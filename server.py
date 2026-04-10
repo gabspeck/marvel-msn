@@ -45,6 +45,13 @@ LOGSRV_INTERFACE_GUIDS = [
     ("00028BC6-0000-0000-C000-000000000046", 0x0A),
 ]
 
+# DIRSRV interface GUID — captured at runtime via HW breakpoint on
+# ResolveServiceSelectorForInterface. The client requests this IID
+# twice (once per DIRSRV pipe).
+DIRSRV_INTERFACE_GUIDS = [
+    ("00028B27-0000-0000-C000-000000000046", 0x01),
+]
+
 # --- CRC-32 (from ENGCT.EXE, §2.4) ---
 # Custom polynomial 0x248ef9be, init=0, no final XOR.
 # Order: XOR → shift → NOT (from decompile of crc_table_init at VA 0x05712da3).
@@ -616,6 +623,21 @@ def build_logsrv_service_map(pipe_idx, server_seq, client_ack, selector):
     return build_service_packet(pipe_idx, host_block, server_seq, client_ack)
 
 
+def build_dirsrv_service_map_payload():
+    """Build the discovery payload for DIRSRV (same 17-byte record format)."""
+    payload = bytearray()
+    for guid_text, entry_selector in DIRSRV_INTERFACE_GUIDS:
+        payload.extend(guid_bytes_le(guid_text))
+        payload.append(entry_selector & 0xFF)
+    return bytes(payload)
+
+
+def build_dirsrv_service_map(pipe_idx, server_seq, client_ack):
+    """Send the DIRSRV IID->selector discovery block."""
+    host_block = build_discovery_host_block(build_dirsrv_service_map_payload(), 0)
+    return build_service_packet(pipe_idx, host_block, server_seq, client_ack)
+
+
 def build_logsrv_greeting(pipe_idx, server_seq, client_ack):
     """Build the first server-initiated LOGSRV block.
 
@@ -659,6 +681,44 @@ def build_logsrv_greeting(pipe_idx, server_seq, client_ack):
     return build_service_packet(pipe_idx, host_block, server_seq, client_ack)
 
 
+def build_empty_reply_payload():
+    """Minimal reply for unimplemented service methods.
+
+    A bare 0x87 (end of static section) triggers the automatic completion
+    path in ProcessTaggedServiceReply when data runs out.  Safe regardless
+    of how many receive fields the request registered.
+    """
+    return bytes([0x87])
+
+
+def build_dirsrv_reply_payload():
+    """Reply for DIRSRV GetProperties calls.
+
+    The request's trailing bytes encode the receive param layout:
+      0x83, 0x83, 0x85 = two dwords + dynamic section.
+
+    CTreeNavClient::GetProperties reads:
+      dword 1 → local status variable (0 = success)
+      dword 2 → node count (passed to iterator constructor at this+0x08)
+    Then GetNextNode iterates the dynamic section as property records.
+
+    Dynamic section format (parsed by FDecompressPropClnt in SVCPROP.DLL):
+      Each record: [total_size:uint32][prop_count:uint16][properties...]
+      A record with 0 properties: total_size=6, count=0.
+    """
+    payload = bytearray()
+    # Two static dwords (matching the 0x83, 0x83 receive descriptors)
+    payload.extend(build_tagged_reply_dword(0))  # dword 1: status = 0 (success)
+    payload.extend(build_tagged_reply_dword(1))  # dword 2: node count = 1
+    payload.append(0x87)  # end of static section
+    # Dynamic section: one property record with 0 properties
+    dynamic_data = struct.pack('<IH', 6, 0)  # total_size=6, prop_count=0
+    payload.append(0x88)  # dynamic complete
+    payload.extend(encode_reply_var_length(len(dynamic_data)))
+    payload.extend(dynamic_data)
+    return bytes(payload)
+
+
 def build_logsrv_reply_for_request(pipe_idx, msg_class, selector, request_id, server_seq, client_ack):
     """Reply to the client's LOGSRV request.
 
@@ -671,8 +731,19 @@ def build_logsrv_reply_for_request(pipe_idx, msg_class, selector, request_id, se
     So: header[0] = msg_class (service selector from discovery map),
         header[1] = selector  (method/opcode byte from request),
         VLI       = request_id matching the pending request.
+
+    Dispatch by selector (byte 1 = method opcode), NOT msg_class (byte 0):
+    both login and transfer requests use the same msg_class (0x06) because
+    they go through the same service handler (IID 28BC2).
+
+    selector 0x00 = login method → full bootstrap reply.
+    selector != 0x00 = other method → empty reply (safe default).
     """
-    host_block = build_host_block(msg_class, selector, request_id, build_logsrv_bootstrap_payload())
+    if selector == 0x00:
+        payload = build_logsrv_bootstrap_payload()
+    else:
+        payload = build_empty_reply_payload()
+    host_block = build_host_block(msg_class, selector, request_id, payload)
     return build_service_packet(pipe_idx, host_block, server_seq, client_ack)
 
 
@@ -977,6 +1048,19 @@ def handle_connection(conn, addr):
                                                 logsrv_discovery_time[pc['client_pipe_idx']] = time.monotonic()
                                                 server_seq = (server_seq + 1) & 0x7F
 
+                                            elif pc['svc_name'] == 'DIRSRV':
+                                                time.sleep(0.1)
+                                                map_pkt = build_dirsrv_service_map(
+                                                    pc['client_pipe_idx'], server_seq,
+                                                    client_ack)
+                                                tx_pkt_no += 1
+                                                log(f"[TXPKT {tx_pkt_no:03d}] DIRSRV discovery for "
+                                                    f"pipe {pc['client_pipe_idx']} "
+                                                    f"(seq={server_seq}, {len(map_pkt)} bytes)")
+                                                hexdump(map_pkt, "[TX] ")
+                                                conn.sendall(map_pkt)
+                                                server_seq = (server_seq + 1) & 0x7F
+
                                         elif pc['type'] == 'control':
                                             log(f"[PIPE] CONTROL type={pc['ctrl_type']} "
                                                 f"data_len={len(pc['data'])}")
@@ -1007,6 +1091,12 @@ def handle_connection(conn, addr):
                                             service_payload = pc['data']
                                             log(f"[SVC] pipe={pc['pipe_idx']} service='{svc['svc_name']}' "
                                                 f"version={svc['version']} data_len={len(service_payload)}")
+
+                                            # 1-byte 0x01: status probe / keepalive (too short for host block)
+                                            if len(service_payload) == 1 and service_payload[0] == 0x01:
+                                                log(f"[SVC] 1-byte status probe on pipe {pc['pipe_idx']}, ignoring (known)")
+                                                continue
+
                                             hb = parse_host_block(service_payload)
                                             if hb:
                                                 log(f"[SVC] host_block class=0x{hb['msg_class']:02x} "
@@ -1026,6 +1116,23 @@ def handle_connection(conn, addr):
                                                     )
                                                     tx_pkt_no += 1
                                                     log(f"[TXPKT {tx_pkt_no:03d}] LOGSRV reply for pipe {pc['pipe_idx']} "
+                                                        f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
+                                                        f"req_id={hb['request_id']} "
+                                                        f"(seq={server_seq}, {len(reply_pkt)} bytes)")
+                                                    hexdump(reply_pkt, "[TX] ")
+                                                    conn.sendall(reply_pkt)
+                                                    server_seq = (server_seq + 1) & 0x7F
+                                                elif svc['svc_name'] == 'DIRSRV':
+                                                    time.sleep(0.1)
+                                                    reply_payload = build_dirsrv_reply_payload()
+                                                    host_block = build_host_block(
+                                                        hb['msg_class'], hb['selector'],
+                                                        hb['request_id'], reply_payload)
+                                                    reply_pkt = build_service_packet(
+                                                        pc['pipe_idx'], host_block,
+                                                        server_seq, client_ack)
+                                                    tx_pkt_no += 1
+                                                    log(f"[TXPKT {tx_pkt_no:03d}] DIRSRV reply for pipe {pc['pipe_idx']} "
                                                         f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
                                                         f"req_id={hb['request_id']} "
                                                         f"(seq={server_seq}, {len(reply_pkt)} bytes)")
@@ -1059,6 +1166,12 @@ def handle_connection(conn, addr):
                                             f"payload_len={len(service_payload)}")
                                     log(f"[SVC] pipe={pf['pipe_idx']} service='{svc['svc_name']}' "
                                         f"version={svc['version']} data_len={len(service_payload)}")
+
+                                    # 1-byte 0x01: status probe / keepalive (too short for host block)
+                                    if len(service_payload) == 1 and service_payload[0] == 0x01:
+                                        log(f"[SVC] 1-byte status probe on pipe {pf['pipe_idx']}, ignoring (known)")
+                                        continue
+
                                     hb = parse_host_block(service_payload)
                                     if hb:
                                         log(f"[SVC] host_block class=0x{hb['msg_class']:02x} "
@@ -1097,6 +1210,23 @@ def handle_connection(conn, addr):
                                             )
                                             tx_pkt_no += 1
                                             log(f"[TXPKT {tx_pkt_no:03d}] LOGSRV reply for pipe {pf['pipe_idx']} "
+                                                f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
+                                                f"req_id={hb['request_id']} "
+                                                f"(seq={server_seq}, {len(reply_pkt)} bytes)")
+                                            hexdump(reply_pkt, "[TX] ")
+                                            conn.sendall(reply_pkt)
+                                            server_seq = (server_seq + 1) & 0x7F
+                                        elif svc['svc_name'] == 'DIRSRV':
+                                            time.sleep(0.1)
+                                            reply_payload = build_dirsrv_reply_payload()
+                                            host_block = build_host_block(
+                                                hb['msg_class'], hb['selector'],
+                                                hb['request_id'], reply_payload)
+                                            reply_pkt = build_service_packet(
+                                                pf['pipe_idx'], host_block,
+                                                server_seq, client_ack)
+                                            tx_pkt_no += 1
+                                            log(f"[TXPKT {tx_pkt_no:03d}] DIRSRV reply for pipe {pf['pipe_idx']} "
                                                 f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
                                                 f"req_id={hb['request_id']} "
                                                 f"(seq={server_seq}, {len(reply_pkt)} bytes)")
