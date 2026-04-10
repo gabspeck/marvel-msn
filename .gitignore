@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+
+# Ghidra project files (local state)
+MSN95.gpr
+MSN95.lock
+MSN95.lock~
+MSN95.rep/
+
+# Other tools
+.codex
+
+# Reference material (not project code)
+*.pdf
+What is *.html
