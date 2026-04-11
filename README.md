@@ -121,9 +121,11 @@ files from the CD directly.
 
 ## Ghidra project
 
-The reverse engineering was done with Ghidra. Function names, type definitions,
-and plate comments are documented in [docs/JOURNAL.md](docs/JOURNAL.md). The
-Ghidra project database is not included in this repository due to size.
+The reverse engineering was done with Ghidra. The full project database
+(MSN95.gpr/MSN95.rep) is included in this repository via Git LFS, with
+analysis annotations for 9 binaries including MPCCL, ENGCT, MOSCP, MOSSHELL,
+SVCPROP, TREENVCL, MOSCL, MCM, and GUIDE. Cloning requires Git LFS to be
+installed. A narrative of the analysis is in [docs/JOURNAL.md](docs/JOURNAL.md).
 
 ## References
 
