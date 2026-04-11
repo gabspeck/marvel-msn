@@ -10,8 +10,15 @@ from server.services.dirsrv import (
     build_property_record,
 )
 from server.transport import parse_packet
-from server.mpc import parse_tagged_params
-from server.config import LOGSRV_INTERFACE_GUIDS, DIRSRV_INTERFACE_GUIDS
+from server.mpc import (
+    parse_tagged_params, build_service_packet, build_host_block,
+    build_tagged_reply_var, _build_continuation_frame,
+)
+from server.wire import decode_header_byte
+from server.config import (
+    LOGSRV_INTERFACE_GUIDS, DIRSRV_INTERFACE_GUIDS,
+    PIPE_ALWAYS_SET, PIPE_CONTINUATION, PIPE_LAST_DATA,
+)
 from server.models import DwordParam, VarParam, EndMarker, DirsrvRequest
 
 
@@ -71,24 +78,26 @@ class TestLOGSRVServiceMap(unittest.TestCase):
 
     def test_produces_packet(self):
         handler = LOGSRVHandler(3, 'LOGSRV')
-        pkt = handler.build_discovery_packet(3, 3)
-        parsed = parse_packet(pkt[:-1])
+        pkts = handler.build_discovery_packet(3, 3)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
         self.assertIsNotNone(parsed)
         self.assertTrue(parsed.crc_ok)
 
     def test_known_wire_bytes(self):
         handler = LOGSRVHandler(3, 'LOGSRV')
-        pkt = handler.build_discovery_packet(3, 3)
+        pkts = handler.build_discovery_packet(3, 3)
         expected_start = bytes.fromhex('83 83 e3 af 00 03 00 00 00 00')
-        self.assertEqual(pkt[:10], expected_start)
+        self.assertEqual(pkts[0][:10], expected_start)
 
 
 class TestLOGSRVReply(unittest.TestCase):
     def test_login_reply_returns_packet(self):
         handler = LOGSRVHandler(3, 'LOGSRV')
-        pkt = handler.handle_request(0x06, 0x00, 0, b'', 4, 4)
-        self.assertIsNotNone(pkt)
-        parsed = parse_packet(pkt[:-1])
+        pkts = handler.handle_request(0x06, 0x00, 0, b'', 4, 4)
+        self.assertIsNotNone(pkts)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
 
     def test_password_change_reply(self):
@@ -99,9 +108,10 @@ class TestLOGSRVReply(unittest.TestCase):
             '00 54 2b 10 04 b8 83'
         )
         handler = LOGSRVHandler(8, 'LOGSRV')
-        pkt = handler.handle_request(0x06, 0x01, 0, pw_payload, 37, 36)
-        self.assertIsNotNone(pkt)
-        parsed = parse_packet(pkt[:-1])
+        pkts = handler.handle_request(0x06, 0x01, 0, pw_payload, 37, 36)
+        self.assertIsNotNone(pkts)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
 
     def test_enumerator_returns_none(self):
@@ -116,7 +126,7 @@ class TestLOGSRVReply(unittest.TestCase):
 
     def test_known_login_reply_wire_bytes(self):
         handler = LOGSRVHandler(3, 'LOGSRV')
-        pkt = handler.handle_request(0x06, 0x00, 0, b'', 4, 4)
+        pkts = handler.handle_request(0x06, 0x00, 0, b'', 4, 4)
         expected = bytes.fromhex(
             '84 84 e3 3b 00 03 00 06 00 00 83 00 00 00 00 83'
             '00 00 00 00 83 00 00 00 00 83 00 00 00 00 83 00'
@@ -124,7 +134,7 @@ class TestLOGSRVReply(unittest.TestCase):
             '35 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00'
             '00 2b 11 96 ab 0d'
         )
-        self.assertEqual(pkt, expected)
+        self.assertEqual(pkts[0], expected)
 
 
 class TestDIRSRVServiceMap(unittest.TestCase):
@@ -194,6 +204,142 @@ class TestPropertyRecord(unittest.TestCase):
         self.assertEqual(total_size, 6)  # just header
         prop_count = struct.unpack('<H', record[4:6])[0]
         self.assertEqual(prop_count, 0)
+
+
+class TestServicePacketFragmentation(unittest.TestCase):
+    """Tests for multi-frame pipe fragmentation in build_service_packet."""
+
+    def test_small_payload_single_packet(self):
+        host_block = build_host_block(0x06, 0x00, 0, b'\x00' * 50)
+        pkts = build_service_packet(3, host_block, 5, 5)
+        self.assertEqual(len(pkts), 1)
+        self.assertLessEqual(len(pkts[0]), 1024)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+
+    def test_large_payload_two_packets(self):
+        # 1052-byte payload mimics the billing reply
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        self.assertEqual(len(pkts), 2)
+
+    def test_both_packets_within_limit(self):
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        for i, pkt in enumerate(pkts):
+            self.assertLessEqual(len(pkt), 1024, f'Packet {i+1} exceeds 1024 bytes')
+
+    def test_both_packets_valid_crc(self):
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        for i, pkt in enumerate(pkts):
+            parsed = parse_packet(pkt[:-1])
+            self.assertIsNotNone(parsed, f'Packet {i+1} unparseable')
+            self.assertTrue(parsed.crc_ok, f'Packet {i+1} CRC fail')
+
+    def test_first_frame_no_last_data(self):
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        parsed = parse_packet(pkts[0][:-1])
+        # First byte of payload is the pipe frame header
+        hdr = decode_header_byte(parsed.payload[0])
+        self.assertTrue(hdr & PIPE_CONTINUATION, 'Frame 1 missing CONTINUATION')
+        self.assertFalse(hdr & PIPE_LAST_DATA, 'Frame 1 should NOT have LAST_DATA')
+
+    def test_second_frame_has_last_data(self):
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        parsed = parse_packet(pkts[1][:-1])
+        hdr = decode_header_byte(parsed.payload[0])
+        self.assertTrue(hdr & PIPE_CONTINUATION, 'Frame 2 missing CONTINUATION')
+        self.assertTrue(hdr & PIPE_LAST_DATA, 'Frame 2 missing LAST_DATA')
+
+    def test_first_frame_has_size_prefix(self):
+        """Frame 1 content starts with uint16_le(total_pipe_data_len)."""
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        parsed = parse_packet(pkts[0][:-1])
+        # After frame header byte, next 2 bytes = pipe_data size prefix
+        size_prefix = struct.unpack('<H', parsed.payload[1:3])[0]
+        expected_pipe_data_len = 2 + len(host_block)  # routing_prefix + host_block
+        self.assertEqual(size_prefix, expected_pipe_data_len)
+
+    def test_second_frame_no_size_prefix(self):
+        """Frame 2 content is raw continuation data (no 2-byte prefix)."""
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        p1 = parse_packet(pkts[0][:-1])
+        p2 = parse_packet(pkts[1][:-1])
+        # Reconstruct: frame1 content after header = size_prefix(2) + chunk1
+        # frame2 content after header = chunk2
+        chunk1 = p1.payload[3:]  # skip header(1) + size_prefix(2)
+        chunk2 = p2.payload[1:]  # skip header(1) only
+        pipe_data = chunk1 + chunk2
+        # First 2 bytes of pipe_data = routing prefix (pipe_idx as uint16_le)
+        routing = struct.unpack('<H', pipe_data[:2])[0]
+        self.assertEqual(routing, 8)  # pipe_idx we passed
+        # Remaining = host_block
+        self.assertEqual(pipe_data[2:], host_block)
+
+    def test_seq_increments_across_packets(self):
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        p1 = parse_packet(pkts[0][:-1])
+        p2 = parse_packet(pkts[1][:-1])
+        self.assertEqual(p1.seq, 10)
+        self.assertEqual(p2.seq, 11)
+
+    def test_seq_wraps_at_127(self):
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 127, 5)
+        p1 = parse_packet(pkts[0][:-1])
+        p2 = parse_packet(pkts[1][:-1])
+        self.assertEqual(p1.seq, 127)
+        self.assertEqual(p2.seq, 0)
+
+    def test_billing_reply_fragments(self):
+        """The actual billing handler produces correctly fragmented packets."""
+        handler = LOGSRVHandler(8, 'LOGSRV')
+        pkts = handler.handle_request(0x06, 0x0A, 0, b'', 10, 10)
+        self.assertEqual(len(pkts), 2)
+        for pkt in pkts:
+            self.assertLessEqual(len(pkt), 1024)
+            parsed = parse_packet(pkt[:-1])
+            self.assertTrue(parsed.crc_ok)
+
+    def test_custom_max_wire_bytes(self):
+        """Fragmentation threshold is configurable."""
+        host_block = build_host_block(0x06, 0x00, 0, b'\x00' * 200)
+        # With default 1024 limit, this fits in one packet
+        pkts_default = build_service_packet(3, host_block, 5, 5)
+        self.assertEqual(len(pkts_default), 1)
+        # With a tight limit, it should fragment
+        pkts_tight = build_service_packet(3, host_block, 5, 5, max_wire_bytes=100)
+        self.assertEqual(len(pkts_tight), 2)
+
+
+class TestContinuationFrame(unittest.TestCase):
+    def test_flags_with_last(self):
+        frame = _build_continuation_frame(3, b'\x01\x02\x03', last=True)
+        hdr = decode_header_byte(frame[0])
+        self.assertTrue(hdr & PIPE_ALWAYS_SET)
+        self.assertTrue(hdr & PIPE_CONTINUATION)
+        self.assertTrue(hdr & PIPE_LAST_DATA)
+        self.assertEqual(hdr & 0x0F, 3)
+
+    def test_flags_without_last(self):
+        frame = _build_continuation_frame(3, b'\x01\x02\x03', last=False)
+        hdr = decode_header_byte(frame[0])
+        self.assertTrue(hdr & PIPE_ALWAYS_SET)
+        self.assertTrue(hdr & PIPE_CONTINUATION)
+        self.assertFalse(hdr & PIPE_LAST_DATA)
+
+    def test_content_follows_header_directly(self):
+        data = b'\xAA\xBB\xCC'
+        frame = _build_continuation_frame(3, data, last=True)
+        # Frame = header(1) + raw content (no length prefix)
+        self.assertEqual(len(frame), 1 + len(data))
+        self.assertEqual(frame[1:], data)
 
 
 if __name__ == '__main__':

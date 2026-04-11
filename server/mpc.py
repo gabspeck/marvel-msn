@@ -5,6 +5,9 @@ format that travels inside logical pipes.
 """
 import struct
 
+from .config import (
+    PIPE_ALWAYS_SET, PIPE_CONTINUATION, PIPE_LAST_DATA, PIPE_INDEX_MASK,
+)
 from .wire import encode_header_byte
 from .pipe import build_pipe_frame, build_control_frame
 from .transport import build_packet
@@ -238,12 +241,66 @@ def build_tagged_reply_var(tag, data):
 
 # --- Service Packet Assembly ---
 
-def build_service_packet(pipe_idx, host_block, server_seq, client_ack):
-    """Wrap a host block for delivery on a logical service pipe."""
+def build_service_packet(pipe_idx, host_block, server_seq, client_ack,
+                         max_wire_bytes=1024):
+    """Wrap a host block for delivery on a logical service pipe.
+
+    Returns a list of wire packets.  When the payload fits in a single
+    transport packet (≤ max_wire_bytes on the wire), the list has one
+    element.  Larger payloads are split across two packets using MOSCP's
+    multi-frame pipe reassembly:
+
+      Packet 1 — continuation frame (no last_data):
+        header_byte + uint16_le(total_pipe_data_len) + chunk1
+
+      Packet 2 — continuation frame (last_data):
+        header_byte + chunk2   (no size prefix — pipe context already
+        allocated from packet 1's prefix)
+
+    MOSCP allocates the pipe buffer from the 2-byte prefix in the first
+    frame and preserves the pipe slot across packets when last_data is
+    not set.
+    """
     routing_prefix = struct.pack('<H', pipe_idx)
     pipe_data = routing_prefix + host_block
-    pipe_frame = build_pipe_frame(pipe_idx, pipe_data)
-    return build_packet(server_seq, client_ack, pipe_frame)
+
+    # Try single-packet path
+    frame = build_pipe_frame(pipe_idx, pipe_data, last=True)
+    pkt = build_packet(server_seq, client_ack, frame)
+    if len(pkt) <= max_wire_bytes:
+        return [pkt]
+
+    # Split across two packets.
+    # Frame 1 overhead: header(1) + size_prefix(2) = 3 bytes in payload.
+    # Packet overhead: seq(1) + ack(1) + CRC(4) + terminator(1) = 7 bytes.
+    # Leave margin for byte-stuffing expansion.
+    size_prefix = struct.pack('<H', len(pipe_data))
+    overhead1 = 7 + 1 + 2  # packet framing + frame header + size prefix
+    chunk1_max = max_wire_bytes - overhead1 - 20  # 20-byte stuffing margin
+    chunk1 = pipe_data[:chunk1_max]
+    chunk2 = pipe_data[chunk1_max:]
+
+    frame1 = _build_continuation_frame(pipe_idx, size_prefix + chunk1, last=False)
+    pkt1 = build_packet(server_seq, client_ack, frame1)
+
+    seq2 = (server_seq + 1) & 0x7F
+    frame2 = _build_continuation_frame(pipe_idx, chunk2, last=True)
+    pkt2 = build_packet(seq2, client_ack, frame2)
+
+    return [pkt1, pkt2]
+
+
+def _build_continuation_frame(pipe_idx, content, last=True):
+    """Build a raw continuation-format pipe frame (no size prefix added).
+
+    The content is placed directly after the header byte.  Used by
+    multi-frame fragmentation where the caller controls the prefix.
+    """
+    flags = PIPE_ALWAYS_SET | PIPE_CONTINUATION
+    if last:
+        flags |= PIPE_LAST_DATA
+    hdr = encode_header_byte(flags | (pipe_idx & PIPE_INDEX_MASK))
+    return bytes([hdr]) + content
 
 
 def build_pipe_open_result(client_pipe_idx, server_seq, client_ack):

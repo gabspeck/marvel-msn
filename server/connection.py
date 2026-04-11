@@ -212,11 +212,12 @@ class ConnectionState:
             self.services[msg.client_pipe_idx] = handler
 
             time.sleep(DELAY_BEFORE_REPLY)
-            discovery_pkt = handler.build_discovery_packet(
+            discovery_pkts = handler.build_discovery_packet(
                 self.server_seq, self.client_ack)
-            self.send_packet(discovery_pkt,
-                f"{msg.svc_name} discovery for pipe {msg.client_pipe_idx}")
-            self.advance_seq()
+            for pkt in discovery_pkts:
+                self.send_packet(pkt,
+                    f"{msg.svc_name} discovery for pipe {msg.client_pipe_idx}")
+                self.advance_seq()
 
     def _handle_service_data(self, pipe_idx, data):
         """Unified service dispatch — handles data for any pipe."""
@@ -247,16 +248,17 @@ class ConnectionState:
             hexdump(hb.payload, "[SVC]  ")
 
         time.sleep(DELAY_BEFORE_REPLY)
-        reply_pkt = handler.handle_request(
+        reply_pkts = handler.handle_request(
             hb.msg_class, hb.selector, hb.request_id,
             hb.payload, self.server_seq, self.client_ack)
 
-        if reply_pkt is not None:
-            self.send_packet(reply_pkt,
-                f"{handler.svc_name} reply for pipe {pipe_idx} "
-                f"class=0x{hb.msg_class:02x} selector=0x{hb.selector:02x} "
-                f"req_id={hb.request_id}")
-            self.advance_seq()
+        if reply_pkts is not None:
+            label = (f"{handler.svc_name} reply for pipe {pipe_idx} "
+                     f"class=0x{hb.msg_class:02x} selector=0x{hb.selector:02x} "
+                     f"req_id={hb.request_id}")
+            for pkt in reply_pkts:
+                self.send_packet(pkt, label)
+                self.advance_seq()
         else:
             self.log(f'[SVC] No reply for selector=0x{hb.selector:02x} '
                      f'(pending request)')
