@@ -1,8 +1,8 @@
 # MSN95 "Marvel" Wire Protocol
 
 Reverse-engineered from MSN for Windows 95 client binaries (July 11, 1995)
-using Ghidra decompilation and a custom emulated server. The login handshake
-is confirmed working end-to-end as of 2026-04-10.
+using Ghidra decompilation and a custom emulated server. Login, directory
+browsing (MSN Shell), and password change are confirmed working end-to-end.
 
 ## Is this protocol based on anything?
 
@@ -289,7 +289,8 @@ Control frames have routing `0xFFFF` followed by a 1-byte type:
 
 ### 2.4 Transport Parameter Negotiation (Type 3)
 
-Sent by the server immediately after the modem handshake. Six uint32 LE values:
+Sent by the server immediately after the modem handshake. Five uint32 LE values
+(optionally six with Keepalive):
 
 ```
  PacketSize  MaxBytes  WindowSize  AckBehind  AckTimeout  [Keepalive]
@@ -297,7 +298,7 @@ Sent by the server immediately after the modem handshake. Six uint32 LE values:
 ```
 
 The client takes the **minimum** of each server value and its own configured
-maximum. Keepalive is only present if the frame exceeds 0x18 bytes.
+maximum. Keepalive is only present if the frame exceeds 0x18 (24) bytes.
 
 ---
 
@@ -460,8 +461,14 @@ Each parameter has a 1-byte tag, an optional length, and data.
 
 ### 6.1 Tag Types
 
-| Tag & 0x8F | Name | Size | Description |
-|------------|------|------|-------------|
+Tags use bit 7 to distinguish direction: **reply tags** (server -> client)
+have bit 7 set (0x81–0x8F), **send tags** (client -> server) have bit 7
+clear (0x01–0x05). The low nibble encodes the same type in both directions.
+
+**Reply tags** (bit 7 set — in server responses):
+
+| Tag | Name | Size | Description |
+|-----|------|------|-------------|
 | 0x81 | Byte | 1 | Fixed 1-byte value |
 | 0x82 | Word | 2 | Fixed 2-byte value (LE) |
 | 0x83 | Dword | 4 | Fixed 4-byte value (LE) |
@@ -469,8 +476,23 @@ Each parameter has a 1-byte tag, an optional length, and data.
 | 0x85 | Dynamic start | length-prefixed | Start of streamed data |
 | 0x86 | Dynamic more | length-prefixed | More streamed data follows |
 | 0x87 | Dynamic last | 0 | End of static section / last chunk marker |
-| 0x88 | Dynamic complete | length-prefixed | Transfer complete |
+| 0x88 | Dynamic complete | to end of host block | Transfer complete (all remaining bytes are data) |
 | 0x8F | Error | 4 | Server error code (uint32 LE) |
+
+**Send tags** (bit 7 clear — in client requests):
+
+| Tag | Name | Size | Description |
+|-----|------|------|-------------|
+| 0x01 | Byte | 1 | Fixed 1-byte value |
+| 0x02 | Word | 2 | Fixed 2-byte value (LE) |
+| 0x03 | Dword | 4 | Fixed 4-byte value (LE) |
+| 0x04 | Variable | length-prefixed | Variable-length data |
+| 0x05 | Dynamic | length-prefixed | Dynamic/streamed data |
+
+In a client request payload, send tags (with data) come first, followed by
+**receive descriptors** — tags with bit 7 set but no data — declaring what
+types the client expects in the reply. For example, a payload ending with
+`0x83 0x83 0x85` means "I expect two dwords then a dynamic section."
 
 ### 6.2 Length Encoding (for variable/dynamic tags)
 
@@ -609,7 +631,43 @@ field uses the reply-side length encoding (0x90 = 0x80 | 16 = inline length
 16). Do NOT include a second 0x84 for the auto-added completion slot —
 completion triggers automatically when data runs out.
 
-### 7.7 Post-Login Behavior (confirmed by wire capture)
+### 7.7 Password Change (LOGSRV Opcode 0x01) (confirmed working)
+
+Triggered by the user via Tools > Password in the MSN client.
+
+**Request** (host block on LOGSRV pipe):
+
+```
+Selector:   0x06  (from discovery map for IID 28BC2)
+Opcode:     0x01  (password change method)
+RequestID:  0x00
+Payload:
+  [0x04][91][17 bytes]   current password (NUL-terminated, 17-byte buffer)
+  [0x04][91][17 bytes]   new password (NUL-terminated, 17-byte buffer)
+  [0x83]                 receive descriptor: expects one dword back
+```
+
+Both passwords are sent as send-side variable params (tag 0x04) in fixed
+17-byte buffers. The password string is NUL-terminated; bytes after the NUL
+are uninitialized buffer contents. Length byte 0x91 = 0x80 | 17 (inline
+length 17).
+
+**Reply**:
+
+```
+Selector:   0x06  (same as request)
+Opcode:     0x01  (same as request)
+RequestID:  0x00  (same as request)
+Payload:
+  [0x83][XX XX XX XX]    result code (uint32 LE)
+```
+
+- Result `0x00000000` = success. The dialog closes.
+- Any non-zero value = failure. The client shows "Cannot change password.
+  The current password is not valid. Please type it again." (same message
+  regardless of the specific non-zero value).
+
+### 7.8 Post-Login Behavior (confirmed by wire capture)
 
 After accepting the login reply, the client enters a setup phase:
 
@@ -630,7 +688,7 @@ After accepting the login reply, the client enters a setup phase:
 
 4. **Idle**: No traffic until user signs out.
 
-### 7.8 LOGSRV Enumerator (Opcode 0x07) — Critical Behavior
+### 7.9 LOGSRV Enumerator (Opcode 0x07) — Critical Behavior
 
 The LOGSRV opcode 0x07 request creates a **MosEnumeratorLoop** thread
 in GUIDE.EXE that calls `WaitForMessage` in a loop, waiting for streamed
@@ -643,10 +701,10 @@ If the server replies with any host block (even a bare 0x87 end marker),
 `ProcessTaggedServiceReply` sets `+0x18 = 1` permanently, signaling
 "transfer complete". The loop then spins at 80% CPU.
 
-**Server rule**: Do NOT reply to LOGSRV requests with selector != 0x00.
+**Server rule**: Do NOT reply to LOGSRV enumerator requests (opcode 0x07).
 Leave the request pending.
 
-### 7.9 Sign-Out Sequence (confirmed by wire capture)
+### 7.10 Sign-Out Sequence (confirmed by wire capture)
 
 Sign-out is a ~285ms burst initiated by the client:
 
@@ -692,19 +750,119 @@ Max uncompressed chunk size: 32KB (0x8000).
 
 ---
 
-## 9. Known Services
+## 9. Directory Browsing (DIRSRV) (confirmed working)
+
+DIRSRV provides the content tree that MOSSHELL.DLL renders in the MSN Shell
+window. After login, the client opens four DIRSRV pipes and queries the root
+node to build the navigation tree.
+
+### 9.1 Discovery
+
+DIRSRV has one interface:
+
+| IID | Selector |
+|-----|----------|
+| {00028B27-0000-0000-C000-000000000046} | 0x01 |
+
+### 9.2 GetProperties Request
+
+The client sends a host block with selector=0x01, opcode=0x02:
+
+```
+Selector:    0x01  (from discovery)
+Opcode:      0x02  (GetProperties method)
+RequestID:   0x00
+Payload:
+  [0x04][variable]    node ID (LARGE_INTEGER, 8 bytes: lo:u32 + hi:u32)
+  [0x01][byte]        flags (0x00 = self-properties, 0x01 = children)
+  [0x03][dword]       unknown (often 0 or 1)
+  [0x03][dword]       property count hint
+  [0x04][variable]    property group (NUL-separated property names)
+  [0x04][variable]    locale string
+  [0x83][0x83][0x85]  receive descriptors: two dwords + dynamic section
+```
+
+The **node ID** `0:0` (all zeros) is the root. For child nodes, the client
+sends the node ID from the parent's property records.
+
+The **property group** is a NUL-separated list of property name strings.
+Known property names for children queries: `a`, `c`, `h`, `b`, `e`, `g`,
+`x`, `mf`, `wv`, `tp`, `p`, `w`, `l`, `i`.
+
+### 9.3 GetProperties Reply
+
+```
+Payload:
+  [0x83][XX XX XX XX]    status (0 = success)
+  [0x83][XX XX XX XX]    node count
+  [0x87]                 end of static section
+  [0x88]                 dynamic complete — all remaining bytes are raw data
+  [property records...]  concatenated SVCPROP records
+```
+
+Tag 0x88 signals "transfer complete". The client's `ReadDynamicSectionRawData`
+(MPCCL.DLL @ 0x04605809) reads **all remaining host-block bytes** as raw data
+after the 0x88 tag. Do NOT prefix the dynamic data with a length — it would
+corrupt the property record parsing.
+
+### 9.4 Property Record Format (SVCPROP.DLL)
+
+Parsed by `FDecompressPropClnt` (SVCPROP.DLL @ 0x7f641592):
+
+```
+ TotalSize   PropCount   Properties...
+[4 LE]      [2 LE]      [variable]
+```
+
+Each property within a record:
+
+```
+ Type    Name\0          ValueData
+[1 byte][NUL-string]    [variable, type-dependent]
+```
+
+**Property types** (from `DecodePropertyValue` @ 0x7f64143a):
+
+| Type | Name | Value size | Description |
+|------|------|------------|-------------|
+| 0x01 | byte | 1 | uint8 |
+| 0x02 | word | 2 | uint16 LE |
+| 0x03 | dword | 4 | uint32 LE |
+| 0x04 | int64 | 8 | int64 LE |
+| 0x0A | string | compressed | Compressed string (MCI/MDI) |
+| 0x0E | blob | 4 + data | `[length:u32][data]` |
+
+### 9.5 Known Properties
+
+| Name | Type | Meaning |
+|------|------|---------|
+| `p` | blob (0x0E) | Display name (e.g., "MSN Central") |
+| `c` | dword (0x03) | Child count |
+| `h` | dword (0x03) | Has children flag |
+| `a` | dword (0x03) | Attributes |
+| `q` | dword (0x03) | Quick-check (node exists probe) |
+| `i` | dword (0x03) | Icon index |
+| `g` | dword (0x03) | Group flag |
+| `wv` | blob (0x0E) | Content view data |
+| `tp` | blob (0x0E) | Type/template |
+| `w` | blob (0x0E) | Unknown blob |
+| `l` | blob (0x0E) | Unknown blob |
+
+---
+
+## 10. Known Services
 
 | Service | Version | Description | Status |
 |---------|---------|-------------|--------|
-| LOGSRV | 6 | Login/authentication | Confirmed working |
-| DIRSRV | 7 | Directory service (content browsing) | Pipe open confirmed |
+| LOGSRV | 6 | Login/authentication, password change | Confirmed working |
+| DIRSRV | 7 | Directory service (content browsing) | Confirmed working |
 | MEDVIEW | 0x1400800A | Content/page rendering (Multimedia Viewer) | From static analysis |
 | CONFLOC | varies | Conference locator (chat) | From static analysis |
 | CONFSRV | varies | Conference server (chat) | From static analysis |
 
 ---
 
-## 10. Error Codes
+## 11. Error Codes
 
 ### MCM (Marvel Connection Manager) Errors
 
@@ -730,7 +888,7 @@ Custom facility code **0xB0B** (e.g., `0x8B0B0017` = bad password).
 
 ---
 
-## 11. Registry Configuration
+## 12. Registry Configuration
 
 Key: `HKLM\SOFTWARE\Microsoft\MOS\Transport`
 
