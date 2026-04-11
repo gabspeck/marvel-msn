@@ -295,6 +295,7 @@ Commands:
   bp <addr>       Set hardware breakpoint (hex addr, e.g. 0460263F)
   bps <addr>      Set software breakpoint
   bpd <addr>      Remove hardware breakpoint
+  watch <addr> [len] Set write watchpoint (default 4 bytes)
   mem <addr> <n>  Read n bytes at addr (hex)
   dword <addr>    Read 32-bit value at addr
   run-to <addr>   Set HW breakpoint, resume, wait for hit
@@ -345,6 +346,12 @@ def main():
             addr = int(sys.argv[2], 16)
             ok = gdb.remove_hw_breakpoint(addr)
             print(f"Remove HW bp at 0x{addr:08x}: {'OK' if ok else 'FAILED'}")
+
+        elif cmd == 'watch' and len(sys.argv) >= 3:
+            addr = int(sys.argv[2], 16)
+            length = int(sys.argv[3], 0) if len(sys.argv) >= 4 else 4
+            ok = gdb.set_write_watchpoint(addr, length)
+            print(f"Write watchpoint at 0x{addr:08x} len={length}: {'OK' if ok else 'FAILED'}")
 
         elif cmd == 'mem' and len(sys.argv) >= 4:
             addr = int(sys.argv[2], 16)

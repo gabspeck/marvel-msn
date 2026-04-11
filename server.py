@@ -737,12 +737,18 @@ def build_logsrv_reply_for_request(pipe_idx, msg_class, selector, request_id, se
     they go through the same service handler (IID 28BC2).
 
     selector 0x00 = login method → full bootstrap reply.
-    selector != 0x00 = other method → empty reply (safe default).
+    selector != 0x00 = enumerator request → do NOT reply.
+
+    Non-login selectors (e.g. opcode 7) create a MosEnumeratorLoop thread
+    that blocks on MsgWaitForSingleObject.  Replying with a bare 0x87
+    immediately completes the request object, permanently signaling the
+    wait event and causing an 80% CPU spin in MPCCL.DLL WaitForMessage.
+    Leaving the request pending lets the enumerator block properly.
     """
     if selector == 0x00:
         payload = build_logsrv_bootstrap_payload()
     else:
-        payload = build_empty_reply_payload()
+        return None
     host_block = build_host_block(msg_class, selector, request_id, payload)
     return build_service_packet(pipe_idx, host_block, server_seq, client_ack)
 
@@ -881,6 +887,7 @@ def handle_connection(conn, addr):
     client_ack = 0  # last client seq we've seen (for ack field in our packets)
     pipe_services = {}
     pipe_buffers = defaultdict(bytearray)
+    pipes_closed = set()
     logsrv_discovery_sent = set()
     first_post_discovery_logged = set()
     pending_logsrv_discovery = {}
@@ -1092,9 +1099,15 @@ def handle_connection(conn, addr):
                                             log(f"[SVC] pipe={pc['pipe_idx']} service='{svc['svc_name']}' "
                                                 f"version={svc['version']} data_len={len(service_payload)}")
 
-                                            # 1-byte 0x01: status probe / keepalive (too short for host block)
+                                            # 1-byte 0x01: pipe close / teardown signal
                                             if len(service_payload) == 1 and service_payload[0] == 0x01:
-                                                log(f"[SVC] 1-byte status probe on pipe {pc['pipe_idx']}, ignoring (known)")
+                                                log(f"[SVC] pipe-close 0x01 on pipe {pc['pipe_idx']}")
+                                                pipes_closed.add(pc['pipe_idx'])
+                                                all_service_pipes = {idx for idx, svc in pipe_services.items() if idx != 0}
+                                                if all_service_pipes and pipes_closed >= all_service_pipes:
+                                                    log(f"[SVC] All {len(pipes_closed)} pipes closed, dropping connection")
+                                                    conn.close()
+                                                    raise ConnectionError("clean signout")
                                                 continue
 
                                             hb = parse_host_block(service_payload)
@@ -1114,14 +1127,18 @@ def handle_connection(conn, addr):
                                                         server_seq,
                                                         client_ack,
                                                     )
-                                                    tx_pkt_no += 1
-                                                    log(f"[TXPKT {tx_pkt_no:03d}] LOGSRV reply for pipe {pc['pipe_idx']} "
-                                                        f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
-                                                        f"req_id={hb['request_id']} "
-                                                        f"(seq={server_seq}, {len(reply_pkt)} bytes)")
-                                                    hexdump(reply_pkt, "[TX] ")
-                                                    conn.sendall(reply_pkt)
-                                                    server_seq = (server_seq + 1) & 0x7F
+                                                    if reply_pkt is not None:
+                                                        tx_pkt_no += 1
+                                                        log(f"[TXPKT {tx_pkt_no:03d}] LOGSRV reply for pipe {pc['pipe_idx']} "
+                                                            f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
+                                                            f"req_id={hb['request_id']} "
+                                                            f"(seq={server_seq}, {len(reply_pkt)} bytes)")
+                                                        hexdump(reply_pkt, "[TX] ")
+                                                        conn.sendall(reply_pkt)
+                                                        server_seq = (server_seq + 1) & 0x7F
+                                                    else:
+                                                        log(f"[SVC] LOGSRV selector=0x{hb['selector']:02x} "
+                                                            f"req_id={hb['request_id']} — enumerator request, no reply")
                                                 elif svc['svc_name'] == 'DIRSRV':
                                                     time.sleep(0.1)
                                                     reply_payload = build_dirsrv_reply_payload()
@@ -1167,9 +1184,15 @@ def handle_connection(conn, addr):
                                     log(f"[SVC] pipe={pf['pipe_idx']} service='{svc['svc_name']}' "
                                         f"version={svc['version']} data_len={len(service_payload)}")
 
-                                    # 1-byte 0x01: status probe / keepalive (too short for host block)
+                                    # 1-byte 0x01: pipe close / teardown signal
                                     if len(service_payload) == 1 and service_payload[0] == 0x01:
-                                        log(f"[SVC] 1-byte status probe on pipe {pf['pipe_idx']}, ignoring (known)")
+                                        log(f"[SVC] pipe-close 0x01 on pipe {pf['pipe_idx']}")
+                                        pipes_closed.add(pf['pipe_idx'])
+                                        all_service_pipes = {idx for idx, svc in pipe_services.items() if idx != 0}
+                                        if all_service_pipes and pipes_closed >= all_service_pipes:
+                                            log(f"[SVC] All {len(pipes_closed)} pipes closed, dropping connection")
+                                            conn.close()
+                                            raise ConnectionError("clean signout")
                                         continue
 
                                     hb = parse_host_block(service_payload)
@@ -1208,14 +1231,18 @@ def handle_connection(conn, addr):
                                                 server_seq,
                                                 client_ack,
                                             )
-                                            tx_pkt_no += 1
-                                            log(f"[TXPKT {tx_pkt_no:03d}] LOGSRV reply for pipe {pf['pipe_idx']} "
-                                                f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
-                                                f"req_id={hb['request_id']} "
-                                                f"(seq={server_seq}, {len(reply_pkt)} bytes)")
-                                            hexdump(reply_pkt, "[TX] ")
-                                            conn.sendall(reply_pkt)
-                                            server_seq = (server_seq + 1) & 0x7F
+                                            if reply_pkt is not None:
+                                                tx_pkt_no += 1
+                                                log(f"[TXPKT {tx_pkt_no:03d}] LOGSRV reply for pipe {pf['pipe_idx']} "
+                                                    f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
+                                                    f"req_id={hb['request_id']} "
+                                                    f"(seq={server_seq}, {len(reply_pkt)} bytes)")
+                                                hexdump(reply_pkt, "[TX] ")
+                                                conn.sendall(reply_pkt)
+                                                server_seq = (server_seq + 1) & 0x7F
+                                            else:
+                                                log(f"[SVC] LOGSRV selector=0x{hb['selector']:02x} "
+                                                    f"req_id={hb['request_id']} — enumerator request, no reply")
                                         elif svc['svc_name'] == 'DIRSRV':
                                             time.sleep(0.1)
                                             reply_payload = build_dirsrv_reply_payload()
