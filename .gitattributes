@@ -1,0 +1,2 @@
+MSN95.rep/** filter=lfs diff=lfs merge=lfs -text
+MSN95.gpr filter=lfs diff=lfs merge=lfs -text

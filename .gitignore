@@ -2,9 +2,7 @@
 __pycache__/
 *.pyc
 
-# Ghidra project (see docs/JOURNAL.md for annotations)
-MSN95.gpr
-MSN95.rep/
+# Ghidra lock files (local state only)
 MSN95.lock
 MSN95.lock~
 
