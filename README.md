@@ -52,10 +52,13 @@ docs/
 
 ### 86Box modem setup
 
-In 86Box settings, configure a serial port with:
-- **Type:** Standard (modem)
-- **Mode:** TCP (host server)
-- **Port:** 2323
+1. **Ports (COM & LPT):** Set the serial port you want the modem on (e.g. COM2)
+   to **None** — the modem network adapter claims it directly.
+2. **Network:** Add a network card of type **[COM] Standard Hayes-compliant
+   Modem**. Click **Configure** and assign it to the serial port from step 1.
+3. **Phonebook:** Create a phonebook file (see `server/phonebook.txt`) that maps
+   the MSN dial-up number to `localhost:2323`. Point 86Box's modem config at
+   this file.
 
 ### Start the server
 
@@ -74,7 +77,10 @@ The `tools/` directory contains scripts that connect to 86Box's GDB stub
 (port 12345) to set hardware breakpoints on client DLL functions and trace
 protocol behavior at runtime.
 
-Enable the GDB stub in 86Box: Settings > Other Peripherals > GDB Stub > Port 12345.
+These scripts are not needed to run the server — they are for programmatic
+debugging of the emulated machine. They require a custom build of 86Box with
+the GDB stub compile flag enabled (this is a build-time option, not a runtime
+setting). Once built, the stub listens on port 12345.
 
 | Script | Target | Purpose |
 |--------|--------|---------|
@@ -121,6 +127,10 @@ Ghidra project database is not included in this repository due to size.
   information resource over a network* (MSN content/IR service)
 - **US 5,774,668** — *System for on-line service in which gateway operator
   provides service map* (gateway, service maps, load balancing)
+
+## Acknowledgments
+
+This project is done with the help of [Claude Code](https://claude.ai/claude-code).
 
 ## License
 
