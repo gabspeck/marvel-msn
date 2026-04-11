@@ -18,6 +18,5 @@ session_capture*.log
 .codex
 .claude/
 
-# Reference material
-*.pdf
-What is *.html
+# Stray PDFs in root (reference material lives in reference/)
+/*.pdf
