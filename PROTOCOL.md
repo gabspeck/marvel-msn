@@ -47,6 +47,76 @@ The internal codename was **"Marvel"** and the protocol layer is called **MPC**
 All layers are confirmed by decompilation. The transport and service layers
 are confirmed by a working emulated server.
 
+---
+
+## Glossary
+
+Quick reference for the protocol's vocabulary. Terms are grouped by layer,
+bottom-up. The patent (US 5,956,509) names are given in parentheses where
+they differ from names used in this document.
+
+### Physical / Transport
+
+| Term | What it is |
+|------|------------|
+| **Connection** | A single physical link — TCP socket or modem serial line. One connection carries everything. Handle type: `HMCONNECT` (WORD). |
+| **Packet** | The atomic unit on the wire. Header (SeqNo + AckNo) + payload + CRC-32 + 0x0D terminator. Max ~600 bytes at default MTU. See §1. |
+| **Byte stuffing** | Escape encoding that keeps reserved bytes (0x0D, 0x1B, etc.) out of the payload. The wire never contains a bare 0x0D except as a packet terminator. See §1.3. |
+| **Sliding window** | Go-Back-N ARQ flow control. The sender may have up to *WindowSize* unacknowledged packets in flight. The receiver ACKs cumulatively. See §1.6. |
+| **ACK / NACK** | Acknowledgement / negative-acknowledgement packets (first byte 0x41 / 0x42). ACKs piggyback on data packets too. |
+| **Transport engine** | The process that owns the physical connection and runs the packet state machine. At runtime this is **MOSCP.EXE**; the codebase also contains **ENGCT.EXE**, an alternate engine not loaded for dial-up or TCP. |
+
+### Pipe Multiplexing
+
+| Term | What it is |
+|------|------------|
+| **Pipe** | A logical bidirectional channel between client and server, multiplexed inside a single connection. Think of it like a TCP port number inside a single TCP stream — many independent conversations share one wire. Each pipe carries traffic for one service instance. Handle type: `HMPIPE` (WORD). Pipe index range: 0–15. The patent calls these **"segments"**. |
+| **Pipe 0** | The physical carrier pipe. All logical pipe traffic is routed through pipe 0 using a 2-byte LE routing prefix. Routing 0x0000 = pipe-open request, 0xFFFF = control frame, anything else = data for that pipe index. See §2.2. |
+| **Pipe frame** | A single chunk of pipe data inside a packet payload. Has a 1-byte header (pipe index + flags) and variable-length content. Multiple frames for different pipes can share one packet. The patent calls these **"segment headers"**. See §2.1. |
+| **Pipe open** | The handshake to create a new logical pipe for a service. Client sends a request on pipe 0 (routing 0x0000) naming the service; server responds with a Select Protocol reply. See §4. |
+| **Pipe close** | A 1-byte `0x01` message sent on a pipe to signal teardown. During sign-out, the client closes all pipes in sequence (DIRSRV first, LOGSRV last). |
+| **Control frame** | A pipe-0 message with routing 0xFFFF. Used for connection-level signaling: type 1 = connection params exchange, type 3 = transport negotiation, type 4 = connection established. See §2.3. |
+
+### Session / Service
+
+| Term | What it is |
+|------|------------|
+| **Session** | The authenticated context between login and sign-out. One connection has one session. Handle type: `HMSESSION` (WORD). The session starts when LOGSRV login succeeds and ends when all pipes close. |
+| **Service** | A named server-side endpoint that the client connects to via a pipe. Examples: `LOGSRV` (login), `DIRSRV` (directory/content browsing). Each service has its own pipe(s) and its own set of RPC methods. The patent calls these **"service objects"**. See §9. |
+| **MPC** | **Marvel Protocol Client** — the overall RPC framework implemented by MPCCL.DLL. Encompasses the service model, host blocks, tagged parameters, and the discovery mechanism. The patent calls the wire format the **"Remote Procedure Layer"**. |
+| **MosSlot** | Shared-memory IPC (`"MosSlot"` file mapping, 48 slots × 1KB) used by client libraries (MOSCL.DLL) to send commands to the transport engine (MOSCP.EXE). Not on the wire — purely intra-machine. See Appendix B. |
+| **ARENA.MOS** | Shared memory region (default 256KB) for bulk pipe data transfer between MOSCL.DLL and MOSCP.EXE. Also purely intra-machine. |
+
+### Service RPC (Host Blocks)
+
+| Term | What it is |
+|------|------------|
+| **Host block** | The MPC message format for service RPCs. Structure: selector + opcode + request_id + tagged payload. This is what travels inside pipe data. The patent calls these **"messages"** (FIG. 8A). See §5.1. |
+| **Selector** | A 1-byte routing ID that maps to a COM interface within a service. Assigned by the server during discovery (§5.3). The client obtained IID `{00028BC2-...}` → selector 0x06 for LOGSRV login. The patent calls this the **"Service Interface ID"**. Replies must echo the request's selector or they are silently dropped. |
+| **Opcode** | The method number within a service interface. Byte 1 of a host block. Example: LOGSRV selector 0x06 opcode 0x00 = login, opcode 0x07 = enumerator. The patent calls this the **"Method ID"**. Replies must echo the request's opcode. |
+| **Request ID** | A VLI-encoded identifier for a specific in-flight RPC call. The client picks it (typically incrementing), and the server must echo it in the reply so the client can match it to the waiting request object. The patent calls this the **"Method Instance ID"**. See §5.2. |
+| **Discovery block** | The server's first message on a newly-opened pipe: a host block with selector=0, opcode=0 containing a table of 17-byte records (16-byte IID + 1-byte selector). This is how the client learns which selector byte to use for each COM interface. See §5.3. |
+| **Tagged parameter** | TLV-like data encoding for RPC payloads. Each parameter has a 1-byte type tag (0x81–0x8F), an optional length, and data. Types include fixed-size (byte/word/dword), variable-length blobs, streamed "dynamic" data, and error codes. See §6. |
+| **VLI** | **Variable-Length Integer** — a compact encoding where the top 2 bits of the first byte select 1/2/4-byte form. Used for request IDs and some length fields. See §5.2. |
+| **Dynamic data** | A streaming transfer mode within tagged parameters. Tags 0x85 (start), 0x86 (more), 0x87 (last/end) allow large or open-ended data to be delivered incrementally rather than in a single blob. |
+
+### Hierarchy Summary
+
+```
+Connection (physical TCP/modem link)
+ └─ Session (authenticated login context)
+     └─ Pipe 3: LOGSRV ──── host blocks with tagged params
+     └─ Pipe 4: DIRSRV ──── host blocks with tagged params
+     └─ Pipe 5: DIRSRV ──── host blocks with tagged params
+     └─ ...up to 15 pipes
+```
+
+One connection, one session, many pipes. Each pipe is an independent RPC
+channel to a service. All pipe data is multiplexed through pipe 0 on the
+wire and demultiplexed by the transport engine.
+
+---
+
 **Note on ENGCT.EXE**: The binaries include a standalone transport engine
 called ENGCT.EXE ("MOSEngine Chicago"), which contains the same packet
 framing, CRC, and sliding-window code. However, **ENGCT.EXE is never loaded
@@ -539,16 +609,67 @@ field uses the reply-side length encoding (0x90 = 0x80 | 16 = inline length
 16). Do NOT include a second 0x84 for the auto-added completion slot —
 completion triggers automatically when data runs out.
 
-### 7.7 Post-Login Behavior (observed, not fully understood)
+### 7.7 Post-Login Behavior (confirmed by wire capture)
 
-After accepting the login reply:
+After accepting the login reply, the client enters a setup phase:
 
-1. Client sends a second LOGSRV request (selector=0x07, request_id=1,
-   payload=tag 0x85 — possibly requesting streamed data)
-2. Client opens two **DIRSRV** pipes (directory service, version 7)
-3. Client sends 1-byte `0x01` messages on all open pipes (unknown purpose —
-   possibly keepalive or status probe)
-4. If DIRSRV is not answered, client disconnects after ~90 seconds
+1. **LOGSRV enumerator** (T+0.3s): Client sends LOGSRV selector=0x07,
+   req_id=1, payload=tag 0x85. This is a long-lived enumerator request —
+   the server must NOT reply or the client spins (see §7.8). The request
+   stays pending until sign-out.
+
+2. **DIRSRV pipe opens** (T+0.9s–1.4s): Client opens **four** DIRSRV pipes:
+   - Pipes 4,5 with version string `"Uagid=0"` (agent-qualified)
+   - Pipes 6,7 with version string `"U"` (bare)
+   Each gets a pipe-open response and a discovery block.
+
+3. **DIRSRV requests** (T+1.5s): Pipes 6 and 7 each send a DIRSRV request
+   (class=0x01, selector=0x02, req_id=0) with identical tagged payloads.
+   Pipes 4 and 5 remain idle — they may be reserved for UI-triggered
+   directory browsing that never happens.
+
+4. **Idle**: No traffic until user signs out.
+
+### 7.8 LOGSRV Enumerator (Opcode 0x07) — Critical Behavior
+
+The LOGSRV opcode 0x07 request creates a **MosEnumeratorLoop** thread
+in GUIDE.EXE that calls `WaitForMessage` in a loop, waiting for streamed
+items. The completion object's `+0x18` flag controls the loop:
+
+- `+0x18 = 0` → WaitForMessage blocks on `MsgWaitForSingleObject(INFINITE)` — correct
+- `+0x18 = 1` → WaitForMessage returns immediately with "more data" — CPU spin
+
+If the server replies with any host block (even a bare 0x87 end marker),
+`ProcessTaggedServiceReply` sets `+0x18 = 1` permanently, signaling
+"transfer complete". The loop then spins at 80% CPU.
+
+**Server rule**: Do NOT reply to LOGSRV requests with selector != 0x00.
+Leave the request pending.
+
+### 7.9 Sign-Out Sequence (confirmed by wire capture)
+
+Sign-out is a ~285ms burst initiated by the client:
+
+```
+ T+0ms    pipe-close 0x01 on pipe 6 (DIRSRV)
+ T+44ms   pipe-close 0x01 on pipe 4 (DIRSRV)
+ T+88ms   pipe-close 0x01 on pipe 7 (DIRSRV)
+ T+132ms  pipe-close 0x01 on pipe 5 (DIRSRV)
+ T+184ms  LOGSRV selector=0x07, payload=0x0F (sign-off notification)
+ T+284ms  pipe-close 0x01 on pipe 3 (LOGSRV)
+ T+285ms  All pipes closed → connection drops
+```
+
+Key observations:
+- **DIRSRV pipes close first**, LOGSRV pipe closes last
+- Pipe close order is not sequential (6→4→7→5), possibly reflecting
+  internal cleanup order in MOSSHELL
+- A **second LOGSRV opcode 0x07** is sent just before closing pipe 3,
+  with payload `0x0F` instead of `0x85` — likely a "sign-off" notification
+- The server does not need to reply to any sign-out messages; the client
+  tears down unilaterally
+- After all pipes close, GUIDE.EXE's CleanupThread drains `g_cOpenSessions`
+  and the process exits (takes a few seconds due to polling)
 
 ---
 

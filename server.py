@@ -394,6 +394,107 @@ def parse_host_block(data):
     }
 
 
+def parse_request_params(data):
+    """Decode send-side tagged parameters from an MPC request payload.
+
+    Send-side tags use the low nibble for type (no bit 7):
+      0x01 = byte, 0x02 = word, 0x03 = dword, 0x04 = variable, 0x05 = dynamic
+    Receive descriptors have bit 7 set (0x81-0x88) and carry no data.
+    """
+    send_params = []
+    recv_descriptors = []
+    pos = 0
+    while pos < len(data):
+        tag = data[pos]
+        pos += 1
+
+        if tag & 0x80:
+            # Receive descriptor — no data, just a type indicator
+            recv_descriptors.append(tag)
+            continue
+
+        # Send parameter
+        if tag == 0x01:
+            if pos >= len(data):
+                break
+            send_params.append({'tag': tag, 'type': 'byte', 'value': data[pos]})
+            pos += 1
+        elif tag == 0x02:
+            if pos + 2 > len(data):
+                break
+            val = struct.unpack('<H', data[pos:pos + 2])[0]
+            send_params.append({'tag': tag, 'type': 'word', 'value': val})
+            pos += 2
+        elif tag == 0x03:
+            if pos + 4 > len(data):
+                break
+            val = struct.unpack('<I', data[pos:pos + 4])[0]
+            send_params.append({'tag': tag, 'type': 'dword', 'value': val})
+            pos += 4
+        elif tag in (0x04, 0x05):
+            # Variable-length: length byte uses bit 7 for inline encoding
+            if pos >= len(data):
+                break
+            length = data[pos]
+            pos += 1
+            if length & 0x80:
+                length = length & 0x7F
+            else:
+                if pos >= len(data):
+                    break
+                length = (length << 8) | data[pos]
+                pos += 1
+            val = data[pos:pos + length]
+            send_params.append({
+                'tag': tag,
+                'type': 'variable' if tag == 0x04 else 'dynamic',
+                'length': length,
+                'data': val,
+            })
+            pos += length
+        else:
+            send_params.append({'tag': tag, 'type': 'unknown', 'rest': data[pos:]})
+            break
+
+    return send_params, recv_descriptors
+
+
+def decode_dirsrv_request(payload):
+    """Decode a DIRSRV GetProperties request payload into human-readable fields."""
+    send_params, recv_descs = parse_request_params(payload)
+    info = {}
+
+    # Expected: variable(node_id), byte(flags), dword, dword, variable(prop_group), variable(locale)
+    var_idx = 0
+    for p in send_params:
+        if p['type'] == 'variable':
+            if var_idx == 0:
+                # First variable = node ID (LARGE_INTEGER, 8 bytes)
+                node_id = p['data']
+                if len(node_id) >= 8:
+                    lo, hi = struct.unpack('<II', node_id[:8])
+                    info['node_id'] = f"{lo}:{hi}"
+                else:
+                    info['node_id'] = node_id.hex()
+            elif var_idx == 1:
+                # Property group name (NUL-terminated string)
+                name = p['data'].rstrip(b'\x00').decode('ascii', errors='replace')
+                info['prop_group'] = name
+            else:
+                info[f'var_{var_idx}'] = p['data'].hex()
+            var_idx += 1
+        elif p['type'] == 'byte':
+            info['flags'] = p['value']
+        elif p['type'] == 'dword':
+            if 'dword_0' not in info:
+                info['dword_0'] = p['value']
+            else:
+                info['dword_1'] = p['value']
+
+    info['recv_descriptors'] = [f"0x{d:02x}" for d in recv_descs]
+    return info
+
+
 def parse_tagged_params(data):
     """Best-effort decode of MPC tagged parameters."""
     params = []
@@ -691,7 +792,31 @@ def build_empty_reply_payload():
     return bytes([0x87])
 
 
-def build_dirsrv_reply_payload():
+def build_property_record(properties):
+    """Build a SVCPROP property record.
+
+    Format (parsed by FDecompressPropClnt in SVCPROP.DLL @ 0x7f641592):
+      [total_size:uint32][prop_count:uint16][properties...]
+    Each property:
+      [type:byte][name:NUL-terminated string][value_data]
+
+    Property types (DecodePropertyValue @ 0x7f64143a):
+      0x01=byte(1), 0x02=word(2), 0x03=dword(4), 0x04=int64(8),
+      0x0A=string(compressed), 0x0E=blob([len:4][data])
+
+    properties: list of (type_byte, name_str, value_bytes)
+    """
+    body = bytearray()
+    for ptype, pname, pvalue in properties:
+        body.append(ptype)
+        body.extend(pname.encode('ascii') + b'\x00')
+        body.extend(pvalue)
+    total_size = 6 + len(body)
+    header = struct.pack('<IH', total_size, len(properties))
+    return header + bytes(body)
+
+
+def build_dirsrv_reply_payload(node_id_str="0:0", request_info=None):
     """Reply for DIRSRV GetProperties calls.
 
     The request's trailing bytes encode the receive param layout:
@@ -704,17 +829,98 @@ def build_dirsrv_reply_payload():
 
     Dynamic section format (parsed by FDecompressPropClnt in SVCPROP.DLL):
       Each record: [total_size:uint32][prop_count:uint16][properties...]
-      A record with 0 properties: total_size=6, count=0.
+
+    Request fields (from wire capture):
+      dword_0=0 → get this node's properties
+      dword_0=1 → get this node's children
+      dword_1   → number of properties requested
+      prop_group → NUL-separated list of property names
     """
+    info = request_info or {}
+    get_children = info.get('dword_0', 0) == 1
+    prop_group = info.get('prop_group', 'q')
+
+    # Parse NUL-separated property name list
+    if '\x00' in prop_group:
+        requested_props = prop_group.split('\x00')
+    else:
+        requested_props = [prop_group]
+
+    print(f"[DIRSRV] node={node_id_str} children={get_children} "
+          f"props={requested_props}", flush=True)
+
+    records = []
+
+    if not get_children:
+        # Query for this node's own properties (initial "q" query).
+        # Return a single record with whatever properties were requested.
+        props = []
+        for name in requested_props:
+            if name == 'q':
+                # "q" seems to be a quick-check property.  Return a dword
+                # so the client knows the node exists and proceeds to
+                # request children with the full property list.
+                props.append((0x03, "q", struct.pack('<I', 1)))
+            else:
+                # Unknown self-property — return 0
+                props.append((0x03, name, struct.pack('<I', 0)))
+        records.append(build_property_record(props))
+
+    else:
+        # Query for children of this node.
+        if node_id_str == "0:0":
+            # Root node children — return MSN Central
+            # Property names discovered from wire: a,c,h,b,e,g,x,mf,wv,tp,p,w,l,i
+            msn_central = []
+            for name in requested_props:
+                if name == 'p':
+                    # Display name
+                    msn_central.append((0x0E, "p",
+                        struct.pack('<I', 11) + b'MSN Central'))
+                elif name == 'c':
+                    msn_central.append((0x03, "c", struct.pack('<I', 3)))  # child count
+                elif name == 'h':
+                    msn_central.append((0x03, "h", struct.pack('<I', 1)))  # has children
+                elif name == 'a':
+                    msn_central.append((0x03, "a", struct.pack('<I', 0)))  # attributes
+                elif name == 'b':
+                    msn_central.append((0x03, "b", struct.pack('<I', 0)))
+                elif name == 'e':
+                    msn_central.append((0x03, "e", struct.pack('<I', 0)))
+                elif name == 'g':
+                    msn_central.append((0x03, "g", struct.pack('<I', 0)))  # group flag
+                elif name == 'x':
+                    msn_central.append((0x03, "x", struct.pack('<I', 0)))
+                elif name == 'mf':
+                    msn_central.append((0x03, "mf", struct.pack('<I', 0)))
+                elif name == 'wv':
+                    msn_central.append((0x0E, "wv", struct.pack('<I', 0)))  # empty blob
+                elif name == 'tp':
+                    msn_central.append((0x0E, "tp", struct.pack('<I', 0)))  # empty blob
+                elif name == 'w':
+                    msn_central.append((0x0E, "w", struct.pack('<I', 0)))   # empty blob
+                elif name == 'l':
+                    msn_central.append((0x0E, "l", struct.pack('<I', 0)))   # empty blob
+                elif name == 'i':
+                    msn_central.append((0x03, "i", struct.pack('<I', 0)))   # icon
+                else:
+                    msn_central.append((0x03, name, struct.pack('<I', 0)))
+            records.append(build_property_record(msn_central))
+        else:
+            # Unknown parent — return empty
+            records.append(build_property_record([]))
+
+    node_count = len(records)
+    dynamic_data = b''.join(records)
+
     payload = bytearray()
-    # Two static dwords (matching the 0x83, 0x83 receive descriptors)
-    payload.extend(build_tagged_reply_dword(0))  # dword 1: status = 0 (success)
-    payload.extend(build_tagged_reply_dword(1))  # dword 2: node count = 1
+    payload.extend(build_tagged_reply_dword(0))           # dword 1: status = 0 (success)
+    payload.extend(build_tagged_reply_dword(node_count))  # dword 2: node count
     payload.append(0x87)  # end of static section
-    # Dynamic section: one property record with 0 properties
-    dynamic_data = struct.pack('<IH', 6, 0)  # total_size=6, prop_count=0
-    payload.append(0x88)  # dynamic complete
-    payload.extend(encode_reply_var_length(len(dynamic_data)))
+    # Dynamic data: tag 0x88 = "complete dynamic chunk".
+    # FUN_04605809 reads ALL remaining host-block bytes as raw data —
+    # do NOT prefix with encode_reply_var_length, it would corrupt the record.
+    payload.append(0x88)
     payload.extend(dynamic_data)
     return bytes(payload)
 
@@ -1140,8 +1346,12 @@ def handle_connection(conn, addr):
                                                         log(f"[SVC] LOGSRV selector=0x{hb['selector']:02x} "
                                                             f"req_id={hb['request_id']} — enumerator request, no reply")
                                                 elif svc['svc_name'] == 'DIRSRV':
+                                                    req_info = decode_dirsrv_request(hb['payload'])
+                                                    log(f"[SVC] DIRSRV request: {req_info}")
+                                                    node_id = req_info.get('node_id', '0:0')
                                                     time.sleep(0.1)
-                                                    reply_payload = build_dirsrv_reply_payload()
+                                                    reply_payload = build_dirsrv_reply_payload(
+                                                        node_id_str=node_id, request_info=req_info)
                                                     host_block = build_host_block(
                                                         hb['msg_class'], hb['selector'],
                                                         hb['request_id'], reply_payload)
@@ -1151,7 +1361,7 @@ def handle_connection(conn, addr):
                                                     tx_pkt_no += 1
                                                     log(f"[TXPKT {tx_pkt_no:03d}] DIRSRV reply for pipe {pc['pipe_idx']} "
                                                         f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
-                                                        f"req_id={hb['request_id']} "
+                                                        f"req_id={hb['request_id']} node={node_id} "
                                                         f"(seq={server_seq}, {len(reply_pkt)} bytes)")
                                                     hexdump(reply_pkt, "[TX] ")
                                                     conn.sendall(reply_pkt)
@@ -1244,8 +1454,12 @@ def handle_connection(conn, addr):
                                                 log(f"[SVC] LOGSRV selector=0x{hb['selector']:02x} "
                                                     f"req_id={hb['request_id']} — enumerator request, no reply")
                                         elif svc['svc_name'] == 'DIRSRV':
+                                            req_info = decode_dirsrv_request(hb['payload'])
+                                            log(f"[SVC] DIRSRV request: {req_info}")
+                                            node_id = req_info.get('node_id', '0:0')
                                             time.sleep(0.1)
-                                            reply_payload = build_dirsrv_reply_payload()
+                                            reply_payload = build_dirsrv_reply_payload(
+                                                node_id_str=node_id, request_info=req_info)
                                             host_block = build_host_block(
                                                 hb['msg_class'], hb['selector'],
                                                 hb['request_id'], reply_payload)
@@ -1255,7 +1469,7 @@ def handle_connection(conn, addr):
                                             tx_pkt_no += 1
                                             log(f"[TXPKT {tx_pkt_no:03d}] DIRSRV reply for pipe {pf['pipe_idx']} "
                                                 f"class=0x{hb['msg_class']:02x} selector=0x{hb['selector']:02x} "
-                                                f"req_id={hb['request_id']} "
+                                                f"req_id={hb['request_id']} node={node_id} "
                                                 f"(seq={server_seq}, {len(reply_pkt)} bytes)")
                                             hexdump(reply_pkt, "[TX] ")
                                             conn.sendall(reply_pkt)
