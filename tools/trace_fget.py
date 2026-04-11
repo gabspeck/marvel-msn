@@ -17,9 +17,7 @@ log it, then continue.
 Also traces FDecompressPropClnt to confirm records reach the parser.
 """
 
-import sys
 import time
-sys.path.insert(0, '.')
 from gdb_debug import GDBClient
 
 # SVCPROP.DLL addresses (from Ghidra)

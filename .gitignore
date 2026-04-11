@@ -1,13 +1,23 @@
+# Python
 __pycache__/
 *.pyc
 
-# Ghidra lock files (local state only)
+# Ghidra project (see docs/JOURNAL.md for annotations)
+MSN95.gpr
+MSN95.rep/
 MSN95.lock
 MSN95.lock~
 
-# Other tools
-.codex
+# Original MSN95 binaries (see README for how to obtain)
+binaries/
 
-# Reference material (not project code)
+# Session captures (run server/server.py to generate your own)
+session_capture*.log
+
+# Development tools
+.codex
+.claude/
+
+# Reference material
 *.pdf
 What is *.html

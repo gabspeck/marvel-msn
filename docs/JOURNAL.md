@@ -1,27 +1,24 @@
-# MSN95 Reverse Engineering Status
+# MSN95 Reverse Engineering Journal
 
-Last updated: 2026-04-10
+> Chronological research journal documenting the reverse engineering of MSN for
+> Windows 95. For the protocol specification, see [PROTOCOL.md](../PROTOCOL.md).
+
+Last updated: 2026-04-11
 
 ## Goal
 
-Get the Windows 95 MSN client past the `Verifying account...` login stage and complete enough of the protocol for a clean signed-in session.
+Reverse-engineer the MSN 1.0 for Windows 95 ("Marvel") wire protocol from client
+binaries and build a working emulated server.
 
 ## Current Runtime State
 
-- Dial-up / modem bootstrap works.
-- The server receives the initial bare `0x0D`.
-- Replying with `COM` and the type-3 transport parameters is sufficient for the client to continue.
-- The client sends pipe-0 control type `4`, then control type `1`.
-- Replying to control type `1` is required for the client to open `LOGSRV`.
-- The client opens `LOGSRV` version `6`.
-- **PIPE-OPEN NOW WORKS** — the server sends a protocol-level pipe-open-response
-  that triggers MOSCP's "Select" handler table → handler 1 → CMD 7 to MOSCL →
-  `SetEvent(pipe+0x5c)` → `PipeObj_OpenAndWait` unblocks.
-- **CLIENT SENDS LOGIN REQUEST** — after pipe open succeeds, the client sends a
-  host block on the opened LOGSRV pipe (pipe 3) containing login credentials.
-- The server does not yet respond to the login request; after 25s the connection
-  times out with carrier_lost.
-- **Client still shows "Verifying account..."** — waiting for login response.
+- Full dial-up bootstrap, login, service discovery, and idle flow working.
+- **MSN Shell renders** — Explorer window opens showing "The Microsoft Network"
+  with MSN Today, E-Mail, Favorite Places, Member Assistance, and Categories.
+- DIRSRV directory browsing active — client navigates the tree, requesting
+  child nodes with 14-property records (a, c, h, b, e, g, x, mf, wv, tp, p, w, l, i).
+- Sign-out completes cleanly (all pipes close, process exits).
+- CPU spin bug fixed (enumerator requests left pending, not replied to).
 
 Latest observed trace pattern (2026-04-10):
 

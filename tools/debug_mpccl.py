@@ -9,8 +9,6 @@ Run this AFTER Windows 95 has booted and you're about to click Connect
 in the MSN login dialog.
 """
 
-import sys
-sys.path.insert(0, '/home/gabriels/projetos/msn95_reveng')
 from gdb_debug import GDBClient
 import time
 
