@@ -9,6 +9,12 @@ This project includes a working **emulated server** that drives the original
 1995 client through dial-up bootstrap, login, service discovery, and directory
 browsing. The MSN Shell window renders and displays the content tree.
 
+## Demo
+
+Currently we can sign in, display the home page and sign out. 
+
+https://github.com/user-attachments/assets/1d8861a0-0a3d-4df9-ba5a-276dedcee68f
+
 ## What's been decoded
 
 - **Transport layer** — packet framing, byte-stuffing (0x1B escape), CRC-32
