@@ -101,6 +101,31 @@ DIRSRV_INTERFACE_GUIDS = [
     (_guid_le("00028B27-0000-0000-C000-000000000046"), 0x01),
 ]
 
+# OLREGSRV (On-Line Registration Service) interfaces.  SIGNUP.EXE holds
+# the client-side IID table at 0x40b4e8 — sixteen 00028Bxx GUIDs covering
+# the phone-book / trial-info / product-details sync used by its "Get the
+# latest product details" flow.  Listed in the order they appear in the
+# binary, paired with a selector that the server assigns contiguously so
+# the client's IID→selector lookup resolves for each one.
+OLREGSRV_INTERFACE_GUIDS = [
+    (_guid_le("00028B73-0000-0000-C000-000000000046"), 0x01),
+    (_guid_le("00028B74-0000-0000-C000-000000000046"), 0x02),
+    (_guid_le("00028B78-0000-0000-C000-000000000046"), 0x03),
+    (_guid_le("00028B79-0000-0000-C000-000000000046"), 0x04),
+    (_guid_le("00028B81-0000-0000-C000-000000000046"), 0x05),
+    (_guid_le("00028B82-0000-0000-C000-000000000046"), 0x06),
+    (_guid_le("00028B83-0000-0000-C000-000000000046"), 0x07),
+    (_guid_le("00028B84-0000-0000-C000-000000000046"), 0x08),
+    (_guid_le("00028B85-0000-0000-C000-000000000046"), 0x09),
+    (_guid_le("00028B86-0000-0000-C000-000000000046"), 0x0A),
+    (_guid_le("00028B8A-0000-0000-C000-000000000046"), 0x0B),
+    (_guid_le("00028B8B-0000-0000-C000-000000000046"), 0x0C),
+    (_guid_le("00028B8C-0000-0000-C000-000000000046"), 0x0D),
+    (_guid_le("00028B8D-0000-0000-C000-000000000046"), 0x0E),
+    (_guid_le("00028B8E-0000-0000-C000-000000000046"), 0x0F),
+    (_guid_le("00028B8F-0000-0000-C000-000000000046"), 0x10),
+]
+
 # FTM (File Transfer Manager) interfaces.  BILLADD's CXferService::HrInit
 # opens a pipe on svc_name="FTM" and queries IID 0x00028B25.  Without a
 # discovery reply the client blocks for ~58 s and the billing dialog aborts.

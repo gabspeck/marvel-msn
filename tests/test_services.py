@@ -13,6 +13,9 @@ from server.services.ftm import (
     FTMHandler, _extract_requested_filename, _build_request_download_reply,
     _build_bill_client_reply, FTM_FALLBACK_FILENAME,
 )
+from server.services.olregsrv import (
+    OLREGSRVHandler, build_olregsrv_service_map_payload,
+)
 from server.transport import parse_packet
 from server.mpc import (
     parse_tagged_params, build_service_packet, build_host_block,
@@ -20,7 +23,7 @@ from server.mpc import (
 )
 from server.wire import decode_header_byte
 from server.config import (
-    LOGSRV_INTERFACE_GUIDS, DIRSRV_INTERFACE_GUIDS,
+    LOGSRV_INTERFACE_GUIDS, DIRSRV_INTERFACE_GUIDS, OLREGSRV_INTERFACE_GUIDS,
     PIPE_ALWAYS_SET, PIPE_CONTINUATION, PIPE_LAST_DATA,
 )
 from server.models import DwordParam, VarParam, EndMarker, DirsrvRequest
@@ -118,10 +121,33 @@ class TestLOGSRVReply(unittest.TestCase):
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
 
-    def test_enumerator_returns_none(self):
+    def test_signup_post_transfer_returns_packet(self):
+        """Selector 0x02 is called on a fresh LOGSRV pipe after the FTM
+        phone-book transfer finishes; client hangs at "Starting transfer..."
+        if the server returns None.  Minimum viable reply is an empty 0x84
+        variable satisfying the single recv descriptor.
+        """
+        payload = bytes.fromhex('03 5f 01 00 00 03 00 00 00 00 03 00 00 00 00 84')
+        handler = LOGSRVHandler(6, 'LOGSRV')
+        pkts = handler.handle_request(0x06, 0x02, 0, payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+
+    def test_signup_query_returns_packet(self):
+        """Selector 0x07 (SIGNUP's 'product details' query) must reply.
+
+        The client sends a single recv descriptor (0x85) and hangs when
+        the server returns None; the minimum viable reply is an empty
+        0x84 variable.
+        """
         handler = LOGSRVHandler(3, 'LOGSRV')
-        pkt = handler.handle_request(0x06, 0x07, 1, b'', 5, 5)
-        self.assertIsNone(pkt)
+        pkts = handler.handle_request(0x06, 0x07, 1, b'\x85', 5, 5)
+        self.assertIsNotNone(pkts)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
 
     def test_unknown_selector_returns_none(self):
         handler = LOGSRVHandler(3, 'LOGSRV')
@@ -175,6 +201,35 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_dirsrv_reply_payload(request)
         self.assertIn(b'MSN Central', payload)
+
+
+class TestOLREGSRVServiceMap(unittest.TestCase):
+    def test_payload_size(self):
+        payload = build_olregsrv_service_map_payload()
+        self.assertEqual(len(payload), len(OLREGSRV_INTERFACE_GUIDS) * 17)
+
+    def test_guid_format(self):
+        payload = build_olregsrv_service_map_payload()
+        for i, (guid_bytes, selector) in enumerate(OLREGSRV_INTERFACE_GUIDS):
+            record = payload[i * 17:(i + 1) * 17]
+            self.assertEqual(record[:16], guid_bytes)
+            self.assertEqual(record[16], selector)
+
+    def test_produces_packet(self):
+        handler = OLREGSRVHandler(4, 'OLREGSRV')
+        pkts = handler.build_discovery_packet(6, 6)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertIsNotNone(parsed)
+        self.assertTrue(parsed.crc_ok)
+
+
+class TestOLREGSRVReply(unittest.TestCase):
+    def test_unknown_selector_returns_none_with_log(self):
+        """Every selector currently returns None — reply shapes aren't RE'd yet."""
+        handler = OLREGSRVHandler(4, 'OLREGSRV')
+        self.assertIsNone(handler.handle_request(0x06, 0x01, 1, b'', 5, 5))
+        self.assertIsNone(handler.handle_request(0x06, 0x05, 1, b'\x85', 5, 5))
 
 
 class TestFTMHandler(unittest.TestCase):

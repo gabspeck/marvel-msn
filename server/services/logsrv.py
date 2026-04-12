@@ -31,6 +31,10 @@ class LOGSRVHandler:
             reply_payload = _BOOTSTRAP_PAYLOAD
         elif selector == 0x01:
             reply_payload = _handle_password_change(payload)
+        elif selector == 0x02:
+            reply_payload = _handle_signup_post_transfer(payload)
+        elif selector == 0x07:
+            reply_payload = _handle_signup_query(payload)
         elif selector == 0x0A:
             reply_payload = _handle_billing_query()
         else:
@@ -104,6 +108,34 @@ def _put_str(buf, offset, s):
     """Write a NUL-terminated ASCII string into a buffer at offset."""
     encoded = s.encode('ascii') + b'\x00'
     buf[offset:offset + len(encoded)] = encoded
+
+
+def _handle_signup_post_transfer(request_payload):
+    """Handle LOGSRV selector 0x02 — opened by SIGNUP after the FTM transfer.
+
+    After SIGNUP finishes the FTM download loop for the "LOGSRV" phone-book
+    payload, it opens a fresh LOGSRV pipe and calls selector 0x02 with three
+    dwords (counter, 0, 0) and one 0x84 recv descriptor.  The reply shape
+    isn't RE'd — an empty 0x84 variable is the minimal well-formed payload
+    that satisfies the unmarshaller so we can see what the client does next.
+    """
+    print(f"  [LOGSRV] selector=0x02 post-transfer query (payload_len={len(request_payload)})")
+    return build_tagged_reply_var(0x84, b'')
+
+
+def _handle_signup_query(request_payload):
+    """Handle the SIGNUP.EXE LOGSRV selector 0x07 request.
+
+    Observed on the wire during the "Get the latest product details" flow:
+    the request carries no send-side params — just a single recv descriptor
+    (0x85) asking for one variable-tagged reply.  The exact reply shape
+    hasn't been pinned down from the COM proxy layer yet; returning an
+    empty 0x84 variable is the minimal well-formed payload that matches
+    the recv descriptor, letting the client's unmarshaller proceed so we
+    can observe whatever it does next.
+    """
+    print(f"  [LOGSRV] selector=0x07 signup query (payload_len={len(request_payload)})")
+    return build_tagged_reply_var(0x84, b'')
 
 
 def _handle_password_change(request_payload):
