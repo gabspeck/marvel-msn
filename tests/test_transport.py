@@ -85,12 +85,17 @@ class TestParsePacket(unittest.TestCase):
 
 class TestTransportParams(unittest.TestCase):
     def test_known_wire_bytes(self):
-        """build_transport_params() must produce the exact wire bytes from session captures."""
+        """build_transport_params() must produce stable wire bytes.
+
+        Advertised packet/max_bytes = 1024 (0x400) so the server stays within
+        the client's registry PacketSize default. The 0x10 WINDOW_SIZE byte
+        is byte-stuffed to 1b 32.
+        """
         pkt = build_transport_params()
         expected = bytes.fromhex(
-            '80 80 e0 17 00 ff ff 03 00 01 00 00 00 01 00 00'
-            ' 1b 32 00 00 00 01 00 00 00 58 02 00 00 31 c4 49'
-            ' 2f 0d'
+            '80 80 e0 17 00 ff ff 03 00 04 00 00 00 04 00 00'
+            ' 1b 32 00 00 00 01 00 00 00 58 02 00 00 38 c9 9a'
+            ' 7e 0d'
         )
         self.assertEqual(pkt, expected)
 

@@ -9,6 +9,10 @@ from server.services.dirsrv import (
     DIRSRVHandler, build_dirsrv_reply_payload, build_dirsrv_service_map_payload,
     build_property_record,
 )
+from server.services.ftm import (
+    FTMHandler, _extract_requested_filename, _build_request_download_reply,
+    _build_bill_client_reply, FTM_FALLBACK_FILENAME,
+)
 from server.transport import parse_packet
 from server.mpc import (
     parse_tagged_params, build_service_packet, build_host_block,
@@ -171,6 +175,59 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_dirsrv_reply_payload(request)
         self.assertIn(b'MSN Central', payload)
+
+
+class TestFTMHandler(unittest.TestCase):
+    def test_request_download_reply_returns_packet(self):
+        payload = bytes.fromhex(
+            '04 bc 70 6c 61 6e 73 2e 74 78 74 00 00 00 00 00'
+            ' 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00'
+            ' 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00'
+            ' 00 00 00 00 00 00 00 00 00 00 00 00'
+        )
+        handler = FTMHandler(1, 'FTM')
+        pkts = handler.handle_request(0x01, 0x00, 0, payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        self.assertEqual(len(pkts), 1)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+
+    def test_bill_client_reply_returns_packet(self):
+        handler = FTMHandler(1, 'FTM')
+        pkts = handler.handle_request(0x01, 0x03, 0, b'', 5, 5)
+        self.assertIsNotNone(pkts)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+
+    def test_unknown_selector_returns_none(self):
+        handler = FTMHandler(1, 'FTM')
+        self.assertIsNone(handler.handle_request(0x01, 0x02, 0, b'', 5, 5))
+
+    def test_extract_requested_filename_requires_expected_var_layout(self):
+        payload = (
+            b'\x04' + bytes([0x80 | 60]) +
+            b'ms_Ynt.hlp\x00' + b'\x00' * (60 - len('ms_Ynt.hlp') - 1)
+        )
+        self.assertEqual(_extract_requested_filename(payload), 'ms_Ynt.hlp')
+
+    def test_extract_requested_filename_falls_back_for_unexpected_var_size(self):
+        payload = b'\x04' + bytes([0x80 | 32]) + b'plans.txt\x00' + b'\x00' * 22
+        self.assertEqual(_extract_requested_filename(payload), FTM_FALLBACK_FILENAME)
+
+    def test_request_download_reply_echoes_filename(self):
+        payload = _build_request_download_reply('ms_Ynt.hlp')
+        self.assertEqual(payload[0], 0x84)
+        self.assertIn(b'ms_Ynt.hlp\x00', payload)
+
+    def test_request_download_reply_handles_non_ascii_filename(self):
+        payload = _build_request_download_reply('pláns.txt')
+        self.assertEqual(payload[0], 0x84)
+        self.assertIn(b'plns.txt\x00', payload)
+
+    def test_bill_client_reply_has_zero_chunk_length(self):
+        payload = _build_bill_client_reply()
+        self.assertEqual(payload[0], 0x84)
+        self.assertEqual(struct.unpack('<H', payload[0x11:0x13])[0], 0)
 
 
 class TestPropertyRecord(unittest.TestCase):

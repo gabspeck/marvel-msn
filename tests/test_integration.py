@@ -86,9 +86,9 @@ class TestFullSession(unittest.TestCase):
 
         pkt_raw = self._recv_until_0d()
         expected = bytes.fromhex(
-            '80 80 e0 17 00 ff ff 03 00 01 00 00 00 01 00 00'
-            ' 1b 32 00 00 00 01 00 00 00 58 02 00 00 31 c4 49'
-            ' 2f 0d'
+            '80 80 e0 17 00 ff ff 03 00 04 00 00 00 04 00 00'
+            ' 1b 32 00 00 00 01 00 00 00 58 02 00 00 38 c9 9a'
+            ' 7e 0d'
         )
         self.assertEqual(pkt_raw, expected)
 

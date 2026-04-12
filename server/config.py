@@ -39,8 +39,11 @@ TAG_DYNAMIC_COMPLETE = 0x88 # Dynamic complete — remaining bytes are raw data
 PIPE_CLOSE_CMD = 0x01
 
 # --- Transport defaults ---
-TRANSPORT_PACKET_SIZE = 256
-TRANSPORT_MAX_BYTES = 256
+# PACKET_SIZE is the max wire-bytes per frame. Client registry default is
+# 1024 (PacketSize) and MOSCP uses MIN(client, server-advertised), so we
+# must advertise at least what build_service_packet actually emits.
+TRANSPORT_PACKET_SIZE = 1024
+TRANSPORT_MAX_BYTES = 1024
 TRANSPORT_WINDOW_SIZE = 16
 TRANSPORT_ACK_BEHIND = 1
 TRANSPORT_ACK_TIMEOUT_MS = 600
@@ -96,6 +99,14 @@ LOGSRV_INTERFACE_GUIDS = [
 
 DIRSRV_INTERFACE_GUIDS = [
     (_guid_le("00028B27-0000-0000-C000-000000000046"), 0x01),
+]
+
+# FTM (File Transfer Manager) interfaces.  BILLADD's CXferService::HrInit
+# opens a pipe on svc_name="FTM" and queries IID 0x00028B25.  Without a
+# discovery reply the client blocks for ~58 s and the billing dialog aborts.
+FTM_INTERFACE_GUIDS = [
+    (_guid_le("00028B25-0000-0000-C000-000000000046"), 0x01),
+    (_guid_le("00028B26-0000-0000-C000-000000000046"), 0x02),
 ]
 
 del _guid_le
