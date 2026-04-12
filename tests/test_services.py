@@ -10,8 +10,9 @@ from server.services.dirsrv import (
     build_property_record,
 )
 from server.services.ftm import (
-    FTMHandler, _extract_requested_filename, _build_request_download_reply,
-    _build_bill_client_reply, FTM_FALLBACK_FILENAME,
+    FTMHandler, _build_request_download_reply,
+    _build_bill_client_reply, _resolve_ftm_target, FTM_FALLBACK_FILENAME,
+    SIGNUP_LOGSRV_FILES, FTM_CLIENT_FILE_ID_SIZE, FTM_COUNTER_OFFSET,
 )
 from server.services.olregsrv import (
     OLREGSRVHandler, build_olregsrv_service_map_payload,
@@ -258,31 +259,112 @@ class TestFTMHandler(unittest.TestCase):
         handler = FTMHandler(1, 'FTM')
         self.assertIsNone(handler.handle_request(0x01, 0x02, 0, b'', 5, 5))
 
-    def test_extract_requested_filename_requires_expected_var_layout(self):
+    def test_resolve_ftm_target_returns_name_for_expected_var_layout(self):
         payload = (
             b'\x04' + bytes([0x80 | 60]) +
             b'ms_Ynt.hlp\x00' + b'\x00' * (60 - len('ms_Ynt.hlp') - 1)
         )
-        self.assertEqual(_extract_requested_filename(payload), 'ms_Ynt.hlp')
+        filename, _ = _resolve_ftm_target(payload)
+        self.assertEqual(filename, 'ms_Ynt.hlp')
 
-    def test_extract_requested_filename_falls_back_for_unexpected_var_size(self):
+    def test_resolve_ftm_target_falls_back_for_unexpected_var_size(self):
         payload = b'\x04' + bytes([0x80 | 32]) + b'plans.txt\x00' + b'\x00' * 22
-        self.assertEqual(_extract_requested_filename(payload), FTM_FALLBACK_FILENAME)
+        filename, _ = _resolve_ftm_target(payload)
+        self.assertEqual(filename, FTM_FALLBACK_FILENAME)
 
     def test_request_download_reply_echoes_filename(self):
-        payload = _build_request_download_reply('ms_Ynt.hlp')
+        payload = _build_request_download_reply('ms_Ynt.hlp', 0)
         self.assertEqual(payload[0], 0x84)
         self.assertIn(b'ms_Ynt.hlp\x00', payload)
 
     def test_request_download_reply_handles_non_ascii_filename(self):
-        payload = _build_request_download_reply('pláns.txt')
+        payload = _build_request_download_reply('pláns.txt', 0)
         self.assertEqual(payload[0], 0x84)
         self.assertIn(b'plns.txt\x00', payload)
+
+    def test_request_download_reply_size_matches_content_len(self):
+        payload = _build_request_download_reply('prodinfo.rtf', 42)
+        # After 2-byte 0x84 length prefix, size1 at offset 0x08 and
+        # size2 at offset 0x0C must both equal content_len.
+        body = payload[2:]
+        self.assertEqual(struct.unpack('<I', body[0x08:0x0C])[0], 42)
+        self.assertEqual(struct.unpack('<I', body[0x0C:0x10])[0], 42)
 
     def test_bill_client_reply_has_zero_chunk_length(self):
         payload = _build_bill_client_reply()
         self.assertEqual(payload[0], 0x84)
         self.assertEqual(struct.unpack('<H', payload[0x11:0x13])[0], 0)
+
+    def test_bill_client_reply_carries_content(self):
+        content = b'{\\rtf1 hi}'
+        payload = _build_bill_client_reply(content)
+        body = payload[2:]  # strip 0x84 + length prefix
+        self.assertEqual(struct.unpack('<H', body[0x10:0x12])[0], len(content))
+        self.assertEqual(body[0x12:0x12 + len(content)], content)
+
+
+def _make_logsrv_request(counter, selector=0x00):
+    """Synthesize a signup-path FTM request with LOGSRV+counter CFI."""
+    cfi = bytearray(FTM_CLIENT_FILE_ID_SIZE)
+    cfi[:6] = b'LOGSRV'
+    struct.pack_into('<I', cfi, FTM_COUNTER_OFFSET, counter)
+    return build_tagged_reply_var(0x04, bytes(cfi)) + b'\x84'
+
+
+class TestFTMSignupLogsrvMapping(unittest.TestCase):
+    def test_counter_0_maps_to_plans_txt(self):
+        filename, content = _resolve_ftm_target(_make_logsrv_request(0))
+        self.assertEqual(filename, 'plans.txt')
+        self.assertEqual(content, b'')
+
+    def test_counter_1_maps_to_prodinfo(self):
+        filename, content = _resolve_ftm_target(_make_logsrv_request(1))
+        self.assertEqual(filename, 'prodinfo.rtf')
+        self.assertTrue(content.startswith(b'{\\rtf1'))
+
+    def test_counter_2_maps_to_legalagr(self):
+        filename, content = _resolve_ftm_target(_make_logsrv_request(2))
+        self.assertEqual(filename, 'legalagr.rtf')
+        self.assertTrue(content.startswith(b'{\\rtf1'))
+
+    def test_counter_3_maps_to_newtips(self):
+        filename, content = _resolve_ftm_target(_make_logsrv_request(3))
+        self.assertEqual(filename, 'newtips.rtf')
+        self.assertTrue(content.startswith(b'{\\rtf1'))
+
+    def test_counter_out_of_range_falls_through(self):
+        filename, content = _resolve_ftm_target(_make_logsrv_request(99))
+        # Unknown counter leaves the source name intact — no content served.
+        self.assertEqual(filename, 'LOGSRV')
+        self.assertEqual(content, b'')
+
+    def test_non_logsrv_name_is_echoed(self):
+        # Billing path: client sends "plans.txt" directly — no mapping.
+        cfi = bytearray(FTM_CLIENT_FILE_ID_SIZE)
+        cfi[:len(b'plans.txt')] = b'plans.txt'
+        payload = build_tagged_reply_var(0x04, bytes(cfi))
+        filename, content = _resolve_ftm_target(payload)
+        self.assertEqual(filename, 'plans.txt')
+        self.assertEqual(content, b'')
+
+    def test_request_download_reply_encodes_mapped_filename(self):
+        handler = FTMHandler(5, 'FTM')
+        pkts = handler.handle_request(
+            0x01, 0x00, 0, _make_logsrv_request(1), 10, 10,
+        )
+        self.assertIsNotNone(pkts)
+        # The mapped filename must appear in the on-wire reply.
+        joined = b''.join(pkts)
+        self.assertIn(b'prodinfo.rtf\x00', joined)
+
+    def test_bill_client_reply_emits_rtf_for_counter_1(self):
+        handler = FTMHandler(5, 'FTM')
+        pkts = handler.handle_request(
+            0x01, 0x03, 1, _make_logsrv_request(1, selector=0x03), 10, 10,
+        )
+        self.assertIsNotNone(pkts)
+        joined = b''.join(pkts)
+        self.assertIn(SIGNUP_LOGSRV_FILES[1][1], joined)
 
 
 class TestPropertyRecord(unittest.TestCase):
