@@ -150,6 +150,19 @@ class TestLOGSRVReply(unittest.TestCase):
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
 
+    def test_post_signup_query_returns_packet(self):
+        """Selector 0x0d fires on a fresh LOGSRV pipe right after the
+        OLREGSRV commit reply.  Returning None makes the client disconnect
+        before the Internet-access prompt and Congrats dialog can appear.
+        """
+        payload = bytes.fromhex('03 5f 01 00 00 03 00 00 00 00 03 00 00 00 00 84')
+        handler = LOGSRVHandler(6, 'LOGSRV')
+        pkts = handler.handle_request(0x06, 0x0D, 0, payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+
     def test_unknown_selector_returns_none(self):
         handler = LOGSRVHandler(3, 'LOGSRV')
         pkt = handler.handle_request(0x06, 0xFF, 0, b'', 5, 5)
