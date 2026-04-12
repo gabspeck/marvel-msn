@@ -8,7 +8,7 @@ from ..mpc import (
     build_tagged_reply_var, build_discovery_payload,
     parse_request_params,
 )
-from ..models import VarParam
+from ..models import VarParam, DwordParam
 
 
 class LOGSRVHandler:
@@ -37,6 +37,8 @@ class LOGSRVHandler:
             reply_payload = _handle_signup_query(payload)
         elif selector == 0x0A:
             reply_payload = _handle_billing_query()
+        elif selector == 0x0D:
+            reply_payload = _handle_post_signup_query(payload)
         else:
             return None
 
@@ -120,6 +122,22 @@ def _handle_signup_post_transfer(request_payload):
     that satisfies the unmarshaller so we can see what the client does next.
     """
     print(f"  [LOGSRV] selector=0x02 post-transfer query (payload_len={len(request_payload)})")
+    return build_tagged_reply_var(0x84, b'')
+
+
+def _handle_post_signup_query(request_payload):
+    """Handle LOGSRV selector 0x0d — opened by SIGNUP right after the
+    OLREGSRV commit reply comes back.
+
+    Request: three dwords (country_id, 0, 0) + one 0x84 recv descriptor.
+    The call runs in parallel with the OLREGSRV one-way continuation
+    frames, so it's not the Congrats-gating step — but leaving it
+    unanswered makes the client disconnect.  Reply shape isn't RE'd;
+    an empty 0x84 variable is the minimal well-formed answer.
+    """
+    send_params, _ = parse_request_params(request_payload)
+    country = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else '?'
+    print(f"  [LOGSRV] selector=0x0d post-signup query (country_id={country})")
     return build_tagged_reply_var(0x84, b'')
 
 

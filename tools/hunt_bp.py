@@ -17,10 +17,23 @@ TARGETS = {
     0x04604350: 'DispatchReplyToRequestObject',
     0x004025cf: 'SIGNUP!HresultClassifier (FUN_004025cf)',
     0x004030ee: 'SIGNUP!ErrorDispatcher (FUN_004030ee)',
-    0x0040353f: 'SIGNUP!ErrorDisplay (FUN_0040353f, 16 callers)',
-    0x00406562: 'FUN_004063de post-wait (EBX=wait result, [EBP-0x18]=local_1c)',
-    0x0040658b: 'FUN_004063de case 0 SUCCESS (local_1c was 0)',
-    0x0040664c: 'FUN_004063de error call to FUN_0040353f',
+    0x0040353f: 'SIGNUP!ShowSignupErrorDialog (16 callers)',
+    0x00406562: 'DispatchSignupCommitAndWait post-wait (EBX=wait result)',
+    0x0040658b: 'DispatchSignupCommitAndWait case 0 SUCCESS (status_word==0)',
+    0x0040664c: 'DispatchSignupCommitAndWait error call to ShowSignupErrorDialog',
+    # Phase 1: trace Congrats path.  Expected healthy flow after submit:
+    #   0x00406562 (commit success) -> 0x004060d1 (EndDialog, EBX=0x19)
+    #   -> 0x004016df (case 8 entry) -> 0x004016ef (FUN_00401332 returned)
+    #   -> 0x00401706 (call Congrats) -> 0x00405b28 (Congrats entry)
+    #   -> 0x00405b4b (DialogBoxParamA returned; EAX = dialog result)
+    # Hitting 0x00401737 without hitting 0x004016df means an abort arm fired.
+    0x004060d1: 'credentials page EndDialog(EBX=iVar3, [EBP+8]=hwnd)',
+    0x004016df: 'FUN_00401469 case 8 entry (success finalize)',
+    0x004016ef: 'FUN_00401469 after FUN_00401332 (EAX=its return)',
+    0x00401706: 'FUN_00401469 call FUN_00405b28 (Congrats)',
+    0x00405b28: 'FUN_00405b28 entry (Congrats DialogBoxParamA wrapper)',
+    0x00405b4b: 'FUN_00405b28 after DialogBoxParamA(0x3e8) (EAX=dialog result)',
+    0x00401737: 'FUN_00401469 exit merge (abort arms jump here)',
 }
 
 def main():

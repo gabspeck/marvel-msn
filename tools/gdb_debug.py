@@ -37,21 +37,18 @@ class GDBClient:
         time.sleep(0.1)
 
     def disconnect(self, resume=True):
+        # 86Box's gdb stub deadlocks if we send `D` (detach): it neither
+        # clears BPs nor reliably triggers client cleanup, and the stub's
+        # event loop runs *inside* the CPU tick — so if D leaves CPU
+        # paused, no new commands can land and sockets stack up in
+        # CLOSE-WAIT.  The right shutdown is `c` (or nothing) + socket
+        # close; the stub auto-resumes when the last client disappears.
         if self.sock:
             try:
                 if resume:
-                    # Ensure CPU is running before detach so mouse/IO keeps working
                     self._send_packet('c')
                     time.sleep(0.1)
-                self._send_packet('D')
-                time.sleep(0.2)
-                # Drain any response
-                self.sock.settimeout(0.3)
-                try:
-                    self.sock.recv(4096)
-                except:
-                    pass
-            except:
+            except Exception:
                 pass
             self.sock.close()
             self.sock = None
