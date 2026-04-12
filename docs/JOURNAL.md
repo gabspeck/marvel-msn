@@ -3,7 +3,7 @@
 > Chronological research journal documenting the reverse engineering of MSN for
 > Windows 95. For the protocol specification, see [PROTOCOL.md](../PROTOCOL.md).
 
-Last updated: 2026-04-11
+Last updated: 2026-04-12
 
 ## Goal
 
@@ -671,3 +671,77 @@ then disconnects after ~90s.
 
 - `RE_STATUS.md` for working status and open questions
 - `PROTOCOL.md` for stable findings that are strong enough to keep
+
+## 2026-04-12 — Signup Wizard End-to-End
+
+Goal: run SIGNUP.EXE's new-account wizard to completion on a fresh
+VM and reach the "Congratulations! You are now a member!" dialog
+(resource `0x3e8` in SIGNUP.EXE).
+
+### Summary of the path we had to clear
+
+| Step | What broke | Fix |
+|------|------------|-----|
+| Credentials Submit | OLREGSRV commit head (class=0x01 sel=0x01) needed a reply — without it the vtbl[0x10] wait burns the 90s timeout and the wizard shows the generic error dialog | Reply with `HRESULT=0` as a single `0x83` dword tag; do NOT reply to the 0xE7/0xE6 continuation frames (they're one-way) and do NOT reply to the sel=0x02 pre-check (causes "important part of signup cannot be found") |
+| After commit reply | Client disconnected before showing Internet-access prompt | **LOGSRV sel=0x0D** was unhandled; our `None` return made the client drop.  Reply with empty `0x84` variable |
+| FTM loop | Wizard opens `CreateFile(OPEN_EXISTING)` on four RTFs next to `SIGNUP.EXE`; the FTM "LOGSRV" name + 0..3 counter is how the server is supposed to serve those | Map counter → `plans.txt` / `prodinfo.rtf` / `legalagr.rtf` / `newtips.rtf`; override the echoed filename via sel=0x00 reply flag bit 3 |
+| Internet-access & phonebook | Needed no server work once the transport stayed up | None — PBKDisplayPhoneBook renders the IP we put in registry for the TCP path |
+
+See `PROTOCOL.md` §9a for the stable wire spec.
+
+### Key RE landmarks (SIGNUP.EXE)
+
+| Addr | Symbol | Role |
+|------|--------|------|
+| `0x00401469` | `FUN_00401469` | Master wizard state machine.  `case 8` is the success arm that calls `FUN_00401332` then `FUN_00405b28`. |
+| `0x004016df` | case 8 entry | Post-credentials success. |
+| `0x00401332` | `FUN_00401332` | Chains MSN install / MAPI / DUN / internet setup; shows Internet-access prompt and PBKDisplayPhoneBook. |
+| `0x00405b28` | Congrats dialog launcher | `DialogBoxParamA(0x3e8, FUN_00405b51)`. |
+| `0x00406030` | credentials DlgProc | Runs `DispatchSignupCommitAndWait`; returns `0x19` on success. |
+| `0x004063de` | `DispatchSignupCommitAndWait` | Wraps the MOSRPC commit call and the 90s wait on `vtbl[0x10]`. |
+| `0x00406562` | wait-post BP | Useful HW BP — EBX=0 here means `WaitForSingleObject` returned wait-success. |
+| `0x0040b9a0` | credentials page vtable | `[+4] = DispatchSignupCommitAndWait`. |
+
+### Debugger lessons learned
+
+- **86Box GDB stub event loop runs inside the CPU tick.**
+  `gdbstub_cpu_exec` handles GDB I/O between instructions, so a paused
+  CPU = a paused stub.  Sending `D` (detach) from our Python client
+  deadlocks: the stub neither clears BPs nor reliably processes client
+  cleanup, leaving sockets stacked in CLOSE-WAIT.  Use socket close
+  only, preceded by `c` to unfreeze the CPU.
+- **HW BPs match on linear address** (`cs_base + pc`; `cs_base=0` in
+  flat user-mode processes).  The stub does NOT scope by CR3.  Any
+  BP in the `0x00400000–0x0040FFFF` range fires in *every* PE EXE
+  loaded at the default base — during Windows boot that includes
+  `winlogon.exe`, `explorer.exe`, and most Win95 system EXEs, which
+  is enough to freeze login.  Only arm EXE BPs after Windows is idle
+  and the target app is running; disarm before state transitions
+  that could launch a new EXE.
+- **BPs persist across GDB client disconnects but are lost when 86Box
+  itself restarts.**  The stub's `first_hwbreak` list is a global,
+  not per-client.  Re-inserting an already-armed BP returns `E22`
+  (not "no slots").
+- **Dynarec misses HW BPs.**  86Box's dynamic recompiler only checks
+  `gdbstub_instruction()` at block boundaries.  Force interpretation
+  (`cpu_use_dynarec = 0`) for per-instruction BP granularity.
+
+### What the Congrats dialog does NOT do
+
+Congrats is shown entirely offline — once the commit and FTM loop
+complete, SIGNUP.EXE disconnects from the server before the dialog
+renders.  Closing it doesn't flip GUIDE.EXE into authenticated
+mode either: `WinMain` (`FUN_0040185d`) only prompts for reboot if
+`state[0x1a1] != 0`, which requires
+`INETCFG.DLL!ConfigureSystemForInternet` plus a real DUN phonebook
+entry — both no-ops in our 86Box setup.  The user has to relaunch
+MSN (or the VM) before an authenticated LOGSRV login appears in
+the server log.  Out of scope for now.
+
+### Commits
+
+- `4fa7ce2` — FTM billing handler + multi-frame pipe fragmentation.
+- `2d31ab9` — Product-details / phone-book flow (LOGSRV 0x07).
+- `ce7e1d5` — FTM LOGSRV file loop (plans.txt → newtips.rtf).
+- `bf74777` — **LOGSRV sel=0x0D post-signup query** (unblocked Congrats).
+- `10389b9` — Test coverage for sel=0x0D.

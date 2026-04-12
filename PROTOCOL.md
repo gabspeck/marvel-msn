@@ -850,12 +850,155 @@ Each property within a record:
 
 ---
 
+## 9a. Signup Wizard (SIGNUP.EXE) (confirmed working)
+
+SIGNUP.EXE runs the new-account wizard in its own process (hosting
+BILLADD.DLL for payment-method entry) and drives several services over
+the same MPC transport the main shell uses.  The wizard finishes when
+the "Congratulations! You are now a member!" dialog (resource id
+`0x3e8`) appears.
+
+### 9a.1 End-to-end sequence
+
+After the user clicks Submit on the credentials page, the client
+performs a fixed sequence.  All of these must succeed or the wizard
+bails silently without showing Congrats:
+
+```
+ 1. OLREGSRV commit         — class=0x01 sel=0x01 + three 0xE7/0xE6 one-way frames
+ 2. LOGSRV sel=0x0D         — post-signup query (country id)
+ 3. LOGSRV sel=0x02         — post-transfer query (opens a fresh pipe)
+ 4. FTM selector 0x00 + 0x03 loop for the four signup RTFs
+ 5. Internet-access prompt (resource 0x44c) → phone-book picker (PBKDisplayPhoneBook)
+ 6. Congrats dialog (resource 0x3e8)
+```
+
+The commit itself succeeds as soon as the class=0x01 sel=0x01 head is
+acked with `HRESULT=0` (a single `0x83` dword tag); the three 0xE7/0xE6
+continuation frames are one-way and MUST NOT be acked.  See §9a.3.
+
+### 9a.2 LOGSRV signup selectors
+
+These share LOGSRV's IID→selector map (interface `{00028BC2-...}` at
+selector `0x06`, same as login) and are only issued from SIGNUP.EXE.
+
+| Selector | Method | Payload | Reply |
+|----------|--------|---------|-------|
+| 0x02 | Post-transfer query | three dwords (counter, 0, 0) + recv `0x84` | empty `0x84` variable |
+| 0x07 | Product-details query | single recv `0x85` | empty `0x84` variable |
+| 0x0A | Billing/account info | none | 0x41c (1052) byte buffer in a `0x84` variable (see §9a.5) |
+| 0x0D | Post-signup query | three dwords (country_id, 0, 0) + recv `0x84` | empty `0x84` variable |
+
+Selectors 0x02/0x07/0x0D have not been RE'd in the COM proxy layer;
+an empty `0x84` variable is the minimum well-formed reply that
+satisfies the recv descriptor and lets the client's unmarshaller
+proceed.  Returning `None` (unhandled selector) on any of them causes
+the client to disconnect and the wizard to close without Congrats —
+selector 0x0D is the one that specifically gates the Internet-access
+prompt and Congrats dialog.
+
+### 9a.3 OLREGSRV commit (Submit button)
+
+SIGNUP.EXE dispatches a single MOSRPC call that serializes as four
+records on the wire, in this order:
+
+```
+ class=0x01 sel=0x01   payment method (card number, expiry, name)   — call head
+ class=0xE7 sel=0x01   member ID + password                         — one-way
+ class=0xE6 sel=0x02   personal name + company                      — one-way
+ class=0xE7 sel=0x02   street address + phone                       — one-way
+```
+
+Only the `class=0x01` head expects a reply.  Reply payload is a single
+`0x83` dword HRESULT:
+
+```
+[0x83][00 00 00 00]   HRESULT = 0 (success)
+```
+
+The proxy copies this dword into its status word before its
+post-commit switch runs; success steers to `case 0` which produces
+`result_code = 0x19` and unblocks the credentials page's modal wait
+(`DispatchSignupCommitAndWait` @ `0x004063de` in SIGNUP.EXE).
+
+Replying to the `class=0x01 sel=0x02` pre-check that precedes the
+commit aborts signup with "An important part of signup cannot be
+found" — that selector must return `None`.
+
+### 9a.4 FTM — signup RTF loop
+
+FTM implements two request selectors (both use the `FtmClientFileId`
+60-byte send buffer via tag 0x04):
+
+| Selector | Name | Used by |
+|----------|------|---------|
+| 0x00 | `HrRequestDownload` | billing, signup RTFs |
+| 0x03 | `HrBillClient` (fast-path) | billing, signup RTFs |
+
+During signup, the wizard runs this loop four times:
+
+- Name in the CFI = the literal string `"LOGSRV"` (not a filename).
+- Counter (`dword` at CFI offset `40`) iterates `0..3`.
+- Server maps the counter to one of `plans.txt`, `prodinfo.rtf`,
+  `legalagr.rtf`, `newtips.rtf` — these are the four files
+  `SIGNUP.EXE!FUN_004029d8` opens with `CreateFile(OPEN_EXISTING)`
+  next to its own module path and fails if any is missing.
+- Server puts the real filename into the sel=0x00 reply at offset
+  `+40`, with reply flag `0x0B` (bits 0, 1, 3 = has compressed size,
+  fast path, has filename override).  HrInit appends the override
+  to the client download dir to form the final local path.
+- Sel=0x00 reply is 72 bytes in a `0x84` variable.  Sel=0x03 reply
+  is an 18-byte header + inline content bytes (WriteFile'd to the
+  local file handle by the client).
+
+Empty RTF content is acceptable — the client's RichEdit silently
+renders an empty document, which is enough for the wizard to
+progress.
+
+### 9a.5 LOGSRV billing info (selector 0x0A)
+
+Opened when the user clicks Tools → Billing → Payment Method in the
+authenticated shell.  Reply is a single `0x84` variable containing a
+0x41c (1052) byte buffer:
+
+```
+ Offset 0x000: dword status (0 = success)
+ Offset 0x008: Order Information (address) — NUL-terminated strings at:
+   +0x3B  First name            +0x1D8 Address line
+   +0x69  Last name             +0x201 City
+   +0x1D0 Country ID (dword)    +0x253 State
+                                +0x27C ZIP code
+                                +0x2BD Phone
+ Offset 0x300: Payment Method (0x11c bytes):
+   +0x00  Type dword (1=CHARGE, 2=DEBIT, 3=DIRECTDEBIT)
+   +0x19  Card number string
+```
+
+### 9a.6 Known wizard-flow gotchas
+
+- **Pipe re-use**: sel=0x02 is called on a *fresh* LOGSRV pipe
+  opened right after the FTM transfer finishes — not on the
+  original login pipe.
+- **Parallel replies**: sel=0x0D runs in parallel with the OLREGSRV
+  one-way continuation frames.  The server must reply to sel=0x0D
+  without waiting for the 0xE6/0xE7 frames to finish arriving.
+- **DIRECTDEBIT form**: selecting payment type 3 in the wizard
+  currently shows no form; CHARGE works end-to-end.  Unresolved.
+- **Post-Congrats session**: once the commit and FTM loop complete,
+  SIGNUP.EXE disconnects from the server before Congrats renders.
+  Congrats is shown entirely offline.  The authenticated session
+  only appears when the user relaunches MSN (or reboots the VM).
+
+---
+
 ## 10. Known Services
 
 | Service | Version | Description | Status |
 |---------|---------|-------------|--------|
-| LOGSRV | 6 | Login/authentication, password change | Confirmed working |
+| LOGSRV | 6 | Login/authentication, password change, signup queries, billing info | Confirmed working |
 | DIRSRV | 7 | Directory service (content browsing) | Confirmed working |
+| FTM | — | File Transfer Manager (signup RTF downloads, billing "plans") | Confirmed working |
+| OLREGSRV | — | On-line registration (signup wizard Submit) | Confirmed working |
 | MEDVIEW | 0x1400800A | Content/page rendering (Multimedia Viewer) | From static analysis |
 | CONFLOC | varies | Conference locator (chat) | From static analysis |
 | CONFSRV | varies | Conference server (chat) | From static analysis |
