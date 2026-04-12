@@ -229,6 +229,16 @@ def encode_reply_var_length(length):
     return bytes([(length >> 8) & 0x7F, length & 0xFF])
 
 
+def build_tagged_reply_byte(value):
+    """Build a 0x81 tagged byte reply."""
+    return b"\x81" + bytes([value & 0xFF])
+
+
+def build_tagged_reply_word(value):
+    """Build a 0x82 tagged word reply."""
+    return b"\x82" + struct.pack("<H", value & 0xFFFF)
+
+
 def build_tagged_reply_dword(value):
     """Build a 0x83 tagged dword reply."""
     return b"\x83" + struct.pack("<I", value & 0xFFFFFFFF)
