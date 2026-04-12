@@ -14,6 +14,7 @@ Two call patterns are covered:
   so the RTFs parse cleanly in RichEdit.
 """
 import struct
+from pathlib import Path
 
 from ..config import FTM_INTERFACE_GUIDS
 from ..mpc import (
@@ -51,19 +52,28 @@ FTM_REQUEST_REPLY_FLAGS = (
 
 FTM_FALLBACK_FILENAME = 'plans.txt'
 
-# Minimal valid RTF the RichEdit control can parse.
-_RTF_PLACEHOLDER = b'{\\rtf1 Placeholder.}'
+_SIGNUP_DATA_DIR = Path(__file__).resolve().parent.parent / 'data' / 'signup'
 
 # SIGNUP.EXE!FUN_004029d8 opens these four in order and fails if any
-# CreateFile(OPEN_EXISTING) returns INVALID_HANDLE_VALUE.  Counter in the
-# FtmClientFileId tail indexes this list directly.
-SIGNUP_LOGSRV_FILES = {
-    0: (FTM_FALLBACK_FILENAME, b''),
-    1: ('prodinfo.rtf', _RTF_PLACEHOLDER),
-    2: ('legalagr.rtf', _RTF_PLACEHOLDER),
-    3: ('newtips.rtf',  _RTF_PLACEHOLDER),
-}
+# CreateFile(OPEN_EXISTING) returns INVALID_HANDLE_VALUE.  The FTM client
+# sends name="LOGSRV" + counter 0..3, so the counter is the only
+# identifier it gives us — this tuple translates it to the filename the
+# client expects to receive.
+SIGNUP_LOGSRV_FILENAMES = (
+    'plans.txt',
+    'prodinfo.rtf',
+    'legalagr.rtf',
+    'newtips.rtf',
+)
 SIGNUP_LOGSRV_SOURCE = 'LOGSRV'
+
+
+def _read_signup_file(filename):
+    """Return the bytes of a file in the signup data dir, or None."""
+    path = _SIGNUP_DATA_DIR / filename
+    if not path.is_file():
+        return None
+    return path.read_bytes()
 
 
 class FTMHandler:
@@ -113,11 +123,15 @@ def _extract_client_file_id(payload):
 def _resolve_ftm_target(payload):
     """Map an FTM request to (on-disk filename, file content).
 
-    - name="LOGSRV" + counter N → SIGNUP_LOGSRV_FILES[N] (signup path).
-      Out-of-range counter falls back to an empty file named "LOGSRV"
-      so the client at least gets a well-formed reply.
-    - Any other name → echo the name, content empty (billing / legacy
-      behavior unchanged).
+    The client-given CFI name drives the lookup:
+    - name="LOGSRV" → signup flow.  The client only sends a 0..3
+      counter, not a per-request filename, so we translate the counter
+      via SIGNUP_LOGSRV_FILENAMES and then read that file from disk.
+      Out-of-range counter falls back to an empty file named "LOGSRV".
+    - Any other name → treat the name as a filename and serve it from
+      server/data/signup/ if it exists; otherwise echo name + empty
+      (billing's default is name="plans.txt", which maps straight to
+      the same INI SIGNUP uses).
     """
     cfi = _extract_client_file_id(payload)
     if cfi is None:
@@ -130,9 +144,16 @@ def _resolve_ftm_target(payload):
 
     if source == SIGNUP_LOGSRV_SOURCE:
         counter = struct.unpack_from('<I', cfi, FTM_COUNTER_OFFSET)[0]
-        if counter in SIGNUP_LOGSRV_FILES:
-            return SIGNUP_LOGSRV_FILES[counter]
+        if 0 <= counter < len(SIGNUP_LOGSRV_FILENAMES):
+            filename = SIGNUP_LOGSRV_FILENAMES[counter]
+            content = _read_signup_file(filename)
+            if content is not None:
+                return filename, content
+        return source, b''
 
+    content = _read_signup_file(source)
+    if content is not None:
+        return source, content
     return source, b''
 
 

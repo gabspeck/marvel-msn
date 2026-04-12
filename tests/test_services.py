@@ -12,7 +12,7 @@ from server.services.dirsrv import (
 from server.services.ftm import (
     FTMHandler, _build_request_download_reply,
     _build_bill_client_reply, _resolve_ftm_target, FTM_FALLBACK_FILENAME,
-    SIGNUP_LOGSRV_FILES, FTM_CLIENT_FILE_ID_SIZE, FTM_COUNTER_OFFSET,
+    SIGNUP_LOGSRV_FILENAMES, FTM_CLIENT_FILE_ID_SIZE, FTM_COUNTER_OFFSET,
 )
 from server.services.olregsrv import (
     OLREGSRVHandler, build_olregsrv_service_map_payload,
@@ -226,11 +226,28 @@ class TestOLREGSRVServiceMap(unittest.TestCase):
 
 
 class TestOLREGSRVReply(unittest.TestCase):
-    def test_unknown_selector_returns_none_with_log(self):
-        """Every selector currently returns None — reply shapes aren't RE'd yet."""
+    def test_class01_acked_with_hresult_zero(self):
+        """The class=0x01 head of the commit gets an HRESULT=0 reply body."""
         handler = OLREGSRVHandler(4, 'OLREGSRV')
-        self.assertIsNone(handler.handle_request(0x06, 0x01, 1, b'', 5, 5))
-        self.assertIsNone(handler.handle_request(0x06, 0x05, 1, b'\x85', 5, 5))
+        pkts = handler.handle_request(0x01, 0x01, 0, b'', 5, 5)
+        self.assertIsNotNone(pkts)
+        self.assertEqual(len(pkts), 1)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        # Payload must contain tag 0x83 followed by four zero bytes.
+        self.assertIn(b'\x83\x00\x00\x00\x00', parsed.payload)
+
+    def test_one_way_records_get_no_reply(self):
+        """class=0xe6/0xe7 continuation frames are fire-and-forget."""
+        handler = OLREGSRVHandler(4, 'OLREGSRV')
+        self.assertIsNone(handler.handle_request(0xe7, 0x01, 0, b'', 5, 5))
+        self.assertIsNone(handler.handle_request(0xe6, 0x02, 0, b'', 5, 5))
+        self.assertIsNone(handler.handle_request(0xe7, 0x02, 0, b'', 5, 5))
+
+    def test_sel02_probe_left_unanswered(self):
+        """sel=0x02 pre-check must stay silent — any reply aborts signup."""
+        handler = OLREGSRVHandler(4, 'OLREGSRV')
+        self.assertIsNone(handler.handle_request(0x01, 0x02, 0, b'\x83', 5, 5))
 
 
 class TestFTMHandler(unittest.TestCase):
@@ -315,7 +332,9 @@ class TestFTMSignupLogsrvMapping(unittest.TestCase):
     def test_counter_0_maps_to_plans_txt(self):
         filename, content = _resolve_ftm_target(_make_logsrv_request(0))
         self.assertEqual(filename, 'plans.txt')
-        self.assertEqual(content, b'')
+        self.assertIn(b'[Countries]', content)
+        self.assertIn(b'[PaymentOptions]', content)
+        self.assertIn(b'PaymentOption1=CHARGE', content)
 
     def test_counter_1_maps_to_prodinfo(self):
         filename, content = _resolve_ftm_target(_make_logsrv_request(1))
@@ -338,13 +357,22 @@ class TestFTMSignupLogsrvMapping(unittest.TestCase):
         self.assertEqual(filename, 'LOGSRV')
         self.assertEqual(content, b'')
 
-    def test_non_logsrv_name_is_echoed(self):
-        # Billing path: client sends "plans.txt" directly — no mapping.
+    def test_direct_filename_is_served_from_disk(self):
+        # Billing path: client sends "plans.txt" directly — resolved
+        # against server/data/signup/plans.txt dynamically.
         cfi = bytearray(FTM_CLIENT_FILE_ID_SIZE)
         cfi[:len(b'plans.txt')] = b'plans.txt'
         payload = build_tagged_reply_var(0x04, bytes(cfi))
         filename, content = _resolve_ftm_target(payload)
         self.assertEqual(filename, 'plans.txt')
+        self.assertIn(b'[PaymentOptions]', content)
+
+    def test_unknown_direct_filename_returns_empty(self):
+        cfi = bytearray(FTM_CLIENT_FILE_ID_SIZE)
+        cfi[:len(b'missing.bin')] = b'missing.bin'
+        payload = build_tagged_reply_var(0x04, bytes(cfi))
+        filename, content = _resolve_ftm_target(payload)
+        self.assertEqual(filename, 'missing.bin')
         self.assertEqual(content, b'')
 
     def test_request_download_reply_encodes_mapped_filename(self):
@@ -364,7 +392,8 @@ class TestFTMSignupLogsrvMapping(unittest.TestCase):
         )
         self.assertIsNotNone(pkts)
         joined = b''.join(pkts)
-        self.assertIn(SIGNUP_LOGSRV_FILES[1][1], joined)
+        _, expected = _resolve_ftm_target(_make_logsrv_request(1))
+        self.assertIn(expected, joined)
 
 
 class TestPropertyRecord(unittest.TestCase):

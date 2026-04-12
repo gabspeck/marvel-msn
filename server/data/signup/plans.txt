@@ -1,0 +1,10 @@
+[Countries]
+Country0=351,1,2,3
+
+[Plans]
+Plan0=Standard Plan,0
+
+[PaymentOptions]
+PaymentOption1=CHARGE,Credit Card,,0,15
+PaymentOption2=DIRECTDEBIT,Direct Debit,,0,15
+PaymentOption3=BANK,Bank Account,,0,15
