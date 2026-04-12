@@ -1,7 +1,9 @@
 """LOGSRV service handler: login, password change, service discovery."""
 import struct
 
-from ..config import LOGSRV_INTERFACE_GUIDS, TAG_END_STATIC
+from ..config import (
+    LOGSRV_INTERFACE_GUIDS, TAG_END_STATIC, MPC_CLASS_ONEWAY_MASK,
+)
 from ..mpc import (
     build_host_block, build_discovery_host_block,
     build_service_packet, build_tagged_reply_dword,
@@ -27,6 +29,11 @@ class LOGSRVHandler:
     def handle_request(self, msg_class, selector, request_id, payload,
                        server_seq, client_ack):
         """Dispatch a LOGSRV request. Returns a wire packet or None."""
+        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+            print(f"  [LOGSRV] one-way continuation class=0x{msg_class:02x} "
+                  f"selector=0x{selector:02x} payload_len={len(payload)}")
+            return None
+
         if selector == 0x00:
             reply_payload = _BOOTSTRAP_PAYLOAD
         elif selector == 0x01:
@@ -37,6 +44,10 @@ class LOGSRVHandler:
             reply_payload = _handle_signup_query(payload)
         elif selector == 0x0A:
             reply_payload = _handle_billing_query()
+        elif selector == 0x0B:
+            reply_payload = _handle_pm_commit()
+        elif selector == 0x0C:
+            reply_payload = _handle_billing_commit()
         elif selector == 0x0D:
             reply_payload = _handle_post_signup_query(payload)
         else:
@@ -59,6 +70,33 @@ def _build_bootstrap_payload():
     return bytes(payload)
 
 _BOOTSTRAP_PAYLOAD = _build_bootstrap_payload()
+
+# Minimum success reply for LOGSRV commit selectors (0x0b PM, 0x0c OI).
+# Must be a 0x84 variable — a 0x83 dword unblocks WaitForResponse but
+# fails the proxy's output_descriptor->m10() type==4 check, which
+# surfaces as "Your account information cannot be updated at this time."
+# First dword of the buffer is the commit status (0 = silent success,
+# 0x1e/0x1f = user message box, anything else = generic error dialog).
+# See BILLADD.DLL BillingDlg_ProcessCommitReply @ 0x00434912.
+_COMMIT_OK_REPLY = build_tagged_reply_var(0x84, b'\x00' * 4)
+
+
+def _handle_pm_commit():
+    """LOGSRV selector 0x0b — Payment Options > Payment Method OK.
+    BILLADD.DLL BillingDlg_CommitPM @ 0x00434b81 submits a 0x11c PM buffer.
+    """
+    print("  [LOGSRV] PM commit (selector 0x0b) — status=0")
+    return _COMMIT_OK_REPLY
+
+
+def _handle_billing_commit():
+    """LOGSRV selector 0x0c — Payment Options > Name and Address OK.
+    BILLADD.DLL BillingDlg_CommitOI @ 0x00434953 submits a 0x2fc OI
+    buffer, fragmented on the wire as class=0xe6/0xe7 one-way
+    continuations (filtered out by MPC_CLASS_ONEWAY_MASK).
+    """
+    print("  [LOGSRV] Billing commit (selector 0x0c) — status=0")
+    return _COMMIT_OK_REPLY
 
 
 def _handle_billing_query():

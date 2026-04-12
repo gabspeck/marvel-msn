@@ -887,6 +887,8 @@ selector `0x06`, same as login) and are only issued from SIGNUP.EXE.
 | 0x02 | Post-transfer query | three dwords (counter, 0, 0) + recv `0x84` | empty `0x84` variable |
 | 0x07 | Product-details query | single recv `0x85` | empty `0x84` variable |
 | 0x0A | Billing/account info | none | 0x41c (1052) byte buffer in a `0x84` variable (see §9a.5) |
+| 0x0B | PM commit (Payment Options → Payment Method OK) | 0x11c PM buffer | `0x84` var, first dword = status (see §9a.5b) |
+| 0x0C | OI commit (Payment Options → Name and Address OK) | 0x2fc OI buffer, fragmented as 0xE6/0xE7 one-way continuations | `0x84` var, first dword = status (see §9a.5b) |
 | 0x0D | Post-signup query | three dwords (country_id, 0, 0) + recv `0x84` | empty `0x84` variable |
 
 Selectors 0x02/0x07/0x0D have not been RE'd in the COM proxy layer;
@@ -974,6 +976,39 @@ authenticated shell.  Reply is a single `0x84` variable containing a
    +0x19  Card number string
 ```
 
+### 9a.5b LOGSRV billing commit (selectors 0x0B and 0x0C)
+
+Opened when the user clicks OK in Tools → Billing → Payment Options
+after editing Payment Method (→ sel=0x0B) or Name and Address
+(→ sel=0x0C) in the authenticated shell.  Both call sites are twins
+in BILLADD.DLL (`BillingDlg_CommitPM` @ `0x00434b81`,
+`BillingDlg_CommitOI` @ `0x00434953`) — the only differences are the
+method index (0xB vs 0xC) and the input buffer (0x11c PM vs 0x2fc
+OI).
+
+The OI buffer is large enough to exceed one MPC frame, so sel=0x0C
+arrives as a `class=0x06` head with a 7-byte envelope followed by
+`class=0xE6` and `class=0xE7` continuation frames carrying the OI
+data.  Same convention as §9a.3: only the head expects a reply,
+continuation frames are one-way and MUST NOT be acked — the server's
+LOGSRV dispatcher drops any frame with the `0xE0` class bits set.
+
+Reply to the head is a `0x84` variable whose first dword is the
+commit status.  A `0x83` dword reply hangs the post-wait check: the
+proxy's `output_descriptor->m10()` must return 4 (VAR) or
+`BillingDlg_ProcessCommitReply` is skipped and the caller shows
+"Your account information cannot be updated at this time."
+
+```
+[0x84][len][status_dword][...]
+  status = 0      → silent success, dialog dismisses
+  status = 0x1e   → MessageBox with string ID 0x134
+  status = 0x1f   → MessageBox with string ID 0x135
+  anything else   → "cannot be updated" error dialog
+```
+
+Minimal successful reply: `0x84` var of 4 NUL bytes.
+
 ### 9a.6 Known wizard-flow gotchas
 
 - **Pipe re-use**: sel=0x02 is called on a *fresh* LOGSRV pipe
@@ -982,8 +1017,12 @@ authenticated shell.  Reply is a single `0x84` variable containing a
 - **Parallel replies**: sel=0x0D runs in parallel with the OLREGSRV
   one-way continuation frames.  The server must reply to sel=0x0D
   without waiting for the 0xE6/0xE7 frames to finish arriving.
-- **DIRECTDEBIT form**: selecting payment type 3 in the wizard
-  currently shows no form; CHARGE works end-to-end.  Unresolved.
+- **DIRECTDEBIT form**: BILLADD.DLL has no dispatch for payment
+  type 3 — `BillingPicker_UpdateVisibility` (`0x00433a63`), the
+  init-fill, and the IDOK validator all only branch on types 1/2.
+  Shipped disabled in this build.  Resolved 2026-04-12 by removing
+  the DIRECTDEBIT line from `server/data/signup/plans.txt`; only
+  CHARGE and BANK are offered now.
 - **Post-Congrats session**: once the commit and FTM loop complete,
   SIGNUP.EXE disconnects from the server before Congrats renders.
   Congrats is shown entirely offline.  The authenticated session

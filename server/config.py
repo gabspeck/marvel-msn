@@ -35,6 +35,12 @@ ROUTING_PIPE_OPEN = 0x0000
 TAG_END_STATIC = 0x87       # End of static section marker
 TAG_DYNAMIC_COMPLETE = 0x88 # Dynamic complete — remaining bytes are raw data
 
+# --- MPC host-block class bits ---
+# Frames whose msg_class has the top three bits set (0xE0 mask) are one-way
+# continuations of a multi-frame RPC (carrying large input buffers for the
+# preceding head).  They must not be acked — see §9a.3 / §9a.5b.
+MPC_CLASS_ONEWAY_MASK = 0xE0
+
 # --- Pipe commands ---
 PIPE_CLOSE_CMD = 0x01
 
