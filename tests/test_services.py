@@ -163,6 +163,19 @@ class TestLOGSRVReply(unittest.TestCase):
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
 
+    def test_existing_member_phonebook_query_returns_packet(self):
+        """Opcode 0x0e fires on a fresh LOGSRV pipe from SIGNUP's
+        "I'm already a member → Update local phone numbers → Connect"
+        path.  Caller checks recv_dword == 0 for success.
+        """
+        payload = bytes.fromhex('03 08 00 00 00 83')
+        handler = LOGSRVHandler(4, 'LOGSRV')
+        pkts = handler.handle_request(0x06, 0x0E, 0, payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        self.assertIsInstance(pkts, list)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+
     def test_unknown_selector_returns_none(self):
         handler = LOGSRVHandler(3, 'LOGSRV')
         pkt = handler.handle_request(0x06, 0xFF, 0, b'', 5, 5)

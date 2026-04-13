@@ -50,6 +50,8 @@ class LOGSRVHandler:
             reply_payload = _handle_billing_commit()
         elif selector == 0x0D:
             reply_payload = _handle_post_signup_query(payload)
+        elif selector == 0x0E:
+            reply_payload = _handle_existing_member_phonebook_query(payload)
         else:
             return None
 
@@ -177,6 +179,23 @@ def _handle_post_signup_query(request_payload):
     country = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else '?'
     print(f"  [LOGSRV] selector=0x0d post-signup query (country_id={country})")
     return build_tagged_reply_var(0x84, b'')
+
+
+def _handle_existing_member_phonebook_query(request_payload):
+    """Handle LOGSRV opcode 0x0e — SIGNUP "I'm already a member → Update
+    local phone numbers → Connect" path.
+
+    Request: one send dword (observed=8, semantic unknown) + one 0x83 recv
+    descriptor.  The caller SIGNUP.EXE!FUN_004043c1 @ 0x004043c1 opens a
+    fresh LOGSRV pipe, issues this opcode, waits, and checks the recv
+    dword with CMP/SBB/NEG at 0x004044a7-0x004044ae — returning TRUE iff
+    the value is exactly 0.  Any other value leaves the wizard stuck at
+    "Starting transfer..." so we must reply with dword=0.
+    """
+    send_params, _ = parse_request_params(request_payload)
+    dw = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else '?'
+    print(f"  [LOGSRV] opcode=0x0e existing-member phonebook query (dword={dw})")
+    return build_tagged_reply_dword(0)
 
 
 def _handle_signup_query(request_payload):
