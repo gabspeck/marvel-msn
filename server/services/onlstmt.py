@@ -295,6 +295,74 @@ def _build_subscriptions_payload():
 _SUBSCRIPTIONS_PAYLOAD = _build_subscriptions_payload()
 
 
+def _encode_plan_record(plan_id, name, detail):
+    """Encode one entry inside the Manage-Subscription 0x84 plans buffer.
+
+    Layout walked by FUN_7f354aa2 plan loop at 0x7f354b94:
+        byte  flag        always 0x01 (only observed value; not read by
+                          the listbox population loop, may gate detail
+                          dialog behavior)
+        word  plan_id     matched against the subscription's stored plan
+                          id at this+0x6da+index*0xc to pre-select the
+                          current row in listbox 0x418
+        cstr  name        listbox display string
+        cstr  detail      detail pane (control 0x427) text shown when
+                          the row is selected
+    """
+    return (
+        b"\x01"
+        + struct.pack("<H", plan_id & 0xFFFF)
+        + name.encode("ascii") + b"\x00"
+        + detail.encode("ascii") + b"\x00"
+    )
+
+
+_PLAN_RECORDS = [
+    _encode_plan_record(
+        0, "MSN Premium",
+        "$4.95/month, includes 3 hours of online time. "
+        "Additional hours billed at $2.50/hour."),
+    _encode_plan_record(
+        1, "MSN Plus",
+        "$19.95/month, unlimited online time."),
+    _encode_plan_record(
+        2, "MSN Annual",
+        "$49.95/year, unlimited online time. Two months free."),
+]
+
+
+def _build_plans_payload():
+    """Build the Manage-Subscription plans reply for selector=0x03.
+
+    Request wire (after host block): `81 84`
+        0x81  — recv byte: plan count (1..100; 0 → error string 0x14).
+        0x84  — recv var: plans buffer (one record per plan).
+
+    Dispatched by ONLSTMT.EXE FUN_7f354aa2 (the Subscriptions tab
+    DLGPROC's Change-button branch) which spawns a worker thread to
+    issue the call and then runs DialogBoxParam(0x68) to host the
+    Manage-Subscription UI.
+
+    Reply: byte + 0x84 var blob + 0x87 end-static.  No dynamic
+    section.
+
+    The plan whose `plan_id` matches the current subscription's
+    stored id (read at this+0x6da+sub_idx*0xc) is auto-selected in
+    listbox 0x418 and its detail text appears in control 0x427.
+    Our subscriptions reply leaves the per-row pad zeroed, so plan
+    id 0 is the current one.
+    """
+    blob = b"".join(_PLAN_RECORDS)
+    return b"".join([
+        build_tagged_reply_byte(len(_PLAN_RECORDS)),
+        build_tagged_reply_var(0x84, blob),
+        bytes([TAG_END_STATIC]),
+    ])
+
+
+_PLANS_PAYLOAD = _build_plans_payload()
+
+
 # Cancel-subscription ack for selector=0x04.  Request wire: one
 # send word (subscription token; client falls back to 0xFFFF when the
 # record carries no per-row id in its pad region) + one 0x81 recv.
@@ -336,6 +404,9 @@ class OnlStmtHandler:
         elif selector == 0x02:
             print("  [OnlStmt] Subscriptions (selector 0x02)")
             reply_payload = _SUBSCRIPTIONS_PAYLOAD
+        elif selector == 0x03:
+            print("  [OnlStmt] Manage subscription / plans (selector 0x03)")
+            reply_payload = _PLANS_PAYLOAD
         elif selector == 0x04:
             print("  [OnlStmt] Cancel subscription (selector 0x04)")
             reply_payload = _CANCEL_ACK_PAYLOAD
