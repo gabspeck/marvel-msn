@@ -48,6 +48,7 @@ from ..mpc import (
     build_service_packet,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
+    build_tagged_reply_var,
     build_tagged_reply_word,
 )
 
@@ -203,6 +204,111 @@ def _build_details_payload():
 _DETAILS_PAYLOAD = _build_details_payload()
 
 
+def _encode_subscription_record(type_flag, service_name, description,
+                                price_cents, price_currency,
+                                record_currency=0):
+    """Encode one entry inside the Subscriptions 0x84 variable buffer.
+
+    Layout walked by FetchSubscriptionList loop at 0x7f35435b:
+        byte    type_flag       0x01 active | 0x02 cancelled | 0x04 pending
+        bytes   pad[12]         unused by the main render loop
+        word    record_currency at offset 0x0d, ISO 4217 numeric
+        cstr    service_name    NUL-terminated, main listbox line
+        cstr    description     NUL-terminated, detail text
+        dword   price_cents     slot-0xb currency, minor units;
+                                0 skips the currency format call
+        word    price_currency  ConfigureCurrencySlot(0xb)
+    """
+    return (
+        bytes([type_flag & 0xFF])
+        + b"\x00" * 12
+        + struct.pack("<H", record_currency & 0xFFFF)
+        + service_name.encode("ascii") + b"\x00"
+        + description.encode("ascii") + b"\x00"
+        + struct.pack("<IH",
+                      price_cents & 0xFFFFFFFF,
+                      price_currency & 0xFFFF)
+    )
+
+
+_SUBSCRIPTIONS_RECORDS = [
+    # type_flag 0x01 = current: rendered as "<name> ** expires ** <date>",
+    # using the "first date" slots (5/6/7).  Remove on this row emits
+    # error string 0x29 "cannot remove current subscription online".
+    _encode_subscription_record(
+        0x01, "MSN Premium", "Monthly subscription", 495, 840,
+        record_currency=840),
+    # type_flag 0x02 = pending/queued change: rendered as "<name>
+    # ** effective ** <date>", using the "second date" slots (8/9/10).
+    # Remove on this row hits the actual cancellation flow
+    # (selector 0x04).
+    _encode_subscription_record(
+        0x02, "MSN Plus Games", "Gaming add-on pack", 299, 840,
+        record_currency=840),
+]
+
+
+def _build_subscriptions_payload():
+    """Build the Subscriptions-tab reply for selector=0x02.
+
+    Request wire (all recv, no send params):
+        81 84 83 82 81 82 81 81 82 81 81
+
+    Dispatched by ONLSTMT.EXE FetchSubscriptionList (0x7f35435b) from
+    the Subscriptions tab DLGPROC (0x7f353c4e) on PSN_SETACTIVE.
+
+    Reply is a pure static section of 11 tagged primitives in recv
+    order, terminated by 0x87 end-static.  No dynamic section.
+
+    Slot mapping (traced through FetchSubscriptionList byte-by-byte):
+        0  byte  sub_count           gate: 1..100 (>100 clamps + warn)
+        1  var   subscription_blob   one record per subscription
+        2  dword account_balance_cents  (formatted via slot-9 currency)
+        3  word  start_year          gate: ≠ 0 else error 0x1e
+        4  byte  start_month         gate: ≠ 0 else Change button stays
+                                     disabled (EnableWindow predicate on
+                                     `this[3]`); ≠ 0 enables control 0x3eb.
+        5  word  first_date_year     → SYSTEMTIME.wYear rendered as the
+        6  byte  first_date_month      "expires"/"effective" date for
+        7  byte  first_date_day        type_flag 0x01 rows
+        8  word  second_date_year    → SYSTEMTIME.wYear rendered as the
+        9  byte  second_date_month     date appended to type_flag 0x02
+        10 byte  second_date_day       rows; 0 suppresses
+    """
+    records_blob = b"".join(_SUBSCRIPTIONS_RECORDS)
+    return b"".join([
+        build_tagged_reply_byte(len(_SUBSCRIPTIONS_RECORDS)),
+        build_tagged_reply_var(0x84, records_blob),
+        build_tagged_reply_dword(495),     # account balance in cents
+        build_tagged_reply_word(2026),     # start year (gate ≠ 0)
+        build_tagged_reply_byte(4),        # start month (gate ≠ 0 enables Change)
+        build_tagged_reply_word(2026),     # first-date year
+        build_tagged_reply_byte(12),       # first-date month
+        build_tagged_reply_byte(31),       # first-date day
+        build_tagged_reply_word(2026),     # second-date year
+        build_tagged_reply_byte(5),        # second-date month
+        build_tagged_reply_byte(1),        # second-date day
+        bytes([TAG_END_STATIC]),
+    ])
+
+
+_SUBSCRIPTIONS_PAYLOAD = _build_subscriptions_payload()
+
+
+# Cancel-subscription ack for selector=0x04.  Request wire: one
+# send word (subscription token; client falls back to 0xFFFF when the
+# record carries no per-row id in its pad region) + one 0x81 recv.
+# Reply is a single tagged status byte + end-static.  The byte is
+# returned all the way back from FUN_7f354e24 to the Subscriptions
+# DLGPROC's Remove-button handler (FUN_7f353c4e at the cVar1==2
+# branch), which treats `== 1` as success (refresh list) and anything
+# else as failure (string 0x2d "Cannot remove subscription").
+_CANCEL_ACK_PAYLOAD = b"".join([
+    build_tagged_reply_byte(1),
+    bytes([TAG_END_STATIC]),
+])
+
+
 class OnlStmtHandler:
     """Handles OnlStmt service requests on a logical pipe."""
 
@@ -227,6 +333,12 @@ class OnlStmtHandler:
         if selector == 0x00:
             print("  [OnlStmt] Statement summary (selector 0x00)")
             reply_payload = _SUMMARY_PAYLOAD
+        elif selector == 0x02:
+            print("  [OnlStmt] Subscriptions (selector 0x02)")
+            reply_payload = _SUBSCRIPTIONS_PAYLOAD
+        elif selector == 0x04:
+            print("  [OnlStmt] Cancel subscription (selector 0x04)")
+            reply_payload = _CANCEL_ACK_PAYLOAD
         elif selector == 0x05:
             print("  [OnlStmt] Get Details (selector 0x05)")
             reply_payload = _DETAILS_PAYLOAD
