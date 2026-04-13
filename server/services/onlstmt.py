@@ -15,21 +15,25 @@ variable buffer.  The worker thread (GetStatementSummaryWorker @
 the reply arrives.
 
 Reply shape (static section):
-    0x83 dword  — status/balance placeholder (currently 0)
+    0x83 dword  — current balance (passed to MOSCL's balance
+                  formatter; exact units TBD — see Pass A of the
+                  plan for the probe).
     0x82 word   — transaction count; must be ≠0 else client shows
                   error 0x1e ("cannot be obtained") per the
                   if (local_c != 0) gate at 7f351efd.
     0x82 word   — year of statement date
     0x81 byte   — month (1-12)
     0x81 byte   — day (1-31)
-    0x82 word   — unknown (not read back; written to stack then
-                  discarded — probably a prev/future balance)
+    0x82 word   — remaining free connect time in minutes; divided
+                  by 60 at 7f351edf (DIV 0x3c) and formatted as
+                  "%02u:%02u" (hours:minutes) into dialog field
+                  ESI+0x151.
     0x81 byte   — highlighted row index; clamped to 1-4 after
                   +1 adjustment at 7f351f24.
-Then 0x87 end-of-static marker and a 0x84 variable payload that
-carries the per-transaction records (layout TBD).
 """
-from ..config import ONLSTMT_INTERFACE_GUIDS, MPC_CLASS_ONEWAY_MASK
+from ..config import (
+    ONLSTMT_INTERFACE_GUIDS, MPC_CLASS_ONEWAY_MASK, TAG_END_STATIC,
+)
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -50,17 +54,54 @@ def _build_summary_payload():
     0x87 + 0x84 var.
     """
     return b"".join([
-        build_tagged_reply_dword(0),     # balance/status
+        build_tagged_reply_dword(1234),  # balance (units TBD — probe value)
         build_tagged_reply_word(1),      # txn count (≠0 or client shows 0x1e)
         build_tagged_reply_word(2026),   # statement year
         build_tagged_reply_byte(4),      # month
         build_tagged_reply_byte(1),      # day
-        build_tagged_reply_word(0),      # unused/discarded
+        build_tagged_reply_word(90),     # free connect time in minutes -> 01:30
         build_tagged_reply_byte(0),      # highlight row (0-based; UI clamps +1 to 1..4)
     ])
 
 
 _SUMMARY_PAYLOAD = _build_summary_payload()
+
+
+def _build_details_payload():
+    """Build the Get-Details reply for selector=0x05.
+
+    Request wire (after host block): `01 00 82 82 85`
+        0x01 0x00  — send byte: selected period index (0 = current).
+        0x82 0x82  — 2 recv words (first = record count; second TBD).
+        0x85       — dynamic recv descriptor (transaction list).
+
+    Dispatched by ONLSTMT.EXE FUN_7f352292 from dialog 0x69's
+    WM_INITDIALOG.  Record parser at 0x7f3523b0.
+
+    Reply shape: two words + 0x87 end-static, **no dynamic tag**.
+    MPCCL.ProcessTaggedServiceReply (0x04605187) only calls
+    SignalRequestCompletion — which sets the +0x18 completion flag
+    m10 waits on — when either:
+      (a) a 0x86 'complete chunk' tag is processed, or
+      (b) static section ends (0x87) and the host-block has no
+          more bytes.
+    Plain 0x85/0x88 tags only raise data-ready/stream-end events;
+    they do NOT complete the request, so any reply ending in 0x85
+    or 0x88 hangs the Retrieving dialog forever.
+
+    record_count=0 → ONLSTMT shows "no transactions" string 0x10.
+    Real records require encoding the parser's bit-flagged layout
+    (see FUN_7f352292 for offsets) — a follow-up once the round
+    trip is confirmed working.
+    """
+    return b"".join([
+        build_tagged_reply_word(0),   # record count (0 → "no transactions")
+        build_tagged_reply_word(0),   # TBD second summary word
+        bytes([TAG_END_STATIC]),
+    ])
+
+
+_DETAILS_PAYLOAD = _build_details_payload()
 
 
 class OnlStmtHandler:
@@ -87,6 +128,9 @@ class OnlStmtHandler:
         if selector == 0x00:
             print("  [OnlStmt] Statement summary (selector 0x00)")
             reply_payload = _SUMMARY_PAYLOAD
+        elif selector == 0x05:
+            print("  [OnlStmt] Get Details (selector 0x05)")
+            reply_payload = _DETAILS_PAYLOAD
         else:
             print(f"  [OnlStmt] UNHANDLED class=0x{msg_class:02x} "
                   f"selector=0x{selector:02x} req_id={request_id} "
