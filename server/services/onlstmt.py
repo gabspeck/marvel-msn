@@ -35,6 +35,9 @@ Reply shape (static section, 7 tagged primitives):
     0x81 byte   — highlighted row index (0-based; UI clamps
                   +1 to 1..4).
 """
+import datetime
+import struct
+
 from ..config import (
     ONLSTMT_INTERFACE_GUIDS, MPC_CLASS_ONEWAY_MASK, TAG_END_STATIC,
 )
@@ -58,7 +61,7 @@ def _build_summary_payload():
     0x87 + 0x84 var.
     """
     return b"".join([
-        build_tagged_reply_dword(1234),  # balance in cents -> "$12.34"
+        build_tagged_reply_dword(1904),  # balance in cents -> "$19.04"
         build_tagged_reply_word(840),    # ISO currency code: USD
         build_tagged_reply_word(2026),   # statement year
         build_tagged_reply_byte(4),      # month
@@ -71,6 +74,98 @@ def _build_summary_payload():
 _SUMMARY_PAYLOAD = _build_summary_payload()
 
 
+_STMT_EPOCH = datetime.datetime(1970, 1, 1)
+_DAYS_WIRE_BIAS = 0x10000 - 0x9c21  # 0x63df = 25567
+
+
+def _encode_timestamp(when):
+    """Encode a datetime into (days_wire, minutes) per FetchStatementDetails.
+
+    Client decodes seconds = ((days_wire + 0x9c21) & 0xFFFF) * 1440 * 60
+    + minutes * 60, so days_wire must equal `days_since_1970 + 25567`
+    modulo 0x10000 and the resulting ushort must be ≥ 0x63e0 — else
+    the client zeroes the days and renders a 1970 date.
+    """
+    delta = when - _STMT_EPOCH
+    days = delta.days
+    minutes = delta.seconds // 60
+    days_wire = (days + _DAYS_WIRE_BIAS) & 0xFFFF
+    return days_wire, minutes
+
+
+def _encode_record(when, description, amount, total,
+                   extra=None, foreign=None):
+    """Encode a single transaction record.
+
+    Layout (FetchStatementDetails loop at 0x7f352292):
+        byte  flags    (bit 0x01 = has trailing dword `extra`,
+                        bit 0x02 = has 10-byte exchange-rate tail)
+        word  days     (days-since-1970 + 0x63df; clamped by client)
+        word  minutes  (clamped to 1440 = 0x5a0)
+        NUL-terminated ASCII description
+        dword amount   (minor units; formatted via slot-10 currency)
+        dword total    (minor units; formatted via slot-10 currency)
+        dword extra    (if flag 0x01; foreign-amount override when 0x02
+                        is also set, else local-currency sub-amount)
+        [exchange-rate tail if flag 0x02]:
+            dword foreign_amount     (slot-11 currency, minor units)
+            word  foreign_currency   (ISO 4217 numeric)
+            dword rate               (slot-10 currency, 4 dp by default)
+
+    When flag 0x02 is set the renderer appends a wrapped second line to
+    the Description cell: "<header> <foreign_amt> <f-sym> * <rate>
+    <local-sym> / 1 <f-sym>".  The header string is the blob-level
+    prefix read once before the record loop.
+    """
+    days_wire, minutes = _encode_timestamp(when)
+    flags = 0
+    if extra is not None:
+        flags |= 0x01
+    if foreign is not None:
+        flags |= 0x02
+    desc_bytes = description.encode("ascii") + b"\x00"
+    parts = [
+        bytes([flags]),
+        struct.pack("<HH", days_wire, minutes),
+        desc_bytes,
+        struct.pack("<II", amount & 0xFFFFFFFF, total & 0xFFFFFFFF),
+    ]
+    if extra is not None:
+        parts.append(struct.pack("<I", extra & 0xFFFFFFFF))
+    if foreign is not None:
+        fx_amount, fx_currency, fx_rate = foreign
+        parts.append(struct.pack("<IHI",
+                                 fx_amount & 0xFFFFFFFF,
+                                 fx_currency & 0xFFFF,
+                                 fx_rate & 0xFFFFFFFF))
+    return b"".join(parts)
+
+
+# Header string read once at blob start (into local_38 at 0x7f352292);
+# prepended to each flag-0x02 annotation line as "\r\n<header> ".
+_DETAILS_HEADER = b"Exchange rate:\x00"
+
+
+_DETAILS_RECORDS = [
+    _encode_record(datetime.datetime(2026, 4, 1, 9, 15),
+                   "Monthly subscription", 495, 495),
+    _encode_record(datetime.datetime(2026, 4, 5, 19, 42),
+                   "Premium content access", 149, 644),
+    _encode_record(datetime.datetime(2026, 4, 9, 14, 3),
+                   "Chat room usage", 75, 719),
+    # Flag-0x02 row: ¥1,000 charged at 0.0067 USD/JPY -> $6.70.
+    # Slot-11 (JPY) NumDigits=0 so foreign dword is whole yen, not
+    # minor units.  Slot-10 (USD) NumDigits=2 so amount/total are
+    # cents.  Rate dword uses rate-digits precision (default 4dp) so
+    # value 67 renders as "0.0067".
+    _encode_record(datetime.datetime(2026, 4, 11, 12, 0),
+                   "Tokyo content purchase", 670, 1389,
+                   foreign=(1000, 392, 67)),
+    _encode_record(datetime.datetime(2026, 4, 12, 22, 30),
+                   "Online statement fee", 515, 1904),
+]
+
+
 def _build_details_payload():
     """Build the Get-Details reply for selector=0x05.
 
@@ -80,29 +175,28 @@ def _build_details_payload():
                      code for slot 10 (transaction-list formatter).
         0x85       — dynamic recv descriptor (transaction list).
 
-    Dispatched by ONLSTMT.EXE FUN_7f352292 from dialog 0x69's
-    WM_INITDIALOG.  Record parser at 0x7f3523b0.
+    Dispatched by ONLSTMT.EXE FetchStatementDetails (0x7f352292) from
+    dialog 0x69's WM_INITDIALOG.
 
-    Reply shape: two words + 0x87 end-static, **no dynamic tag**.
-    MPCCL.ProcessTaggedServiceReply (0x04605187) only calls
-    SignalRequestCompletion — which sets the +0x18 completion flag
-    m10 waits on — when either:
-      (a) a 0x86 'complete chunk' tag is processed, or
-      (b) static section ends (0x87) and the host-block has no
-          more bytes.
-    Plain 0x85/0x88 tags only raise data-ready/stream-end events;
-    they do NOT complete the request, so any reply ending in 0x85
-    or 0x88 hangs the Retrieving dialog forever.
+    Reply: two words static + 0x87 end-static + 0x86 dynamic-complete
+    blob.  MPCCL.ProcessTaggedServiceReply (0x04605187) requires
+    either a 0x86 tag or "static done + packet end" to call
+    SignalRequestCompletion and set the +0x18 flag m10 waits on —
+    0x85 or 0x88 alone would hang the Retrieving dialog forever.
 
-    record_count=0 → ONLSTMT shows "no transactions" string 0x10.
-    Real records require encoding the parser's bit-flagged layout
-    (see FUN_7f352292 for offsets) — a follow-up once the round
-    trip is confirmed working.
+    ReadDynamicSectionRawData (MPCCL 0x04605809) copies all bytes
+    after the 0x86 tag verbatim; there is NO length prefix.
+
+    Dynamic blob starts with a NUL-terminated ASCII *header string*
+    (prefix used by the flag-0x02 exchange-rate formatter), read
+    once before the record loop at 0x7f352292.
     """
+    blob = _DETAILS_HEADER + b"".join(_DETAILS_RECORDS)
     return b"".join([
-        build_tagged_reply_word(0),    # record count (0 → "no transactions")
-        build_tagged_reply_word(840),  # slot-10 currency: USD
+        build_tagged_reply_word(len(_DETAILS_RECORDS)),
+        build_tagged_reply_word(840),   # slot-10 currency: USD
         bytes([TAG_END_STATIC]),
+        b"\x86" + blob,                  # dynamic-complete: no length prefix
     ])
 
 
