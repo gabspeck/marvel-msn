@@ -230,19 +230,17 @@ class TestSubscriptionsPayload(unittest.TestCase):
         self.assertEqual(len(params), 12)
         self.assertIsInstance(params[-1], EndMarker)
 
-    def test_balance_currency_nonzero(self):
-        # Slot 9 currency must be non-zero or client shows error 0x1e.
+    def test_balance_currency_is_valid_iso_4217(self):
+        # Slot 3 = balance currency code, used to format the threshold
+        # billing line at the bottom of the tab.  ≠ 0 passes the error
+        # 0x1e gate, but a code not in g_rgISOCurrencyCodes renders as
+        # "unknown currency" — must be a real ISO 4217 numeric code.
         params = parse_tagged_params(_SUBSCRIPTIONS_PAYLOAD)
-        # Slot ordering per docstring: byte, var, dword, word(start_year),
-        # byte(start_month), word(first_year), byte(first_month),
-        # byte(first_day), word(second_year), byte(second_month),
-        # byte(second_day).  Balance currency lives in slot 3 (start_year)
-        # in the doc — but the gate flagged in onlstmt.py is the one at
-        # index 3 of the static section. Just assert non-zero.
-        self.assertNotEqual(params[3].value, 0)
+        self.assertEqual(params[3].value, 840)  # USD
 
-    def test_change_button_enabled_predicate(self):
-        # Slot 4 = start_month: ≠ 0 enables the Change button (0x3eb).
+    def test_slot4_flag_nonzero(self):
+        # Slot 4 byte stored on dialog state +0x0c; purpose unclear but
+        # must be non-zero (matches captured server replies).
         params = parse_tagged_params(_SUBSCRIPTIONS_PAYLOAD)
         self.assertNotEqual(params[4].value, 0)
 

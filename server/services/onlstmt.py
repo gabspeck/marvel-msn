@@ -306,11 +306,16 @@ def _build_subscriptions_payload():
     Slot mapping (traced through FetchSubscriptionList byte-by-byte):
         0  byte  sub_count           gate: 1..100 (>100 clamps + warn)
         1  var   subscription_blob   one record per subscription
-        2  dword account_balance_cents  (formatted via slot-9 currency)
-        3  word  start_year          gate: ≠ 0 else error 0x1e
-        4  byte  start_month         gate: ≠ 0 else Change button stays
-                                     disabled (EnableWindow predicate on
-                                     `this[3]`); ≠ 0 enables control 0x3eb.
+        2  dword account_balance_cents  formatted via slot-3 currency
+        3  word  balance_currency    ISO 4217; gate ≠ 0 else error 0x1e.
+                                     Also seeds the threshold-notification
+                                     currency at HKCU\...\OnlineStatement\
+                                     Notification Currency when registry
+                                     value is missing — a wrong code shows
+                                     "unknown currency" on the threshold
+                                     line at the bottom of the tab.
+        4  byte  flag                stored on dialog state +0x0c; purpose
+                                     unclear, must be non-zero.
         5  word  first_date_year     → SYSTEMTIME.wYear rendered as the
         6  byte  first_date_month      "expires"/"effective" date for
         7  byte  first_date_day        type_flag 0x01 rows
@@ -322,9 +327,9 @@ def _build_subscriptions_payload():
     return b"".join([
         build_tagged_reply_byte(len(_SUBSCRIPTIONS_RECORDS)),
         build_tagged_reply_var(0x84, records_blob),
-        build_tagged_reply_dword(495),     # account balance in cents
-        build_tagged_reply_word(2026),     # start year (gate ≠ 0)
-        build_tagged_reply_byte(4),        # start month (gate ≠ 0 enables Change)
+        build_tagged_reply_dword(495),
+        build_tagged_reply_word(840),      # balance currency: USD
+        build_tagged_reply_byte(1),
         build_tagged_reply_word(2026),     # first-date year
         build_tagged_reply_byte(12),       # first-date month
         build_tagged_reply_byte(31),       # first-date day
