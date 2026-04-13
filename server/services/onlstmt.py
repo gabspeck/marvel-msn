@@ -252,15 +252,54 @@ def _encode_subscription_record(type_flag, service_name, description,
                                 record_currency=0):
     """Encode one entry inside the Subscriptions 0x84 variable buffer.
 
-    Layout walked by FetchSubscriptionList loop at 0x7f35435b:
-        byte    type_flag       0x01 active | 0x02 cancelled | 0x04 pending
+    Layout walked by FetchSubscriptionList at 0x7f35435b (filling each
+    listbox row) and re-read by the Remove-button branch in the
+    Subscriptions DLGPROC at 0x7f353c4e (deciding what to do):
+
+        byte    type_flag       see table below — drives both rendering
+                                and Remove behavior
         bytes   pad[12]         unused by the main render loop
-        word    record_currency at offset 0x0d, ISO 4217 numeric
+        word    record_currency at offset 0x0d, ISO 4217 numeric;
+                                appended via LoadCurrencyName when the
+                                row's price is non-zero
         cstr    service_name    NUL-terminated, main listbox line
         cstr    description     NUL-terminated, detail text
-        dword   price_cents     slot-0xb currency, minor units;
-                                0 skips the currency format call
-        word    price_currency  ConfigureCurrencySlot(0xb)
+        dword   price_cents     formatted in slot-0xb currency, minor
+                                units; 0 suppresses the price column
+        word    price_currency  fed to ConfigureCurrencySlot(0xb) so
+                                GetCurrencyFormatA renders the row's
+                                amount with the right symbol/format
+
+    type_flag semantics (the only byte the client actually branches on):
+
+        +------+-------------------------+------------------------------+
+        | flag | listbox rendering       | Remove-button result         |
+        +------+-------------------------+------------------------------+
+        | 0x01 | "<name> ** expires **   | LoadString 0x29 →            |
+        |      | <first-date>"           | "cannot remove your current  |
+        |      | (uses slots 5/6/7 from  | subscription online"         |
+        |      | the static reply)       | (the Premium/active row)     |
+        +------+-------------------------+------------------------------+
+        | 0x02 | "<name> ** effective ** | confirm dialog → fires       |
+        |      | <second-date>"          | OnlStmt cancel selector 0x04 |
+        |      | (uses slots 8/9/10)     | with the row's currency word |
+        |      |                         | as the cancel ID; the *only* |
+        |      |                         | flag actually cancellable    |
+        +------+-------------------------+------------------------------+
+        | 0x04 | plain "<name>" with     | LoadString 0x2c →            |
+        |      | no date column          | the credits-can't-be-removed |
+        |      |                         | message; used for promo/     |
+        |      |                         | welcome credits              |
+        +------+-------------------------+------------------------------+
+        | else | plain "<name>" with     | LoadString 0x2d →            |
+        |      | no date column          | generic "cannot remove"      |
+        |      |                         | catch-all                    |
+        +------+-------------------------+------------------------------+
+
+    Source: type_flag is read at piVar5[-1] in both the row-builder
+    (FUN_7f35435b second loop) and the Remove handler (FUN_7f353c4e
+    control 0x3ef branch).  The cancel path calls FUN_7f354e24(this,
+    0xffff) which posts an MPC request on selector 0x04.
     """
     return (
         bytes([type_flag & 0xFF])
@@ -274,19 +313,20 @@ def _encode_subscription_record(type_flag, service_name, description,
     )
 
 
+# One record per type_flag branch — see _encode_subscription_record for
+# the full table of rendering and Remove behavior.
 _SUBSCRIPTIONS_RECORDS = [
-    # type_flag 0x01 = current: rendered as "<name> ** expires ** <date>",
-    # using the "first date" slots (5/6/7).  Remove on this row emits
-    # error string 0x29 "cannot remove current subscription online".
     _encode_subscription_record(
         0x01, "MSN Premium", "Monthly subscription", 495, 840,
         record_currency=840),
-    # type_flag 0x02 = pending/queued change: rendered as "<name>
-    # ** effective ** <date>", using the "second date" slots (8/9/10).
-    # Remove on this row hits the actual cancellation flow
-    # (selector 0x04).
     _encode_subscription_record(
         0x02, "MSN Plus Games", "Gaming add-on pack", 299, 840,
+        record_currency=840),
+    _encode_subscription_record(
+        0x04, "Promotional credit", "First-month welcome credit", 199, 840,
+        record_currency=840),
+    _encode_subscription_record(
+        0xFF, "MSN Bookshelf", "Reference library access", 99, 840,
         record_currency=840),
 ]
 
