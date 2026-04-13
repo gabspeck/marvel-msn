@@ -14,22 +14,26 @@ variable buffer.  The worker thread (GetStatementSummaryWorker @
 7f35301c) calls m10(INFINITE) to dispatch and block the UI until
 the reply arrives.
 
-Reply shape (static section):
-    0x83 dword  — current balance (passed to MOSCL's balance
-                  formatter; exact units TBD — see Pass A of the
-                  plan for the probe).
-    0x82 word   — transaction count; must be ≠0 else client shows
-                  error 0x1e ("cannot be obtained") per the
-                  if (local_c != 0) gate at 7f351efd.
-    0x82 word   — year of statement date
-    0x81 byte   — month (1-12)
-    0x81 byte   — day (1-31)
+Reply shape (static section, 7 tagged primitives):
+    0x83 dword  — current balance in minor units (cents for USD);
+                  formatted by MOSCL balance helper via
+                  GetCurrencyFormatA using slot-9 currency.
+    0x82 word   — ISO 4217 numeric currency code for slot 9 (the
+                  balance formatter).  Must be ≠0 else ONLSTMT
+                  shows error 0x1e.  Passed to LoadCurrencyName
+                  (MOSCUDLL.DLL 0x7f661c33) which formats as
+                  "%03d" and looks the string up in a small
+                  hardcoded table — supported codes include
+                  840 (USD), 826 (GBP), 392 (JPY), 280 (DEM)
+                  etc.; unknown codes fall through to string id
+                  0x82 "unknown currency".
+    0x82 word   — year of statement date (e.g. 2026).
+    0x81 byte   — month (1-12).
+    0x81 byte   — day (1-31).
     0x82 word   — remaining free connect time in minutes; divided
-                  by 60 at 7f351edf (DIV 0x3c) and formatted as
-                  "%02u:%02u" (hours:minutes) into dialog field
-                  ESI+0x151.
-    0x81 byte   — highlighted row index; clamped to 1-4 after
-                  +1 adjustment at 7f351f24.
+                  by 60 at 7f351edf and formatted "%02u:%02u".
+    0x81 byte   — highlighted row index (0-based; UI clamps
+                  +1 to 1..4).
 """
 from ..config import (
     ONLSTMT_INTERFACE_GUIDS, MPC_CLASS_ONEWAY_MASK, TAG_END_STATIC,
@@ -54,13 +58,13 @@ def _build_summary_payload():
     0x87 + 0x84 var.
     """
     return b"".join([
-        build_tagged_reply_dword(1234),  # balance (units TBD — probe value)
-        build_tagged_reply_word(1),      # txn count (≠0 or client shows 0x1e)
+        build_tagged_reply_dword(1234),  # balance in cents -> "$12.34"
+        build_tagged_reply_word(840),    # ISO currency code: USD
         build_tagged_reply_word(2026),   # statement year
         build_tagged_reply_byte(4),      # month
         build_tagged_reply_byte(1),      # day
-        build_tagged_reply_word(90),     # free connect time in minutes -> 01:30
-        build_tagged_reply_byte(0),      # highlight row (0-based; UI clamps +1 to 1..4)
+        build_tagged_reply_word(90),     # free connect minutes -> 01:30
+        build_tagged_reply_byte(0),      # highlight row
     ])
 
 
@@ -72,7 +76,8 @@ def _build_details_payload():
 
     Request wire (after host block): `01 00 82 82 85`
         0x01 0x00  — send byte: selected period index (0 = current).
-        0x82 0x82  — 2 recv words (first = record count; second TBD).
+        0x82 0x82  — first = record count; second = ISO currency
+                     code for slot 10 (transaction-list formatter).
         0x85       — dynamic recv descriptor (transaction list).
 
     Dispatched by ONLSTMT.EXE FUN_7f352292 from dialog 0x69's
@@ -95,8 +100,8 @@ def _build_details_payload():
     trip is confirmed working.
     """
     return b"".join([
-        build_tagged_reply_word(0),   # record count (0 → "no transactions")
-        build_tagged_reply_word(0),   # TBD second summary word
+        build_tagged_reply_word(0),    # record count (0 → "no transactions")
+        build_tagged_reply_word(840),  # slot-10 currency: USD
         bytes([TAG_END_STATIC]),
     ])
 
