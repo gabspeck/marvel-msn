@@ -1,0 +1,8 @@
+[run]
+source = server
+omit =
+    server/__main__.py
+
+[report]
+show_missing = True
+skip_covered = False

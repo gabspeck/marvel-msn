@@ -77,6 +77,13 @@ The server listens on TCP port 2323. Open the MSN client in Windows 95, click
 modem AT commands, transport negotiation, pipe multiplexing, LOGSRV login,
 DIRSRV directory browsing.
 
+## Tests
+
+```sh
+make test                       # run the full unittest suite
+pip install coverage && make coverage   # statement coverage report
+```
+
 ## Tracing tools
 
 The `tools/` directory contains scripts that connect to 86Box's GDB stub

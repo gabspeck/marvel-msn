@@ -578,5 +578,110 @@ class TestContinuationFrame(unittest.TestCase):
         self.assertEqual(frame[1:], data)
 
 
+class TestLOGSRVCommitTagType(unittest.TestCase):
+    """LOGSRV billing-commit replies (selectors 0x0B/0x0C) MUST use 0x84
+    (var) rather than 0x83 (dword).  BILLADD's
+    BillingDlg_ProcessCommitReply unblocks on either, but its tag-type
+    check rejects 0x83 — leaving the OK button stuck."""
+
+    def _commit_reply(self, selector):
+        handler = LOGSRVHandler(3, 'LOGSRV')
+        pkts = handler.handle_request(0x06, selector, 0, b'', 5, 5)
+        parsed = parse_packet(pkts[0][:-1])
+        # Skip pipe header(1) + length prefix(2) + routing prefix(2)
+        host_block = parsed.payload[5:]
+        # host_block layout: msg_class | selector | VLI req_id | reply
+        # Our request_id=0 fits in 1 VLI byte → reply starts at offset 3.
+        return host_block[3:]
+
+    def test_pm_commit_uses_var_tag(self):
+        reply = self._commit_reply(0x0B)
+        self.assertEqual(reply[0], 0x84,
+                         "PM commit reply must use 0x84 var tag, not 0x83 dword")
+
+    def test_billing_commit_uses_var_tag(self):
+        reply = self._commit_reply(0x0C)
+        self.assertEqual(reply[0], 0x84,
+                         "Billing commit reply must use 0x84 var tag, not 0x83 dword")
+
+    def test_var_payload_is_status_dword(self):
+        # Inline length byte (bit 7 set) for a 4-byte status dword = 0x84.
+        reply = self._commit_reply(0x0C)
+        self.assertEqual(reply[1], 0x84)  # 0x80 | 4
+        self.assertEqual(len(reply), 2 + 4)
+        status = struct.unpack('<I', reply[2:6])[0]
+        self.assertEqual(status, 0)
+
+
+class TestServicePacketBoundaries(unittest.TestCase):
+    """Exact-boundary cases for build_service_packet fragmentation."""
+
+    def _largest_unfragmented_payload_len(self):
+        # Binary search for the largest host-block payload that still
+        # fits in a single wire packet under the default 1024 limit.
+        lo, hi = 0, 2048
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            host_block = build_host_block(0x06, 0x00, 0, b'\x00' * mid)
+            pkts = build_service_packet(3, host_block, 5, 5)
+            if len(pkts) == 1 and len(pkts[0]) <= 1024:
+                lo = mid
+            else:
+                hi = mid - 1
+        return lo
+
+    def test_no_fragmentation_at_exact_cutoff(self):
+        n = self._largest_unfragmented_payload_len()
+        host_block = build_host_block(0x06, 0x00, 0, b'\x00' * n)
+        pkts = build_service_packet(3, host_block, 5, 5)
+        self.assertEqual(len(pkts), 1)
+        self.assertLessEqual(len(pkts[0]), 1024)
+
+    def test_fragmentation_one_byte_past_cutoff(self):
+        n = self._largest_unfragmented_payload_len()
+        host_block = build_host_block(0x06, 0x00, 0, b'\x00' * (n + 1))
+        pkts = build_service_packet(3, host_block, 5, 5)
+        self.assertEqual(len(pkts), 2)
+
+    def test_seq_wrap_chunk2_zero(self):
+        # seq=0x7F + 1 wraps to 0x00 in chunk 2 (mask 0x7F).
+        host_block = build_host_block(
+            0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 0x7F, 5)
+        p1 = parse_packet(pkts[0][:-1])
+        p2 = parse_packet(pkts[1][:-1])
+        self.assertEqual(p1.seq, 0x7F)
+        self.assertEqual(p2.seq, 0x00)
+
+    def test_chunks_reassemble_to_original_pipe_data(self):
+        # Round-trip: chunk1 + chunk2 (after stripping per-frame overhead)
+        # must equal routing_prefix + host_block.
+        host_block = build_host_block(
+            0x06, 0x0A, 0, build_tagged_reply_var(0x84, bytes(1052)))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        self.assertEqual(len(pkts), 2)
+        p1 = parse_packet(pkts[0][:-1])
+        p2 = parse_packet(pkts[1][:-1])
+        chunk1 = p1.payload[3:]   # skip header(1) + size_prefix(2)
+        chunk2 = p2.payload[1:]   # skip header(1) only
+        expected = struct.pack('<H', 8) + host_block
+        self.assertEqual(chunk1 + chunk2, expected)
+
+    def test_stuffing_margin_absorbs_small_burst(self):
+        # The 20-byte stuffing margin in build_service_packet exists so
+        # a modest sprinkling of stuffed bytes (0x1b, 0x0d) inside an
+        # otherwise normal payload doesn't push chunk1 past the wire
+        # limit.  Verify the margin holds for ~15 stuffed bytes.
+        body = (b'\x00' * 1037) + (b'\x1b' * 15)
+        host_block = build_host_block(
+            0x06, 0x0A, 0, build_tagged_reply_var(0x84, body))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        self.assertEqual(len(pkts), 2)
+        for pkt in pkts:
+            self.assertLessEqual(len(pkt), 1024)
+            parsed = parse_packet(pkt[:-1])
+            self.assertTrue(parsed.crc_ok)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -1,4 +1,11 @@
-"""Integration test: replay a real client session against the server."""
+"""Integration test: replay a real client session against the server.
+
+These two end-to-end tests are golden-path only — they replay byte
+captures of one specific known-good session.  Add new scenarios as
+separate TestCases rather than extending these; the hardcoded packet
+bytes below were captured against a specific server build and cannot
+be modified without re-capturing.
+"""
 import unittest
 import socket
 import struct

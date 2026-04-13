@@ -18,3 +18,7 @@ session_capture*.log
 
 # Stray PDFs in root (reference material lives in reference/)
 /*.pdf
+
+# Coverage tooling
+.coverage
+htmlcov/

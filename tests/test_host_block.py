@@ -8,7 +8,7 @@ from server.mpc import (
     build_tagged_reply_dword, build_tagged_reply_var,
     encode_reply_var_length,
 )
-from server.models import ByteParam, WordParam, DwordParam, VarParam
+from server.models import ByteParam, WordParam, DwordParam, VarParam, UnknownParam
 
 
 class TestHostBlock(unittest.TestCase):
@@ -128,6 +128,72 @@ class TestParseRequestParams(unittest.TestCase):
         self.assertEqual(len(descs), 8)
         self.assertEqual(descs[:7], [0x83] * 7)
         self.assertEqual(descs[7], 0x84)
+
+
+class TestParseRequestParamsTruncation(unittest.TestCase):
+    """Malformed/truncated send-side payloads must fail gracefully —
+    parse_request_params is fed straight from the wire and cannot raise."""
+
+    def test_empty_payload(self):
+        params, descs = parse_request_params(b'')
+        self.assertEqual(params, [])
+        self.assertEqual(descs, [])
+
+    def test_truncated_byte_param(self):
+        # Tag 0x01 with no following byte.
+        params, descs = parse_request_params(bytes([0x01]))
+        self.assertEqual(params, [])
+        self.assertEqual(descs, [])
+
+    def test_truncated_word_param(self):
+        # Tag 0x02 with only 1 of 2 expected bytes.
+        params, descs = parse_request_params(bytes([0x02, 0xAA]))
+        self.assertEqual(params, [])
+
+    def test_truncated_dword_param(self):
+        # Tag 0x03 with only 3 of 4 expected bytes.
+        params, descs = parse_request_params(bytes([0x03, 0xAA, 0xBB, 0xCC]))
+        self.assertEqual(params, [])
+
+    def test_truncated_variable_length_byte(self):
+        # Tag 0x04 with no following length byte at all.
+        params, descs = parse_request_params(bytes([0x04]))
+        self.assertEqual(params, [])
+
+    def test_variable_length_promises_more_data_than_provided(self):
+        # Tag 0x04, inline-length 5, but only 2 bytes follow.  Parser
+        # currently returns whatever data is present without raising.
+        data = bytes([0x04, 0x85, ord('h'), ord('i')])
+        params, descs = parse_request_params(data)
+        self.assertEqual(len(params), 1)
+        self.assertIsInstance(params[0], VarParam)
+        self.assertLessEqual(len(params[0].data), 5)
+
+    def test_unknown_send_tag_captured_as_unknown_param(self):
+        # 0x42 isn't a known send tag (0x01-0x05) and bit 7 is clear so
+        # it's not a recv descriptor either.  Captured as UnknownParam.
+        data = bytes([0x42, 0xDE, 0xAD])
+        params, descs = parse_request_params(data)
+        self.assertEqual(len(params), 1)
+        self.assertIsInstance(params[0], UnknownParam)
+        self.assertEqual(params[0].tag, 0x42)
+
+    def test_many_recv_descriptors_only(self):
+        # Eight recv descriptors, no send params — common in summary RPCs.
+        data = bytes([0x83] * 7 + [0x84])
+        params, descs = parse_request_params(data)
+        self.assertEqual(params, [])
+        self.assertEqual(len(descs), 8)
+        self.assertEqual(descs, [0x83] * 7 + [0x84])
+
+    def test_interleaved_send_and_recv(self):
+        # Recv descriptors can appear anywhere in the stream.
+        data = bytes([0x83, 0x01, 0x42, 0x83, 0x02, 0x12, 0x34, 0x84])
+        params, descs = parse_request_params(data)
+        self.assertEqual(len(params), 2)
+        self.assertEqual(params[0].value, 0x42)
+        self.assertEqual(params[1].value, 0x3412)
+        self.assertEqual(descs, [0x83, 0x83, 0x84])
 
 
 class TestTaggedReply(unittest.TestCase):
