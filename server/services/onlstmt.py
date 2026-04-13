@@ -32,8 +32,12 @@ Reply shape (static section, 7 tagged primitives):
     0x81 byte   — day (1-31).
     0x82 word   — remaining free connect time in minutes; divided
                   by 60 at 7f351edf and formatted "%02u:%02u".
-    0x81 byte   — highlighted row index (0-based; UI clamps
-                  +1 to 1..4).
+    0x81 byte   — period count minus 1 (0..3).  Stored at
+                  this[0xe5] as `byte + 1` clamped to max 4.
+                  Drives the Get-Details period listbox 0x414
+                  populated by FUN_7f351fd2 — N entries: current
+                  period plus N-1 prior calendar months walked
+                  backwards from the statement date.
 """
 import datetime
 import struct
@@ -68,7 +72,7 @@ def _build_summary_payload():
         build_tagged_reply_byte(4),      # month
         build_tagged_reply_byte(1),      # day
         build_tagged_reply_word(90),     # free connect minutes -> 01:30
-        build_tagged_reply_byte(0),      # highlight row
+        build_tagged_reply_byte(3),      # period_count - 1 -> 4 periods
     ])
 
 
@@ -147,37 +151,76 @@ def _encode_record(when, description, amount, total,
 _DETAILS_HEADER = b"Exchange rate:\x00"
 
 
-_DETAILS_RECORDS = [
-    _encode_record(datetime.datetime(2026, 4, 1, 9, 15),
-                   "Monthly subscription", 495, 495),
-    _encode_record(datetime.datetime(2026, 4, 5, 19, 42),
-                   "Premium content access", 149, 644),
-    _encode_record(datetime.datetime(2026, 4, 9, 14, 3),
-                   "Chat room usage", 75, 719),
-    # Flag-0x02 row: ¥1,000 charged at 0.0067 USD/JPY -> $6.70.
-    # Slot-11 (JPY) NumDigits=0 so foreign dword is whole yen, not
-    # minor units.  Slot-10 (USD) NumDigits=2 so amount/total are
-    # cents.  Rate dword uses rate-digits precision (default 4dp) so
-    # value 67 renders as "0.0067".
-    _encode_record(datetime.datetime(2026, 4, 11, 12, 0),
-                   "Tokyo content purchase", 670, 1389,
-                   foreign=(1000, 392, 67)),
-    _encode_record(datetime.datetime(2026, 4, 12, 22, 30),
-                   "Online statement fee", 515, 1904),
+# Per-period transaction lists, indexed by the period byte the client
+# sends as the first send param of selector=0x05.  Period 0 is the
+# current statement; periods 1..N are prior calendar months walked
+# backward by FUN_7f351fd2 from the statement date in the summary.
+_DETAILS_RECORDS_BY_PERIOD = [
+    # Period 0 — April 2026 (current statement, $19.04 balance).
+    [
+        _encode_record(datetime.datetime(2026, 4, 1, 9, 15),
+                       "Monthly subscription", 495, 495),
+        _encode_record(datetime.datetime(2026, 4, 5, 19, 42),
+                       "Premium content access", 149, 644),
+        _encode_record(datetime.datetime(2026, 4, 9, 14, 3),
+                       "Chat room usage", 75, 719),
+        # Flag-0x02 row: ¥1,000 charged at 0.0067 USD/JPY -> $6.70.
+        # Slot-11 (JPY) NumDigits=0 so foreign dword is whole yen, not
+        # minor units.  Slot-10 (USD) NumDigits=2 so amount/total are
+        # cents.  Rate dword uses rate-digits precision (default 4dp)
+        # so value 67 renders as "0.0067".
+        _encode_record(datetime.datetime(2026, 4, 11, 12, 0),
+                       "Tokyo content purchase", 670, 1389,
+                       foreign=(1000, 392, 67)),
+        _encode_record(datetime.datetime(2026, 4, 12, 22, 30),
+                       "Online statement fee", 515, 1904),
+    ],
+    # Period 1 — March 2026.
+    [
+        _encode_record(datetime.datetime(2026, 3, 1, 8, 30),
+                       "Monthly subscription", 495, 495),
+        _encode_record(datetime.datetime(2026, 3, 14, 21, 5),
+                       "Premium content access", 149, 644),
+        _encode_record(datetime.datetime(2026, 3, 28, 23, 50),
+                       "Online statement fee", 250, 894),
+    ],
+    # Period 2 — February 2026.
+    [
+        _encode_record(datetime.datetime(2026, 2, 1, 7, 45),
+                       "Monthly subscription", 495, 495),
+        _encode_record(datetime.datetime(2026, 2, 7, 18, 22),
+                       "Game zone tournament entry", 200, 695),
+        _encode_record(datetime.datetime(2026, 2, 18, 20, 11),
+                       "Premium content access", 149, 844),
+        _encode_record(datetime.datetime(2026, 2, 27, 22, 30),
+                       "Online statement fee", 250, 1094),
+    ],
+    # Period 3 — January 2026.
+    [
+        _encode_record(datetime.datetime(2026, 1, 1, 10, 0),
+                       "Monthly subscription", 495, 495),
+        _encode_record(datetime.datetime(2026, 1, 19, 19, 17),
+                       "Premium content access", 149, 644),
+        _encode_record(datetime.datetime(2026, 1, 31, 23, 59),
+                       "Online statement fee", 250, 894),
+    ],
 ]
 
 
-def _build_details_payload():
+def _build_details_payload(records):
     """Build the Get-Details reply for selector=0x05.
 
-    Request wire (after host block): `01 00 82 82 85`
-        0x01 0x00  — send byte: selected period index (0 = current).
+    Request wire (after host block): `01 NN 82 82 85`
+        0x01 NN    — send byte: selected period index (0 = current).
         0x82 0x82  — first = record count; second = ISO currency
                      code for slot 10 (transaction-list formatter).
         0x85       — dynamic recv descriptor (transaction list).
 
     Dispatched by ONLSTMT.EXE FetchStatementDetails (0x7f352292) from
-    dialog 0x69's WM_INITDIALOG.
+    dialog 0x69's WM_INITDIALOG and again from its Period-listbox OK
+    handler.  The period byte selects which calendar-month statement
+    the client is asking for; the server is expected to return the
+    transactions that fall within that period.
 
     Reply: two words static + 0x87 end-static + 0x86 dynamic-complete
     blob.  MPCCL.ProcessTaggedServiceReply (0x04605187) requires
@@ -192,16 +235,16 @@ def _build_details_payload():
     (prefix used by the flag-0x02 exchange-rate formatter), read
     once before the record loop at 0x7f352292.
     """
-    blob = _DETAILS_HEADER + b"".join(_DETAILS_RECORDS)
+    blob = _DETAILS_HEADER + b"".join(records)
     return b"".join([
-        build_tagged_reply_word(len(_DETAILS_RECORDS)),
+        build_tagged_reply_word(len(records)),
         build_tagged_reply_word(840),   # slot-10 currency: USD
         bytes([TAG_END_STATIC]),
         b"\x86" + blob,                  # dynamic-complete: no length prefix
     ])
 
 
-_DETAILS_PAYLOAD = _build_details_payload()
+_DETAILS_PAYLOADS = [_build_details_payload(r) for r in _DETAILS_RECORDS_BY_PERIOD]
 
 
 def _encode_subscription_record(type_flag, service_name, description,
@@ -411,8 +454,13 @@ class OnlStmtHandler:
             print("  [OnlStmt] Cancel subscription (selector 0x04)")
             reply_payload = _CANCEL_ACK_PAYLOAD
         elif selector == 0x05:
-            print("  [OnlStmt] Get Details (selector 0x05)")
-            reply_payload = _DETAILS_PAYLOAD
+            # Request payload: `01 NN ...` — first send param is the
+            # period index byte.  Fall back to 0 (current) if absent.
+            period = payload[1] if len(payload) >= 2 and payload[0] == 0x01 else 0
+            if period >= len(_DETAILS_PAYLOADS):
+                period = 0
+            print(f"  [OnlStmt] Get Details (selector 0x05) period={period}")
+            reply_payload = _DETAILS_PAYLOADS[period]
         else:
             print(f"  [OnlStmt] UNHANDLED class=0x{msg_class:02x} "
                   f"selector=0x{selector:02x} req_id={request_id} "
