@@ -103,6 +103,11 @@ LOGSRV_INTERFACE_GUIDS = [
     (_guid_le("00028BC6-0000-0000-C000-000000000046"), 0x0A),
 ]
 
+# DIRSRV (directory browsing / tree navigation) interfaces.  Static analysis of
+# TREENVCL.CTreeNavClient (0x7f63113d) confirms IID 00028B27 as the directly
+# resolved DIRSRV interface.  Adjacent memory in TREENVCL holds the contiguous
+# family 00028B25..00028B2E, but only 28B27 has been observed at runtime, so
+# the rest stay unpublished until a real consumer asks for them.
 DIRSRV_INTERFACE_GUIDS = [
     (_guid_le("00028B27-0000-0000-C000-000000000046"), 0x01),
 ]

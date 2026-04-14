@@ -199,9 +199,12 @@ class TestDIRSRVServiceMap(unittest.TestCase):
         payload = build_dirsrv_service_map_payload()
         self.assertEqual(len(payload), len(DIRSRV_INTERFACE_GUIDS) * 17)
 
-    def test_single_guid(self):
+    def test_guid_records_match_catalog(self):
         payload = build_dirsrv_service_map_payload()
-        self.assertEqual(payload[16], 0x01)  # selector for the one DIRSRV GUID
+        for i, (guid_bytes, selector) in enumerate(DIRSRV_INTERFACE_GUIDS):
+            record = payload[i * 17:(i + 1) * 17]
+            self.assertEqual(record[:16], guid_bytes)
+            self.assertEqual(record[16], selector)
 
 
 class TestDIRSRVReply(unittest.TestCase):

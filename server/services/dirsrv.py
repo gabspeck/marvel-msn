@@ -48,6 +48,36 @@ def build_property_record(properties):
     return header + bytes(body)
 
 
+def build_child_props(requested_props, title, *, is_container, c_value=0, mnid_a=b'\x00' * 8):
+    # 'b' is the 1-byte browse-flags property read by ExecuteCommand:
+    #   bit 0x01 = container/folder, bit 0x08 = denied. 0 = openable leaf.
+    # 'a' is an 8-byte blob used by CMosTreeNode::GetNthChild to build the
+    #   child mnid (field_8/field_c).
+    # 'c' is app_id for leaf-node Exec → HRMOSExec.
+    out = []
+    for name in requested_props:
+        if name == 'p':
+            out.append((0x0E, 'p', struct.pack('<I', len(title)) + title.encode('ascii')))
+        elif name == 'a':
+            out.append((0x0E, 'a', struct.pack('<I', len(mnid_a)) + mnid_a))
+        elif name == 'b':
+            out.append((0x01, 'b', bytes([0x01 if is_container else 0x00])))
+        elif name == 'c':
+            out.append((0x03, 'c', struct.pack('<I', c_value)))
+        elif name == 'h':
+            out.append((0x03, 'h', struct.pack('<I', 1 if is_container else 0)))
+        elif name == 'x':
+            # 0-length blob causes client malloc(0) → NULL → FUN_7f3fb9f5
+            # returns E_OUTOFMEMORY (received_flag=1 && data_ptr==NULL).
+            # Send a 1-byte NUL payload so the cache slot has a real alloc.
+            out.append((0x0E, 'x', struct.pack('<I', 1) + b'\x00'))
+        elif name in ('wv', 'tp', 'w', 'l'):
+            out.append((0x0E, name, struct.pack('<I', 1) + b'\x00'))
+        else:
+            out.append((0x03, name, struct.pack('<I', 0)))
+    return out
+
+
 def build_dirsrv_reply_payload(request=None):
     """Build a DIRSRV GetProperties reply.
 
@@ -59,40 +89,43 @@ def build_dirsrv_reply_payload(request=None):
     requested_props = [p for p in request.prop_group.split('\x00') if p]
     is_children = request.dword_0 == 1
 
-    print(f"[DIRSRV] node={request.node_id} children={is_children} props={requested_props}")
+    print(f"[DIRSRV] node={request.node_id} raw={request.node_id_raw.hex()} "
+          f"children={is_children} props={requested_props}")
 
     records = []
 
+    # Map wire node_id → (title, is_container, c_value, mnid_a).
+    # 'c' = registered MOS app_id (see reference_mos_apps_registry.md):
+    #   1 = Directory_Service (for containers in DSNAV)
+    #   7 = Down_Load_And_Run (for browser-URL leaves — MSN Today)
+    node_table = {
+        "0:0":         ("Root",        True,  1, struct.pack('<II', 0x44000c, 0)),
+        "4456460:0":   ("MSN Central", True,  1, struct.pack('<II', 0x44000c, 0)),
+        "0:4456460":   ("MSN Central", True,  1, struct.pack('<II', 0x44000c, 0)),
+        "4456461:0":   ("MSN Today",   False, 7, struct.pack('<II', 0x44000d, 0)),
+    }
+    info = node_table.get(request.node_id,
+                          ("MSN Today", False, 7, struct.pack('<II', 0x44000d, 0)))
+    title, is_container, c_value, mnid_a = info
+
     if not is_children:
-        props = []
-        for name in requested_props:
-            if name == 'q':
-                props.append((0x03, "q", struct.pack('<I', 1)))
-            else:
-                props.append((0x03, name, struct.pack('<I', 0)))
-        records.append(build_property_record(props))
+        own = build_child_props(
+            requested_props, title=title,
+            is_container=is_container, c_value=c_value, mnid_a=mnid_a)
+        records.append(build_property_record(own))
     else:
         if request.node_id == "0:0":
-            msn_central = []
-            for name in requested_props:
-                if name == 'p':
-                    msn_central.append((0x0E, "p",
-                        struct.pack('<I', 11) + b'MSN Central'))
-                elif name == 'c':
-                    msn_central.append((0x03, "c", struct.pack('<I', 3)))
-                elif name == 'h':
-                    msn_central.append((0x03, "h", struct.pack('<I', 1)))
-                elif name == 'a':
-                    msn_central.append((0x03, "a", struct.pack('<I', 0)))
-                elif name == 'i':
-                    msn_central.append((0x03, "i", struct.pack('<I', 0)))
-                elif name in ('wv', 'tp', 'w', 'l'):
-                    msn_central.append((0x0E, name, struct.pack('<I', 0)))
-                else:
-                    msn_central.append((0x03, name, struct.pack('<I', 0)))
+            msn_central = build_child_props(
+                requested_props, title="MSN Central",
+                is_container=True, c_value=1,
+                mnid_a=struct.pack('<II', 0x44000c, 0))
             records.append(build_property_record(msn_central))
         else:
-            records.append(build_property_record([]))
+            child = build_child_props(
+                requested_props, title="MSN Today",
+                is_container=False, c_value=7,
+                mnid_a=struct.pack('<II', 0x44000d, 0))
+            records.append(build_property_record(child))
 
     node_count = len(records)
     dynamic_data = b''.join(records)

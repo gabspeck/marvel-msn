@@ -108,3 +108,4 @@ class DirsrvRequest:
     dword_0: int = 0
     dword_1: int = 0
     recv_descriptors: list[int] = field(default_factory=list)
+    node_id_raw: bytes = b''

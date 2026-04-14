@@ -154,11 +154,19 @@ def decode_dirsrv_request(payload):
     for p in send_params:
         if isinstance(p, VarParam):
             if var_idx == 0:
-                if len(p.data) >= 8:
-                    lo, hi = struct.unpack('<II', p.data[:8])
-                    req.node_id = f"{lo}:{hi}"
+                # Wire node_id is an 8-byte "_MosLid64": [field_0:u32][field_8:u32].
+                # Full 24-byte _MosNodeId is (field_0, pad4, field_8, field_c, field_10[u16]);
+                # field_c / field_10 are truncated on the wire.
+                # field_0 = service/class index (selects shell extension DLL),
+                # field_8 = within-service node sub-id.  Children inherit field_0
+                # from parent and get (field_8, field_c) from wire property 'a'.
+                d = p.data
+                if len(d) >= 8:
+                    f0, f8 = struct.unpack('<II', d[:8])
+                    req.node_id = f"{f0}:{f8}"
                 else:
-                    req.node_id = p.data.hex()
+                    req.node_id = d.hex()
+                req.node_id_raw = d
             elif var_idx == 1:
                 req.prop_group = p.data.rstrip(b'\x00').decode('ascii', errors='replace')
             var_idx += 1

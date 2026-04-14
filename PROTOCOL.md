@@ -836,17 +836,32 @@ Each property within a record:
 
 | Name | Type | Meaning |
 |------|------|---------|
-| `p` | blob (0x0E) | Display name (e.g., "MSN Central") |
-| `c` | dword (0x03) | Child count |
-| `h` | dword (0x03) | Has children flag |
-| `a` | dword (0x03) | Attributes |
-| `q` | dword (0x03) | Quick-check (node exists probe) |
-| `i` | dword (0x03) | Icon index |
-| `g` | dword (0x03) | Group flag |
-| `wv` | blob (0x0E) | Content view data |
-| `tp` | blob (0x0E) | Type/template |
-| `w` | blob (0x0E) | Unknown blob |
-| `l` | blob (0x0E) | Unknown blob |
+| `p` | blob (0x0E) | Display name / title (e.g., "MSN Central") — also used as Size on the Properties dialog Context tab. |
+| `e` | blob (0x0E) | Name (icon-view label below the leaf level — General tab "Name" field per MOSSHELL FUN_7f401d81 decode). |
+| `g` | blob (0x0E) | Go word (General tab). |
+| `a` | blob (0x0E) | 8-byte mnid blob `pack('<II', f8, fc)` — read by `CMosTreeNode::GetNthChild` to construct the child node's `_MosNodeId.field_8`/`field_c`. NOT a DWORD. |
+| `b` | byte (0x01) | Browse flags. Bit 0 = container/folder, bit 3 = denied (non-browsable, blocks `ExecuteCommand`). |
+| `c` | dword (0x03) | Registered MOS app_id for `CMosTreeNode::Exec` → `HRMOSExec` dispatch. **Not** child count. `1` = `Directory_Service` (DSnav containers), `7` = `Down_Load_And_Run` (browser-URL leaves; short-circuits to `CreateOleWorkerThread`). Per `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>`. |
+| `h` | dword (0x03) | `1` = container/has-children, `0` = leaf. |
+| `x` | blob (0x0E) | Cmdline args string for `HRMOSExec(c, args)`. Empty → length-1 NUL. |
+| `q` | dword (0x03) | Language LCID (Properties dialog Context tab). Send DWORD `1` for the not-children probe so the cache slot is populated; DWORD `0` triggers OOM downstream. |
+| `r` | blob (0x0E) | Topics (Context tab). |
+| `s` | blob (0x0E) | People (Context tab). |
+| `t` | blob (0x0E) | Place (Context tab). |
+| `n` | blob (0x0E) | Forum manager (Context tab). |
+| `on` | blob (0x0E) | Owner / Vendor name (Context tab). |
+| `y` | dword (0x03) | Vendor ID — `SetDlgItemInt` on dialog item 0x79. |
+| `v` | blob (0x0E) | Created timestamp (Context tab). |
+| `w` | blob (0x0E) | Last changed timestamp (Context tab). |
+| `wv`,`tp`,`l`,`mf`,`i` | blob/dword | Catch-all blobs / dwords. Send length-1 NUL for the blob ones; DWORD 0 for others. |
+
+**Empty-blob OOM trap**: any type-0x0E blob with `length=0` makes the
+client `malloc(0)` (returns NULL on the MSVC runtime in this VM).
+MOSSHELL's cache reader `FUN_7f3fb9f5` then sees `received_flag=1 &&
+data_ptr==NULL` and returns `E_OUTOFMEMORY` (`0x8007000E`); `ReportMosXErr`
+maps that to `MosCommonError(1)` → the **"Out of memory"** dialog.
+Always send at least 1 byte (e.g. `\x00`) for blob props you don't have
+real data for.
 
 ---
 

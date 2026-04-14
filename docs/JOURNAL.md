@@ -3,7 +3,7 @@
 > Chronological research journal documenting the reverse engineering of MSN for
 > Windows 95. For the protocol specification, see [PROTOCOL.md](../PROTOCOL.md).
 
-Last updated: 2026-04-12
+Last updated: 2026-04-14 (second update: MSN Today 'b' not-received root cause)
 
 ## Goal
 
@@ -745,3 +745,1005 @@ the server log.  Out of scope for now.
 - `ce7e1d5` — FTM LOGSRV file loop (plans.txt → newtips.rtf).
 - `bf74777` — **LOGSRV sel=0x0D post-signup query** (unblocked Congrats).
 - `10389b9` — Test coverage for sel=0x0D.
+
+## 2026-04-13 — DIRSRV Consumer / IID Recovery
+
+Goal: resume the post-login DIRSRV analysis after the MCP session dropped and
+pin down which client binaries and interface GUIDs are actually involved.
+
+### New static findings
+
+#### 1. `MOSSHELL.DLL` is a confirmed DIRSRV consumer
+
+`CMosTreeNode::GetShabbyViaFtm` at `0x7f3fd800` calls:
+
+```c
+HrFtmDownloadWithUI(..., "DIRSRV", ..., 1, 7, 1);
+```
+
+So the shell/tree path is not using LOGSRV for content fetches after login; it
+explicitly routes FTM downloads through `DIRSRV`.
+
+Key point:
+
+- This strongly supports the runtime observation that the post-login traffic
+  opening additional pipes is real service work, not a spurious reconnect path.
+
+#### 2. `TREENVCL.DLL` opens a DIRSRV-facing helper and resolves IID `28B27`
+
+`CTreeNavClient::CTreeNavClient` at `0x7f63113d` does:
+
+- `CoCreateInstance(&GUID_00028B07, ..., &GUID_00028B08, &this->helper)`
+- then helper `vtbl[0x24/4]` with `&GUID_00028B27`, service name, account id,
+  and locale string, storing the resulting interface pointer at `this+0x28`
+
+Raw GUIDs recovered from `.rdata`:
+
+- `0x7f633070` = `{00028B07-0000-0000-C000-000000000046}`
+- `0x7f633080` = `{00028B08-0000-0000-C000-000000000046}`
+- `0x7f633270` = `{00028B27-0000-0000-C000-000000000046}`
+
+This is the first confirmed **DIRSRV interface IID** from static analysis in
+the client-side tree stack.
+
+#### 3. `TREENVCL.DLL` contains a contiguous DIRSRV GUID family
+
+Memory at `0x7f633250` contains:
+
+- `{00028B25-0000-0000-C000-000000000046}`
+- `{00028B26-0000-0000-C000-000000000046}`
+- `{00028B27-0000-0000-C000-000000000046}`
+- `{00028B28-0000-0000-C000-000000000046}`
+- `{00028B29-0000-0000-C000-000000000046}`
+- `{00028B2A-0000-0000-C000-000000000046}`
+- `{00028B2B-0000-0000-C000-000000000046}`
+- `{00028B2C-0000-0000-C000-000000000046}`
+- `{00028B2D-0000-0000-C000-000000000046}`
+- `{00028B2E-0000-0000-C000-000000000046}`
+
+Implication:
+
+- DIRSRV likely uses its own selector map in the `28B25..28B2E` range, just as
+  LOGSRV used the `28BB6..28BC6` family.
+- Publishing at least `28B27` in the server's DIRSRV discovery block is likely
+  necessary before tree navigation calls can proceed.
+
+#### 4. Tree navigation methods are layered on top of that interface
+
+`MOSSHELL.DLL` methods such as:
+
+- `OkToGetChildren` (`0x7f3fe333`)
+- `GetNthChild` (`0x7f3fdfc4`)
+- `EnumShn` (`0x7f3fd8ab`)
+
+all call into `TREENVCL.DLL`:
+
+- `CTreeNavClient::GetChildren`
+- `CTreeNavClient::GetNthNode`
+- `CTreeNavClient::EnumShn`
+
+Those return **DS status codes**, which `MOSSHELL.DLL!ResultFromDsStatus`
+(`0x7f3fabb5`) maps into HRESULTs. So any missing DIRSRV selector/reply is
+expected to surface later as a DS status failure in MOSSHELL.
+
+### What this changes
+
+The most concrete next runtime target is no longer "find any DIRSRV IID" in
+the abstract. We now have:
+
+- a confirmed consumer path: `MOSSHELL` / `TREENVCL`
+- a confirmed interface IID: `28B27`
+- a plausible full DIRSRV discovery GUID family: `28B25..28B2E`
+
+### Updated next steps
+
+1. Publish a DIRSRV selector map that includes at least `28B27`
+   (and probably the full `28B25..28B2E` family) and see whether the
+   post-login client progresses beyond the current disconnect.
+
+2. Instrument `ResolveServiceSelectorForInterface` (`MPCCL 0x046073db`)
+   during a post-login tree navigation attempt to confirm which of
+   `28B25..28B2E` are requested at runtime.
+
+3. Break on `MOSSHELL.DLL!ResultFromDsStatus` (`0x7f3fabb5`) after the
+   selector map is added. If failures remain, the returned DS status code
+   should narrow the missing method/reply semantics quickly.
+
+## 2026-04-13: Live click-path breakpoint confirms `MSN Today` dies at cached property `b`
+
+After adding the provisional DIRSRV selector map (`28B25..28B2E`), I armed the
+Claude-noted click-path breakpoints with `tools/gdb_debug.py` against the
+`86Box_dbg` GDB stub:
+
+- `0x7f3ff693` `CMosTreeNode::ExecuteCommand`
+- `0x7f3fce71` `GetProperty`
+- `0x7f3fb9f5` cache cell reader
+- `0x7f3fa1da` `ReportMosXErr`
+- `0x7f3fa179` `ReportMosXErrX`
+
+On an `MSN Today` click, the target stopped at:
+
+- `EIP = 0x7f3fb9f5`
+
+Registers at the stop:
+
+- `EDI = 0x7f40e1c4`
+
+That address matches the property token for wire property `b` from the earlier
+static RE. So the runtime path is not failing in some later OLE/service-launch
+step yet; it is first trying to resolve the cached `b` attribute for the clicked
+node and stopping in the cache reader.
+
+This is consistent with the current server logs for the same click:
+
+- DIRSRV request targets node `0:4456508`
+- requested props include `b`
+- our fallback reply for that node returns no meaningful child/property data
+
+Implication:
+
+- The current `Cannot open service` failure remains best explained by the node
+  lacking cached property `b`, not by a bad `e`/launch-class value.
+- The next productive server change is to emit a real per-child record for the
+  parent/child path that leads to `0:4456508`, with at least `a`, `b`, and `p`
+  populated so `CMosTreeNode::ExecuteCommand` can classify the clicked node.
+
+## 2026-04-13: `MSN Today` launch path reaches `HRMOSExec`, but app `5` does not yield a usable filename
+
+This session pushed the `MSN Today` path further with live breakpoints in
+`MOSSHELL.DLL` and `MCM.DLL`, plus a server-side experiment on the `c` app id
+advertised for the `MSN Today` icon under node `0:4456508`.
+
+### Breakpoint progression
+
+With the click-path breakpoints re-armed, the `MSN Today` path was traced
+through:
+
+- `0x7f3ff693` `CMosTreeNode::ExecuteCommand`
+- `0x7f3feba6` `CMosTreeNode::Exec`
+- `0x041020d8` `MCM.DLL!HRMOSExec`
+
+This confirms the click is no longer dying before dispatch; it reaches the
+launcher logic in `MCM.DLL`.
+
+### `CMosTreeNode::Exec` semantics
+
+Decompilation of `CMosTreeNode::Exec` (`0x7f3feba6`) in `MOSSHELL.DLL`
+clarified the launch properties:
+
+- property `c` is the MOS app id passed directly to `HRMOSExec`
+- property `ri` is fetched as a string/blob and passed as the trailing launch
+  argument
+- for non-DNR apps (`c != 7`), the code path is:
+  `GetProperty("ri") -> HRMOSExec(c, ri, ...)`
+
+So the central-icon metadata needs to be valid enough for `HRMOSExec`, not just
+for tree rendering.
+
+### `HRMOSExec` argument format
+
+Decompilation of `MCM.DLL!HRMOSExec` (`0x041020d8`) and its helper
+`FUN_04102091` (`0x04102091`) showed the exact launch-string format:
+
+1. `FGetNamesForApp(app_id, NULL, 0, filename_buf)` resolves the app registry
+   entry
+2. `FUN_04102091` formats:
+
+   `-MOS:<app_id>:<node_hi>:<node_lo>:<type> <ri>`
+
+3. `HRMOSExec` then builds:
+
+   `<Filename> <formatted_args>`
+
+4. It calls `CreateProcessA`
+5. On failure it calls `MosErrorP`
+
+Important addresses:
+
+- `0x04102016` immediately after `FGetNamesForApp`
+- `0x04102185` `CreateProcessA` call site
+- `0x04102faa` `MosErrorP`
+
+### Live result for provisional `MSN Today -> c=5`
+
+The original server mapping advertised:
+
+- `MSN Today` -> `c = 5`
+- `ri = ""`
+
+Live breakpoints showed:
+
+- `HRMOSExec` is reached for `MSN Today`
+- at `0x04102016`, `EAX = 1`, so `FGetNamesForApp(5)` reports success
+- but reading the expected stack filename buffer at that stop produced only
+  `0xFF` fill bytes, not a usable executable path
+- resuming from that same invocation did **not** trip:
+  - `0x04102185` `CreateProcessA`
+  - `0x04102faa` `MosErrorP`
+
+The practical interpretation is that app id `5` is recognized by name but is
+not yielding a usable launch target in this client build, so `MSN Today` with
+`c=5` is not a viable launch mapping.
+
+### Offline Win95 image correlation
+
+The offline `win95_c.raw` string dump still shows the MOS app registry table.
+Relevant entries:
+
+- `FilenameC:\Progra~1\TheMic~1\dsnav.nav` + `Friendly nameDirectory_Service`
+- `FilenameC:\Progra~1\TheMic~1\guidenav.nav` + `Friendly nameGuide_Service`
+- `FilenameC:\Progra~1\TheMic~1\mosview.exe` + `Friendly nameMedia_Viewer`
+- `FilenameC:\Progra~1\TheMic~1\dnr.exe` + `Friendly nameDown_Load_And_Run`
+- `Friendly nameWhatsNew`
+
+Notably, `App #5` appears as `Friendly nameWhatsNew`, but in the simple raw
+string dump it does **not** appear with the adjacent `Filename...` pattern that
+the working app entries do. That matches the live `HRMOSExec` result above.
+
+### Server-side experiment: reroute `MSN Today` to app `6`
+
+To test a launchable app record instead of the broken `WhatsNew` mapping, the
+server was patched so node `0:4456524` now advertises:
+
+- `c = 6` (`Media_Viewer`)
+- `ri = ""`
+
+Files changed:
+
+- `server/services/dirsrv.py`
+- `tests/test_services.py`
+
+Tests passed after the patch:
+
+- `python -m unittest tests.test_services -v`
+- `python -m unittest tests.test_integration -v`
+
+### Live behavior after the `c=6` patch
+
+After restarting the live server and clearing breakpoints, `MSN Today`
+behavior changed again:
+
+- the first click produced traffic
+- the client queried node `0:4456508` for `ri,g`
+- it accepted the reply
+- then it sat for roughly 27 seconds with no meaningful second-stage request
+- it retried a tiny root query (`payload=0x0f`)
+- eventually, around 60 seconds, it closed `DIRSRV` pipe `8`
+- the UI later surfaced:
+  `"This service is not available at this time"`
+
+This means the current failure is **not** a raw transport outage anymore. The
+client can still talk to the server, but the launched path is waiting on some
+additional local/service-side condition and timing out into the generic
+availability dialog.
+
+### Error-path breakpoint attempt
+
+I re-armed:
+
+- `0x7f3fa1da` `ReportMosXErr`
+- `0x7f3fa179` `ReportMosXErrX`
+
+Results:
+
+- `0x7f3fa1da` armed successfully
+- `0x7f3fa179` returned `E22` from the 86Box stub and did not arm
+- reproducing the `"This service is not available at this time"` dialog did
+  **not** hit `ReportMosXErr`
+
+So the dialog is likely not coming through that exact helper, or the stub
+failed to preserve the breakpoint state at the relevant moment.
+
+### 86Box GDB stub note
+
+The local debugger helper `tools/gdb_debug.py` was improved this session after
+reading `86box/src/gdbstub.c`:
+
+- added a file lock to serialize access to the single-client stub
+- added `batch` mode to keep multi-step operations on one connection
+- documented that merely connecting pauses the guest and that reconnects can
+  cause `BrokenPipe` / stray pauses
+
+This reduced some debugger churn, but the 86Box stub still behaves
+inconsistently under repeated breakpoint work.
+
+### Best next steps
+
+1. Break in the launched `Media_Viewer` / post-launch process rather than in
+   `HRMOSExec`, because the path is now clearly getting beyond the earlier
+   dispatch stage.
+
+2. Capture the exact command line or module name for the rerouted
+   `MSN Today -> c=6` launch, ideally by stopping closer to the successful
+   `CreateProcessA` transition or by trapping the child process startup path.
+
+3. Revisit the missing second-stage request on `DIRSRV` pipe `8`:
+   the server sees the pipe open but still does not see the meaningful content
+   query that should follow a healthy `MSN Today` launch.
+
+4. If breakpointing remains unreliable, mine the client install / registry
+   more directly to recover the intended `WhatsNew` executable or a more
+   authoritative `MSN Today` app mapping than the current `Media_Viewer`
+   fallback experiment.
+
+## 2026-04-13: Deep static RE narrows the `MSN Today` timeout to `MVTTL14C!hrAttachToService`
+
+After the live `MSN Today -> app_id 6` experiment produced:
+
+- one burst of traffic
+- a new `DIRSRV` pipe (`pipe 8`)
+- then ~30 seconds of silence
+- then the UI dialog:
+  `"This service is not available at this time"`
+
+I switched to static analysis of the media-view stack in:
+
+- `MOSVIEW.EXE`
+- `MVCL14N.DLL`
+- `MVTTL14C.DLL`
+
+### 1. `MOSVIEW.EXE` startup path
+
+`MOSVIEW.EXE` main startup is `FUN_7f3c1053`.
+
+Important behavior:
+
+- it calls `FGetCmdLineInfo` imported from `MCM.DLL`
+- for a normal `-MOS:` command line, it parses:
+  - app id
+  - node id high dword
+  - node id low dword
+  - type
+  - trailing `ri` string after the first space
+
+`MCM.DLL!FGetCmdLineInfo` (`0x041022ba`) confirms the syntax:
+
+`-MOS:<appid>:<node_hi>:<node_lo>:<type> <ri>`
+
+For the `MSN Today` node id we were serving (`0:4456524 = 0x0044004c`):
+
+- `DAT_7f3cd04c = 0`
+- `DAT_7f3cd048 = 0x0044004c`
+
+and `MOSVIEW` rewrites its internal launch token to a simple hex string:
+
+- `DAT_7f3cd054 = "44004C"`
+
+So by the time `CreateMediaViewWindow(...)` runs, it is **not** operating on
+the raw `-MOS:` command line anymore.  It operates on the normalized title key
+`"44004C"` plus the trailing `ri` string.
+
+### 2. `CreateMediaViewWindow` gates
+
+`CreateMediaViewWindow` is `0x7f3c4f26`.
+
+Its control flow:
+
+1. Look up / create a handler record for the normalized key (`"44004C"`)
+2. Call `FUN_7f3c61ce(param_1, app_seq, hwnd)`
+3. If that returns `0`, abort startup immediately
+4. Otherwise call `FUN_7f3c6790(...)` to build the actual view hierarchy
+
+The important point is that `FUN_7f3c61ce` is the earliest stage where
+`MOSVIEW` establishes the title/service connection.  If it fails, later UI
+construction never happens.
+
+### 3. `FUN_7f3c61ce`: MEDVIEW title open sequence
+
+`FUN_7f3c61ce` is `0x7f3c61ce`.
+
+It does:
+
+1. `MosViewStartConnection("MEDVIEW")`
+2. build a title-open string using:
+
+   `":%d[%s]%d"`
+
+   with:
+   - the global title type id (`DAT_7f3cd2e8 = 2`)
+   - the normalized key (`"44004C"`)
+   - trailing integer `0`
+
+   producing effectively:
+
+   `":2[44004C]0"`
+
+3. `hMVTitleOpen(":2[44004C]0")`
+4. `lpMVNew()`
+5. pull multiple title-info record classes (`0x2b`, `0x1f`, `0x98`, string list)
+6. if all that succeeds, later `FUN_7f3c6790` lays out windows and topics
+
+So the viewer connection is:
+
+- title family = `MEDVIEW`
+- title type = `2`
+- title key = `44004C`
+
+### 4. `MVCL14N.DLL`: title type `2` maps to `MVTTL14C.DLL`
+
+`MVCL14N.DLL!MVTitleConnection` is `0x7e885090`.
+
+For title type `2`, it loads the second provider DLL from its title-provider
+table:
+
+- title type `1` -> `MVTL14N.DLL`
+- title type `2` -> `MVTTL14C.DLL`
+
+and then calls that provider's exported `TitleConnection`.
+
+### 5. `MVTTL14C.DLL!TitleConnection`
+
+`MVTTL14C.DLL!TitleConnection` is `0x7e8446f3`.
+
+Behavior:
+
+- if passed `NULL`, it detaches
+- if passed empty string, it substitutes `"MEDVIEW"`
+- otherwise it calls:
+
+  `hrAttachToService(param_1, NULL, NULL)`
+
+and maps errors as:
+
+- if `hrAttachToService` returns `0x8b0b0011`, remap to `0x8b0b0407`
+- otherwise any negative HRESULT becomes:
+  `high_word(original) | 0x07d1`
+
+This is important because `MOSVIEW.EXE`'s top-level startup later does:
+
+- if `CreateMediaViewWindow(...) == 0` and `DAT_7f3cd2ec != 0x407`
+  - call `MosErrorP(..., 1, 9, 0)`
+
+That is the generic `"This service is not available..."` path.  So the exact
+dialog the user saw is consistent with:
+
+- `TitleConnection` failing
+- but **not** with the special remapped `0x407` case
+
+### 6. `MVTTL14C.DLL!hrAttachToService` is the likely timeout site
+
+`hrAttachToService` is `0x7e844114`.
+
+This is the deepest useful finding from the session.
+
+It:
+
+1. lazily initializes COM
+2. `CoCreateInstance` with:
+   - CLSID `00028B07-0000-0000-C000-000000000046`
+   - IID   `00028B08-0000-0000-C000-000000000046`
+3. on the resulting helper object, calls method `+0x24` with:
+   - service name `"MEDVIEW"`
+   - IID `00028B71-0000-0000-C000-000000000046`
+   - out pointer for a service object
+   - flags `0x1400800a`
+4. obtains another object from the service object
+5. pulls an async waiter / notifier object from that
+6. waits on it with:
+
+   `FUN_7e843dcb(local_c, 30000, 0xffffffff)`
+
+#### Related GUID block in `MVTTL14C`
+
+Near the attach IID there is a contiguous GUID cluster:
+
+- `00028B60`
+- `00028B61`
+- `00028B70`
+- `00028B71`
+- `00028B72`
+- `00028B73`
+
+Only `28B71` is referenced directly in `hrAttachToService`, but the adjacent
+family strongly suggests another media-view selector/IID block, analogous to
+the previously recovered DIRSRV family `28B25..28B2E`.
+
+### 7. The 30-second wait matches the live symptom exactly
+
+`FUN_7e843dcb` (`0x7e843dcb`) polls the async object every 100 ms.
+
+It treats HRESULT `-0x74f4fff7` as "still pending" and loops until either:
+
+- the call completes with another status, or
+- the supplied timeout expires
+
+In the `hrAttachToService` call site, the timeout is **30000 ms**.
+
+This matches the live run very closely:
+
+- first click opens a new `DIRSRV` pipe after launch
+- then there is about half a minute of no meaningful traffic
+- then the UI eventually reports service unavailable
+
+The best current hypothesis is:
+
+- the async attach object never transitions out of the pending HRESULT
+- after ~30 seconds `hrAttachToService` returns failure
+- `TitleConnection` maps that failure to generic `...07d1`
+- `MOSVIEW` converts that into the service-unavailable dialog
+
+### 8. Static interpretation of the remaining server gap
+
+The earlier runtime traces showed:
+
+- `MSN Today` click can now reach `MOSVIEW`
+- a fresh post-launch `DIRSRV` pipe opens
+- but the server never sees the meaningful follow-up RPC that should satisfy
+  the media attach path
+
+Combined with the `MVTTL14C` analysis above, that strongly suggests the real
+missing piece is **not** the old shell-tree metadata anymore.  It is some
+initial media-view service/interface attach flow that our current discovery /
+selector catalog does not satisfy.
+
+Most concrete candidate:
+
+- publish or otherwise support the `00028B71` / likely `00028B72` media-view
+  interface family in the relevant service map (very possibly still under the
+  transport's `DIRSRV`-backed attach path)
+
+### 9. Recommended next RE steps
+
+1. Inspect `MVTTL14C` around the service-object method invoked after the
+   `00028B71` attach to recover the exact async object semantics and the error
+   codes it returns.
+
+2. Trace where `00028B72` is used in `MVTTL14C` (likely via vtable/QueryInterface
+   paths rather than a direct static GUID reference).
+
+3. Revisit the server's interface discovery catalogs with the new media-view
+   family in mind:
+   - `00028B71`
+   - probably `00028B72`
+   - possibly the broader nearby cluster `28B60/61/70/71/72/73`
+
+4. Correlate the new IIDs with the post-launch `DIRSRV` pipe (`pipe 8`) seen
+   on the wire, because that pipe is the most likely runtime manifestation of
+   `hrAttachToService("MEDVIEW", IID 28B71, ...)`.
+
+### Operational handoff state
+
+At the end of this session:
+
+- the Win95 VM was restarted with:
+
+  `QT_QPA_PLATFORM=xcb 86Box_dbg -P "/home/gabriels/86Box VMs/Windows 95/" -R "/home/gabriels/projetos/86BoxROMs/"`
+
+- the guest CPU was resumed with:
+
+  `python3 tools/gdb_debug.py batch "resume"`
+
+- live 86Box process observed:
+  - `pid 94090`
+  - command `86Box_dbg -P /home/gabriels/86Box VMs/Windows 95/ -R /home/gabriels/projetos/86BoxROMs/`
+
+- no useful breakpoints should be assumed active for handoff
+
+- the dial-up server log still reports:
+  - `[*] MSN dial-up server listening on 0.0.0.0:2323`
+
+The practical next-session starting point should be:
+
+1. verify the server is still actually listening on `:2323`
+2. if needed, relaunch it in a persistent attached session rather than a
+   shell-backgrounded process
+3. continue from the `MVTTL14C!hrAttachToService` / `00028B71` attach path
+   rather than the older shell-tree-property analysis
+
+## 2026-04-13 — Course correction on the DIRSRV-tree hypothesis
+
+Critical re-read of the previous two journal entries showed the chain
+`MSN Today click → MOSVIEW launch → 30 s wait on MEDVIEW IID 28B71` was
+reached by **feeding the client invented data**, not by tracing the real
+dispatch path.  Reverting that scaffolding now to keep the foundation honest.
+
+### What is being kept (sound static evidence)
+
+- `MOSSHELL.CMosTreeNode::GetShabbyViaFtm` (`0x7f3fd800`) calls
+  `HrFtmDownloadWithUI("DIRSRV", ...)` — confirms MOSSHELL is a DIRSRV
+  consumer.
+- `TREENVCL.CTreeNavClient` ctor (`0x7f63113d`) does
+  `CoCreateInstance(CLSID 28B07, IID 28B08)` then resolves IID **28B27** —
+  this is the only DIRSRV IID confirmed as actually requested.
+- Adjacent GUID family `28B25..28B2E` exists at `0x7f633250` in TREENVCL
+  but only `28B27` has been seen in use.  Memory adjacency is **not**
+  evidence the others are needed.
+- `MVTTL14C.hrAttachToService` (`0x7e844114`) waits 30 s on IID `28B71`
+  for service `MEDVIEW`; `FUN_7e843dcb` polls every 100 ms for HRESULT
+  `-0x74f4fff7` ("still pending").  This explains the 30-second timeout
+  symptom **whenever** MOSVIEW is actually launched, regardless of how it
+  got launched.
+- App registry table from `win95_c.raw`:
+  - app 1 = `dsnav.nav` (Directory_Service)
+  - app 3 = `guidenav.nav` (Guide_Service)
+  - app 4 = `mosview.exe` (Media_Viewer)  *(unverified id)*
+  - app 5 = `WhatsNew` — friendly name only, **no Filename entry** in the
+    raw dump.  In this client build app 5 is registered but unlaunchable.
+  - app 7 = `dnr.exe` (Down_Load_And_Run)
+- `MCM.HRMOSExec` (`0x041020d8`) builds command line
+  `<Filename> -MOS:<app_id>:<node_hi>:<node_lo>:<type> <ri>` and calls
+  `CreateProcessA`.
+- `MOSVIEW.FUN_7f3c1053` parses `-MOS:` args; for type `2` it eventually
+  calls `MVCL14N.MVTitleConnection` which loads `MVTTL14C.DLL` and calls
+  its `TitleConnection` export.
+
+### What is being reverted (speculative scaffolding)
+
+1. `DIRSRV_NODES` tree in `server/services/dirsrv.py` — the hardcoded
+   `0:0 → 0:4456508 (MSN Central) → [5 icon children]` structure was
+   invented.  `sub_id` values, `app_id` assignments (MSN Today→6,
+   E-Mail→3, Favorite Places→1, Member Asst→13, Categories→3), and the
+   `b=0x01 for folders / 0x00 for non-folders` rule had no static evidence.
+   The only "validation" was that the symptom changed from "Cannot open
+   service" → "service not available after 30 s", which is what would
+   happen for any forced MOSVIEW launch with a missing MEDVIEW service.
+2. Tests `test_msn_central_children_include_shell_icons` and
+   `test_msn_central_children_expose_exec_metadata` — these pinned the
+   invented tree as expected behavior.
+3. Selector-map expansion to `28B25..28B2E` (selectors `0x01..0x0A`).
+   Reverted to single `(28B27, 0x01)` to match the only IID actually
+   resolved at runtime; reshaping selector numbering for unverified IIDs
+   risks breaking future runtime behavior the server has not been
+   exercised against.
+
+### What is being kept (instrumentation)
+
+- `DirsrvRequest.node_id_raw` field (`server/models.py`) — useful for
+  observing the wire bytes of the 8-byte `_MosLid64`.
+- Extended `decode_dirsrv_request` doc + raw capture in `server/mpc.py`.
+- Improved `[DIRSRV] node=… raw=…` log line in
+  `server/services/dirsrv.py`.
+- `test_guid_records_match_catalog` (replaces the rigid
+  `payload[16] == 0x01` assertion with a loop over the catalog) — works
+  for any catalog size and is strictly better.
+
+### Why the "progress" was misleading
+
+The original "Cannot open service" error happened with **no DIRSRV query
+for `0:4456508`** in the trace — that node only got queried after
+`DIRSRV_NODES` was populated to advertise it as a child of `0:0`.  So the
+node-not-found cache miss the live BP captured at `FUN_7f3fb9f5` was on
+something else (probably a node returned by `GUIDENAV.GETPMTN` for the
+JUMP target, whose property cache nobody ever populates because GUIDENAV
+overrides `GetProperty` instead of seeding the cache).
+
+The `c=6` patch then forced HRMOSExec to launch `mosview.exe`, which then
+necessarily hit the 30-second `hrAttachToService` wait because the server
+serves no MEDVIEW.  Both effects are downstream of the invented tree, not
+evidence the tree is right.
+
+### Real next steps
+
+1. **Verify icon source.**  Set a one-shot HW BP on
+   `GUIDENAV.FUN_7f5123ce` (HOMEBASE icon-table loader, `0x7f5123ce`).
+   If it fires during home-view rendering, the 5 icons are sourced from
+   the HOMEBASE custom resource and the previous-session memory is
+   correct — DIRSRV is **not** the icon source.
+2. **Capture the cache miss in detail.**  Re-arm the BP on
+   `0x7f3fb9f5` and dump full registers + the first 8 stack dwords.
+   `ECX` (the `this` for `CPropertyCacheElt`) and the return address tell
+   us which node owns the empty cache and what code path is asking.
+3. **Trace the JUMP dispatch.**  HOMEBASE action `LJUMP 1:4:0:0` for
+   MSN Today routes to GUIDENAV (field_0=1).  Step through
+   `GUIDENAV.GETPMTN(1:4:0:0)` and the subsequent `ExecuteCommand` to
+   see who reads `c` and from where; that is what `c` should actually be
+   for MSN Today (rather than guessing 5 vs 6).
+4. **Only then** decide whether MEDVIEW + IID 28B71 needs server support.
+   That work is real and will be needed if MSN Today's real path goes
+   through MOSVIEW — but not before the dispatch architecture is
+   understood.
+
+## 2026-04-14 — MSN Today click root cause pinned: DSNAV node, 'b' bit 3
+
+Live SoftICE session (VT100 serial bridge) while stopped inside Explorer at
+`ExecuteCommand` entry confirmed the exact failure point. Prior sessions had
+speculated about GUIDENAV overrides, HrBrowseObject, and
+`CMosTreeNode::GetProperty`'s cache-miss fallback at `0x7F3FCF03`; all were
+wrong. The dialog originates from the **outer guard at the top of
+`CMosTreeNode::ExecuteCommand` itself**.
+
+### Trace of one click
+
+1. Click MSN Today → `MOSSHELL.CMosTreeNode::ExecuteCommand` (0x7F3FF693)
+   entered with `this = 0x00BE06DC`, `cmd = 0x3000` (default open),
+   `param_4 = IShellBrowser (0x004414AC)`, return = 0x7F512860 (GUIDENAV JUMP
+   dispatcher).
+2. Outer guard at 0x7F3FF6CB issues `vt[0x40]("b", &byte, 1, 0)` on `this`.
+3. Guard reads byte, `TEST byte [ESP+0x13], 0x8` — **bit 3 is set**, so
+   `JZ 0x7F3FF701` is NOT taken.
+4. Falls through to 0x7F3FF6E4 `MOV [ESP+0x14], 0x8B0B0041` (local_14
+   overwritten with MSN error code).
+5. `CALL 0x7F3FA1DA` = `ReportMosXErr`. HRESULT at `*arg1` confirmed
+   `0x8B0B0041`. Caller return `0x7F3FF6F8` (right after the CALL).
+6. `ReportMosXErr` internally calls `ReportMosXErrX` (0x7F3FA179) which
+   displays the "Cannot open service." dialog — hosted by Explorer.
+
+Both `ReportMosXErr` and `ReportMosXErrX` BPs fired; HrBrowseObject (0x7F3FA76C)
+BP did NOT fire. So the switch body for case 0x3000 never runs.
+
+### The object is DSNAV, not GUIDENAV
+
+`this = 0x00BE06DC` has vtable `0x7F586020`. That vtable lives in
+**DSNAV.NAV** (SoftICE reports `DSNAV!.text+1E5C` for the thunks at
+`0x7F582E5C+`). DSNAV's vtable is populated with import thunks that forward
+to MOSSHELL exports:
+
+- slot 15 (+0x3C) → `JMP [0x7F589494]` → `0x7F3FCE12` (MOSSHELL FindProperty)
+- slot 16 (+0x40) → `JMP [0x7F589490]` → `0x7F3FCE71` (MOSSHELL GetProperty)
+
+So DSNAV does **not** override the property accessors; it uses MOSSHELL's
+generic `GetProperty` which in turn calls `FindProperty` (cache search) +
+`FUN_7F3FB9F5` (read by index). For MSN Today, `FindProperty("b")` succeeded
+(guard's HRESULT was 0 at 0x7F3FF6D4), so 'b' *is* in the DSNAV node's
+property cache — with bit 3 set.
+
+The node fields after the vtable pointer are `field_0=2, field_1=0,
+field_2=0, field_3=0` (all dwords). This differs from the GUIDENAV small-node
+`(1:4:0:0)` encoding. DSNAV and GUIDENAV use the same MOSSHELL base class
+but live in different module trees.
+
+### Correction to prior understanding
+
+- Prior memory held that GUIDENAV's `vt[0x10]` override returns 'b'=0x02 for
+  every node (bit 3 clear) and that the "Cannot open service" error was
+  therefore the GetProperty cache-miss fallback. **That memory was about the
+  wrong module.** MSN Today click never enters GUIDENAV from the user's
+  click; it enters DSNAV directly.
+- Prior memory called slot 16 "GetPropertyFromHost". Its real name is just
+  `GetProperty` (0x7F3FCE71). The confusion came from inspecting GUIDENAV's
+  override side only.
+
+### The actual question now: who sets 'b' bit 3 on the DSNAV node?
+
+The 'b' byte is cached on the DSNAV node before the click. Bit 3's semantics
+per the ExecuteCommand guard are "non-browsable / must not be opened via
+this path." Server-side, `server/services/dirsrv.py` returns all-zero
+properties except `q=1` for non-children requests — so DIRSRV is NOT putting
+bit 3 in 'b'. Candidates:
+
+- DSNAV seeds its own property cache at node construction with some default
+  `b` value (possibly reading from a HOMEBASE-like resource / service map).
+- A different service writes 'b' into the cache — `MCM` / `MOSAF` / the
+  catalog GUID family are candidates.
+- The 'b' cache value was copied from a parent node whose 'b' should have
+  been different.
+
+### Next steps
+
+1. Import `binaries/DSNAV.NAV` into the Ghidra project (not currently
+   imported — only GUIDENAV.NAV is). Base 0x7F580000 at runtime.
+2. Find the DSNAV code path that creates/populates the MSN Today node's
+   property cache. Specifically: where it calls the MOSSHELL `AddProperty`
+   equivalent for 'b' (or the setter exposed via the import table).
+3. Re-click with a live BP at 0x7F3FF6D6 (TEST byte) and read the actual
+   byte value to confirm the exact `b` (not just "bit 3 set"). Then walk
+   back to see the write.
+4. Once the write site is known, decide whether:
+   - the server needs to send a non-default 'b' for this node, or
+   - the client needs a different upstream property (e.g. a missing parent
+     'a'/'e' that would flip the DSNAV's default 'b' computation), or
+   - this is the wrong click path entirely and the HOMEBASE 5-icon view
+     should never dispatch MSN Today through DSNAV's
+     `ExecuteCommand(cmd=0x3000)`.
+
+### Why prior "real next steps" 1–3 were partly misdirected
+
+The previous plan focused on GUIDENAV.GETPMTN and the
+`FUN_7F3FB9F5` cache-miss return — both are real code paths, but neither
+is on the failing click's hot path. GUIDENAV's JUMP dispatcher is in the
+caller chain (return address = 0x7F512860 is inside GUIDENAV), but the
+object that `ExecuteCommand` runs against is DSNAV's, not GUIDENAV's. The
+outer-guard bit-3 check fails before any code that would touch GUIDENAV
+overrides or `FUN_7F3FB9F5` for MSN Today's own data.
+
+## 2026-04-14 — 'b' was "not-received", not "bit-3-set"; fix exposes MCM layer
+
+### Live SoftICE BP nailed the real HRESULT
+
+With `ADDR explorer` and BP at `0x7F3FF6D2` (TEST EAX after the GetProperty
+vtable call — fires on both success and failure paths), the second MSN
+Today click stopped with `EAX = 0x8B0B0041`. That's the COM-style
+"property not received" return from MOSSHELL's FUN_7f3fb9f5 cache read
+(returns 0x8B0B0041 when `this+8 == 0`), NOT a successful GetProperty
+whose 'b' byte has bit 3 set.
+
+So the outer guard in ExecuteCommand never reached its `TEST byte 0x8`
+branch on first click — GetProperty itself failed, `iVar3 < 0` took the
+`JL` at 0x7F3FF6D4 directly to the `MOV [ESP+0x14], 0x8B0B0041; CALL
+ReportMosXErr` sequence. (The `TEST byte` is only executed on the second
+click, for reasons we haven't yet traced — likely because one call path
+seeds the cache as side-effect while the other doesn't.)
+
+**Prior memory `project_msn_today_property_b_check.md` had the final
+mechanism wrong.** It's not "bit 3 set on a successfully-returned 'b'";
+it's "'b' never got written to the node's cache, GetProperty returns the
+not-received sentinel."
+
+### Why 'b' was empty: DIRSRV GetChildren reply had no properties
+
+`server/services/dirsrv.py`'s pre-fix GetChildren branch for MSN Central's
+children returned a 33-byte SVCPROP record with zero property entries
+(just the header). The client accepted the reply, allocated DSNAV nodes
+for each child, but populated nothing into their property caches. When
+MSN Today's node got clicked, `GetProperty("b", …)` hit FUN_7f3fb9f5 →
+`this+8 == 0` → 0x8B0B0041.
+
+### Fix (shipped in this session)
+
+Added `build_child_props(requested_props, title, children)` to
+`server/services/dirsrv.py`. The children branch now populates every
+requested property with a default value (`p` = title string, `c` = int,
+`h` = 1, `b` = 0, etc.) and emits one `build_property_record` per child
+node. Hardcoded node-id check removed (IDs aren't stable across sessions).
+
+Live result: the "Cannot open service." dialog is gone. A new dialog
+appears — "This task cannot be completed at this time.##Please try again
+later." — which confirms we pushed past the outer 'b' guard and hit the
+next layer.
+
+### Static analysis of the new dialog
+
+The new string lives at MCM.DLL `0x0411f9b2` (PE `/PascalUnicode`
+STRINGTABLE, 68 chars, no direct xref). The `##` separator pattern is
+the MosError dialog proc's convention (MCM `FUN_04103063`): the primary
+text goes to dialog item 0x65, the secondary text (after `##`) to 0x66.
+
+Dialog entry points in MCM (`MosErrorP → MosErrorExP → MosError`), plus
+the common-error shim:
+
+- `MosCommonError(hwnd, N)` — builds a param block with
+  `text_id = N + 0x192` and calls `MosError`. The base `0x192` is the
+  MCM STRINGTABLE resource ID for the first common-error string.
+- MOSSHELL's `ReportMosXErr` (0x7F3FA1DA) dispatches HRESULTs:
+  - `0x8B0B0041` → `iVar2 = 6` → `ReportMosXErrX(6, node)` → MosError
+    with MOSSHELL STRINGTABLE entry at table-slot 6 (resource 0xB0,
+    "Cannot open service.##This service is not available at this time.
+    Please try again later." at MOSSHELL 0x7F41D0F8).
+  - Many other 0x8B0B00xx codes → explicit `MosCommonError(hwnd, 1..10)`.
+  - **Default fallback** (`LAB_7f3fa357`): `MosCommonError(hwnd, 0)` →
+    MCM resource `0x192`. The observed "This task cannot be completed
+    at this time." string is the best fit for this generic
+    resource-0-based dialog.
+
+### 'c' is app_id, not children-count — current server fix is semantically wrong
+
+Decompiling `CMosTreeNode::Exec` (MOSSHELL `0x7F3FEBA6`):
+
+```c
+iVar3 = vt_GetProperty(this, "z", &pricing, 4, 0);  // pricing confirm
+iVar3 = vt_GetProperty(this, "c", &app_id, 4, 0);
+if (app_id == 7) {
+    CreateOleWorkerThread(FUN_7f3fea8c, …);          // browser URL path
+} else {
+    vt_GetProperty(this, "x", &args, 0);              // cmdline args
+    local_8 = HRMOSExec(app_id, args, …);             // MCM: CreateProcessA
+}
+```
+
+`HRMOSExec(app_id, args, …)` (MCM `0x041020d8`):
+
+1. `FGetNamesForApp(app_id, …)` reads `HKLM\SOFTWARE\Microsoft\MOS\
+   Applications\App #<app_id>\{Filename, Friendly name}`.
+2. If no registry entry → returns 0 silently (no dialog).
+3. Else: builds cmdline, `CreateProcessA`. On failure:
+   `LoadStringA(0x52a/0x52d/0x52e)` + `wsprintfA` + `MosErrorP(NULL,
+   hInst, 0x529, formatted_text, 0)` — a custom MCM dialog, NOT the
+   "This task cannot be completed" one.
+
+`build_child_props` currently sets `c = children_count` for MSN Today
+(`children=0`), so `HRMOSExec(0, …)` runs. With no `App #0` registry
+entry, this path returns silently. **Therefore the dialog isn't coming
+from HRMOSExec.** It's coming earlier — a `GetProperty("z" | "c" | "x")`
+still returns 0x8B0B0041 for some property we haven't populated, OR the
+shell post-processes Exec's return and maps it through `MosCommonError`.
+
+### Next-steps shortlist
+
+1. Correct `build_child_props` to set `c` semantically — an app_id, not
+   a children count. Candidate values from journal context:
+   - `c = 7` → browser worker thread (needs a URL as the associated
+     string). Safe default if no real MSN Today app exists locally.
+   - `c = 5` (Media_Viewer) / `c = 6` (MOSVIEW) per earlier probes, but
+     only if the VM actually has `App #5` / `App #6` registered.
+2. Verify MSN Central is labeled as a container (`h = 1` for the parent
+   that's the 0:0 → MSN Central link, non-leaf), and MSN Today's
+   `c/h` combination matches the child-leaf semantics the shell expects.
+3. Populate `z` (pricing) and `x` (args) explicitly in the children
+   reply to avoid any `GetProperty` miss on a subsequent click.
+4. Live-trace (BP at 0x7F3FEC02 entry to `CMosTreeNode::Exec` + print of
+   all GetProperty HRESULT returns) to confirm which property read still
+   hits 0x8B0B0041 post-fix. Then either populate it server-side or
+   satisfy the node via DSNAV's own property defaults.
+
+### Corrections to prior entries
+
+- **`project_msn_today_property_b_check.md`**: the "'b' bit 3 set" story
+  is wrong. The real failure was 'b' not-received (cache flag 0 at
+  `this+8`). Will update.
+- **Journal "DSNAV seeds bit 3"** (earlier section): scrap that line of
+  investigation. The DSNAV node's property cache was simply empty
+  because our server never sent property records for its children.
+
+## 2026-04-14 (later) — DIRSRV stable state: '0'-icon children, no OOM
+
+### What was actually wrong with the empty-blob path
+
+Walking the working state back from a regression chase: the original
+DIRSRV reply for `('wv', 'tp', 'w', 'l')` and `'x'` sent type-0x0E blobs
+with a 4-byte length prefix of `0`. SVCPROP delivers the blob to the
+client's property cache as `(length=0, data=NULL_after_malloc(0))`.
+MOSSHELL's `FUN_7f3fb9f5` (cache reader) treats `received_flag=1 &&
+data_ptr==NULL` as `E_OUTOFMEMORY` (`0x8007000E`), which `ReportMosXErr`
+maps to `MosCommonError(1)` → the "Out of memory" dialog.
+
+Sending a **1-byte NUL payload** (length=1, data=`\x00`) makes the
+client's `malloc(1)` return a non-NULL pointer; the cache slot is
+considered valid and `GetProperty` returns the blob without tripping the
+OOM check. This is the minimum-viable fix for those four blob props.
+
+### `c` and the 8-byte mnid — what landed
+
+`build_child_props(requested_props, title, *, is_container, c_value,
+mnid_a)` in `server/services/dirsrv.py` now centralises:
+
+- `'p'` = title as length-prefixed ASCII blob (visible icon label, root
+  level — still renders as a literal `"0"` because that's the placeholder
+  numeric form the shell uses when no proper Name is supplied; the
+  actual title hasn't reached the icon label path yet).
+- `'a'` = 8-byte mnid blob `pack('<II', 0x44000c-or-d, 0)` (formerly a
+  DWORD 0). This is what `CMosTreeNode::GetNthChild` reads to construct
+  the child node's mnid (`field_8`/`field_c`).
+- `'b'` = 1-byte byte-tag (0x01) — `0x01` for containers, `0x00` for
+  leaves. Browse-flags semantics: bit 0 = container, bit 3 = denied.
+- `'c'` = registered MOS app_id DWORD, **not** child count. `1` =
+  `Directory_Service` (DSnav containers), `7` = `Down_Load_And_Run`
+  (browser-URL leaves; `CMosTreeNode::Exec` short-circuits to
+  `CreateOleWorkerThread` for `c == 7`).
+- `'h'` = DWORD 1/0 (container/leaf).
+- `'x'`, `('wv','tp','w','l')` = length-1 NUL blob (see above).
+- everything else = DWORD 0 catch-all.
+
+A `node_table` keyed by wire `node_id` (`f0:f8` decoded from the 8-byte
+`_MosLid64` `'a'` blob) selects `(title, is_container, c_value, mnid_a)`
+per node. `0:0` → "Root" (container), `0:4456460`/`4456460:0` → "MSN
+Central" (container), `4456461:0` → "MSN Today" (leaf), unknown ids
+default to "MSN Today" leaf.
+
+### Observed behaviour (this session)
+
+- Login completes; MSN Shell renders.
+- MSN Central icon clicks open without "Out of memory" or "Cannot open
+  service".
+- Child icon shows the forbidden-circle "0" placeholder (no proper Name
+  routed through to the listview yet).
+- Double-click on the "0" icon navigates into an identical view (MSN
+  Today's children = MSN Today recursively, since unknown ids fall back
+  to that leaf).
+
+### Regressions this session caused (and how they were resolved)
+
+1. Promoting `'p'` from DWORD-0 (catch-all) to a length-prefixed title
+   blob in the `not is_children` path → MSN Central stopped opening,
+   "Out of memory" returned. Reverted that path to use the same
+   `build_child_props` so types stay consistent.
+2. Adding `name in string_blob_props` without defining the variable →
+   `NameError` raised mid-DIRSRV-reply, killed the connection, surfaced
+   as "task cannot be completed at this time". Removed the dead branch.
+3. Reverted too far back to the committed code → `build_property_record([])`
+   for children → "Cannot open service." Re-restored the
+   `build_child_props` + `node_table` shape from the working snapshot
+   in `~/.claude/projects/.../abfc885a-...jsonl` line 2139.
+
+### Next steps (still open)
+
+1. Route the title into the icon-view label so the child renders as
+   "MSN Today" instead of "0". Decode of MOSSHELL's General-tab dialog
+   procedure (template #101) is still pending — the wire-property → label
+   mapping there will tell us which prop the listview reads.
+2. Stop the recursive MSN-Today-under-MSN-Today behaviour. Either return
+   no children for the leaf node, or route the `node_table` lookup off a
+   real child id sent in the `'a'` mnid blob.
+3. Once `c=7` actually runs, MSN Today should hand a URL to the browser
+   worker thread (`CMosTreeNode::Exec` → `CreateOleWorkerThread(FUN_7f3fea8c)`).
+   We don't yet populate the URL; expect the worker thread to fail
+   silently or pop a custom MCM dialog.
