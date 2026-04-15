@@ -1,14 +1,15 @@
 """Server-wide logging configuration.
 
 One top-level `server` logger with per-module children. Records carry
-connection-local `elapsed` and `event_no` fields injected by a
-`ContextVar`-backed filter — callers inside a connection loop call
-`set_context()` at each event boundary so any handler that logs on that
-call gets the right prefix. Outside a connection (boot, shutdown, stray
-exceptions) the filter defaults both to zero.
+connection-local `conn_id`, `elapsed`, and `event_no` fields injected by
+a `ContextVar`-backed filter. `conn_id` is set once per connection via
+`set_connection()`; `elapsed` + `event_no` advance per event via
+`set_context()`. Outside a connection (boot, shutdown, stray
+exceptions) the filter reports zeros for all three.
 
 TRACE (level 5) is added below DEBUG for hex-dump firehose.
 """
+
 from __future__ import annotations
 
 import contextvars
@@ -28,17 +29,36 @@ def _trace(self, msg, *args, **kwargs):
 logging.Logger.trace = _trace
 
 
-_ctx: contextvars.ContextVar[dict] = contextvars.ContextVar(
-    "server_log_ctx", default={"elapsed": 0.0, "event_no": 0},
+_conn_id: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "server_log_conn_id",
+    default=0,
+)
+
+_ctx: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "server_log_ctx",
+    default=None,
 )
 
 
 class _CtxFilter(logging.Filter):
     def filter(self, record):
+        record.conn_id = _conn_id.get()
         ctx = _ctx.get()
-        record.elapsed = ctx["elapsed"]
-        record.event_no = ctx["event_no"]
+        if ctx is None:
+            record.elapsed = 0.0
+            record.event_no = 0
+        else:
+            record.elapsed = ctx["elapsed"]
+            record.event_no = ctx["event_no"]
         return True
+
+
+def set_connection(conn_id):
+    _conn_id.set(conn_id)
+
+
+def clear_connection():
+    _conn_id.set(0)
 
 
 def set_context(elapsed, event_no):
@@ -46,7 +66,7 @@ def set_context(elapsed, event_no):
 
 
 def reset_context():
-    _ctx.set({"elapsed": 0.0, "event_no": 0})
+    _ctx.set(None)
 
 
 def configure(level=None):
@@ -56,11 +76,13 @@ def configure(level=None):
         resolved = TRACE if level_name == "TRACE" else logging.INFO
 
     handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s.%(msecs)03d %(levelname)-5s "
-        "[%(elapsed)7.3f #%(event_no)04d] %(name)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
-    ))
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s.%(msecs)03d %(levelname)-5s "
+            "[c=%(conn_id)03d %(elapsed)7.3f #%(event_no)04d] %(name)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    )
     handler.addFilter(_CtxFilter())
 
     root = logging.getLogger("server")

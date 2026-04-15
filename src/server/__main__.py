@@ -1,4 +1,6 @@
 """Entry point: python -m server"""
+
+import datetime
 import logging
 import socket
 
@@ -10,7 +12,7 @@ from .connection import handle_connection
 def main():
     server_log.configure()
     log = logging.getLogger("server")
-    log.info("listen host=%s port=%d", HOST, PORT)
+    log.info("listen host=%s port=%d date=%s", HOST, PORT, datetime.date.today().isoformat())
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -25,5 +27,5 @@ def main():
                 log.exception("unhandled_exception")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
