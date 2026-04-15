@@ -13,12 +13,14 @@ Two flavours:
 """
 
 import contextlib
+import os
 import socket
 import struct
 import threading
 import time
 import unittest
 
+from server import log as server_log
 from server.connection import handle_connection
 from server.models import DwordParam, EndMarker, VarParam
 from server.mpc import (
@@ -29,6 +31,10 @@ from server.mpc import (
 )
 from server.pipe import build_control_frame, build_pipe_frame
 from server.transport import build_packet, parse_packet
+
+# Route server logs to stdout when auditing DEBUG/TRACE output.
+if os.environ.get("MSN_LOG_LEVEL"):
+    server_log.configure()
 
 
 class TestFullSession(unittest.TestCase):
@@ -348,9 +354,10 @@ class TestFullFeatureSession(unittest.TestCase):
         self._exercise_ftm()
         self._exercise_olregsrv()
         self._exercise_onlstmt()
+        self._exercise_unknown_selector()
+        self._exercise_pipe_reopen()
 
         for pipe in (
-            self.PIPE_LOGSRV,
             self.PIPE_DIRSRV,
             self.PIPE_FTM,
             self.PIPE_OLREGSRV,
@@ -413,6 +420,14 @@ class TestFullFeatureSession(unittest.TestCase):
 
         pkts = self._call_selector(self.PIPE_LOGSRV, 0x06, 0x0D, sig_payload, req_id=7)
         self.assertEqual(self._reply_payload(pkts)[0], 0x84)
+
+        # 0x0E — existing-member phonebook; expects one send dword and
+        # replies with a single 0x83 dword = 0.
+        phonebook_req = _send_param_dword(8) + b"\x83"
+        pkts = self._call_selector(self.PIPE_LOGSRV, 0x06, 0x0E, phonebook_req, req_id=8)
+        params = parse_tagged_params(self._reply_payload(pkts))
+        self.assertIsInstance(params[0], DwordParam)
+        self.assertEqual(params[0].value, 0)
 
     def _exercise_dirsrv(self):
         self._open_pipe(self.PIPE_DIRSRV, "DIRSRV", 1)
@@ -526,6 +541,23 @@ class TestFullFeatureSession(unittest.TestCase):
         )
         # 0x81 0x01 => success; any other byte trips client error 0x2d.
         self.assertEqual(self._reply_payload(pkts)[:3], b"\x81\x01\x87")
+
+    def _exercise_unknown_selector(self):
+        """Call a selector no handler accepts — server ACKs, sends no DATA."""
+        self._send_service_call(self.PIPE_LOGSRV, 0x06, 0xFE, b"\x83", req_id=99)
+        self.assertEqual(self._drain_packets(0, timeout=0.3), [])
+
+    def _exercise_pipe_reopen(self):
+        """Close LOGSRV, reopen on a new pipe index, issue one call.
+
+        Verifies the server rebuilds per-pipe handler state on reopen.
+        """
+        self._close_pipe(self.PIPE_LOGSRV)
+        reopened_pipe = self.PIPE_LOGSRV + 10
+        self._open_pipe(reopened_pipe, "LOGSRV", 6)
+        pkts = self._call_selector(reopened_pipe, 0x06, 0x07, b"\x85", req_id=0)
+        self.assertEqual(self._reply_payload(pkts)[0], 0x84)
+        self._close_pipe(reopened_pipe)
 
 
 if __name__ == "__main__":

@@ -117,7 +117,6 @@ class ConnectionState:
             if not data:
                 break
 
-            self.debug("rx_raw len=%d", len(data))
             self.trace_hex("rx_bytes", data)
 
             if not self.transport_started:
@@ -189,7 +188,6 @@ class ConnectionState:
             if pf.last_data:
                 assembled = bytes(self.pipe_buffers[pf.pipe_idx])
                 self.pipe_buffers[pf.pipe_idx].clear()
-                self.debug("pipe_message pipe=%d assembled_len=%d", pf.pipe_idx, len(assembled))
 
                 if pf.pipe_idx == 0:
                     self._handle_pipe0_message(assembled)
