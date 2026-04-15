@@ -1,50 +1,55 @@
 """Tests for wire encoding: CRC-32, byte-stuffing, header byte encoding."""
+
 import unittest
 
-from server.wire import (
-    crc32, byte_stuff, byte_unstuff, mask_crc,
-    encode_header_byte, decode_header_byte, CRC_TABLE,
-)
 from server.config import ESCAPE_SET, STUFF_MAP, UNSTUFF_MAP
+from server.wire import (
+    CRC_TABLE,
+    byte_stuff,
+    byte_unstuff,
+    crc32,
+    decode_header_byte,
+    encode_header_byte,
+    mask_crc,
+)
 
 
 class TestCRC32(unittest.TestCase):
     def test_empty(self):
-        self.assertEqual(crc32(b''), 0)
+        self.assertEqual(crc32(b""), 0)
 
     def test_single_zero(self):
-        self.assertEqual(crc32(b'\x00'), CRC_TABLE[0])
+        self.assertEqual(crc32(b"\x00"), CRC_TABLE[0])
 
     def test_known_transport_params(self):
         wire = bytes.fromhex(
-            '80 80 e0 17 00 ff ff 03 00 01 00 00 00 01 00 00'
-            ' 1b 32 00 00 00 01 00 00 00 58 02 00 00'
+            "80 80 e0 17 00 ff ff 03 00 01 00 00 00 01 00 00 1b 32 00 00 00 01 00 00 00 58 02 00 00"
         )
         crc_val = crc32(wire)
-        crc_bytes = crc_val.to_bytes(4, 'little')
+        crc_bytes = crc_val.to_bytes(4, "little")
         masked = mask_crc(crc_bytes)
-        self.assertEqual(masked, bytes.fromhex('31 c4 49 2f'))
+        self.assertEqual(masked, bytes.fromhex("31 c4 49 2f"))
 
     def test_known_client_ctrl4(self):
-        wire = bytes.fromhex('80 80 e0 03 00 ff ff 04')
+        wire = bytes.fromhex("80 80 e0 03 00 ff ff 04")
         crc_val = crc32(wire)
-        crc_bytes = crc_val.to_bytes(4, 'little')
+        crc_bytes = crc_val.to_bytes(4, "little")
         masked = mask_crc(crc_bytes)
-        self.assertEqual(masked, bytes.fromhex('fc 03 18 a0'))
+        self.assertEqual(masked, bytes.fromhex("fc 03 18 a0"))
 
     def test_incremental_matches_bulk(self):
-        data = b'Hello, Marvel protocol!'
+        data = b"Hello, Marvel protocol!"
         bulk = crc32(data)
         self.assertEqual(crc32(data), bulk)
 
 
 class TestByteStuffing(unittest.TestCase):
     def test_empty(self):
-        self.assertEqual(byte_stuff(b''), b'')
-        self.assertEqual(byte_unstuff(b''), b'')
+        self.assertEqual(byte_stuff(b""), b"")
+        self.assertEqual(byte_unstuff(b""), b"")
 
     def test_roundtrip_no_special(self):
-        data = b'Hello World 123'
+        data = b"Hello World 123"
         self.assertEqual(byte_unstuff(byte_stuff(data)), data)
 
     def test_roundtrip_all_special(self):
@@ -104,16 +109,18 @@ class TestHeaderByte(unittest.TestCase):
     def test_non_special_passthrough(self):
         for v in range(256):
             if v not in self.SPECIAL_VALUES:
-                self.assertEqual(encode_header_byte(v), v,
-                                 f"0x{v:02x} should pass through unchanged")
+                self.assertEqual(
+                    encode_header_byte(v), v, f"0x{v:02x} should pass through unchanged"
+                )
 
     def test_all_byte_values_roundtrip(self):
         ENCODED_FORMS = {0x4D, 0x50, 0x4B}
         for v in range(256):
             if v in ENCODED_FORMS:
                 continue
-            self.assertEqual(decode_header_byte(encode_header_byte(v)), v,
-                             f"Roundtrip failed for 0x{v:02x}")
+            self.assertEqual(
+                decode_header_byte(encode_header_byte(v)), v, f"Roundtrip failed for 0x{v:02x}"
+            )
 
 
 class TestMaskCRC(unittest.TestCase):
@@ -125,9 +132,10 @@ class TestMaskCRC(unittest.TestCase):
         for b in ESCAPE_SET:
             crc = bytes([b, 0x00, 0x00, 0x00])
             masked = mask_crc(crc)
-            self.assertNotIn(masked[0], ESCAPE_SET,
-                             f"Byte 0x{b:02x} should be masked out of ESCAPE_SET")
+            self.assertNotIn(
+                masked[0], ESCAPE_SET, f"Byte 0x{b:02x} should be masked out of ESCAPE_SET"
+            )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

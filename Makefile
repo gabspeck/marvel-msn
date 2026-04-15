@@ -1,13 +1,27 @@
-.PHONY: test coverage coverage-html
+.PHONY: install test coverage coverage-html lint format typecheck
+
+install:
+	uv sync --all-extras
 
 test:
-	python -m unittest discover -s tests -v
+	uv run python -m unittest discover -s tests -v
 
 coverage:
-	coverage run -m unittest discover -s tests
-	coverage report -m
+	uv run coverage run --source=src/server -m unittest discover -s tests
+	uv run coverage report -m
 
 coverage-html:
-	coverage run -m unittest discover -s tests
-	coverage html
+	uv run coverage run --source=src/server -m unittest discover -s tests
+	uv run coverage html
 	@echo "Open htmlcov/index.html"
+
+lint:
+	uv run ruff check src tests
+	uv run ruff format --check src tests
+
+format:
+	uv run ruff format src tests
+	uv run ruff check --fix src tests
+
+typecheck:
+	uv run mypy src

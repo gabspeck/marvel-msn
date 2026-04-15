@@ -9,14 +9,23 @@ quirks, and the wire-format invariants documented in onlstmt.py:
   * 0x87 end-static terminator for static-only replies
   * cancel-ack success byte (anything other than 1 trips error 0x2d)
 """
+
 import datetime
 import logging
 import struct
 import unittest
 
+from server.config import TAG_END_STATIC
+from server.models import (
+    ByteParam,
+    DwordParam,
+    EndMarker,
+    WordParam,
+)
+from server.mpc import parse_host_block, parse_tagged_params
 from server.services.onlstmt import (
-    OnlStmtHandler,
     _CANCEL_ACK_PAYLOAD,
+    OnlStmtHandler,
     _encode_record,
     _encode_timestamp,
     build_details_payload,
@@ -25,11 +34,6 @@ from server.services.onlstmt import (
     build_summary_payload,
 )
 from server.store import default_seed
-from server.config import TAG_END_STATIC
-from server.mpc import parse_host_block, parse_tagged_params
-from server.models import (
-    ByteParam, DwordParam, EndMarker, WordParam,
-)
 from server.transport import parse_packet
 
 
@@ -42,7 +46,7 @@ def _extract_host_block(wire_packets):
     assert pkt is not None and pkt.crc_ok, "packet failed transport parse"
     # Frame: pipe header byte + 2-byte length prefix + 2-byte routing
     # prefix + host block
-    return pkt.payload[1 + 2 + 2:]
+    return pkt.payload[1 + 2 + 2 :]
 
 
 class TestSummaryPayload(unittest.TestCase):
@@ -55,10 +59,18 @@ class TestSummaryPayload(unittest.TestCase):
         params = parse_tagged_params(self.payload)
         self.assertEqual(len(params), 7)
         kinds = [type(p) for p in params]
-        self.assertEqual(kinds, [
-            DwordParam, WordParam, WordParam,
-            ByteParam, ByteParam, WordParam, ByteParam,
-        ])
+        self.assertEqual(
+            kinds,
+            [
+                DwordParam,
+                WordParam,
+                WordParam,
+                ByteParam,
+                ByteParam,
+                WordParam,
+                ByteParam,
+            ],
+        )
 
     def test_currency_slot_is_usd(self):
         params = parse_tagged_params(self.payload)
@@ -80,8 +92,9 @@ class TestSummaryPayload(unittest.TestCase):
 class TestDetailsPayloads(unittest.TestCase):
     def setUp(self):
         self.seed = default_seed()
-        self.payloads = [build_details_payload(i)
-                         for i in range(len(self.seed.statement_transactions))]
+        self.payloads = [
+            build_details_payload(i) for i in range(len(self.seed.statement_transactions))
+        ]
 
     def test_one_payload_per_period(self):
         self.assertEqual(len(self.payloads), 4)
@@ -104,8 +117,7 @@ class TestDetailsPayloads(unittest.TestCase):
             with self.subTest(period=period):
                 self.assertEqual(payload[0], 0x82)
                 count = struct.unpack("<H", payload[1:3])[0]
-                self.assertEqual(count,
-                                 len(self.seed.statement_transactions[period]))
+                self.assertEqual(count, len(self.seed.statement_transactions[period]))
 
 
 class TestDetailsPeriodDispatch(unittest.TestCase):
@@ -122,8 +134,12 @@ class TestDetailsPeriodDispatch(unittest.TestCase):
 
     def _dispatch(self, payload):
         wire = self.handler.handle_request(
-            msg_class=0x01, selector=0x05, request_id=0,
-            payload=payload, server_seq=0, client_ack=0,
+            msg_class=0x01,
+            selector=0x05,
+            request_id=0,
+            payload=payload,
+            server_seq=0,
+            client_ack=0,
         )
         host_block = _extract_host_block(wire)
         parsed = parse_host_block(host_block)
@@ -180,8 +196,7 @@ class TestDetailsRecordEncoding(unittest.TestCase):
     def test_foreign_only_sets_flag_bit_1_with_jpy_whole_yen(self):
         # JPY (392) NumDigits=0: foreign dword is whole yen, NOT minor
         # units.  Caller passes 1000 => renders as ¥1,000 (not ¥10).
-        rec = _encode_record(self.WHEN, "X", 670, 1389,
-                             foreign=(1000, 392, 67))
+        rec = _encode_record(self.WHEN, "X", 670, 1389, foreign=(1000, 392, 67))
         self.assertEqual(rec[0], 0x02)
         # 1 + 4 + 2 + 8 + 10 (fx tail) = 25 bytes
         self.assertEqual(len(rec), 25)
@@ -191,8 +206,7 @@ class TestDetailsRecordEncoding(unittest.TestCase):
         self.assertEqual(fx_rate, 67)
 
     def test_both_flags_set_when_both_provided(self):
-        rec = _encode_record(self.WHEN, "X", 100, 200,
-                             extra=7, foreign=(1, 840, 1))
+        rec = _encode_record(self.WHEN, "X", 100, 200, extra=7, foreign=(1, 840, 1))
         self.assertEqual(rec[0], 0x03)
         # Layout: ... amount, total, extra dword, then 10-byte fx tail.
         self.assertEqual(len(rec), 1 + 4 + 2 + 8 + 4 + 10)
@@ -206,7 +220,7 @@ class TestDaysWireBias(unittest.TestCase):
         when = datetime.datetime(2026, 4, 1)
         days = (when - datetime.datetime(1970, 1, 1)).days
         days_wire, minutes = _encode_timestamp(when)
-        self.assertEqual(days_wire, (days + 0x63df) & 0xFFFF)
+        self.assertEqual(days_wire, (days + 0x63DF) & 0xFFFF)
         self.assertEqual(minutes, 0)
 
     def test_minutes_packed_as_seconds_div_60(self):
@@ -216,7 +230,7 @@ class TestDaysWireBias(unittest.TestCase):
 
     def test_2030_jan_1_above_safety_threshold(self):
         days_wire, _ = _encode_timestamp(datetime.datetime(2030, 1, 1))
-        self.assertGreaterEqual(days_wire, 0x63e0)
+        self.assertGreaterEqual(days_wire, 0x63E0)
 
     def test_records_in_real_payloads_above_safety_threshold(self):
         # Sanity: every record in our fixture data passes the gate.
@@ -224,7 +238,7 @@ class TestDaysWireBias(unittest.TestCase):
         for period_records in seed.statement_transactions:
             for txn in period_records:
                 days_wire, _ = _encode_timestamp(txn.when)
-                self.assertGreaterEqual(days_wire, 0x63e0)
+                self.assertGreaterEqual(days_wire, 0x63E0)
 
     def test_wraps_within_16_bits(self):
         # Far-future date sums past 0x10000 — verify the mask applies
@@ -286,7 +300,7 @@ class TestPlansPayload(unittest.TestCase):
         while pos < len(blob):
             self.assertEqual(blob[pos], 0x01)  # flag always 0x01
             pos += 1
-            plan_id = struct.unpack("<H", blob[pos:pos + 2])[0]
+            plan_id = struct.unpack("<H", blob[pos : pos + 2])[0]
             seen_ids.append(plan_id)
             pos += 2
             # consume two NUL-terminated cstrs
@@ -307,8 +321,12 @@ class TestUnknownSelectorReturnsNone(unittest.TestCase):
         handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt")
         with self.assertLogs("server.services.onlstmt", level="WARNING") as cap:
             result = handler.handle_request(
-                msg_class=0x01, selector=0x09, request_id=0,
-                payload=b"", server_seq=0, client_ack=0,
+                msg_class=0x01,
+                selector=0x09,
+                request_id=0,
+                payload=b"",
+                server_seq=0,
+                client_ack=0,
             )
         self.assertIsNone(result)
         self.assertTrue(any("unhandled" in m for m in cap.output))
@@ -319,8 +337,12 @@ class TestUnknownSelectorReturnsNone(unittest.TestCase):
         logging.disable(logging.CRITICAL)
         try:
             result = handler.handle_request(
-                msg_class=0xE6, selector=0x05, request_id=0,
-                payload=b"data", server_seq=0, client_ack=0,
+                msg_class=0xE6,
+                selector=0x05,
+                request_id=0,
+                payload=b"data",
+                server_seq=0,
+                client_ack=0,
             )
         finally:
             logging.disable(logging.NOTSET)

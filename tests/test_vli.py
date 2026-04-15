@@ -1,7 +1,8 @@
 """Tests for Variable-Length Integer encoding/decoding."""
+
 import unittest
 
-from server.mpc import encode_vli, decode_vli
+from server.mpc import decode_vli, encode_vli
 
 
 class TestVLI(unittest.TestCase):
@@ -66,17 +67,17 @@ class TestVLI(unittest.TestCase):
         self.assertEqual(encoded[0] & 0xC0, 0xC0)
 
     def test_decode_at_offset(self):
-        prefix = b'\xAA\xBB'
+        prefix = b"\xaa\xbb"
         encoded = encode_vli(42)
         data = prefix + encoded
         val, length = decode_vli(data, pos=2)
         self.assertEqual(val, 42)
 
     def test_decode_empty(self):
-        val, length = decode_vli(b'', 0)
+        val, length = decode_vli(b"", 0)
         self.assertIsNone(val)
         self.assertEqual(length, 0)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
