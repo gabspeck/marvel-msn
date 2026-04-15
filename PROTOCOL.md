@@ -1,1191 +1,708 @@
 # MSN95 "Marvel" Wire Protocol
 
-Reverse-engineered from MSN for Windows 95 client binaries (July 11, 1995)
-using Ghidra decompilation and a custom emulated server. Login, directory
-browsing (MSN Shell), and password change are confirmed working end-to-end.
+Reverse-engineered reference for the MSN for Windows 95 client (July 11, 1995).
+Internal codename **"Marvel"**; RPC layer is **MPC** (Marvel Protocol Client).
+Bespoke Microsoft stack — not DCOM, not PPP, not OSI. See US patent 5,956,509
+for the original design sketch.
 
-## Is this protocol based on anything?
-
-No. This is a completely bespoke Microsoft protocol stack, built in-house for
-the MSN online service circa 1994-1995. It does not implement or extend any
-public standard (X.25 LAPB, PPP, OSI, DCE RPC, etc.), though individual
-pieces borrow common ideas:
-
-- The **byte-stuffing** scheme resembles PPP's ACCM octet-stuffing (RFC 1662),
-  but uses a different escape character (0x1B instead of 0x7D) and a different
-  complement operation (lookup table instead of XOR 0x20).
-- The **sliding window** is textbook Go-Back-N ARQ with a 7-bit sequence space,
-  similar to HDLC or LAPB, but the framing is different.
-- The **CRC-32** uses a non-standard polynomial (0x248EF9BE) with an unusual
-  NOT-after-XOR twist, not matching any known CRC catalog entry.
-- The **variable-length integer** encoding looks like ASN.1 BER length encoding
-  (top 2 bits select 1/2/4-byte form), but the bit patterns differ.
-- The **service model** is loosely COM-shaped (IID GUIDs, interface selectors,
-  method opcodes) because the client-side library (MPCCL.DLL) is a COM DLL,
-  but the wire format is not DCOM/ORPC — it's a custom tagged-parameter RPC.
-
-The internal codename was **"Marvel"** and the protocol layer is called **MPC**
-(Marvel Protocol Client).
+Companion docs: `docs/JOURNAL.md` (chronological findings), `TODO.md` (open
+work), Ghidra project at `~/apps/MSN95.gpr`.
 
 ---
 
-## Protocol Layers
+## 1. Overview
 
 ```
- Application     GUIDE.EXE, MOSSHELL.DLL, CONFAPI.DLL
-                      |
- Service RPC     MPCCL.DLL — tagged-parameter request/reply over named pipes
-                      |
- Session/IPC     MOSCL.DLL — MosSlot shared-memory IPC to transport engine
-                      |
- Transport       MOSCP.EXE — packet framing, sliding window, CRC,
-                              modem/X.25 handshake, TCP connect
-                      |
-                   TCP socket / serial modem
+ Application     GUIDE.EXE, MOSSHELL.DLL, SIGNUP.EXE, CONFAPI.DLL
+ Service RPC     MPCCL.DLL        — tagged-parameter host blocks
+ Session/IPC     MOSCL.DLL        — MosSlot shared-memory IPC
+ Transport       MOSCP.EXE        — framing, CRC, window, modem handshake
+ Wire            TCP socket or serial modem
 ```
 
-All layers are confirmed by decompilation. The transport and service layers
-are confirmed by a working emulated server.
+Hierarchy: one **Connection** → one **Session** → up to 16 **Pipes** →
+per-pipe RPC traffic as **Host Blocks** containing **Tagged Parameters**.
+
+ENGCT.EXE is an alternate transport engine shipped but not loaded for dial-up
+or TCP — MOSCP.EXE handles both. Same wire format either way.
 
 ---
 
-## Glossary
+## 2. Transport (MOSCP)
 
-Quick reference for the protocol's vocabulary. Terms are grouped by layer,
-bottom-up. The patent (US 5,956,509) names are given in parentheses where
-they differ from names used in this document.
-
-### Physical / Transport
-
-| Term | What it is |
-|------|------------|
-| **Connection** | A single physical link — TCP socket or modem serial line. One connection carries everything. Handle type: `HMCONNECT` (WORD). |
-| **Packet** | The atomic unit on the wire. Header (SeqNo + AckNo) + payload + CRC-32 + 0x0D terminator. Max ~600 bytes at default MTU. See §1. |
-| **Byte stuffing** | Escape encoding that keeps reserved bytes (0x0D, 0x1B, etc.) out of the payload. The wire never contains a bare 0x0D except as a packet terminator. See §1.3. |
-| **Sliding window** | Go-Back-N ARQ flow control. The sender may have up to *WindowSize* unacknowledged packets in flight. The receiver ACKs cumulatively. See §1.6. |
-| **ACK / NACK** | Acknowledgement / negative-acknowledgement packets (first byte 0x41 / 0x42). ACKs piggyback on data packets too. |
-| **Transport engine** | The process that owns the physical connection and runs the packet state machine. At runtime this is **MOSCP.EXE**; the codebase also contains **ENGCT.EXE**, an alternate engine not loaded for dial-up or TCP. |
-
-### Pipe Multiplexing
-
-| Term | What it is |
-|------|------------|
-| **Pipe** | A logical bidirectional channel between client and server, multiplexed inside a single connection. Think of it like a TCP port number inside a single TCP stream — many independent conversations share one wire. Each pipe carries traffic for one service instance. Handle type: `HMPIPE` (WORD). Pipe index range: 0–15. The patent calls these **"segments"**. |
-| **Pipe 0** | The physical carrier pipe. All logical pipe traffic is routed through pipe 0 using a 2-byte LE routing prefix. Routing 0x0000 = pipe-open request, 0xFFFF = control frame, anything else = data for that pipe index. See §2.2. |
-| **Pipe frame** | A single chunk of pipe data inside a packet payload. Has a 1-byte header (pipe index + flags) and variable-length content. Multiple frames for different pipes can share one packet. The patent calls these **"segment headers"**. See §2.1. |
-| **Pipe open** | The handshake to create a new logical pipe for a service. Client sends a request on pipe 0 (routing 0x0000) naming the service; server responds with a Select Protocol reply. See §4. |
-| **Pipe close** | A 1-byte `0x01` message sent on a pipe to signal teardown. During sign-out, the client closes all pipes in sequence (DIRSRV first, LOGSRV last). |
-| **Control frame** | A pipe-0 message with routing 0xFFFF. Used for connection-level signaling: type 1 = connection params exchange, type 3 = transport negotiation, type 4 = connection established. See §2.3. |
-
-### Session / Service
-
-| Term | What it is |
-|------|------------|
-| **Session** | The authenticated context between login and sign-out. One connection has one session. Handle type: `HMSESSION` (WORD). The session starts when LOGSRV login succeeds and ends when all pipes close. |
-| **Service** | A named server-side endpoint that the client connects to via a pipe. Examples: `LOGSRV` (login), `DIRSRV` (directory/content browsing). Each service has its own pipe(s) and its own set of RPC methods. The patent calls these **"service objects"**. See §9. |
-| **MPC** | **Marvel Protocol Client** — the overall RPC framework implemented by MPCCL.DLL. Encompasses the service model, host blocks, tagged parameters, and the discovery mechanism. The patent calls the wire format the **"Remote Procedure Layer"**. |
-| **MosSlot** | Shared-memory IPC (`"MosSlot"` file mapping, 48 slots × 1KB) used by client libraries (MOSCL.DLL) to send commands to the transport engine (MOSCP.EXE). Not on the wire — purely intra-machine. See Appendix B. |
-| **ARENA.MOS** | Shared memory region (default 256KB) for bulk pipe data transfer between MOSCL.DLL and MOSCP.EXE. Also purely intra-machine. |
-
-### Service RPC (Host Blocks)
-
-| Term | What it is |
-|------|------------|
-| **Host block** | The MPC message format for service RPCs. Structure: selector + opcode + request_id + tagged payload. This is what travels inside pipe data. The patent calls these **"messages"** (FIG. 8A). See §5.1. |
-| **Selector** | A 1-byte routing ID that maps to a COM interface within a service. Assigned by the server during discovery (§5.3). The client obtained IID `{00028BC2-...}` → selector 0x06 for LOGSRV login. The patent calls this the **"Service Interface ID"**. Replies must echo the request's selector or they are silently dropped. |
-| **Opcode** | The method number within a service interface. Byte 1 of a host block. Example: LOGSRV selector 0x06 opcode 0x00 = login, opcode 0x07 = enumerator. The patent calls this the **"Method ID"**. Replies must echo the request's opcode. |
-| **Request ID** | A VLI-encoded identifier for a specific in-flight RPC call. The client picks it (typically incrementing), and the server must echo it in the reply so the client can match it to the waiting request object. The patent calls this the **"Method Instance ID"**. See §5.2. |
-| **Discovery block** | The server's first message on a newly-opened pipe: a host block with selector=0, opcode=0 containing a table of 17-byte records (16-byte IID + 1-byte selector). This is how the client learns which selector byte to use for each COM interface. See §5.3. |
-| **Tagged parameter** | TLV-like data encoding for RPC payloads. Each parameter has a 1-byte type tag (0x81–0x8F), an optional length, and data. Types include fixed-size (byte/word/dword), variable-length blobs, streamed "dynamic" data, and error codes. See §6. |
-| **VLI** | **Variable-Length Integer** — a compact encoding where the top 2 bits of the first byte select 1/2/4-byte form. Used for request IDs and some length fields. See §5.2. |
-| **Dynamic data** | A streaming transfer mode within tagged parameters. Tags 0x85 (start), 0x86 (more), 0x87 (last/end) allow large or open-ended data to be delivered incrementally rather than in a single blob. |
-
-### Hierarchy Summary
-
-```
-Connection (physical TCP/modem link)
- └─ Session (authenticated login context)
-     └─ Pipe 3: LOGSRV ──── host blocks with tagged params
-     └─ Pipe 4: DIRSRV ──── host blocks with tagged params
-     └─ Pipe 5: DIRSRV ──── host blocks with tagged params
-     └─ ...up to 15 pipes
-```
-
-One connection, one session, many pipes. Each pipe is an independent RPC
-channel to a service. All pipe data is multiplexed through pipe 0 on the
-wire and demultiplexed by the transport engine.
-
----
-
-**Note on ENGCT.EXE**: The binaries include a standalone transport engine
-called ENGCT.EXE ("MOSEngine Chicago"), which contains the same packet
-framing, CRC, and sliding-window code. However, **ENGCT.EXE is never loaded
-at runtime** for dial-up or TCP connections. Process inspection during login
-shows only GUIDE.EXE, MOSCP.EXE, TAPIEXE.EXE, and LIGHTS.EXE. MOSCP.EXE
-is the actual transport engine for these connection types. ENGCT.EXE may only
-be used for Named Pipe (X25PIPE) or other transport modes not yet tested.
-The wire protocol is the same regardless of which engine handles it.
-
----
-
-## 1. Transport Packets
-
-Every message on the wire is a **packet** terminated by byte `0x0D`.
-
-### 1.1 Packet Format
+### 2.1 Packet frame
 
 ```
  SeqNo    AckNo    Payload (byte-stuffed)    CRC-32     0x0D
-[1 byte] [1 byte] [0..N bytes]              [4 bytes]  [1 byte]
+[1]      [1]      [0..N]                    [4]        [1]
 ```
 
-- **SeqNo**: Sequence number. Bits 6-0 are the 7-bit sequence (0-127).
-  Bit 7 is always set for data packets. Value 0x41 = ACK-only, 0x42 = NACK.
-- **AckNo**: Piggybacked acknowledgement. Bits 6-0 = last-received + 1.
-  Bit 7 always set.
-- **Payload**: Pipe-multiplexed data (see section 2). Byte-stuffed on the wire.
-- **CRC-32**: Computed over the wire bytes (encoded SeqNo + AckNo + stuffed
-  payload), then masked before transmission.
-- **0x0D**: Packet terminator.
+- SeqNo: bit 7 set for data; `0x41` = ACK-only, `0x42` = NACK. Bits 6-0 = seq.
+- AckNo: bit 7 always set. Bits 6-0 = last-received + 1.
+- Payload: pipe-multiplexed frames, byte-stuffed.
+- CRC-32 of the already-encoded wire bytes; zone-3 masked after computation.
+- Min packet: 7 bytes.
 
-Minimum packet: 7 bytes (SeqNo + AckNo + CRC + terminator, no payload).
+### 2.2 Byte stuffing (payload only)
 
-### 1.2 Special Packet Types
+Escape = `0x1B`. Raw → wire:
 
-| First byte | Type | Description |
-|------------|------|-------------|
-| 0x41 | ACK | Acknowledgement only — no payload |
-| 0x42 | NACK | Retransmission request — byte 1 & 0x7F = last good seq |
-| other | DATA | Normal data packet |
+| Raw | Wire | Raw | Wire |
+|-----|------|-----|------|
+| 0x1B | 1B 30 | 0x0B | 1B 33 |
+| 0x0D | 1B 31 | 0x8D | 1B 34 |
+| 0x10 | 1B 32 | 0x90 | 1B 35 |
+|      |       | 0x8B | 1B 36 |
 
-### 1.3 Byte Stuffing
+### 2.3 Three-zone encoding
 
-The payload uses escape-based stuffing. Escape character is **0x1B**.
+1. **Header** (SeqNo/AckNo): if post-bit7 value ∈ {0x8D, 0x90, 0x8B}, XOR 0xC0.
+2. **Payload**: stuffing table above.
+3. **CRC bytes**: OR 0x60 on any byte in the escape set.
 
-| Raw byte | Wire encoding | Why escaped |
-|----------|---------------|-------------|
-| 0x0D | `1B 31` | Packet terminator |
-| 0x1B | `1B 30` | Escape character |
-| 0x10 | `1B 32` | DLE |
-| 0x0B | `1B 33` | VT |
-| 0x8D | `1B 34` | High control |
-| 0x90 | `1B 35` | High control |
-| 0x8B | `1B 36` | High control |
+### 2.4 CRC-32
 
-To decode: on seeing 0x1B, read the next byte and map
-`'0'->0x1B, '1'->0x0D, '2'->0x10, '3'->0x0B, '4'->0x8D, '5'->0x90, '6'->0x8B`.
-
-### 1.4 Three-Zone Wire Encoding
-
-A single packet uses **three different** encoding rules depending on the field:
-
-1. **Header bytes** (SeqNo, AckNo): If the value (after setting bit 7) is
-   0x8D, 0x90, or 0x8B, XOR it with 0xC0.
-2. **Payload bytes**: 0x1B escape stuffing (above).
-3. **CRC bytes**: OR 0x60 on any byte that's in the escape set.
-
-The CRC is computed over the already-encoded zones 1 and 2. Then the CRC
-bytes themselves get zone-3 masking before being appended.
-
-### 1.5 CRC-32
-
-Custom polynomial **0x248EF9BE**, init = 0, no final XOR. Table generation
-uses NOT after XOR on the odd path:
+Custom polynomial `0x248EF9BE`, init 0, no final XOR, `NOT` on the odd path.
+Computed over wire bytes (zones 1+2 after encoding).
 
 ```c
-for (int i = 0; i < 256; i++) {
-    uint32_t c = i;
-    for (int j = 0; j < 8; j++) {
-        if (c & 1)
-            c = ~((c ^ 0x248EF9BE) >> 1);
-        else
-            c >>= 1;
-    }
-    table[i] = c;
-}
-
-uint32_t crc = 0;
-for (int i = 0; i < len; i++)
-    crc = (crc >> 8) ^ table[(data[i] ^ (uint8_t)crc) & 0xFF];
+if (c & 1) c = ~((c ^ 0x248EF9BE) >> 1); else c >>= 1;
 ```
 
-CRC is over the **wire bytes** (after header encoding + payload stuffing),
-not the decoded bytes.
+### 2.5 Sliding window
 
-### 1.6 Sliding Window
+Go-Back-N ARQ. 7-bit seq space. Default window 16, ACK timeout 6000ms,
+AckBehind 1, max retransmits 12. On timeout: `w >>= 1` (min 1), resend
+all unacked in order.
 
-Go-Back-N ARQ:
+### 2.6 Special packets
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| Sequence space | 7-bit (0-127) | Wraps with `(seq + 1) & 0x7F` |
-| Window size | 16 | Negotiable, halved on timeout |
-| ACK timeout | 6000 ms | Retransmit timer |
-| Max retransmissions | 12 | Disconnect after 12 failures |
-| AckBehind | 1 | Force ACK after N unacked receives |
-
-On timeout: window halved (`w >>= 1; if w == 0 w = 1`), all unacked packets
-retransmitted in order. Pure ACKs use the 0x41 packet type.
+| First byte | Type |
+|-----------|------|
+| 0x41 | ACK-only |
+| 0x42 | NACK (byte 1 & 0x7F = last good seq) |
+| other | DATA |
 
 ---
 
-## 2. Pipe Multiplexing
+## 3. Pipe multiplexing
 
-A single packet payload carries data for one or more **logical pipes**.
-The payload (after byte-unstuffing) is a sequence of pipe frames.
-
-### 2.1 Pipe Frame Format
+### 3.1 Pipe frame
 
 ```
  PipeHdr   [LenByte]   PipeData
-[1 byte]   [0-1 byte]  [variable]
+[1]        [0-1]        [variable]
 ```
 
-**PipeHdr** (after decode_header_byte):
+PipeHdr (after `decode_header_byte`):
 
 | Bits | Mask | Meaning |
 |------|------|---------|
 | 3-0 | 0x0F | Pipe index (0-15) |
-| 4 | 0x10 | has_length — LenByte follows |
-| 5 | 0x20 | continuation — rest of packet is this pipe's data |
+| 4 | 0x10 | has_length — next byte (& 0x7F) = content length |
+| 5 | 0x20 | continuation — rest of packet belongs to this pipe |
 | 6 | 0x40 | last_data — final fragment of this message |
-| 7 | 0x80 | Always set |
+| 7 | 0x80 | always set |
 
-If **has_length** is set, the next byte (& 0x7F) gives the content byte count.
-If **continuation** is set, all remaining packet bytes belong to this pipe
-(no length byte needed). These are mutually exclusive in practice.
+PipeData begins with a `uint16 LE` content-length prefix, then content bytes.
 
-**PipeData** always starts with a `uint16 LE` content-length prefix, followed
-by the content bytes.
+### 3.2 Pipe-0 routing
 
-### 2.2 Pipe 0 Routing
+All logical pipe traffic multiplexes on **physical pipe 0**. First two bytes
+of pipe-0 content are a routing prefix (uint16 LE):
 
-All logical pipe traffic is multiplexed on **physical pipe 0**. The first two
-bytes of pipe-0 content are a **routing prefix** (uint16 LE):
-
-| Routing value | Meaning |
-|---------------|---------|
-| 0x0000 | New pipe open request |
+| Routing | Meaning |
+|---------|---------|
+| 0x0000 | Pipe-open request |
 | 0xFFFF | Control frame |
-| any other | Data for that logical pipe index |
+| other  | Data for that logical pipe index |
 
-This means the outer PipeHdr nibble is always 0. The routing prefix determines
-the actual destination pipe.
+### 3.3 Control frames (routing 0xFFFF)
 
-### 2.3 Control Frames
+| Type | Meaning |
+|------|---------|
+| 1 | Connection request — server echoes payload back |
+| 3 | Transport parameter negotiation (see 3.4) |
+| 4 | Connection established |
 
-Control frames have routing `0xFFFF` followed by a 1-byte type:
+### 3.4 Transport params (type 3)
 
-```
- FF FF   Type    Payload
-[2 bytes][1 byte][variable]
-```
-
-| Type | Description |
-|------|-------------|
-| 1 | Connection request (echoed back by server) |
-| 3 | Transport parameter negotiation |
-| 4 | Connection establishment signal |
-
-### 2.4 Transport Parameter Negotiation (Type 3)
-
-Sent by the server immediately after the modem handshake. Five uint32 LE values
-(optionally six with Keepalive):
-
-```
- PacketSize  MaxBytes  WindowSize  AckBehind  AckTimeout  [Keepalive]
-[4 bytes]   [4 bytes] [4 bytes]   [4 bytes]  [4 bytes]   [4 bytes optional]
-```
-
-The client takes the **minimum** of each server value and its own configured
-maximum. Keepalive is only present if the frame exceeds 0x18 (24) bytes.
+Five or six `uint32 LE`: `PacketSize, MaxBytes, WindowSize, AckBehind,
+AckTimeout, [Keepalive]`. Keepalive present only if frame > 0x18 bytes.
+Client takes min of server value and its own configured max.
 
 ---
 
-## 3. Modem Handshake
+## 4. Connection bring-up
 
-Before the transport protocol starts, MOSCP.EXE performs a text-based handshake
-over the modem connection.
-
-### 3.1 Sequence (confirmed working)
+### 4.1 Modem handshake
 
 ```
-Client -> Server:  0x0D                    (bare carriage return)
-Server -> Client:  "COM\r"                 (triggers direct transport mode)
-Server -> Client:  [transport params packet]  (type-3 control frame, section 2.4)
+Client → 0x0D                          (bare CR)
+Server → "COM\r"                       (switch to binary)
+Server → type-3 control frame          (transport params)
+Client → type-4 control frame          (connection signal)
+Client → type-1 control frame          (connection request)
+Server → type-1 echo                   (echo payload verbatim)
 ```
 
-The server **must** respond with the ASCII string `COM` followed by `\r`.
-This tells MOSCP to switch from modem-negotiation state to binary packet mode
-and hand off to ENGCT. Any other response (or no response within 20 seconds)
-results in connection failure.
+Any response other than `COM\r` within 20s aborts. `ENGCT.EXE` notes:
+static analysis shows X.25 prompts (`AUSTPAC:`, `TELENET`, `please log in:`,
+`please Sign-on:`, PAD 0xA3); not exercised at runtime.
 
-### 3.2 X.25 / Dial-up Networks (from static analysis)
+For TCP: connection string `P:username:server_address\0` (`P`=primary,
+`B`=backup datacenter).
 
-MOSCP also supports connecting through X.25 packet-switched networks (AUSTPAC,
-TELENET, MCI, AT&T). The server's first bytes are pattern-matched:
+### 4.2 Pipe open (pipe 0, routing 0x0000)
 
-| Server sends | Action |
-|-------------|--------|
-| `COM` | Direct transport mode (binary protocol starts) |
-| `AUSTPAC:` | AUSTPAC network login |
-| `TELENET` | TELENET network |
-| `Please Sign-on:` | Send username |
-| `please log in:` | Send username |
-| X.25 PAD prompt (0xA3) | Send PAD parameters |
+```
+Client:
+ 0000   0000   PipeIdx   ServiceName\0   VerParam\0   Version
+ [2LE]  [2LE]  [2LE]     [string]         [string]     [4LE]
 
-For TCP connections (transport type 8), the connection string format is
-`P:username:server_address\0` where `P` = primary datacenter, `B` = backup.
+Server (continuation frame — PipeHdr bit 5 set, bit 4 clear):
+ Routing=pipe_idx   Cmd=0x0001   ServerPipeIdx=pipe_idx   Error=0x0000
+ [2LE]              [2LE]         [2LE]                    [2LE]
+```
+
+Using has_length format instead of continuation format causes a misroute.
 
 ---
 
-## 4. Pipe Open Protocol
+## 5. Service RPC (MPC)
 
-When the client wants to connect to a service (like LOGSRV), it sends a
-**pipe open request** on pipe 0.
-
-### 4.1 Client Request (pipe 0, routing = 0x0000)
-
-```
- 0000    0000    PipeIdx   ServiceName\0   VerParam\0   Version
-[2 LE]  [2 LE]  [2 LE]   [string]        [string]     [4 LE]
-```
-
-- **PipeIdx**: Client's chosen pipe index for this service
-- **ServiceName**: ASCII name (e.g., `LOGSRV`, `DIRSRV`)
-- **VerParam**: Version parameter string
-- **Version**: uint32 service version number
-
-### 4.2 Server Response — Select Protocol (confirmed working)
-
-New pipes start in **"Select"** transport mode. The server must respond using
-**continuation frame format** (PipeHdr bit 5 set, bit 4 clear). Using
-has_length format causes a misroute in the client.
-
-Response content (8 bytes, sent on the pipe being opened):
-
-```
- Routing    Command    ServerPipeIdx   Error
-[2 LE]     [2 LE]     [2 LE]          [2 LE]
- =pipe_idx  =0x0001    =pipe_idx       =0x0000
-```
-
-- **Routing**: The client's pipe index (for MOSCP's internal routing)
-- **Command**: 0x0001 = "pipe open success" handler
-- **ServerPipeIdx**: Server's pipe index (mirror the client's)
-- **Error**: 0x0000 = success
-
-This triggers MOSCP's handler table -> handler 1 -> CMD 7 to MOSCL -> unblocks
-the client's `PipeObj_OpenAndWait`.
-
----
-
-## 5. Service Protocol (MPC RPC)
-
-Once a pipe is open, the client and server exchange **host blocks** — the MPC
-service-level message format.
-
-### 5.1 Host Block Format
+### 5.1 Host block
 
 ```
  Selector   Opcode    RequestID (VLI)    Payload
-[1 byte]   [1 byte]  [1-4 bytes]        [variable]
+ [1]        [1]       [1-4]              [variable]
 ```
 
-- **Selector** (byte 0): Routes the message to the correct service handler.
-  Assigned during service discovery (section 5.2). The reply **must** echo the
-  same selector the client used, or the message is silently dropped.
-- **Opcode** (byte 1): Method/operation code within the service. The reply
-  **must** echo the same opcode from the request.
-- **RequestID**: Variable-length integer identifying the specific request.
-  The reply **must** echo the same ID.
+Reply **must** echo selector, opcode, and request ID exactly. Any mismatch →
+silent drop.
 
-### 5.2 Variable-Length Integer (VLI)
+### 5.2 VLI (variable-length integer)
 
-| Top 2 bits | Length | Max value | Encoding |
-|------------|--------|-----------|----------|
-| 00xxxxxx | 1 byte | 63 | `byte & 0x3F` |
-| 10xxxxxx | 2 bytes | 16,383 | `(b[0] & 0x3F) << 8 | b[1]` |
-| 11xxxxxx | 4 bytes | 1,073,741,823 | `(b[0..3]) & 0x3FFFFFFF` |
+| Top 2 bits | Length | Max | Decode |
+|-----------|--------|------|--------|
+| 00 | 1 byte | 63 | `b & 0x3F` |
+| 10 | 2 bytes | 16,383 | `(b0 & 0x3F) << 8 \| b1` |
+| 11 | 4 bytes | 2³⁰-1 | `b0..b3 & 0x3FFFFFFF` |
 
-### 5.3 Service Discovery (confirmed working)
+### 5.3 Service discovery
 
-After a pipe is opened, the server sends a **discovery block** — a host block
-with selector = 0x00, opcode = 0x00. The payload is a table of **17-byte
-records**, each mapping a COM interface IID to a 1-byte selector:
+First server message on a new pipe: host block with `selector=0x00,
+opcode=0x00, request_id=0`. Payload is a table of 17-byte records:
 
 ```
- IID (Windows LE layout)   Selector
-[16 bytes]                 [1 byte]
+ IID (Windows in-memory GUID layout)   Selector
+ [16]                                   [1]
 ```
 
-The IIDs must be in **Windows in-memory byte order** (little-endian for the
-first three fields of the GUID), because the client resolves them with
-`memcmp()` against compiled-in GUID constants.
+Client resolves via `memcmp` against compiled-in GUIDs; first three GUID
+fields are little-endian. No RPCs are issued until the client's requested
+IID has a selector mapped.
 
-The client will not issue any RPC requests until the discovery block has
-mapped its requested IID to a selector. For LOGSRV, the login path requests
-IID `{00028BC2-0000-0000-C000-000000000046}`.
+### 5.4 Three-level reply routing
 
-### 5.4 Three-Level Reply Routing (confirmed by decompilation)
+Incoming replies route through: (1) selector → service handler map,
+(2) VLI request ID → pending request slot, (3) opcode → stored opcode match.
+Miss at any level → silent drop with no error.
 
-When the client receives a host block reply, it routes through three levels:
+### 5.5 Message classes
 
-1. **Selector** (byte 0): Looked up in the session's service handler map
-   (populated from the discovery block). If not found -> silently dropped.
-2. **RequestID** (VLI): Looked up in the service handler's pending-request
-   map. Routes to the specific in-flight request object.
-3. **Opcode** (byte 1): Verified against the request object's stored opcode.
-   Must match exactly or the reply is discarded.
+The `class` byte (at host-block offset 0, alias for "selector" in old
+terminology) also carries framing flags for large requests:
 
-**Consequence**: The reply must echo all three values from the client's
-request. Getting any one wrong causes a silent drop with no error.
+| Class | Meaning |
+|-------|---------|
+| 0x01 | Normal call head (two-way) |
+| 0x06 | Call head with continuation frames following |
+| 0xE6 / 0xE7 | One-way continuation frames (drop if bit `0xE0` is set) |
 
-### 5.5 Service Data on the Wire
-
-All service data travels through pipe 0 with a 2-byte LE routing prefix
-(the logical pipe index). So a complete service message on the wire is:
-
-```
-[pipe-0 frame header]
-  [routing_prefix:2LE = logical_pipe_idx]
-    [host_block: selector | opcode | VLI_request_id | tagged_payload]
-```
+Continuation frames (0xE6/0xE7) carry extra payload for the preceding call
+head but expect **no reply**. Server must ignore them.
 
 ---
 
-## 6. Tagged Parameter System
+## 6. Tagged parameters
 
-Request and reply payloads use a **tagged parameter** scheme (TLV-like).
-Each parameter has a 1-byte tag, an optional length, and data.
+### 6.1 Tags
 
-### 6.1 Tag Types
+Send tags (client → server) have bit 7 clear; reply tags (server → client)
+have bit 7 set. Low nibble = type.
 
-Tags use bit 7 to distinguish direction: **reply tags** (server -> client)
-have bit 7 set (0x81–0x8F), **send tags** (client -> server) have bit 7
-clear (0x01–0x05). The low nibble encodes the same type in both directions.
+| Send | Reply | Name | Size |
+|------|-------|------|------|
+| 0x01 | 0x81 | byte | 1 |
+| 0x02 | 0x82 | word | 2 LE |
+| 0x03 | 0x83 | dword | 4 LE |
+| 0x04 | 0x84 | variable | length-prefixed |
+| 0x05 | 0x85 | dynamic-start | length-prefixed |
+|      | 0x86 | dynamic-more | length-prefixed |
+|      | 0x87 | dynamic-last / end-of-static | 0 |
+|      | 0x88 | dynamic-complete (rest of host block is raw) | — |
+|      | 0x8F | error code | 4 LE |
 
-**Reply tags** (bit 7 set — in server responses):
+In a client request, send tags with data come first, followed by **receive
+descriptors** — bit-7-set tags with no data declaring expected reply types.
+Up to 16 send and 16 receive descriptors per request. The client auto-adds
+a final `0x84` completion slot — server must **not** send data for it.
 
-| Tag | Name | Size | Description |
-|-----|------|------|-------------|
-| 0x81 | Byte | 1 | Fixed 1-byte value |
-| 0x82 | Word | 2 | Fixed 2-byte value (LE) |
-| 0x83 | Dword | 4 | Fixed 4-byte value (LE) |
-| 0x84 | Variable | length-prefixed | Variable-length data |
-| 0x85 | Dynamic start | length-prefixed | Start of streamed data |
-| 0x86 | Dynamic more | length-prefixed | More streamed data follows |
-| 0x87 | Dynamic last | 0 | End of static section / last chunk marker |
-| 0x88 | Dynamic complete | to end of host block | Transfer complete (all remaining bytes are data) |
-| 0x8F | Error | 4 | Server error code (uint32 LE) |
+### 6.2 Length encoding (tags 0x84–0x88)
 
-**Send tags** (bit 7 clear — in client requests):
+| Byte 0 bit 7 | Format |
+|--------------|--------|
+| set | Inline 7-bit length (`byte & 0x7F`, max 127) |
+| clear | 15-bit big-endian across two bytes (max 32767) |
 
-| Tag | Name | Size | Description |
-|-----|------|------|-------------|
-| 0x01 | Byte | 1 | Fixed 1-byte value |
-| 0x02 | Word | 2 | Fixed 2-byte value (LE) |
-| 0x03 | Dword | 4 | Fixed 4-byte value (LE) |
-| 0x04 | Variable | length-prefixed | Variable-length data |
-| 0x05 | Dynamic | length-prefixed | Dynamic/streamed data |
+### 6.3 Server error codes (tag 0x8F)
 
-In a client request payload, send tags (with data) come first, followed by
-**receive descriptors** — tags with bit 7 set but no data — declaring what
-types the client expects in the reply. For example, a payload ending with
-`0x83 0x83 0x85` means "I expect two dwords then a dynamic section."
-
-### 6.2 Length Encoding (for variable/dynamic tags)
-
-For tags 0x84-0x88, the length byte uses bit 7 as a flag:
-
-- **Bit 7 set**: Inline 7-bit length (`byte & 0x7F` = length, max 127)
-- **Bit 7 clear**: 15-bit big-endian length across two bytes
-  (`(b[0] & 0x7F) << 8 | b[1]`, max 32767)
-
-### 6.3 Parameter Matching
-
-Each client request pre-registers up to **16 send** and **16 receive**
-parameter descriptors, each with a type tag. The server's response tags are
-matched sequentially against the registered receive descriptors. Send
-parameters must be added before receive parameters.
-
-Additionally, the client **auto-adds a completion slot** (tag 0x84) after all
-registered receive parameters. The server should NOT include data for this
-slot — completion triggers automatically when data runs out after tag 0x87.
-
-### 6.4 Server Error Codes (tag 0x8F)
-
-| Code | Description |
-|------|-------------|
+| Code | Meaning |
+|------|---------|
 | 0xE0000001 | Client parameter type mismatch |
-| 0xE0000002 | Buffer not formatted per MPC rules |
-| 0xE0000003 | Problem adding/sending parameters |
-| 0xE0000004 | Method not registered on server |
+| 0xE0000002 | Buffer not MPC-formatted |
+| 0xE0000003 | AddParam/Send failure |
+| 0xE0000004 | Method not registered |
 | 0xE0000005 | Memory error |
-| 0xE0000006 | Bug in MPC code |
+| 0xE0000006 | MPC internal bug |
 | 0xE0000007 | Invalid parameter |
-| 0xE0000008 | Error during send |
-| 0xE0000009 | Error during upload block receive |
+| 0xE0000008 | Send error |
+| 0xE0000009 | Upload-block receive error |
 | 0xE000000A | Application asserted |
 
 ---
 
-## 7. Login Handshake (LOGSRV)
+## 7. Services
 
-This is the complete sequence to get the client past "Verifying account..."
-and into a signed-in state. Confirmed working end-to-end.
+| Service | Ver | Purpose | Status |
+|---------|-----|---------|--------|
+| LOGSRV | 6 | Login, password, signup queries, billing info | working |
+| DIRSRV | 7 | Directory tree browsing (MOSSHELL) | working |
+| FTM | — | File Transfer Manager (signup RTFs, billing plans) | working |
+| OLREGSRV | — | Signup wizard Submit | working |
+| ONLSTMT | 3 | Account statement (subscriptions, usage, plans) | working |
+| MEDVIEW | 0x1400800A | Multimedia content viewer | not implemented |
+| CONFLOC | — | Conference locator (chat) | not implemented |
+| CONFSRV | — | Conference server (chat) | not implemented |
 
-### 7.1 Full Sequence
+### 7.1 LOGSRV
 
-```
- Step  Direction        What
- ──────────────────────────────────────────────────────────────
-  1    Client->Server   0x0D (bare CR)
-  2    Server->Client   "COM\r"
-  3    Server->Client   Transport params (type-3 control frame)
-  4    Client->Server   Control type 4 (connection signal)
-  5    Client->Server   Control type 1 (connection request)
-  6    Server->Client   Control type 1 echo (echo payload back)
-  7    Client->Server   Pipe open for LOGSRV, version 6
-  8    Server->Client   Pipe open response (Select protocol, cmd=1)
-  9    Server->Client   LOGSRV discovery block (IID->selector map)
-  10   Client->Server   Login RPC request
-  11   Server->Client   Login RPC reply
-  ──────────────────────────────────────────────────────────────
-       Result: GUIDE icon appears in system tray. Client is logged in.
-```
+**IIDs (selector map sent in discovery block, 10 entries):**
 
-### 7.2 Step 6: Control Type 1 Echo
+| IID | Sel | Use |
+|-----|-----|-----|
+| {00028BB6-…-46} | 0x01 | — |
+| {00028BB7-…-46} | 0x02 | — |
+| {00028BB8-…-46} | 0x03 | — |
+| {00028BC0-…-46} | 0x04 | — |
+| {00028BC1-…-46} | 0x05 | — |
+| **{00028BC2-…-46}** | **0x06** | Login interface (authoritative) |
+| {00028BC3-…-46} | 0x07 | — |
+| {00028BC4-…-46} | 0x08 | — |
+| {00028BC5-…-46} | 0x09 | — |
+| {00028BC6-…-46} | 0x0A | — |
 
-The server echoes back the client's control type 1 payload verbatim.
-The client will not proceed to open service pipes until this is received.
+All LOGSRV methods below run on selector **0x06**. Opcodes:
 
-### 7.3 Step 8: Pipe Open Response
+| Op | Method | Request | Reply |
+|----|--------|---------|-------|
+| 0x00 | Login | `0x03` dword (last-update ver) + `0x04` 0x58-byte login blob; recv: 7×`0x83`, 1×`0x84` (16) | 7 dwords, `0x87`, `0x84`(16 zero bytes). First dword = result (0 or 0x0C = success) |
+| 0x01 | Change password | `0x04`×2 (17-byte NUL-terminated bufs for old/new) | `0x83` result (0 = success) |
+| 0x02 | Post-transfer query (signup) | 3 dwords + recv `0x84` | empty `0x84` |
+| 0x07 | Enumerator (post-login) | `0x85` | **DO NOT REPLY** — server leaves pending forever (see 7.1.1) |
+| 0x07 | Sign-off notification | payload `0x0F` byte | no reply expected |
+| 0x0A | Billing info fetch | none | `0x84` with 0x41C-byte Account buffer (see 7.1.2) |
+| 0x0B | PM commit (billing Payment Method OK) | 0x11C PM buffer | `0x84` var, first dword = status (see 7.1.3) |
+| 0x0C | OI commit (billing Name and Address OK) | 0x2FC OI buffer fragmented as 0x06 head + 0xE6/0xE7 continuations | `0x84` var, first dword = status (see 7.1.3) |
+| 0x0D | Post-signup query | 3 dwords (country_id, 0, 0) + recv `0x84` | empty `0x84` |
+| 0x0E | Phone-book update | `0x03` dword=8, recv `0x83` | `0x83` dword=0 stub (see Open Questions) |
 
-See section 4.2. Must use continuation frame format, command 0x0001.
+#### 7.1.1 Opcode 0x07 enumerator
 
-### 7.4 Step 9: Discovery Block
+Creates a `MosEnumeratorLoop` thread calling `WaitForMessage` on the reply
+completion. Replying (even a bare `0x87`) sets `+0x18 = 1` permanently →
+`MsgWaitForSingleObject` returns instantly → 80% CPU spin. Leave pending.
 
-Host block with selector=0x00, opcode=0x00, request_id=0. Payload is a table
-of 17-byte records. For LOGSRV, the working server sends 10 IID records:
-
-| IID | Selector |
-|-----|----------|
-| {00028BB6-...-46} | 0x01 |
-| {00028BB7-...-46} | 0x02 |
-| {00028BB8-...-46} | 0x03 |
-| {00028BC0-...-46} | 0x04 |
-| {00028BC1-...-46} | 0x05 |
-| **{00028BC2-...-46}** | **0x06** |
-| {00028BC3-...-46} | 0x07 |
-| {00028BC4-...-46} | 0x08 |
-| {00028BC5-...-46} | 0x09 |
-| {00028BC6-...-46} | 0x0A |
-
-The client requests IID `{00028BC2-0000-0000-C000-000000000046}` for the login
-interface, which maps to selector **0x06**.
-
-### 7.5 Step 10: Login Request
-
-The client sends a host block on the LOGSRV pipe:
+#### 7.1.2 Billing info (selector 0x0A) — 0x41C-byte Account buffer
 
 ```
-Selector:   0x06  (from discovery map for IID 28BC2)
-Opcode:     0x00  (login method)
-RequestID:  0x00  (first request)
-Payload:    tagged parameters
-```
-
-Tagged send parameters:
-- Tag 0x03: 4-byte "version of last update" value
-- Tag 0x04: 0x58-byte login blob (contains username + password)
-
-Registered receive parameters (what the client expects back):
-- 7x tag 0x83 (fixed 4-byte dwords)
-- 1x tag 0x84 (variable, 16-byte buffer)
-- 1x tag 0x84 (auto-added completion slot — do NOT send data for this)
-
-### 7.6 Step 11: Login Reply (confirmed working)
-
-The server replies with a host block that echoes the request's routing:
-
-```
-Selector:   0x06  (same as request)
-Opcode:     0x00  (same as request)
-RequestID:  0x00  (same as request)
-Payload:
-  [0x83][00 00 00 00]    field 0: login result (0 = success)
-  [0x83][00 00 00 00]    field 1: zero
-  [0x83][00 00 00 00]    field 2: zero
-  [0x83][00 00 00 00]    field 3: zero
-  [0x83][00 00 00 00]    field 4: zero
-  [0x83][00 00 00 00]    field 5: zero
-  [0x83][00 00 00 00]    field 6: zero
-  [0x87]                 end of static section
-  [0x84][90][16 zero bytes]   variable field (16 bytes, all zero)
-```
-
-The first dword (field 0) is the login result code. Values 0x00 and 0x0C
-both mean success. The 0x87 tag ends the static section. The 0x84 variable
-field uses the reply-side length encoding (0x90 = 0x80 | 16 = inline length
-16). Do NOT include a second 0x84 for the auto-added completion slot —
-completion triggers automatically when data runs out.
-
-### 7.7 Password Change (LOGSRV Opcode 0x01) (confirmed working)
-
-Triggered by the user via Tools > Password in the MSN client.
-
-**Request** (host block on LOGSRV pipe):
-
-```
-Selector:   0x06  (from discovery map for IID 28BC2)
-Opcode:     0x01  (password change method)
-RequestID:  0x00
-Payload:
-  [0x04][91][17 bytes]   current password (NUL-terminated, 17-byte buffer)
-  [0x04][91][17 bytes]   new password (NUL-terminated, 17-byte buffer)
-  [0x83]                 receive descriptor: expects one dword back
-```
-
-Both passwords are sent as send-side variable params (tag 0x04) in fixed
-17-byte buffers. The password string is NUL-terminated; bytes after the NUL
-are uninitialized buffer contents. Length byte 0x91 = 0x80 | 17 (inline
-length 17).
-
-**Reply**:
-
-```
-Selector:   0x06  (same as request)
-Opcode:     0x01  (same as request)
-RequestID:  0x00  (same as request)
-Payload:
-  [0x83][XX XX XX XX]    result code (uint32 LE)
-```
-
-- Result `0x00000000` = success. The dialog closes.
-- Any non-zero value = failure. The client shows "Cannot change password.
-  The current password is not valid. Please type it again." (same message
-  regardless of the specific non-zero value).
-
-### 7.8 Post-Login Behavior (confirmed by wire capture)
-
-After accepting the login reply, the client enters a setup phase:
-
-1. **LOGSRV enumerator** (T+0.3s): Client sends LOGSRV selector=0x07,
-   req_id=1, payload=tag 0x85. This is a long-lived enumerator request —
-   the server must NOT reply or the client spins (see §7.8). The request
-   stays pending until sign-out.
-
-2. **DIRSRV pipe opens** (T+0.9s–1.4s): Client opens **four** DIRSRV pipes:
-   - Pipes 4,5 with version string `"Uagid=0"` (agent-qualified)
-   - Pipes 6,7 with version string `"U"` (bare)
-   Each gets a pipe-open response and a discovery block.
-
-3. **DIRSRV requests** (T+1.5s): Pipes 6 and 7 each send a DIRSRV request
-   (class=0x01, selector=0x02, req_id=0) with identical tagged payloads.
-   Pipes 4 and 5 remain idle — they may be reserved for UI-triggered
-   directory browsing that never happens.
-
-4. **Idle**: No traffic until user signs out.
-
-### 7.9 LOGSRV Enumerator (Opcode 0x07) — Critical Behavior
-
-The LOGSRV opcode 0x07 request creates a **MosEnumeratorLoop** thread
-in GUIDE.EXE that calls `WaitForMessage` in a loop, waiting for streamed
-items. The completion object's `+0x18` flag controls the loop:
-
-- `+0x18 = 0` → WaitForMessage blocks on `MsgWaitForSingleObject(INFINITE)` — correct
-- `+0x18 = 1` → WaitForMessage returns immediately with "more data" — CPU spin
-
-If the server replies with any host block (even a bare 0x87 end marker),
-`ProcessTaggedServiceReply` sets `+0x18 = 1` permanently, signaling
-"transfer complete". The loop then spins at 80% CPU.
-
-**Server rule**: Do NOT reply to LOGSRV enumerator requests (opcode 0x07).
-Leave the request pending.
-
-### 7.10 Sign-Out Sequence (confirmed by wire capture)
-
-Sign-out is a ~285ms burst initiated by the client:
-
-```
- T+0ms    pipe-close 0x01 on pipe 6 (DIRSRV)
- T+44ms   pipe-close 0x01 on pipe 4 (DIRSRV)
- T+88ms   pipe-close 0x01 on pipe 7 (DIRSRV)
- T+132ms  pipe-close 0x01 on pipe 5 (DIRSRV)
- T+184ms  LOGSRV selector=0x07, payload=0x0F (sign-off notification)
- T+284ms  pipe-close 0x01 on pipe 3 (LOGSRV)
- T+285ms  All pipes closed → connection drops
-```
-
-Key observations:
-- **DIRSRV pipes close first**, LOGSRV pipe closes last
-- Pipe close order is not sequential (6→4→7→5), possibly reflecting
-  internal cleanup order in MOSSHELL
-- A **second LOGSRV opcode 0x07** is sent just before closing pipe 3,
-  with payload `0x0F` instead of `0x85` — likely a "sign-off" notification
-- The server does not need to reply to any sign-out messages; the client
-  tears down unilaterally
-- After all pipes close, GUIDE.EXE's CleanupThread drains `g_cOpenSessions`
-  and the process exits (takes a few seconds due to polling)
-
----
-
-## 8. Data Compression (from static analysis)
-
-MPC supports compression for bulk data transfer:
-
-- **MCI** (Microsoft Compression Interface): Client -> Server
-- **MDI** (Microsoft Decompression Interface): Server -> Client
-
-Compressed data is a sequence of independently-decompressible chunks:
-
-```
-[chunk_size:4LE][compressed_data: chunk_size bytes]
-[chunk_size:4LE][compressed_data: chunk_size bytes]
-...
-```
-
-Max uncompressed chunk size: 32KB (0x8000).
-
----
-
-## 9. Directory Browsing (DIRSRV) (confirmed working)
-
-DIRSRV provides the content tree that MOSSHELL.DLL renders in the MSN Shell
-window. After login, the client opens four DIRSRV pipes and queries the root
-node to build the navigation tree.
-
-### 9.1 Discovery
-
-DIRSRV has one interface:
-
-| IID | Selector |
-|-----|----------|
-| {00028B27-0000-0000-C000-000000000046} | 0x01 |
-
-### 9.2 GetProperties Request
-
-The client sends a host block with selector=0x01, opcode=0x02:
-
-```
-Selector:    0x01  (from discovery)
-Opcode:      0x02  (GetProperties method)
-RequestID:   0x00
-Payload:
-  [0x04][variable]    node ID (LARGE_INTEGER, 8 bytes: lo:u32 + hi:u32)
-  [0x01][byte]        flags (0x00 = self-properties, 0x01 = children)
-  [0x03][dword]       unknown (often 0 or 1)
-  [0x03][dword]       property count hint
-  [0x04][variable]    property group (NUL-separated property names)
-  [0x04][variable]    locale string
-  [0x83][0x83][0x85]  receive descriptors: two dwords + dynamic section
-```
-
-The **node ID** `0:0` (all zeros) is the root. For child nodes, the client
-sends the node ID from the parent's property records.
-
-The **property group** is a NUL-separated list of property name strings.
-Known property names for children queries: `a`, `c`, `h`, `b`, `e`, `g`,
-`x`, `mf`, `wv`, `tp`, `p`, `w`, `l`, `i`.
-
-### 9.3 GetProperties Reply
-
-```
-Payload:
-  [0x83][XX XX XX XX]    status (0 = success)
-  [0x83][XX XX XX XX]    node count
-  [0x87]                 end of static section
-  [0x88]                 dynamic complete — all remaining bytes are raw data
-  [property records...]  concatenated SVCPROP records
-```
-
-Tag 0x88 signals "transfer complete". The client's `ReadDynamicSectionRawData`
-(MPCCL.DLL @ 0x04605809) reads **all remaining host-block bytes** as raw data
-after the 0x88 tag. Do NOT prefix the dynamic data with a length — it would
-corrupt the property record parsing.
-
-### 9.4 Property Record Format (SVCPROP.DLL)
-
-Parsed by `FDecompressPropClnt` (SVCPROP.DLL @ 0x7f641592):
-
-```
- TotalSize   PropCount   Properties...
-[4 LE]      [2 LE]      [variable]
-```
-
-Each property within a record:
-
-```
- Type    Name\0          ValueData
-[1 byte][NUL-string]    [variable, type-dependent]
-```
-
-**Property types** (from `DecodePropertyValue` @ 0x7f64143a):
-
-| Type | Name | Value size | Description |
-|------|------|------------|-------------|
-| 0x01 | byte | 1 | uint8 |
-| 0x02 | word | 2 | uint16 LE |
-| 0x03 | dword | 4 | uint32 LE |
-| 0x04 | int64 | 8 | int64 LE |
-| 0x0A | string | flag-byte | `FUN_7f6413ca` when 5th arg == 0, else falls through to 0x0B decoder |
-| 0x0B | string | flag-byte | **Flag-byte string** (`SVCPROP!FUN_7f641328`). See below. |
-| 0x0E | blob | 4 + data | `[length:u32][data]` |
-| 0x10 | dword array | 4 + 4n | `[count:u32][values:u32...]` |
-
-**Type 0x0B wire format** — `[flag:1][string_data]`:
-
-| flag bit | encoding of `string_data` | materialized cache value |
-|----------|---------------------------|--------------------------|
-| `& 2` | (none — 1 byte total) | empty string |
-| `& 1` | `[ascii...][NUL]` | ASCII bytes widened to UTF-16LE in a freshly-malloc'd buffer |
-| else | `[utf16le...][wide NUL]` | raw UTF-16LE copied into a freshly-malloc'd buffer |
-
-The cache always stores UTF-16LE; the ASCII path is a wire-size optimisation
-for 7-bit-ASCII strings. Cache length is `wcslen * 2 + 2` bytes in both
-non-empty paths. Empty strings are stored as `length=0, data=NULL`.
-
-### 9.5 Known Properties
-
-| Name | Type | Meaning |
-|------|------|---------|
-Properties dialog has two tabs with distinct property requests:
-
-- **General tab** (dlg #101) request: `['e', 'j', 'k', 'ca', 'tp', 'z', 'o', 'g']`
-- **Context tab** (dlg #102/103) request: `['q', 'r', 's', 't', 'u', 'n', 'y', 'on', 'v', 'w', 'p', 'g']`
-
-Both tabs issue a `dword_0=1` (GetChildren-style) request against the selected leaf node — `g` appears in both as a shared icon/graphic lookup.
-
-String-valued dialog fields use **type 0x0B** (flag-byte string). The server
-emits them as `\x01 + ascii + \x00` — flag=0x01 selects the ASCII path, the
-client widens to UTF-16LE in the cache. Confirmed live via SoftICE BPX on
-`CMosTreeNode::RememberProperty @ 0x7f3fc8f8`: length=20, data = correctly
-widened `"MSN Today\0"`.
-
-| Name | Type | Tab | Dialog field | Meaning / rendering notes |
-|------|------|-----|--------------|---------------------------|
-| `e`  | string (0x0B) | General + icon view | **Name**       | Icon-view label AND General tab Name field. |
-| `j`  | string (0x0B) | General             | **Go word**    | Short navigation keyword. |
-| `k`  | string (0x0B) | General             | **Category**   | Category label. |
-| `ca` | string (0x0B) | General             | **Price**      | Price text (e.g. "Free"). |
-| `tp` | string (0x0B) | General             | **Type**       | Content-type string. |
-| `z`  | dword  (0x03) | General             | **Rating**     | MPAA-style rating. DWORD 0 → `"Not rated"` placeholder. |
-| `o`  | dword  (0x03) | General             | **Description**| Dword; used as description index. |
-| `q`  | dword  (0x03) | Context             | **Language**   | LCID. Send DWORD `1` for the not-children probe so the cache slot is populated; DWORD `0` triggers OOM downstream. |
-| `r`  | string (0x0B) | Context             | **Topics**     | |
-| `s`  | string (0x0B) | Context             | **People**     | |
-| `t`  | string (0x0B) | Context             | **Place**      | |
-| `u`  | string (0x0B) | Context             | (hidden)       | Requested but no visible field — possibly "Unit" or currency tied to price. |
-| `n`  | string (0x0B) | Context             | **Forum manager** | |
-| `y`  | dword  (0x03) | Context             | (VendorID, hidden) | `SetDlgItemInt` on dlg item 0x79 — not laid out in #102 view. |
-| `on` | string (0x0B) | Context             | **Owner**      | Two-letter prop name (wire encoding supports it). |
-| `v`  | string (0x0B) | Context             | **Created**    | Timestamp string. |
-| `w`  | string (0x0B) | Context             | **Last changed** | Timestamp string. |
-| `p`  | string (0x0B) | Context + title     | **Size**       | Human-readable size string. |
-| `g`  | blob/dword   | General + Context + children | (icon)         | Global icon/graphic handle requested on every dialog + every GetChildren. Not mapped to a visible field. |
-| `a`  | blob (0x0E)  | children            | –              | 8-byte mnid blob `pack('<II', f8, fc)` — read by `CMosTreeNode::GetNthChild` to construct the child node's `_MosNodeId.field_8`/`field_c`. NOT a DWORD. |
-| `b`  | byte (0x01)  | children            | –              | Browse flags. Bit 0 = container/folder, bit 3 = denied (non-browsable, blocks `ExecuteCommand`). |
-| `c`  | dword (0x03) | children            | –              | Registered MOS app_id for `CMosTreeNode::Exec` → `HRMOSExec` dispatch. **Not** child count. `1` = `Directory_Service` (DSnav containers), `7` = `Down_Load_And_Run` (browser-URL leaves; short-circuits to `CreateOleWorkerThread`). Per `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>`. |
-| `h`  | dword (0x03) | children            | –              | `1` = container/has-children, `0` = leaf. |
-| `x`  | blob (0x0E)  | children            | –              | Cmdline args string for `HRMOSExec(c, args)`. Empty → length-1 NUL. |
-| `wv`,`l`,`mf`,`i` | blob/dword | children | – | Catch-all blobs / dwords. Send length-1 NUL for the blob ones; DWORD 0 for others. |
-
-**Empty-blob OOM trap**: any type-0x0E blob with `length=0` makes the
-client `malloc(0)` (returns NULL on the MSVC runtime in this VM).
-MOSSHELL's cache reader `FUN_7f3fb9f5` then sees `received_flag=1 &&
-data_ptr==NULL` and returns `E_OUTOFMEMORY` (`0x8007000E`); `ReportMosXErr`
-maps that to `MosCommonError(1)` → the **"Out of memory"** dialog.
-Always send at least 1 byte (e.g. `\x00`) for blob props you don't have
-real data for.
-
----
-
-## 9a. Signup Wizard (SIGNUP.EXE) (confirmed working)
-
-SIGNUP.EXE runs the new-account wizard in its own process (hosting
-BILLADD.DLL for payment-method entry) and drives several services over
-the same MPC transport the main shell uses.  The wizard finishes when
-the "Congratulations! You are now a member!" dialog (resource id
-`0x3e8`) appears.
-
-### 9a.1 End-to-end sequence
-
-After the user clicks Submit on the credentials page, the client
-performs a fixed sequence.  All of these must succeed or the wizard
-bails silently without showing Congrats:
-
-```
- 1. OLREGSRV commit         — class=0x01 sel=0x01 + three 0xE7/0xE6 one-way frames
- 2. LOGSRV sel=0x0D         — post-signup query (country id)
- 3. LOGSRV sel=0x02         — post-transfer query (opens a fresh pipe)
- 4. FTM selector 0x00 + 0x03 loop for the four signup RTFs
- 5. Internet-access prompt (resource 0x44c) → phone-book picker (PBKDisplayPhoneBook)
- 6. Congrats dialog (resource 0x3e8)
-```
-
-The commit itself succeeds as soon as the class=0x01 sel=0x01 head is
-acked with `HRESULT=0` (a single `0x83` dword tag); the three 0xE7/0xE6
-continuation frames are one-way and MUST NOT be acked.  See §9a.3.
-
-### 9a.2 LOGSRV signup selectors
-
-These share LOGSRV's IID→selector map (interface `{00028BC2-...}` at
-selector `0x06`, same as login) and are only issued from SIGNUP.EXE.
-
-| Selector | Method | Payload | Reply |
-|----------|--------|---------|-------|
-| 0x02 | Post-transfer query | three dwords (counter, 0, 0) + recv `0x84` | empty `0x84` variable |
-| 0x07 | Product-details query | single recv `0x85` | empty `0x84` variable |
-| 0x0A | Billing/account info | none | 0x41c (1052) byte buffer in a `0x84` variable (see §9a.5) |
-| 0x0B | PM commit (Payment Options → Payment Method OK) | 0x11c PM buffer | `0x84` var, first dword = status (see §9a.5b) |
-| 0x0C | OI commit (Payment Options → Name and Address OK) | 0x2fc OI buffer, fragmented as 0xE6/0xE7 one-way continuations | `0x84` var, first dword = status (see §9a.5b) |
-| 0x0D | Post-signup query | three dwords (country_id, 0, 0) + recv `0x84` | empty `0x84` variable |
-
-Selectors 0x02/0x07/0x0D have not been RE'd in the COM proxy layer;
-an empty `0x84` variable is the minimum well-formed reply that
-satisfies the recv descriptor and lets the client's unmarshaller
-proceed.  Returning `None` (unhandled selector) on any of them causes
-the client to disconnect and the wizard to close without Congrats —
-selector 0x0D is the one that specifically gates the Internet-access
-prompt and Congrats dialog.
-
-### 9a.3 OLREGSRV commit (Submit button)
-
-SIGNUP.EXE dispatches a single MOSRPC call that serializes as four
-records on the wire, in this order:
-
-```
- class=0x01 sel=0x01   payment method (card number, expiry, name)   — call head
- class=0xE7 sel=0x01   member ID + password                         — one-way
- class=0xE6 sel=0x02   personal name + company                      — one-way
- class=0xE7 sel=0x02   street address + phone                       — one-way
-```
-
-Only the `class=0x01` head expects a reply.  Reply payload is a single
-`0x83` dword HRESULT:
-
-```
-[0x83][00 00 00 00]   HRESULT = 0 (success)
-```
-
-The proxy copies this dword into its status word before its
-post-commit switch runs; success steers to `case 0` which produces
-`result_code = 0x19` and unblocks the credentials page's modal wait
-(`DispatchSignupCommitAndWait` @ `0x004063de` in SIGNUP.EXE).
-
-Replying to the `class=0x01 sel=0x02` pre-check that precedes the
-commit aborts signup with "An important part of signup cannot be
-found" — that selector must return `None`.
-
-### 9a.4 FTM — signup RTF loop
-
-FTM implements two request selectors (both use the `FtmClientFileId`
-60-byte send buffer via tag 0x04):
-
-| Selector | Name | Used by |
-|----------|------|---------|
-| 0x00 | `HrRequestDownload` | billing, signup RTFs |
-| 0x03 | `HrBillClient` (fast-path) | billing, signup RTFs |
-
-During signup, the wizard runs this loop four times:
-
-- Name in the CFI = the literal string `"LOGSRV"` (not a filename).
-- Counter (`dword` at CFI offset `40`) iterates `0..3`.
-- Server maps the counter to one of `plans.txt`, `prodinfo.rtf`,
-  `legalagr.rtf`, `newtips.rtf` — these are the four files
-  `SIGNUP.EXE!FUN_004029d8` opens with `CreateFile(OPEN_EXISTING)`
-  next to its own module path and fails if any is missing.
-- Server puts the real filename into the sel=0x00 reply at offset
-  `+40`, with reply flag `0x0B` (bits 0, 1, 3 = has compressed size,
-  fast path, has filename override).  HrInit appends the override
-  to the client download dir to form the final local path.
-- Sel=0x00 reply is 72 bytes in a `0x84` variable.  Sel=0x03 reply
-  is an 18-byte header + inline content bytes (WriteFile'd to the
-  local file handle by the client).
-
-Empty RTF content is acceptable — the client's RichEdit silently
-renders an empty document, which is enough for the wizard to
-progress.
-
-### 9a.5 LOGSRV billing info (selector 0x0A)
-
-Opened when the user clicks Tools → Billing → Payment Method in the
-authenticated shell.  Reply is a single `0x84` variable containing a
-0x41c (1052) byte buffer:
-
-```
- Offset 0x000: dword status (0 = success)
- Offset 0x008: Order Information (address) — NUL-terminated strings at:
-   +0x3B  First name            +0x1D8 Address line
-   +0x69  Last name             +0x201 City
-   +0x1D0 Country ID (dword)    +0x253 State
-                                +0x27C ZIP code
-                                +0x2BD Phone
- Offset 0x300: Payment Method (0x11c bytes):
+ 0x000  dword status (0 = success)
+ 0x008  Order Information block
+   +0x3B  First name        +0x1D0 Country ID (dword)
+   +0x69  Last name         +0x1D8 Address line
+                             +0x201 City
+                             +0x253 State
+                             +0x27C ZIP
+                             +0x2BD Phone
+ 0x300  Payment Method block (0x11C bytes)
    +0x00  Type dword (1=CHARGE, 2=DEBIT, 3=DIRECTDEBIT)
-   +0x19  Card number string
+   +0x19  Card number (ASCIIZ)
 ```
 
-### 9a.5b LOGSRV billing commit (selectors 0x0B and 0x0C)
+DIRECTDEBIT (type 3) has no client dispatch — `BillingPicker_UpdateVisibility`
+(BILLADD @ 0x00433A63) only handles 1/2. Shipped disabled; remove from
+`server/data/signup/plans.txt`.
 
-Opened when the user clicks OK in Tools → Billing → Payment Options
-after editing Payment Method (→ sel=0x0B) or Name and Address
-(→ sel=0x0C) in the authenticated shell.  Both call sites are twins
-in BILLADD.DLL (`BillingDlg_CommitPM` @ `0x00434b81`,
-`BillingDlg_CommitOI` @ `0x00434953`) — the only differences are the
-method index (0xB vs 0xC) and the input buffer (0x11c PM vs 0x2fc
-OI).
+#### 7.1.3 Billing commits (0x0B / 0x0C)
 
-The OI buffer is large enough to exceed one MPC frame, so sel=0x0C
-arrives as a `class=0x06` head with a 7-byte envelope followed by
-`class=0xE6` and `class=0xE7` continuation frames carrying the OI
-data.  Same convention as §9a.3: only the head expects a reply,
-continuation frames are one-way and MUST NOT be acked — the server's
-LOGSRV dispatcher drops any frame with the `0xE0` class bits set.
+Reply **must** be a `0x84` variable (not a `0x83` dword — the proxy's
+`output_descriptor->m10()` must return 4 (VAR) or the post-wait check
+skips processing and shows "Your account information cannot be updated at
+this time."). First dword of the variable:
 
-Reply to the head is a `0x84` variable whose first dword is the
-commit status.  A `0x83` dword reply hangs the post-wait check: the
-proxy's `output_descriptor->m10()` must return 4 (VAR) or
-`BillingDlg_ProcessCommitReply` is skipped and the caller shows
-"Your account information cannot be updated at this time."
+| Status | Effect |
+|--------|--------|
+| 0x00 | Silent success; dialog dismisses |
+| 0x1E | MessageBox string ID 0x134 |
+| 0x1F | MessageBox string ID 0x135 |
+| other | "cannot be updated" error |
+
+Minimum success reply: `0x84` var, 4 NUL bytes.
+
+#### 7.1.4 Post-login behavior
+
+After login reply:
+- T+0.3s: LOGSRV 0x07 enumerator (leave pending).
+- T+0.9–1.4s: four DIRSRV pipes open — pipes 4/5 version `"Uagid=0"`, pipes
+  6/7 version `"U"`. Each gets pipe-open reply + discovery block.
+- T+1.5s: pipes 6 and 7 each send DIRSRV `class=0x01, sel=0x02, req_id=0`.
+  Pipes 4/5 remain idle.
+
+#### 7.1.5 Sign-out (client-initiated, ~285ms)
 
 ```
-[0x84][len][status_dword][...]
-  status = 0      → silent success, dialog dismisses
-  status = 0x1e   → MessageBox with string ID 0x134
-  status = 0x1f   → MessageBox with string ID 0x135
-  anything else   → "cannot be updated" error dialog
+ T+0ms    pipe-close 0x01 on DIRSRV pipe 6
+ T+44ms   pipe-close 0x01 on DIRSRV pipe 4
+ T+88ms   pipe-close 0x01 on DIRSRV pipe 7
+ T+132ms  pipe-close 0x01 on DIRSRV pipe 5
+ T+184ms  LOGSRV sel=0x07 payload 0x0F (sign-off)
+ T+284ms  pipe-close 0x01 on LOGSRV pipe 3
 ```
 
-Minimal successful reply: `0x84` var of 4 NUL bytes.
+DIRSRV pipes close first, LOGSRV last. Server does not reply to any of
+these — client tears down unilaterally.
 
-### 9a.6 Known wizard-flow gotchas
+### 7.2 DIRSRV
 
-- **Pipe re-use**: sel=0x02 is called on a *fresh* LOGSRV pipe
-  opened right after the FTM transfer finishes — not on the
-  original login pipe.
-- **Parallel replies**: sel=0x0D runs in parallel with the OLREGSRV
-  one-way continuation frames.  The server must reply to sel=0x0D
-  without waiting for the 0xE6/0xE7 frames to finish arriving.
-- **DIRECTDEBIT form**: BILLADD.DLL has no dispatch for payment
-  type 3 — `BillingPicker_UpdateVisibility` (`0x00433a63`), the
-  init-fill, and the IDOK validator all only branch on types 1/2.
-  Shipped disabled in this build.  Resolved 2026-04-12 by removing
-  the DIRECTDEBIT line from `server/data/signup/plans.txt`; only
-  CHARGE and BANK are offered now.
-- **Post-Congrats session**: once the commit and FTM loop complete,
-  SIGNUP.EXE disconnects from the server before Congrats renders.
-  Congrats is shown entirely offline.  The authenticated session
-  only appears when the user relaunches MSN (or reboots the VM).
+Discovery: one IID, `{00028B27-…-46}` → selector `0x01`.
+
+#### 7.2.1 GetProperties request (selector 0x01, opcode 0x02)
+
+```
+ [0x04][var]  node ID          — 8 bytes: lo:u32 + hi:u32 (root = 0:0)
+ [0x01][u8]   flags            — 0x00 self-props, 0x01 children
+ [0x03][u32]  request_kind     — 0 or 1
+ [0x03][u32]  property count hint
+ [0x04][var]  property group   — NUL-separated names
+ [0x04][var]  locale string
+ recv: [0x83][0x83][0x85]      — two dwords + dynamic
+```
+
+#### 7.2.2 GetProperties reply
+
+```
+ [0x83][u32]  status (0 = success)
+ [0x83][u32]  node count
+ [0x87]       end-of-static
+ [0x88]       dynamic-complete — rest of host block is raw
+ <concatenated SVCPROP records>
+```
+
+`0x88` has no length prefix — `ReadDynamicSectionRawData` (MPCCL @
+0x04605809) reads all remaining host-block bytes. Prefixing a length
+corrupts the record parse.
+
+#### 7.2.3 SVCPROP property record
+
+`FDecompressPropClnt` (SVCPROP @ 0x7F641592):
+
+```
+ TotalSize   PropCount   <properties>
+ [4LE]       [2LE]
+```
+
+Each property: `[type:1][name-asciiz][value-data]`. Wire types are in §8.
+
+#### 7.2.4 Master property table
+
+Request contexts:
+- **nav** — GetChildren / list view (`flags=0x01`).
+- **dlg-general** — Properties dialog General tab. Request group:
+  `['e', 'j', 'k', 'ca', 'tp', 'z', 'o', 'g']`.
+- **dlg-context** — Properties dialog Context tab. Request group:
+  `['q', 'r', 's', 't', 'u', 'n', 'y', 'on', 'v', 'w', 'p', 'g']`.
+
+Both tab requests use `dword_0=1` (GetChildren-shape) against the leaf.
+
+| Name | Wire | Context | Consumer / dialog field | Semantics |
+|------|------|---------|-------------------------|-----------|
+| `a`  | 0x0E | nav | — | 8-byte mnid blob `pack('<II', f8, fc)` — builds `_MosNodeId.field_8/_c` in `GetNthChild` |
+| `b`  | 0x01 | nav | — | Browse flags. bit 0 = container, bit 3 = denied (blocks Exec) |
+| `c`  | 0x03 | nav + click | Exec dispatch | Registered MOS app_id (HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>). 1 = Directory_Service, 6 = Media_Viewer, 7 = Down_Load_And_Run (browser URL) |
+| `ca` | 0x0B | dlg-general | Category | — |
+| `e`  | **0x0A** | nav + dlg-general + titlebar | Name (icon label + explorer titlebar + General Name) | ASCII-cache string. Both icon label and `IShellFolder::GetDisplayNameOf` (STRRET ANSI) read 'e'; 0x0B truncates titlebar to "M" |
+| `g`  | ? | nav + dlg-general + dlg-context | (icon) | Global icon/graphic handle. Wire shape unresolved — see Open Questions |
+| `h`  | 0x03 | nav | — | 1 = container/has-children, 0 = leaf |
+| `i`  | 0x03 | nav | — | Unknown; send 0 |
+| `j`  | 0x0B | dlg-general | Description / Go word | — |
+| `k`  | 0x0B | dlg-general | Go word | — |
+| `l`  | 0x03 | nav | — | Unknown; send 0 |
+| `mf` | 0x03 | nav | — | Unknown; send 0 |
+| `n`  | 0x0B | dlg-context | Forum manager | — |
+| `o`  | 0x03 | dlg-general | Rating | DWORD 0 → "Not rated" |
+| `on` | 0x0B | dlg-context | Owner | Two-letter prop name |
+| `p`  | **context-dependent** | nav / dlg-context | Size | nav: `0x0E` blob carrying legacy title. dlg-context: `0x03` DWORD byte count — `FUN_7F3FBA69`'s `"p"` branch reads `**(cache+4)` and calls FormatSizeString (vtable +0x140) |
+| `q`  | 0x03 | dlg-context | Language | LCID. Non-zero required — 0 triggers downstream OOM |
+| `r`  | 0x0B | dlg-context | Topics | — |
+| `s`  | 0x0B | dlg-context | People | — |
+| `t`  | 0x0B | dlg-context | Place | — |
+| `tp` | 0x0B | dlg-general | Type | — |
+| `u`  | 0x0B | dlg-context | (hidden) | Requested but no visible field |
+| `v`  | 0x0B | dlg-context | Created | Timestamp string |
+| `w`  | 0x0B | dlg-context | Last changed | Timestamp string |
+| `wv` | 0x0E | nav | — | Unknown blob; send 1-byte NUL |
+| `x`  | 0x0E | nav | — | Cmdline args for `HRMOSExec(c, args)`. Empty → length-1 NUL |
+| `y`  | 0x03 | dlg-context | (VendorID, hidden) | `SetDlgItemInt` on item 0x79, not laid out |
+| `z`  | 0x03 | dlg-general | Price | DWORD 0 → "Free" |
+
+**Property `e` rationale** — Both the nav titlebar *and* the dialog
+titlebar read 'e' via ANSI paths:
+- `CMosTreeNode::Properties @ 0x7F3FEF12` does `GetProperty("e", buf, 0x104)`
+  (raw memcpy from cache) and passes buf to **PropertySheetA** (ANSI). UTF-16
+  bytes truncate at the first wide NUL → "M".
+- `IShellFolder::GetDisplayNameOf` on the DSNAV shell extension routes
+  `STRRET_CSTR` through an ANSI path for the explorer titlebar.
+
+Since `GetProperty` is raw memcpy (vtable slot 16 = `FUN_7F3FCE71`),
+the cache itself must hold ASCII. Type 0x0A runs `WideCharToMultiByte`
+after decode and stores ASCII. Type 0x0B leaves UTF-16 in cache.
+
+**Other dialog strings stay 0x0B** — `GetPropSz` (vtable slot 19 =
+`FUN_7F3FD065`) lazily populates an ASCII copy at `cache+0xC` via
+`EnsurePropSzCache → WideCharToMultiByte`. Field renderers call
+`GetPropSz`, which works for either type. Empirically switching
+n/on/v/w to 0x0A blanks those fields; keep them 0x0B.
+
+#### 7.2.5 Empty-blob OOM trap
+
+Any `0x0E` blob with `length=0` makes the client `malloc(0)` → NULL on
+the MSVC runtime in this VM. MOSSHELL's cache reader `FUN_7F3FB9F5`
+returns `E_OUTOFMEMORY` (`0x8007000E`) → `ReportMosXErr` → "Out of memory"
+dialog. Always send ≥ 1 byte (e.g. `\x00`) for blob props.
+
+#### 7.2.6 Click dispatch
+
+Wire property letters `'a' / 'e'` ≠ internal dispatch keys `'z' / 'c'`.
+`CMosTreeNode::Exec` reads the **cached** `'c'` from the GetChildren reply,
+not from a per-click GetProperties. `c=7` → browser URL; anything else →
+`CreateProcessA` using `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>`.
+
+### 7.3 FTM
+
+Both selectors use the `FtmClientFileId` 60-byte CFI buffer via tag `0x04`:
+
+| Sel | Method | Reply |
+|-----|--------|-------|
+| 0x00 | `HrRequestDownload` | `0x84` var, 72 bytes; flag byte `0x0B` = bits 0+1+3 (has compressed size, fast path, filename override); filename at CFI offset +40 |
+| 0x03 | `HrBillClient` fast path | 18-byte header + inline content bytes (client WriteFile's these to the local file) |
+
+CFI layout: name field is a literal service-level identifier (e.g.
+`"LOGSRV"` during signup RTF loop, not a filename). Counter at offset +40
+iterates 0..3 during signup; server maps to `plans.txt`, `prodinfo.rtf`,
+`legalagr.rtf`, `newtips.rtf` (all must exist next to `SIGNUP.EXE` —
+checked via `CreateFile(OPEN_EXISTING)` in `FUN_004029D8`).
+
+Empty RTF content is acceptable — RichEdit renders an empty document.
+
+### 7.4 OLREGSRV (signup commit)
+
+One call from SIGNUP.EXE's `DispatchSignupCommitAndWait @ 0x004063DE`,
+serialized as four wire records:
+
+```
+ class=0x01 sel=0x01   payment method (card number, expiry, name)  — CALL HEAD
+ class=0xE7 sel=0x01   member ID + password                        — one-way
+ class=0xE6 sel=0x02   personal name + company                     — one-way
+ class=0xE7 sel=0x02   street address + phone                      — one-way
+```
+
+Only the `class=0x01` head expects a reply:
+
+```
+ [0x83][00 00 00 00]   HRESULT = 0 — unblocks credentials page's 90s wait
+```
+
+The proxy's post-commit switch sees result=0 → case 0 → `result_code = 0x19`.
+Replying to the `class=0x01 sel=0x02` pre-check aborts signup with "An
+important part of signup cannot be found" — pre-check must return None.
+
+### 7.5 ONLSTMT (account statement)
+
+Pipe name `"OnlStmt"`, service version **3**. Discovery table has 27 IIDs.
+
+| Sel | Method | Reply shape |
+|-----|--------|-------------|
+| 0x00 | Statement summary | 7 tagged: `0x83` balance, `0x82` currency, `0x82` year, `0x81` month, `0x81` day, `0x82` minutes, `0x81` period_count−1 |
+| 0x02 | Subscriptions list | 11 tagged primitives + `0x84` record blob |
+| 0x03 | Plans | `0x84` variable |
+| 0x04 | Cancel | `0x83` status |
+| 0x05 | Get Details | **must end in `0x86` dynamic-complete** (not `0x85` or `0x88`) or `ProcessTaggedServiceReply` hangs |
+
+Encodings:
+- Currency: ISO 4217 numeric code.
+- Date wire form: `days_wire = days_since_1970 + 0x63DF`.
+
+### 7.6 MEDVIEW / CONFLOC / CONFSRV
+
+Static-only — not implemented on the server side. See Open Questions.
 
 ---
 
-## 10. Known Services
+## 8. SVCPROP wire types
 
-| Service | Version | Description | Status |
-|---------|---------|-------------|--------|
-| LOGSRV | 6 | Login/authentication, password change, signup queries, billing info | Confirmed working |
-| DIRSRV | 7 | Directory service (content browsing) | Confirmed working |
-| FTM | — | File Transfer Manager (signup RTF downloads, billing "plans") | Confirmed working |
-| OLREGSRV | — | On-line registration (signup wizard Submit) | Confirmed working |
-| MEDVIEW | 0x1400800A | Content/page rendering (Multimedia Viewer) | From static analysis |
-| CONFLOC | varies | Conference locator (chat) | From static analysis |
-| CONFSRV | varies | Conference server (chat) | From static analysis |
+`DecodePropertyValue @ 0x7F64143A` — decoder dispatch.
+
+| Type | Name | Wire body | Cache storage |
+|------|------|-----------|---------------|
+| 0x01 | byte | 1 byte | byte |
+| 0x02 | word | 2 LE | word |
+| 0x03 | dword | 4 LE | dword |
+| 0x04 | int64 | 8 LE | int64 |
+| 0x0A | string | `[flag:1][body]` | **ASCII** — `FUN_7F6413CA` runs `WideCharToMultiByte` after decode; UTF-16 temp freed |
+| 0x0B | string | `[flag:1][body]` | **UTF-16LE** — raw temp buffer kept |
+| 0x0E | blob | `[len:u32][data]` | `(len, data_ptr)` |
+| 0x10 | dword array | `[count:u32][values:u32×n]` | array |
+
+### 8.1 Flag-byte string body (0x0A and 0x0B)
+
+Decoded by `DecodeFlagByteString @ 0x7F641328`:
+
+| flag bit | body | temp buffer |
+|----------|------|-------------|
+| `& 2` | (none; 1 byte total) | empty |
+| `& 1` | `[ascii…][NUL]` | ASCII widened to UTF-16 |
+| else | `[utf16le…][wide NUL]` | raw UTF-16 |
+
+**0x0A vs 0x0B is cache-side, not wire-side** — both read the same flag
+body. 0x0A tells SVCPROP to narrow the temp back to ASCII before caching;
+0x0B keeps the UTF-16. This is the NT-server (UTF-16 native) / Win95 client
+(ANSI native) split.
+
+### 8.2 Consumer dispatch
+
+- `GetProperty` (vtable slot 16 @ `0x7F3FCE71`) — raw memcpy from cache +4.
+  Encoding must match cache (0x0A returns ASCII bytes; 0x0B returns UTF-16).
+- `GetPropSz` (vtable slot 19 @ `0x7F3FD065`) — lazy-populates ASCII at
+  `cache+0xC` via `EnsurePropSzCache → WideCharToMultiByte`. Tolerates
+  either wire type; always returns ASCII.
+
+ANSI consumers reached via `GetProperty` (titlebar, PropertySheetA, shell
+`STRRET_CSTR`) need 0x0A. Consumers reached via `GetPropSz` (most dialog
+field renderers) work with 0x0B.
 
 ---
 
-## 11. Error Codes
+## 9. Error codes
 
-### MCM (Marvel Connection Manager) Errors
+### 9.1 MCM (Marvel Connection Manager)
 
-| Code | Description |
-|------|-------------|
-| 1 | User cancelled |
-| 2 | Busy signal |
-| 3 | No dial tone |
-| 4 | No carrier |
-| 5 | Network error |
-| 6 | No LOGIN service |
-| 7 | Bad password |
-| 8 | Bad user ID |
-| 9 | InitMos() failed |
-| 12 | Registry keys missing |
-| 13 | Modem/TAPI error |
-| 14 | Connection dropped |
-| 15 | Modem busy/not found |
+| Code | Meaning | Code | Meaning |
+|------|---------|------|---------|
+| 1 | User cancelled | 8 | Bad user ID |
+| 2 | Busy | 9 | InitMos() failed |
+| 3 | No dial tone | 12 | Registry missing |
+| 4 | No carrier | 13 | Modem/TAPI error |
+| 5 | Network error | 14 | Connection dropped |
+| 6 | No LOGIN service | 15 | Modem busy/not found |
+| 7 | Bad password | | |
 
-### HRESULT Facility
+### 9.2 HRESULT facility
 
-Custom facility code **0xB0B** (e.g., `0x8B0B0017` = bad password).
+Custom facility **0xB0B** — e.g. `0x8B0B0017` = bad password,
+`0x8B0B0041` = property NOT-RECEIVED.
+
+### 9.3 MPC server errors (tag 0x8F)
+
+See §6.3.
 
 ---
 
-## 12. Registry Configuration
+## 10. Registry
 
-Key: `HKLM\SOFTWARE\Microsoft\MOS\Transport`
+`HKLM\SOFTWARE\Microsoft\MOS\Transport`:
 
-| Value | Default | Description |
-|-------|---------|-------------|
-| PacketSize | (from server) | Inbound packet buffer |
-| PacketOutSize | (from server) | Outbound packet buffer |
-| WindowSize | 16 | Sliding window size |
-| AckBehind | 1 | Packets before forced ACK |
-| AckTimeout | 600 | ACK timeout in ms |
-| ArenaSize | 0x40000 | Shared memory size (256KB) |
+| Value | Default | Purpose |
+|-------|---------|---------|
+| PacketSize | (from server) | Inbound buffer |
+| PacketOutSize | (from server) | Outbound buffer |
+| WindowSize | 16 | Sliding window |
+| AckBehind | 1 | Forced-ACK threshold |
+| AckTimeout | 600 | ms |
+| ArenaSize | 0x40000 | ARENA.MOS shared region |
 | TransportPriority | — | Preferred transport |
-| Latency | 0 | Artificial send delay (debug) |
+| Latency | 0 | Debug send delay |
 
-Key: `HKLM\SOFTWARE\Microsoft\MOS\Connection` — connection settings.
-
-Key: `HKLM\SOFTWARE\Microsoft\MOS\Debug\DisplayMcmErrors` — show error dialog.
+Other keys:
+- `HKLM\SOFTWARE\Microsoft\MOS\Connection` — connection settings.
+- `HKLM\SOFTWARE\Microsoft\MOS\Debug\DisplayMcmErrors` — show error UI.
+- `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<N>` — `c` property
+  dispatch table (Filename + NED for each app_id).
 
 ---
 
-## Appendix A: Client Binary Map
+## 11. Open questions
+
+| Area | Question |
+|------|----------|
+| LOGSRV 0x0E | Real phone-book update contract. Current stub replies dword=0 → client ticks "done" without a real FTM fetch. Need: meaning of send dword=8, whether non-zero reply triggers a fetch, versioning scheme. Tracked in `TODO.md`; Ghidra: `SIGNUP.EXE!FUN_004043C1`. |
+| LOGSRV 0x02 / 0x07 / 0x0D | COM-proxy unmarshaller layer not RE'd. Empty `0x84` reply is the minimum that works — specific semantics unknown. |
+| DIRSRV `g` | Icon/graphic property wire shape unknown. Currently sent as type 0x03 DWORD = 0; icon renders as "forbidden 0" glyph. |
+| DIRSRV `u` | Requested on dlg-context but no visible field — possibly currency/unit tied to price. |
+| DIRSRV `wv` / `l` / `mf` / `i` | Present in nav request group; shapes/meanings unknown. Catch-all defaults. |
+| Properties titlebar | Blank on **first** open of each node's Properties dialog — only shows "MSN Today" on re-open (cache hit). Suggests 'e' cache-population timing vs `CMosTreeNode::Properties` read order. |
+| `CMosTreeNode::Properties` Context tab | "Cannot open service" (resource 0xDE). Factory call at `FUN_7F402098` returns failure — unrelated to wire format. |
+| MEDVIEW / CONFLOC / CONFSRV | Services referenced in static strings; not implemented. |
+| X.25 handshake | Static analysis only; never exercised. |
+
+---
+
+## Appendix A: Client binary map
 
 | Binary | Size | Role |
 |--------|------|------|
-| MPCCL.DLL | 88K | Core MPC protocol: pipes, services, tagged params |
-| MOSCP.EXE | 68K | Transport engine at runtime: packets, CRC, modem handshake |
-| MOSCL.DLL | — | Low-level pipe/session primitives, MosSlot IPC |
-| ENGCT.EXE | 72K | Alternate transport engine (not loaded for dial-up/TCP) |
+| MPCCL.DLL | 88K | MPC RPC: pipes, host blocks, tagged params |
+| MOSCP.EXE | 68K | Transport engine (runtime): framing, CRC, window |
+| MOSCL.DLL | — | Pipe/session primitives, MosSlot IPC |
+| ENGCT.EXE | 72K | Alternate transport engine (not loaded) |
 | GUIDE.EXE | 116K | Login manager, session lifecycle |
-| MOSSHELL.DLL | 180K | Shell/tree navigation |
-| CONFAPI.DLL | 24K | Chat/conferencing API |
-| SACLIENT.DLL | 32K | System administration (users, groups) |
-| MVTTL14C.DLL | 36K | Multimedia Viewer (content rendering) |
+| MOSSHELL.DLL | 180K | Shell tree navigation, DSNAV, Properties |
+| SVCPROP.DLL | — | Property record decoder |
+| SIGNUP.EXE | — | New-account wizard (hosts BILLADD.DLL) |
+| BILLADD.DLL | — | Billing / payment UI, in-process under SIGNUP |
+| CONFAPI.DLL | 24K | Chat / conferencing |
+| SACLIENT.DLL | 32K | System administration |
+| MVTTL14C.DLL | 36K | Multimedia Viewer |
 
-## Appendix B: Internal IPC (MOSCL.DLL <-> MOSCP.EXE)
+## Appendix B: Internal IPC (MOSCL ↔ MOSCP)
 
-Not needed for a server implementation, but documented for completeness.
+MosSlot shared memory: `"MosSlot"` file mapping, `"MosArena"` mutex,
+48 slots × 1KB. Bulk pipe data via `"ARENA.MOS"` (default 256KB).
 
-Communication between the client libraries and the transport engine uses
-**MosSlot** — a custom shared-memory mailslot (`"MosSlot"` file mapping,
-`"MosArena"` mutex, 48 slots x 1KB each). Bulk pipe data goes through
-`"ARENA.MOS"` shared memory (default 256KB).
+Client → Engine commands:
 
-### Command Types (Client -> Engine)
+| Cmd | Name | Cmd | Name |
+|-----|------|-----|------|
+| 0 | Register (PID) | 0xA | Terminate |
+| 4 | Write pipe data | 0xB | Close pipe (abort) |
+| 6 | Open pipe | 0xD | Close pipe |
+| 8 | Open connection | | |
 
-| Cmd | Name |
-|-----|------|
-| 0 | Register (with PID) |
-| 4 | Write pipe data |
-| 6 | Open pipe |
-| 8 | Open connection |
-| 0xA | Terminate |
-| 0xB | Close pipe (abort) |
-| 0xD | Close pipe |
+Engine → Client commands:
 
-### Command Types (Engine -> Client)
-
-| Cmd | Name |
-|-----|------|
-| 1 | Registration OK |
-| 3 | Pipe read ready |
-| 5 | Pipe write done |
-| 7 | Pipe open result |
-| 9 | Connection status |
-| 0xC | Pipe closed |
-| 0xF | Connection event |
-| 0x10 | Pipe reset |
+| Cmd | Name | Cmd | Name |
+|-----|------|-----|------|
+| 1 | Registration OK | 9 | Connection status |
+| 3 | Pipe read ready | 0xC | Pipe closed |
+| 5 | Pipe write done | 0xF | Connection event |
+| 7 | Pipe open result | 0x10 | Pipe reset |
