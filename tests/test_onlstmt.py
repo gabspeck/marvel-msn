@@ -10,10 +10,9 @@ quirks, and the wire-format invariants documented in onlstmt.py:
   * cancel-ack success byte (anything other than 1 trips error 0x2d)
 """
 import datetime
-import io
+import logging
 import struct
 import unittest
-from contextlib import redirect_stdout
 
 from server.services.onlstmt import (
     OnlStmtHandler,
@@ -110,15 +109,22 @@ class TestDetailsPayloads(unittest.TestCase):
 
 
 class TestDetailsPeriodDispatch(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        logging.disable(logging.CRITICAL)
+
+    @classmethod
+    def tearDownClass(cls):
+        logging.disable(logging.NOTSET)
+
     def setUp(self):
         self.handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt")
 
     def _dispatch(self, payload):
-        with redirect_stdout(io.StringIO()):
-            wire = self.handler.handle_request(
-                msg_class=0x01, selector=0x05, request_id=0,
-                payload=payload, server_seq=0, client_ack=0,
-            )
+        wire = self.handler.handle_request(
+            msg_class=0x01, selector=0x05, request_id=0,
+            payload=payload, server_seq=0, client_ack=0,
+        )
         host_block = _extract_host_block(wire)
         parsed = parse_host_block(host_block)
         return parsed.payload
@@ -299,23 +305,25 @@ class TestCancelAck(unittest.TestCase):
 class TestUnknownSelectorReturnsNone(unittest.TestCase):
     def test_unhandled_selector_returns_none(self):
         handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt")
-        buf = io.StringIO()
-        with redirect_stdout(buf):
+        with self.assertLogs("server.services.onlstmt", level="WARNING") as cap:
             result = handler.handle_request(
                 msg_class=0x01, selector=0x09, request_id=0,
                 payload=b"", server_seq=0, client_ack=0,
             )
         self.assertIsNone(result)
-        self.assertIn("UNHANDLED", buf.getvalue())
+        self.assertTrue(any("unhandled" in m for m in cap.output))
 
     def test_oneway_continuation_returns_none(self):
         # MPC_CLASS_ONEWAY_MASK in msg_class -> drop without reply.
         handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt")
-        with redirect_stdout(io.StringIO()):
+        logging.disable(logging.CRITICAL)
+        try:
             result = handler.handle_request(
                 msg_class=0xE6, selector=0x05, request_id=0,
                 payload=b"data", server_seq=0, client_ack=0,
             )
+        finally:
+            logging.disable(logging.NOTSET)
         self.assertIsNone(result)
 
 

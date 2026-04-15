@@ -1,4 +1,5 @@
 """DIRSRV service handler: directory browsing, property records."""
+import logging
 import struct
 
 from ..config import DIRSRV_INTERFACE_GUIDS, TAG_END_STATIC, TAG_DYNAMIC_COMPLETE
@@ -7,8 +8,12 @@ from ..mpc import (
     build_service_packet, build_tagged_reply_dword,
     build_discovery_payload, decode_dirsrv_request,
 )
+from ..log import TRACE
 from ..models import DirsrvRequest
 from ..store import app_store as _default_store
+
+
+log = logging.getLogger(__name__)
 
 
 class DIRSRVHandler:
@@ -210,8 +215,9 @@ def build_dirsrv_reply_payload(request=None):
     requested_props = [p for p in request.prop_group.split('\x00') if p]
     is_children = request.dword_0 == 1
 
-    print(f"[DIRSRV] node={request.node_id} raw={request.node_id_raw.hex()} "
-          f"children={is_children} props={requested_props}")
+    log.info("get_properties node=%s raw=%s children=%s props=%s",
+             request.node_id, request.node_id_raw.hex(),
+             is_children, ",".join(requested_props) or "-")
 
     content_store = _default_store.content
     node = content_store.get_node(request.node_id)
@@ -232,8 +238,9 @@ def build_dirsrv_reply_payload(request=None):
     node_count = len(records)
     dynamic_data = b''.join(records)
 
-    for i, rec in enumerate(records):
-        print(f"[DIRSRV] record[{i}] len={len(rec)} hex={rec.hex()}")
+    if log.isEnabledFor(TRACE):
+        for i, rec in enumerate(records):
+            log.trace("record idx=%d len=%d hex=%s", i, len(rec), rec.hex())
 
     payload = bytearray()
     payload.extend(build_tagged_reply_dword(0))           # status = success

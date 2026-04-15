@@ -17,11 +17,16 @@ belonging to the same call.  Acking the head with an empty host
 block releases the client's vtbl[0x10] wait before its 90s timer
 expires.  We don't persist the submitted data yet.
 """
+import logging
+
 from ..config import OLREGSRV_INTERFACE_GUIDS
 from ..mpc import (
     build_discovery_host_block, build_discovery_payload, build_host_block,
     build_service_packet, build_tagged_reply_dword, parse_request_params,
 )
+
+
+log = logging.getLogger(__name__)
 
 
 class OLREGSRVHandler:
@@ -36,10 +41,10 @@ class OLREGSRVHandler:
 
     def handle_request(self, msg_class, selector, request_id, payload,
                        server_seq, client_ack):
-        _, recv_descs = parse_request_params(payload)
-        print(f"  [OLREGSRV] request class=0x{msg_class:02x} "
-              f"selector=0x{selector:02x} req_id={request_id} "
-              f"payload_len={len(payload)} recv={[hex(d) for d in recv_descs]}")
+        if log.isEnabledFor(logging.INFO):
+            _, recv_descs = parse_request_params(payload)
+            log.info("recv_descs=%s",
+                     ",".join(f"0x{d:02x}" for d in recv_descs) or "-")
         # Only the sel=0x01 commit head gets a reply.  Replying to the
         # sel=0x02 pre-check aborts signup with "important part of
         # signup cannot be found"; the 0xe6/0xe7 continuations are

@@ -1,4 +1,5 @@
 """LOGSRV service handler: login, password change, service discovery."""
+import logging
 import struct
 
 from ..config import (
@@ -12,6 +13,9 @@ from ..mpc import (
 )
 from ..models import VarParam, DwordParam
 from ..store import app_store as _default_store
+
+
+log = logging.getLogger(__name__)
 
 
 class LOGSRVHandler:
@@ -31,8 +35,8 @@ class LOGSRVHandler:
                        server_seq, client_ack):
         """Dispatch a LOGSRV request. Returns a wire packet or None."""
         if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
-            print(f"  [LOGSRV] one-way continuation class=0x{msg_class:02x} "
-                  f"selector=0x{selector:02x} payload_len={len(payload)}")
+            log.info("oneway_continuation class=0x%02x selector=0x%02x payload_len=%d",
+                     msg_class, selector, len(payload))
             return None
 
         if selector == 0x00:
@@ -88,7 +92,7 @@ def _handle_pm_commit():
     """LOGSRV selector 0x0b — Payment Options > Payment Method OK.
     BILLADD.DLL BillingDlg_CommitPM @ 0x00434b81 submits a 0x11c PM buffer.
     """
-    print("  [LOGSRV] PM commit (selector 0x0b) — status=0")
+    log.info("pm_commit status=0")
     return _COMMIT_OK_REPLY
 
 
@@ -98,7 +102,7 @@ def _handle_billing_commit():
     buffer, fragmented on the wire as class=0xe6/0xe7 one-way
     continuations (filtered out by MPC_CLASS_ONEWAY_MASK).
     """
-    print("  [LOGSRV] Billing commit (selector 0x0c) — status=0")
+    log.info("billing_commit status=0")
     return _COMMIT_OK_REPLY
 
 
@@ -122,7 +126,7 @@ def _handle_billing_query():
         +0x00  Type dword (1=CHARGE, 2=DEBIT, 3=DIRECTDEBIT)
         +0x19  Card number string
     """
-    print("  [LOGSRV] Billing/account info query")
+    log.info("billing_query")
     profile = _default_store.account.get_billing_profile()
     buf = bytearray(0x41c)  # 1052 bytes, zero-filled
 
@@ -163,7 +167,7 @@ def _handle_signup_post_transfer(request_payload):
     isn't RE'd — an empty 0x84 variable is the minimal well-formed payload
     that satisfies the unmarshaller so we can see what the client does next.
     """
-    print(f"  [LOGSRV] selector=0x02 post-transfer query (payload_len={len(request_payload)})")
+    log.info("signup_post_transfer payload_len=%d", len(request_payload))
     return build_tagged_reply_var(0x84, b'')
 
 
@@ -178,8 +182,9 @@ def _handle_post_signup_query(request_payload):
     an empty 0x84 variable is the minimal well-formed answer.
     """
     send_params, _ = parse_request_params(request_payload)
-    country = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else '?'
-    print(f"  [LOGSRV] selector=0x0d post-signup query (country_id={country})")
+    country = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else None
+    log.info("post_signup_query country_id=%s",
+             country if country is not None else "?")
     return build_tagged_reply_var(0x84, b'')
 
 
@@ -195,8 +200,9 @@ def _handle_existing_member_phonebook_query(request_payload):
     "Starting transfer..." so we must reply with dword=0.
     """
     send_params, _ = parse_request_params(request_payload)
-    dw = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else '?'
-    print(f"  [LOGSRV] opcode=0x0e existing-member phonebook query (dword={dw})")
+    dw = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else None
+    log.info("existing_member_phonebook dword=%s",
+             dw if dw is not None else "?")
     return build_tagged_reply_dword(0)
 
 
@@ -211,7 +217,7 @@ def _handle_signup_query(request_payload):
     the recv descriptor, letting the client's unmarshaller proceed so we
     can observe whatever it does next.
     """
-    print(f"  [LOGSRV] selector=0x07 signup query (payload_len={len(request_payload)})")
+    log.info("signup_query payload_len=%d", len(request_payload))
     return build_tagged_reply_var(0x84, b'')
 
 
@@ -227,7 +233,7 @@ def _handle_password_change(request_payload):
         old_pw = send_params[0].data.split(b'\x00', 1)[0].decode('ascii', errors='replace')
     if len(send_params) > 1 and isinstance(send_params[1], VarParam):
         new_pw = send_params[1].data.split(b'\x00', 1)[0].decode('ascii', errors='replace')
-    print(f"  [LOGSRV] Password change: '{old_pw}' -> '{new_pw}'")
+    log.info("password_change old=%s new=%s", old_pw, new_pw)
     return build_tagged_reply_dword(0)
 
 

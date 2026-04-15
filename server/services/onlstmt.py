@@ -40,6 +40,7 @@ Reply shape (static section, 7 tagged primitives):
                   backwards from the statement date.
 """
 import datetime
+import logging
 import struct
 
 from ..config import (
@@ -56,6 +57,9 @@ from ..mpc import (
     build_tagged_reply_word,
 )
 from ..store import app_store as _default_store
+
+
+log = logging.getLogger(__name__)
 
 
 def build_summary_payload():
@@ -390,32 +394,32 @@ class OnlStmtHandler:
                        server_seq, client_ack):
         """Dispatch an OnlStmt request.  Returns a wire packet or None."""
         if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
-            print(f"  [OnlStmt] one-way continuation class=0x{msg_class:02x} "
-                  f"selector=0x{selector:02x} payload_len={len(payload)}")
+            log.info("oneway_continuation class=0x%02x selector=0x%02x "
+                     "payload_len=%d", msg_class, selector, len(payload))
             return None
 
         if selector == 0x00:
-            print("  [OnlStmt] Statement summary (selector 0x00)")
+            log.info("statement_summary")
             reply_payload = build_summary_payload()
         elif selector == 0x02:
-            print("  [OnlStmt] Subscriptions (selector 0x02)")
+            log.info("subscriptions")
             reply_payload = build_subscriptions_payload()
         elif selector == 0x03:
-            print("  [OnlStmt] Manage subscription / plans (selector 0x03)")
+            log.info("manage_subscription")
             reply_payload = build_plans_payload()
         elif selector == 0x04:
-            print("  [OnlStmt] Cancel subscription (selector 0x04)")
+            log.info("cancel_subscription")
             reply_payload = _CANCEL_ACK_PAYLOAD
         elif selector == 0x05:
             # Request payload: `01 NN ...` — first send param is the
             # period index byte.  Fall back to 0 (current) if absent.
             period = payload[1] if len(payload) >= 2 and payload[0] == 0x01 else 0
-            print(f"  [OnlStmt] Get Details (selector 0x05) period={period}")
+            log.info("get_details period=%d", period)
             reply_payload = build_details_payload(period)
         else:
-            print(f"  [OnlStmt] UNHANDLED class=0x{msg_class:02x} "
-                  f"selector=0x{selector:02x} req_id={request_id} "
-                  f"payload_len={len(payload)}")
+            log.warning("unhandled class=0x%02x selector=0x%02x req_id=%d "
+                        "payload_len=%d",
+                        msg_class, selector, request_id, len(payload))
             return None
 
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)

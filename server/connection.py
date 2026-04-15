@@ -3,10 +3,12 @@
 Manages the protocol state machine from telnet negotiation through
 login, directory browsing, and sign-out.
 """
+import logging
 import socket
 import time
 from collections import defaultdict
 
+from . import log as server_log
 from .config import (
     PACKET_TERMINATOR, DELAY_AFTER_COM, DELAY_BEFORE_REPLY,
     SOCKET_TIMEOUT, PIPE_CLOSE_CMD,
@@ -20,13 +22,7 @@ from .models import ControlMessage, PipeOpenRequest, PipeData
 from .services import SERVICE_HANDLERS
 
 
-def hexdump(data, prefix=""):
-    """Pretty-print hex dump with ASCII sidebar."""
-    for offset in range(0, len(data), 16):
-        chunk = data[offset:offset + 16]
-        hex_part = ' '.join(f'{b:02x}' for b in chunk)
-        ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-        print(f'{prefix} {offset:04x}: {hex_part:<48s} {ascii_part}')
+log = logging.getLogger(__name__)
 
 
 def _strip_telnet(data, conn):
@@ -66,15 +62,33 @@ class ConnectionState:
         self.buf = bytearray()
         self.transport_started = False
 
-    def log(self, msg):
-        elapsed = time.monotonic() - self.conn_start
+    def _tick(self):
         self.event_no += 1
-        print(f'[{elapsed:7.3f} #{self.event_no:04d}] {msg}')
+        server_log.set_context(time.monotonic() - self.conn_start, self.event_no)
+
+    def info(self, msg, *args):
+        if not log.isEnabledFor(logging.INFO):
+            return
+        self._tick()
+        log.info(msg, *args)
+
+    def warning(self, msg, *args):
+        if not log.isEnabledFor(logging.WARNING):
+            return
+        self._tick()
+        log.warning(msg, *args)
+
+    def trace_hex(self, label, data):
+        if not log.isEnabledFor(server_log.TRACE):
+            return
+        self._tick()
+        log.trace("%s len=%d hex=%s", label, len(data), data.hex())
 
     def send_packet(self, pkt, label=""):
         self.tx_pkt_no += 1
-        self.log(f'[TXPKT {self.tx_pkt_no:03d}] {label} ({len(pkt)} bytes)')
-        hexdump(pkt, "[TX]")
+        self.info("tx_packet n=%d label=%r len=%d",
+                  self.tx_pkt_no, label, len(pkt))
+        self.trace_hex("tx_bytes", pkt)
         self.conn.sendall(pkt)
 
     def advance_seq(self):
@@ -84,7 +98,7 @@ class ConnectionState:
 
     def run(self):
         """Main entry point — runs the full connection lifecycle."""
-        self.log(f'[*] Waiting for initial 0x0D from MOSCP...')
+        self.info("awaiting_initial_cr")
         self.conn.settimeout(SOCKET_TIMEOUT)
 
         while True:
@@ -97,8 +111,8 @@ class ConnectionState:
             if not data:
                 break
 
-            self.log(f'[RX] Raw ({len(data)} bytes)')
-            hexdump(data, "[RX]")
+            self.info("rx_raw len=%d", len(data))
+            self.trace_hex("rx_bytes", data)
 
             if not self.transport_started:
                 data = _strip_telnet(data, self.conn)
@@ -121,41 +135,40 @@ class ConnectionState:
 
     def _do_handshake(self):
         """Send COM\\r and transport params."""
-        self.log('[RX] Empty terminator (bare 0x0D)')
-        self.log('[TX] Sending \'COM\' (direct transport trigger)')
+        self.info("rx_empty_terminator")
+        self.info("tx_com_trigger")
         self.conn.sendall(b'COM\r')
         time.sleep(DELAY_AFTER_COM)
 
         params_pkt = build_transport_params()
-        self.send_packet(params_pkt, "Sending transport params")
+        self.send_packet(params_pkt, "transport_params")
         self.transport_started = True
 
     def _handle_raw_packet(self, packet_data):
         """Parse and dispatch a single packet."""
         pkt = parse_packet(packet_data)
         if pkt is None:
-            self.log(f'[!] Unparseable packet ({len(packet_data)} bytes)')
+            self.warning("unparseable_packet len=%d", len(packet_data))
             return
 
         self.rx_pkt_no += 1
-        self.log(f'[RXPKT {self.rx_pkt_no:03d}] type={pkt.type} '
-                 f'seq={pkt.seq} ack={pkt.ack} '
-                 f'payload_len={len(pkt.payload)} '
-                 f'crc={"OK" if pkt.crc_ok else "FAIL"}')
+        self.info("rx_packet n=%d type=%s seq=%d ack=%d payload_len=%d crc=%s",
+                  self.rx_pkt_no, pkt.type, pkt.seq, pkt.ack,
+                  len(pkt.payload), "ok" if pkt.crc_ok else "fail")
         if pkt.payload:
-            hexdump(pkt.payload, "[PKT]  ")
+            self.trace_hex("rx_payload", pkt.payload)
 
         if pkt.type != 'DATA':
             return
         if not pkt.crc_ok:
-            self.log('[!] CRC FAIL — dropping packet')
+            self.warning("crc_fail action=drop")
             return
 
         # ACK the client's packet and update client_ack before processing
         # so that service replies built in this iteration use the correct value
         self.client_ack = (pkt.seq + 1) & 0x7F
         ack_pkt = build_ack_packet(self.client_ack)
-        self.send_packet(ack_pkt, f"ACK seq={pkt.seq} ack_field={self.client_ack}")
+        self.send_packet(ack_pkt, f"ack seq={pkt.seq} ack_field={self.client_ack}")
 
         # Process pipe frames
         frames = parse_pipe_frames(pkt.payload)
@@ -165,7 +178,8 @@ class ConnectionState:
             if pf.last_data:
                 assembled = bytes(self.pipe_buffers[pf.pipe_idx])
                 self.pipe_buffers[pf.pipe_idx].clear()
-                self.log(f'[PIPE] MESSAGE pipe={pf.pipe_idx} assembled_len={len(assembled)}')
+                self.info("pipe_message pipe=%d assembled_len=%d",
+                          pf.pipe_idx, len(assembled))
 
                 if pf.pipe_idx == 0:
                     self._handle_pipe0_message(assembled)
@@ -187,23 +201,24 @@ class ConnectionState:
 
     def _handle_control(self, msg):
         """Handle control frames (type-1 echo, type-4 ack)."""
-        self.log(f'[PIPE] CONTROL type={msg.ctrl_type} data_len={len(msg.data)}')
+        self.info("pipe_control type=%d data_len=%d",
+                  msg.ctrl_type, len(msg.data))
 
         if msg.ctrl_type == 1:
             echo_pkt = build_control_type1_ack(
                 self.server_seq, self.client_ack, msg.data)
-            self.send_packet(echo_pkt,
-                f"Control type-1 echo (seq={self.server_seq})")
+            self.send_packet(echo_pkt, f"control_type1_echo seq={self.server_seq}")
             self.advance_seq()
 
     def _handle_pipe_open(self, msg):
         """Respond to a pipe-open request and send service discovery."""
-        self.log(f'[PIPE] OPEN REQUEST: pipe_idx={msg.client_pipe_idx} '
-                 f'svc={msg.svc_name!r} ver={msg.ver_param!r} version={msg.version}')
+        self.info("pipe_open pipe=%d svc=%s ver=%r version=%d",
+                  msg.client_pipe_idx, msg.svc_name,
+                  msg.ver_param, msg.version)
 
         open_pkt = build_pipe_open_result(msg.client_pipe_idx, self.server_seq, self.client_ack)
         self.send_packet(open_pkt,
-            f"Pipe open RESPONSE for pipe {msg.client_pipe_idx} svc={msg.svc_name!r}")
+                         f"pipe_open_response pipe={msg.client_pipe_idx} svc={msg.svc_name}")
         self.advance_seq()
 
         handler_cls = SERVICE_HANDLERS.get(msg.svc_name)
@@ -216,36 +231,37 @@ class ConnectionState:
                 self.server_seq, self.client_ack)
             for pkt in discovery_pkts:
                 self.send_packet(pkt,
-                    f"{msg.svc_name} discovery for pipe {msg.client_pipe_idx}")
+                                 f"discovery pipe={msg.client_pipe_idx} svc={msg.svc_name}")
                 self.advance_seq()
 
     def _handle_service_data(self, pipe_idx, data):
         """Unified service dispatch — handles data for any pipe."""
         if len(data) == 1 and data[0] == PIPE_CLOSE_CMD:
-            self.log(f'[SVC] pipe-close on pipe {pipe_idx}')
+            self.info("pipe_close pipe=%d", pipe_idx)
             self.pipes_closed.add(pipe_idx)
             self.pipe_buffers.pop(pipe_idx, None)
             if self._all_service_pipes_closed():
-                self.log('[*] All service pipes closed — disconnecting')
+                self.info("all_pipes_closed action=disconnect")
                 self.conn.close()
                 raise ConnectionError("All pipes closed")
             return
 
         handler = self.services.get(pipe_idx)
         if not handler:
-            self.log(f'[SVC] No handler for pipe {pipe_idx}, ignoring')
+            self.warning("no_handler pipe=%d action=ignore", pipe_idx)
             return
 
         hb = parse_host_block(data)
         if not hb:
-            self.log(f'[SVC] Unparseable host block on pipe {pipe_idx}')
+            self.warning("unparseable_host_block pipe=%d", pipe_idx)
             return
 
-        self.log(f'[SVC] pipe={pipe_idx} service={handler.svc_name!r} '
-                 f'class=0x{hb.msg_class:02x} selector=0x{hb.selector:02x} '
-                 f'req_id={hb.request_id} payload_len={len(hb.payload)}')
+        self.info("svc_request pipe=%d svc=%s class=0x%02x selector=0x%02x "
+                  "req_id=%d payload_len=%d",
+                  pipe_idx, handler.svc_name, hb.msg_class, hb.selector,
+                  hb.request_id, len(hb.payload))
         if hb.payload:
-            hexdump(hb.payload, "[SVC]  ")
+            self.trace_hex("svc_payload", hb.payload)
 
         time.sleep(DELAY_BEFORE_REPLY)
         reply_pkts = handler.handle_request(
@@ -253,15 +269,15 @@ class ConnectionState:
             hb.payload, self.server_seq, self.client_ack)
 
         if reply_pkts is not None:
-            label = (f"{handler.svc_name} reply for pipe {pipe_idx} "
+            label = (f"svc_reply pipe={pipe_idx} svc={handler.svc_name} "
                      f"class=0x{hb.msg_class:02x} selector=0x{hb.selector:02x} "
                      f"req_id={hb.request_id}")
             for pkt in reply_pkts:
                 self.send_packet(pkt, label)
                 self.advance_seq()
         else:
-            self.log(f'[SVC] No reply for selector=0x{hb.selector:02x} '
-                     f'(pending request)')
+            self.info("svc_no_reply pipe=%d selector=0x%02x",
+                      pipe_idx, hb.selector)
 
     def _all_service_pipes_closed(self):
         """Check if all registered service pipes have been closed."""
@@ -272,17 +288,17 @@ class ConnectionState:
 
 def handle_connection(conn, addr):
     """Entry point for a new TCP connection."""
-    print(f'[*] Connection from {addr}')
-    conn_start = time.monotonic()
+    server_log.reset_context()
+    log.info("connection_open addr=%s:%d", addr[0], addr[1])
     try:
         state = ConnectionState(conn, addr)
         state.run()
-    except (ConnectionError, BrokenPipeError, OSError):
-        elapsed = time.monotonic() - conn_start
-        print(f'[{elapsed:7.3f}] [!] Connection closed')
+    except (ConnectionError, BrokenPipeError, OSError) as e:
+        log.info("connection_closed addr=%s:%d reason=%s",
+                 addr[0], addr[1], type(e).__name__)
     finally:
         try:
             conn.close()
         except OSError:
             pass
-    print(f'[*] Connection from {addr} closed')
+        server_log.reset_context()

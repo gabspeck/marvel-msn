@@ -13,6 +13,7 @@ Two call patterns are covered:
   overrides the echoed filename, and serves minimal placeholder content
   so the RTFs parse cleanly in RichEdit.
 """
+import logging
 import struct
 from pathlib import Path
 
@@ -23,6 +24,9 @@ from ..mpc import (
     parse_request_params,
 )
 from ..models import VarParam
+
+
+log = logging.getLogger(__name__)
 
 FTM_SELECTOR_REQUEST_DOWNLOAD = 0x00
 FTM_SELECTOR_BILL_CLIENT = 0x03
@@ -88,16 +92,14 @@ class FTMHandler:
 
     def handle_request(self, msg_class, selector, request_id, payload,
                        server_seq, client_ack):
-        print(f"  [FTM] request class=0x{msg_class:02x} selector=0x{selector:02x} "
-              f"req_id={request_id} payload_len={len(payload)}")
-
         if selector == FTM_SELECTOR_REQUEST_DOWNLOAD:
             filename, content = _resolve_ftm_target(payload)
-            print(f"  [FTM] target filename={filename!r} content_len={len(content)}")
+            log.info("request_download filename=%s content_len=%d",
+                     filename, len(content))
             reply_payload = _build_request_download_reply(filename, len(content))
         elif selector == FTM_SELECTOR_BILL_CLIENT:
             _, content = _resolve_ftm_target(payload)
-            print(f"  [FTM] bill-client content_len={len(content)}")
+            log.info("bill_client content_len=%d", len(content))
             reply_payload = _build_bill_client_reply(content)
         else:
             return None

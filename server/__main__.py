@@ -1,16 +1,16 @@
 """Entry point: python -m server"""
-import sys
-import os
+import logging
 import socket
 
+from . import log as server_log
 from .config import HOST, PORT
 from .connection import handle_connection
 
 
 def main():
-    sys.stdout = os.fdopen(sys.stdout.fileno(), "w", buffering=1)
-    print(f"[*] MSN dial-up server listening on {HOST}:{PORT}")
-    print()
+    server_log.configure()
+    log = logging.getLogger("server")
+    log.info("listen host=%s port=%d", HOST, PORT)
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -21,11 +21,8 @@ def main():
             conn, addr = srv.accept()
             try:
                 handle_connection(conn, addr)
-            except Exception as e:
-                print(f"[!] Error: {e}")
-                import traceback
-                traceback.print_exc()
-            print()
+            except Exception:
+                log.exception("unhandled_exception")
 
 
 if __name__ == '__main__':
