@@ -158,7 +158,7 @@ class ConnectionState:
 
         self.rx_pkt_no += 1
         self.info(
-            "rx_packet n=%d type=%s seq=%d ack=%d payload_len=%d crc=%s",
+            "rx_packet n=%d type=%s seq=%s ack=%s payload_len=%d crc=%s",
             self.rx_pkt_no,
             pkt.type,
             pkt.seq,
