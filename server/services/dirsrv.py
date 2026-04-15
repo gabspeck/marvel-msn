@@ -55,48 +55,54 @@ def _blob(s):
 
 
 def _sz(s):
-    """Value body for a type-0x0B string property.
+    """Value body for a type-0x0A or 0x0B string property.
 
-    Wire format (SVCPROP FUN_7f641328, called from DecodePropertyValue):
+    Wire body is the flag-byte string format shared by 0x0A and 0x0B:
         [flag:1][string_data]
     - flag & 2: empty string, no data follows (1 byte total).
-    - flag & 1: ASCII path — `[flag][asciiz]`; each byte widened to UTF-16
-      in-memory via zero-extend loop. lstrlenA determines length.
-    - else:     UTF-16LE path — `[flag][utf16le-with-wide-NUL]`; wcslen
-      determines length.
-    Use flag=0x01 (ASCII) since dialog strings are all ASCII — half the bytes
-    on the wire, and materializes to the same UTF-16 in the cache.
+    - flag & 1: ASCII path — [flag][asciiz]; widened to UTF-16 in a temp buf.
+    - else:     UTF-16LE path — [flag][utf16le-with-wide-NUL].
+
+    The *type byte* determines where the cache stores it:
+    - Type 0x0B keeps the UTF-16 temp buffer (GetProperty returns raw UTF-16).
+    - Type 0x0A then runs WideCharToMultiByte, so the cache holds ASCII
+      (what PropertySheetA and other ANSI consumers read via GetProperty).
     """
     if not s:
-        return b'\x02'  # empty-string flag; no data follows
+        return b'\x02'
     data = s.encode('ascii', errors='replace')
     return b'\x01' + data + b'\x00'
 
 
 # Content for leaf nodes served to the Properties dialog.
-# Types confirmed via MOSSHELL Ghidra decode:
-#   Context tab FUN_7f401d81 — q=DWORD LCID, r/s/t/n/on/v/w/p=string, y=DWORD.
-#   General tab write FUN_7f4010a3 — ca=string, z=DWORD (packed price), o=DWORD.
+# Wire letter → General tab field (corrected 2026-04-15 by live observation):
+#   e  → Name            (ASCII cache, type 0x0A)
+#   k  → Go word         (was misidentified as Category)
+#   ca → Category        (was misidentified as category_price_str)
+#   tp → Type
+#   z  → Price DWORD     (0 formats as "Free")
+#   o  → Rating DWORD    (0 formats as "Not rated")
+# Context tab fields (Ghidra FUN_7f401d81):
+#   q=LCID DWORD, r/s/t/n/on/v/w=strings, y=VendorID DWORD, p=size DWORD.
 MSN_TODAY_CONTENT = {
-    'name':        'MSN Today',                                    # e
-    'go_word':     'today',                                         # j
-    'category':    'News',                                          # k (string? guess)
-    'category_price_str': 'Free',                                   # ca (string)
-    'type_str':    'News & Features',                              # tp
-    'price_dword': 0,                                               # z (dword, packed)
-    'rating_dword': 0,                                              # o (dword)
-    'description': 'Your daily window to MSN.',                    # ???
-    'language':    1033,                                            # q (en-US LCID, dword)
-    'topics':      'News, Weather, Entertainment',                 # r
-    'people':      'Microsoft editorial staff',                    # s
-    'place':       'Redmond, WA, USA',                             # t
-    'u_value':     '',                                              # u (hidden)
-    'forum_mgr':   'MSN Editorial',                                # n
-    'vendor_id':   1,                                               # y (dword)
-    'owner':       'The Microsoft Network',                        # on
-    'created':     'August 24, 1995',                              # v
-    'modified':    'April 15, 2026',                               # w
-    'size_str':    '5 MB',                                          # p (string per Ghidra)
+    'name':        'MSN Today',                                    # e  — Name
+    'go_word':     'today',                                         # k  — Go word
+    'category':    'News',                                          # ca — Category
+    'type_str':    'News & Features',                              # tp — Type
+    'price_dword': 0,                                               # z  — Price (0 = Free)
+    'rating_dword': 0,                                              # o  — Rating (0 = Not rated)
+    'description': 'Your daily window to MSN.',                    # j  — Description
+    'language':    1033,                                            # q  — en-US LCID
+    'topics':      'News, Weather, Entertainment',                 # r  — Topics
+    'people':      'Microsoft editorial staff',                    # s  — People
+    'place':       'Redmond, WA, USA',                             # t  — Place
+    'u_value':     '',                                              # u  — hidden
+    'forum_mgr':   'MSN Editorial',                                # n  — Forum manager
+    'vendor_id':   1,                                               # y  — Vendor ID
+    'owner':       'The Microsoft Network',                        # on — Owner
+    'created':     'August 24, 1995',                              # v  — Created
+    'modified':    'April 15, 2026',                               # w  — Last changed
+    'size_bytes':  5 * 1024 * 1024,                                 # p  — Size (DWORD → FormatSizeString)
 }
 
 
@@ -134,22 +140,29 @@ def build_nav_props(requested_props, *, is_container, c_value=0,
 def build_dialog_props(requested_props, content):
     """Props for the Properties dialog — types from MOSSHELL Ghidra decode.
 
-    String props use wire type 0x0B (UTF-16 → ASCII via WideCharToMultiByte)
-    in MOSSHELL FUN_7f3fbc12 case 0xb. Type 0x0E case is a no-op and returns
-    E_OUTOFMEMORY from GetPropSzBuf; type 0x0A is a raw ASCII pass-through
-    but type 0x0B is the canonical MSN95 string wire encoding.
+    Strings use wire type 0x0A (not 0x0B). Both share the same flag-byte wire
+    body, but 0x0A causes SVCPROP to run WideCharToMultiByte so the cache
+    holds ASCII. CMosTreeNode::Properties @ 0x7f3fef12 reads prop 'e' via
+    GetProperty (raw memcpy) and passes the buffer straight to PropertySheetA
+    (ANSI). With 0x0B the cache is UTF-16 and PropertySheetA truncates at the
+    first wide NUL ("MSN Today" → "M"). 0x0A keeps the cache ASCII so both
+    GetProperty (raw) and GetPropSz (ANSI) render the full string.
     """
     out = []
     for name in requested_props:
-        # UTF-16LE string (type 0x0B) — Ghidra-confirmed string reads
+        # 'e' must be 0x0A (ASCII cache) — CMosTreeNode::Properties raw-memcpies
+        # it to PropertySheetA (ANSI). With 0x0B it would truncate at the first
+        # wide NUL ("MSN Today" → "M"). All other strings use 0x0B: their cache
+        # is consumed by GetPropSz which runs EnsurePropSzCache's
+        # WideCharToMultiByte path to produce the ASCII copy at cache+0xC.
         if name == 'e':
-            out.append((0x0B, 'e', _sz(content['name'])))
+            out.append((0x0A, 'e', _sz(content['name'])))
         elif name == 'j':
-            out.append((0x0B, 'j', _sz(content['go_word'])))
+            out.append((0x0B, 'j', _sz(content['description'])))
         elif name == 'k':
-            out.append((0x0B, 'k', _sz(content['category'])))
+            out.append((0x0B, 'k', _sz(content['go_word'])))
         elif name == 'ca':
-            out.append((0x0B, 'ca', _sz(content['category_price_str'])))
+            out.append((0x0B, 'ca', _sz(content['category'])))
         elif name == 'tp':
             out.append((0x0B, 'tp', _sz(content['type_str'])))
         elif name == 'r':
@@ -170,7 +183,11 @@ def build_dialog_props(requested_props, content):
         elif name == 'w':
             out.append((0x0B, 'w', _sz(content['modified'])))
         elif name == 'p':
-            out.append((0x0B, 'p', _sz(content['size_str'])))
+            # 'p' is a DWORD byte count. FUN_7f3fba69's special 'p' branch
+            # reads `**(cache+4)` (first DWORD of value data) and calls
+            # FormatSizeString (vtable+0x140), caching the formatted result
+            # at cache+0xC for GetPropSzBuf.
+            out.append((0x03, 'p', struct.pack('<I', content['size_bytes'])))
         # DWORD (type 0x03) — Ghidra-confirmed dword reads
         elif name == 'q':
             out.append((0x03, 'q', struct.pack('<I', content['language'])))
@@ -233,7 +250,7 @@ def build_dirsrv_reply_payload(request=None):
 
     msn_central_content = dict(MSN_TODAY_CONTENT, name="MSN Central",
                                type_str="Directory",
-                               size_str="—")
+                               size_bytes=0)
 
     if not is_children:
         own = build_child_props(
@@ -243,6 +260,10 @@ def build_dirsrv_reply_payload(request=None):
             title=title)
         records.append(build_property_record(own))
     else:
+        # Permissive fallback: GetChildren on any non-"0:0" node returns MSN
+        # Today. This causes visual endless hierarchy (leaf appears as its
+        # own child) but is required for CMosTreeNode::Exec to cache 'z'/'c'
+        # — returning empty broke dispatch with "task cannot be completed".
         if request.node_id == "0:0":
             msn_central = build_child_props(
                 requested_props,
