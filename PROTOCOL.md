@@ -829,31 +829,67 @@ Each property within a record:
 | 0x02 | word | 2 | uint16 LE |
 | 0x03 | dword | 4 | uint32 LE |
 | 0x04 | int64 | 8 | int64 LE |
-| 0x0A | string | compressed | Compressed string (MCI/MDI) |
+| 0x0A | string | flag-byte | `FUN_7f6413ca` when 5th arg == 0, else falls through to 0x0B decoder |
+| 0x0B | string | flag-byte | **Flag-byte string** (`SVCPROP!FUN_7f641328`). See below. |
 | 0x0E | blob | 4 + data | `[length:u32][data]` |
+| 0x10 | dword array | 4 + 4n | `[count:u32][values:u32...]` |
+
+**Type 0x0B wire format** — `[flag:1][string_data]`:
+
+| flag bit | encoding of `string_data` | materialized cache value |
+|----------|---------------------------|--------------------------|
+| `& 2` | (none — 1 byte total) | empty string |
+| `& 1` | `[ascii...][NUL]` | ASCII bytes widened to UTF-16LE in a freshly-malloc'd buffer |
+| else | `[utf16le...][wide NUL]` | raw UTF-16LE copied into a freshly-malloc'd buffer |
+
+The cache always stores UTF-16LE; the ASCII path is a wire-size optimisation
+for 7-bit-ASCII strings. Cache length is `wcslen * 2 + 2` bytes in both
+non-empty paths. Empty strings are stored as `length=0, data=NULL`.
 
 ### 9.5 Known Properties
 
 | Name | Type | Meaning |
 |------|------|---------|
-| `p` | blob (0x0E) | Display name / title (e.g., "MSN Central") — also used as Size on the Properties dialog Context tab. |
-| `e` | blob (0x0E) | Name (icon-view label below the leaf level — General tab "Name" field per MOSSHELL FUN_7f401d81 decode). |
-| `g` | blob (0x0E) | Go word (General tab). |
-| `a` | blob (0x0E) | 8-byte mnid blob `pack('<II', f8, fc)` — read by `CMosTreeNode::GetNthChild` to construct the child node's `_MosNodeId.field_8`/`field_c`. NOT a DWORD. |
-| `b` | byte (0x01) | Browse flags. Bit 0 = container/folder, bit 3 = denied (non-browsable, blocks `ExecuteCommand`). |
-| `c` | dword (0x03) | Registered MOS app_id for `CMosTreeNode::Exec` → `HRMOSExec` dispatch. **Not** child count. `1` = `Directory_Service` (DSnav containers), `7` = `Down_Load_And_Run` (browser-URL leaves; short-circuits to `CreateOleWorkerThread`). Per `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>`. |
-| `h` | dword (0x03) | `1` = container/has-children, `0` = leaf. |
-| `x` | blob (0x0E) | Cmdline args string for `HRMOSExec(c, args)`. Empty → length-1 NUL. |
-| `q` | dword (0x03) | Language LCID (Properties dialog Context tab). Send DWORD `1` for the not-children probe so the cache slot is populated; DWORD `0` triggers OOM downstream. |
-| `r` | blob (0x0E) | Topics (Context tab). |
-| `s` | blob (0x0E) | People (Context tab). |
-| `t` | blob (0x0E) | Place (Context tab). |
-| `n` | blob (0x0E) | Forum manager (Context tab). |
-| `on` | blob (0x0E) | Owner / Vendor name (Context tab). |
-| `y` | dword (0x03) | Vendor ID — `SetDlgItemInt` on dialog item 0x79. |
-| `v` | blob (0x0E) | Created timestamp (Context tab). |
-| `w` | blob (0x0E) | Last changed timestamp (Context tab). |
-| `wv`,`tp`,`l`,`mf`,`i` | blob/dword | Catch-all blobs / dwords. Send length-1 NUL for the blob ones; DWORD 0 for others. |
+Properties dialog has two tabs with distinct property requests:
+
+- **General tab** (dlg #101) request: `['e', 'j', 'k', 'ca', 'tp', 'z', 'o', 'g']`
+- **Context tab** (dlg #102/103) request: `['q', 'r', 's', 't', 'u', 'n', 'y', 'on', 'v', 'w', 'p', 'g']`
+
+Both tabs issue a `dword_0=1` (GetChildren-style) request against the selected leaf node — `g` appears in both as a shared icon/graphic lookup.
+
+String-valued dialog fields use **type 0x0B** (flag-byte string). The server
+emits them as `\x01 + ascii + \x00` — flag=0x01 selects the ASCII path, the
+client widens to UTF-16LE in the cache. Confirmed live via SoftICE BPX on
+`CMosTreeNode::RememberProperty @ 0x7f3fc8f8`: length=20, data = correctly
+widened `"MSN Today\0"`.
+
+| Name | Type | Tab | Dialog field | Meaning / rendering notes |
+|------|------|-----|--------------|---------------------------|
+| `e`  | string (0x0B) | General + icon view | **Name**       | Icon-view label AND General tab Name field. |
+| `j`  | string (0x0B) | General             | **Go word**    | Short navigation keyword. |
+| `k`  | string (0x0B) | General             | **Category**   | Category label. |
+| `ca` | string (0x0B) | General             | **Price**      | Price text (e.g. "Free"). |
+| `tp` | string (0x0B) | General             | **Type**       | Content-type string. |
+| `z`  | dword  (0x03) | General             | **Rating**     | MPAA-style rating. DWORD 0 → `"Not rated"` placeholder. |
+| `o`  | dword  (0x03) | General             | **Description**| Dword; used as description index. |
+| `q`  | dword  (0x03) | Context             | **Language**   | LCID. Send DWORD `1` for the not-children probe so the cache slot is populated; DWORD `0` triggers OOM downstream. |
+| `r`  | string (0x0B) | Context             | **Topics**     | |
+| `s`  | string (0x0B) | Context             | **People**     | |
+| `t`  | string (0x0B) | Context             | **Place**      | |
+| `u`  | string (0x0B) | Context             | (hidden)       | Requested but no visible field — possibly "Unit" or currency tied to price. |
+| `n`  | string (0x0B) | Context             | **Forum manager** | |
+| `y`  | dword  (0x03) | Context             | (VendorID, hidden) | `SetDlgItemInt` on dlg item 0x79 — not laid out in #102 view. |
+| `on` | string (0x0B) | Context             | **Owner**      | Two-letter prop name (wire encoding supports it). |
+| `v`  | string (0x0B) | Context             | **Created**    | Timestamp string. |
+| `w`  | string (0x0B) | Context             | **Last changed** | Timestamp string. |
+| `p`  | string (0x0B) | Context + title     | **Size**       | Human-readable size string. |
+| `g`  | blob/dword   | General + Context + children | (icon)         | Global icon/graphic handle requested on every dialog + every GetChildren. Not mapped to a visible field. |
+| `a`  | blob (0x0E)  | children            | –              | 8-byte mnid blob `pack('<II', f8, fc)` — read by `CMosTreeNode::GetNthChild` to construct the child node's `_MosNodeId.field_8`/`field_c`. NOT a DWORD. |
+| `b`  | byte (0x01)  | children            | –              | Browse flags. Bit 0 = container/folder, bit 3 = denied (non-browsable, blocks `ExecuteCommand`). |
+| `c`  | dword (0x03) | children            | –              | Registered MOS app_id for `CMosTreeNode::Exec` → `HRMOSExec` dispatch. **Not** child count. `1` = `Directory_Service` (DSnav containers), `7` = `Down_Load_And_Run` (browser-URL leaves; short-circuits to `CreateOleWorkerThread`). Per `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>`. |
+| `h`  | dword (0x03) | children            | –              | `1` = container/has-children, `0` = leaf. |
+| `x`  | blob (0x0E)  | children            | –              | Cmdline args string for `HRMOSExec(c, args)`. Empty → length-1 NUL. |
+| `wv`,`l`,`mf`,`i` | blob/dword | children | – | Catch-all blobs / dwords. Send length-1 NUL for the blob ones; DWORD 0 for others. |
 
 **Empty-blob OOM trap**: any type-0x0E blob with `length=0` makes the
 client `malloc(0)` (returns NULL on the MSVC runtime in this VM).

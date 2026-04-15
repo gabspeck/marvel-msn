@@ -1747,3 +1747,108 @@ default to "MSN Today" leaf.
    worker thread (`CMosTreeNode::Exec` → `CreateOleWorkerThread(FUN_7f3fea8c)`).
    We don't yet populate the URL; expect the worker thread to fail
    silently or pop a custom MCM dialog.
+
+## 2026-04-15 — Properties dialog strings render: SVCPROP type 0x0B wire format
+
+Strings in the MSN Today Properties dialog now render correctly. Root cause
+was a wrong wire encoding for type 0x0B — not an empty-blob / missing-flag
+issue, and not fixable by changing cache reader paths.
+
+### What the client actually does
+
+`SVCPROP.DLL!FDecompressPropClntImpl @ 0x7f641592` parses a property
+record as:
+
+```
+[total_size:u32][prop_count:u16] [type:u8][name:asciiz][value_data]…
+```
+
+`DecodePropertyValue @ 0x7f64143a` dispatches on `type`. For `0x0B` (and
+`0x0A` when its 5th arg is non-zero), it calls `FUN_7f641328` — a
+**flag-byte string decoder**, not a raw UTF-16 copy:
+
+```c
+byte flag = *value_data;
+if (flag & 2) {                // empty
+    *out_size = 0; *out_consumed = 1; return NULL;
+}
+if (flag & 1) {                // ASCII, widened in cache
+    int n = lstrlenA(value_data+1);
+    _Dst = malloc(n*2 + 2);
+    for (each byte b) *w++ = (ushort)b;
+    *out_size = n*2 + 2;
+    *out_consumed = n + 2;     // flag + ascii + NUL
+} else {                       // raw UTF-16LE
+    size_t w = wcslen((wchar_t*)(value_data+1));
+    _Dst = malloc(w*2 + 2);
+    memcpy(_Dst, value_data+1, w*2 + 2);
+    *out_consumed = w*2 + 3;   // flag + utf16 + wide NUL
+}
+```
+
+Cache always stores UTF-16LE; the ASCII path is just a wire-size
+optimisation for 7-bit strings.
+
+### The bug we had
+
+`server/services/dirsrv.py::_sz()` emitted bare UTF-16LE with no flag
+byte: `s.encode('utf-16-le') + b'\x00\x00'`. For prop `e` = "MSN Today",
+the client read the first byte `0x4D` ("M") as the flag, saw `flag & 1`,
+went down the ASCII path, and `lstrlenA("\x00\x53\x00\x4E…")` returned 0
+(first byte is NUL) — so the cache slot got `length=2, data=""`. Every
+string prop landed as empty and the dialog fields fell back to
+placeholders.
+
+### Verified live with SoftICE
+
+Set `BPX 0x7f3fc8f8` (entry of `CMosTreeNode::RememberProperty`, the
+vtable-slot-3 cache writer called by `SetPropertyGroupFromPsp @ 0x7f3fc85a`).
+`ADDR explorer` first — MOSSHELL maps into Explorer's context (shell
+namespace extension host), not guide/moscp.
+
+Before fix — stack args at BP entry, decoded via
+`D esp l 20`:
+
+```
+ret=0x7F3FC8CB  this=0x00BE04D4  name=0x7F40E1E8("e")
+data_ptr=0x00447234  length=2  type=0x0B
+```
+
+`D 00447234 l 2` → `00 00`. Two bytes of NUL — empty wide string. Matches
+the ASCII-path-with-first-byte-NUL analysis above.
+
+After fix (`_sz()` now emits `\x01 + ascii + \x00`):
+
+```
+data_ptr=0x00443100  length=20  type=0x0B
+D 00443100 l 20 → 4D 00 53 00 4E 00 20 00 54 00 6F 00 64 00 61 00 79 00 00 00
+```
+
+Properly widened `"MSN Today\0"`. Dialog fields populate.
+
+### Fix
+
+```python
+def _sz(s):
+    """Type-0x0B flag-byte string: flag=0x01 ASCII (widened in cache)."""
+    if not s:
+        return b'\x02'                         # empty-string flag
+    return b'\x01' + s.encode('ascii', errors='replace') + b'\x00'
+```
+
+PROTOCOL.md §9.4/§9.5 updated: 0x0B added to the type table with
+full wire-format description; every dialog string prop
+(`e, j, k, ca, tp, r, s, t, u, n, on, v, w, p`) retyped from `0x0E` blob
+to `0x0B` string.
+
+### Still open
+
+- **Icon** on the MSN Today leaf still renders as the forbidden-`0` glyph.
+  `g` prop is sent as DWORD 0 catch-all; shape of `g` on the wire for a
+  real icon handle is not yet confirmed.
+- **Context tab "Cannot open service"** (resource ID 0xDE) — unrelated
+  to DIRSRV wire format. Factory call `param_2[4](4, 0)` at
+  `FUN_7f401d81 @ 0x7f402098` returns failure. Triggered when the
+  container/LCID-list branch activates (`local_18 != 0`), after the
+  `y` vendor-id DWORD read succeeds. Fires twice — possibly
+  PropertySheet init-twice or on-tab-switch re-init.
