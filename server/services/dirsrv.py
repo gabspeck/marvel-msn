@@ -125,11 +125,12 @@ def build_nav_props(requested_props, *, is_container, c_value=0,
         elif name == 'c':
             out.append((0x03, 'c', struct.pack('<I', c_value)))
         elif name == 'e':
-            # Icon label reads prop 'e' as a wide string — type 0x0B keeps
-            # the UTF-16 temp buffer in the cache, so the icon renders the
-            # full title. Prior stable state sent DWORD 0 here, which
-            # rendered as the literal "0".
-            out.append((0x0B, 'e', _sz(title)))
+            # Nav 'e' = title string, wire type 0x0A (ASCII cache). Both
+            # the icon label and the explorer window titlebar read 'e' via
+            # paths that expect ANSI bytes. 0x0B (UTF-16 cache) rendered
+            # the icon but truncated the titlebar to "M" at the first wide
+            # NUL. 0x0A stores ASCII in the cache, satisfying both readers.
+            out.append((0x0A, 'e', _sz(title)))
         elif name == 'h':
             out.append((0x03, 'h', struct.pack('<I', 1 if is_container else 0)))
         elif name == 'x':
