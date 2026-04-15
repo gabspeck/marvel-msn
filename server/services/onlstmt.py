@@ -55,9 +55,10 @@ from ..mpc import (
     build_tagged_reply_var,
     build_tagged_reply_word,
 )
+from ..store import app_store as _default_store
 
 
-def _build_summary_payload():
+def build_summary_payload():
     """Build the statement-summary reply for selector=0x00.
 
     Request wire has exactly 7 recv tags (no 0x84), so the reply is 7
@@ -65,18 +66,17 @@ def _build_summary_payload():
     has an extra 0x84 recv tag from m48 and therefore ends in
     0x87 + 0x84 var.
     """
+    statement = _default_store.statement
+    s = statement.get_summary()
     return b"".join([
-        build_tagged_reply_dword(1904),  # balance in cents -> "$19.04"
-        build_tagged_reply_word(840),    # ISO currency code: USD
-        build_tagged_reply_word(2026),   # statement year
-        build_tagged_reply_byte(4),      # month
-        build_tagged_reply_byte(1),      # day
-        build_tagged_reply_word(90),     # free connect minutes -> 01:30
-        build_tagged_reply_byte(3),      # period_count - 1 -> 4 periods
+        build_tagged_reply_dword(s.balance_cents),
+        build_tagged_reply_word(s.currency_iso),
+        build_tagged_reply_word(s.year),
+        build_tagged_reply_byte(s.month),
+        build_tagged_reply_byte(s.day),
+        build_tagged_reply_word(s.free_connect_minutes),
+        build_tagged_reply_byte(max(statement.period_count() - 1, 0)),
     ])
-
-
-_SUMMARY_PAYLOAD = _build_summary_payload()
 
 
 _STMT_EPOCH = datetime.datetime(1970, 1, 1)
@@ -151,63 +151,7 @@ def _encode_record(when, description, amount, total,
 _DETAILS_HEADER = b"Exchange rate:\x00"
 
 
-# Per-period transaction lists, indexed by the period byte the client
-# sends as the first send param of selector=0x05.  Period 0 is the
-# current statement; periods 1..N are prior calendar months walked
-# backward by FUN_7f351fd2 from the statement date in the summary.
-_DETAILS_RECORDS_BY_PERIOD = [
-    # Period 0 — April 2026 (current statement, $19.04 balance).
-    [
-        _encode_record(datetime.datetime(2026, 4, 1, 9, 15),
-                       "Monthly subscription", 495, 495),
-        _encode_record(datetime.datetime(2026, 4, 5, 19, 42),
-                       "Premium content access", 149, 644),
-        _encode_record(datetime.datetime(2026, 4, 9, 14, 3),
-                       "Chat room usage", 75, 719),
-        # Flag-0x02 row: ¥1,000 charged at 0.0067 USD/JPY -> $6.70.
-        # Slot-11 (JPY) NumDigits=0 so foreign dword is whole yen, not
-        # minor units.  Slot-10 (USD) NumDigits=2 so amount/total are
-        # cents.  Rate dword uses rate-digits precision (default 4dp)
-        # so value 67 renders as "0.0067".
-        _encode_record(datetime.datetime(2026, 4, 11, 12, 0),
-                       "Tokyo content purchase", 670, 1389,
-                       foreign=(1000, 392, 67)),
-        _encode_record(datetime.datetime(2026, 4, 12, 22, 30),
-                       "Online statement fee", 515, 1904),
-    ],
-    # Period 1 — March 2026.
-    [
-        _encode_record(datetime.datetime(2026, 3, 1, 8, 30),
-                       "Monthly subscription", 495, 495),
-        _encode_record(datetime.datetime(2026, 3, 14, 21, 5),
-                       "Premium content access", 149, 644),
-        _encode_record(datetime.datetime(2026, 3, 28, 23, 50),
-                       "Online statement fee", 250, 894),
-    ],
-    # Period 2 — February 2026.
-    [
-        _encode_record(datetime.datetime(2026, 2, 1, 7, 45),
-                       "Monthly subscription", 495, 495),
-        _encode_record(datetime.datetime(2026, 2, 7, 18, 22),
-                       "Game zone tournament entry", 200, 695),
-        _encode_record(datetime.datetime(2026, 2, 18, 20, 11),
-                       "Premium content access", 149, 844),
-        _encode_record(datetime.datetime(2026, 2, 27, 22, 30),
-                       "Online statement fee", 250, 1094),
-    ],
-    # Period 3 — January 2026.
-    [
-        _encode_record(datetime.datetime(2026, 1, 1, 10, 0),
-                       "Monthly subscription", 495, 495),
-        _encode_record(datetime.datetime(2026, 1, 19, 19, 17),
-                       "Premium content access", 149, 644),
-        _encode_record(datetime.datetime(2026, 1, 31, 23, 59),
-                       "Online statement fee", 250, 894),
-    ],
-]
-
-
-def _build_details_payload(records):
+def build_details_payload(period_index):
     """Build the Get-Details reply for selector=0x05.
 
     Request wire (after host block): `01 NN 82 82 85`
@@ -235,6 +179,11 @@ def _build_details_payload(records):
     (prefix used by the flag-0x02 exchange-rate formatter), read
     once before the record loop at 0x7f352292.
     """
+    txns = _default_store.statement.get_transactions(period_index)
+    records = [_encode_record(t.when, t.description,
+                              t.amount_minor, t.total_minor,
+                              extra=t.extra, foreign=t.foreign)
+               for t in txns]
     blob = _DETAILS_HEADER + b"".join(records)
     return b"".join([
         build_tagged_reply_word(len(records)),
@@ -244,36 +193,31 @@ def _build_details_payload(records):
     ])
 
 
-_DETAILS_PAYLOADS = [_build_details_payload(r) for r in _DETAILS_RECORDS_BY_PERIOD]
-
-
-def _encode_subscription_record(type_flag, service_name, description,
-                                price_cents, price_currency,
-                                record_currency=0):
+def _encode_subscription_record(sub):
     """Encode one entry inside the Subscriptions 0x84 variable buffer.
 
     Layout walked by FetchSubscriptionList at 0x7f35435b (filling each
     listbox row) and re-read by the Remove-button branch in the
     Subscriptions DLGPROC at 0x7f353c4e (deciding what to do):
 
-        byte    type_flag       see table below — drives both rendering
+        byte    kind            see table below — drives both rendering
                                 and Remove behavior
         bytes   pad[12]         unused by the main render loop
         word    record_currency at offset 0x0d, ISO 4217 numeric;
                                 appended via LoadCurrencyName when the
                                 row's price is non-zero
-        cstr    service_name    NUL-terminated, main listbox line
-        cstr    description     NUL-terminated, detail text
-        dword   price_cents     formatted in slot-0xb currency, minor
+        cstr    name            NUL-terminated, main listbox line
+        cstr    detail          NUL-terminated, detail text
+        dword   price_minor     formatted in slot-0xb currency, minor
                                 units; 0 suppresses the price column
         word    price_currency  fed to ConfigureCurrencySlot(0xb) so
                                 GetCurrencyFormatA renders the row's
                                 amount with the right symbol/format
 
-    type_flag semantics (the only byte the client actually branches on):
+    kind semantics (the only byte the client actually branches on):
 
         +------+-------------------------+------------------------------+
-        | flag | listbox rendering       | Remove-button result         |
+        | kind | listbox rendering       | Remove-button result         |
         +------+-------------------------+------------------------------+
         | 0x01 | "<name> ** expires **   | LoadString 0x29 →            |
         |      | <first-date>"           | "cannot remove your current  |
@@ -296,42 +240,24 @@ def _encode_subscription_record(type_flag, service_name, description,
         |      |                         | catch-all                    |
         +------+-------------------------+------------------------------+
 
-    Source: type_flag is read at piVar5[-1] in both the row-builder
+    Source: kind is read at piVar5[-1] in both the row-builder
     (FUN_7f35435b second loop) and the Remove handler (FUN_7f353c4e
     control 0x3ef branch).  The cancel path calls FUN_7f354e24(this,
     0xffff) which posts an MPC request on selector 0x04.
     """
     return (
-        bytes([type_flag & 0xFF])
+        bytes([sub.kind & 0xFF])
         + b"\x00" * 12
-        + struct.pack("<H", record_currency & 0xFFFF)
-        + service_name.encode("ascii") + b"\x00"
-        + description.encode("ascii") + b"\x00"
+        + struct.pack("<H", sub.record_currency & 0xFFFF)
+        + sub.name.encode("ascii") + b"\x00"
+        + sub.detail.encode("ascii") + b"\x00"
         + struct.pack("<IH",
-                      price_cents & 0xFFFFFFFF,
-                      price_currency & 0xFFFF)
+                      sub.price_minor & 0xFFFFFFFF,
+                      sub.price_currency & 0xFFFF)
     )
 
 
-# One record per type_flag branch — see _encode_subscription_record for
-# the full table of rendering and Remove behavior.
-_SUBSCRIPTIONS_RECORDS = [
-    _encode_subscription_record(
-        0x01, "MSN Premium", "Monthly subscription", 495, 840,
-        record_currency=840),
-    _encode_subscription_record(
-        0x02, "MSN Plus Games", "Gaming add-on pack", 299, 840,
-        record_currency=840),
-    _encode_subscription_record(
-        0x04, "Promotional credit", "First-month welcome credit", 199, 840,
-        record_currency=840),
-    _encode_subscription_record(
-        0xFF, "MSN Bookshelf", "Reference library access", 99, 840,
-        record_currency=840),
-]
-
-
-def _build_subscriptions_payload():
+def build_subscriptions_payload():
     """Build the Subscriptions-tab reply for selector=0x02.
 
     Request wire (all recv, no send params):
@@ -363,9 +289,10 @@ def _build_subscriptions_payload():
         9  byte  second_date_month     date appended to type_flag 0x02
         10 byte  second_date_day       rows; 0 suppresses
     """
-    records_blob = b"".join(_SUBSCRIPTIONS_RECORDS)
+    subs = _default_store.statement.get_subscriptions()
+    records_blob = b"".join(_encode_subscription_record(s) for s in subs)
     return b"".join([
-        build_tagged_reply_byte(len(_SUBSCRIPTIONS_RECORDS)),
+        build_tagged_reply_byte(len(subs)),
         build_tagged_reply_var(0x84, records_blob),
         build_tagged_reply_dword(495),
         build_tagged_reply_word(840),      # balance currency: USD
@@ -380,10 +307,7 @@ def _build_subscriptions_payload():
     ])
 
 
-_SUBSCRIPTIONS_PAYLOAD = _build_subscriptions_payload()
-
-
-def _encode_plan_record(plan_id, name, detail):
+def _encode_plan_record(plan):
     """Encode one entry inside the Manage-Subscription 0x84 plans buffer.
 
     Layout walked by FUN_7f354aa2 plan loop at 0x7f354b94:
@@ -399,27 +323,13 @@ def _encode_plan_record(plan_id, name, detail):
     """
     return (
         b"\x01"
-        + struct.pack("<H", plan_id & 0xFFFF)
-        + name.encode("ascii") + b"\x00"
-        + detail.encode("ascii") + b"\x00"
+        + struct.pack("<H", plan.plan_id & 0xFFFF)
+        + plan.name.encode("ascii") + b"\x00"
+        + plan.detail.encode("ascii") + b"\x00"
     )
 
 
-_PLAN_RECORDS = [
-    _encode_plan_record(
-        0, "MSN Premium",
-        "$4.95/month, includes 3 hours of online time. "
-        "Additional hours billed at $2.50/hour."),
-    _encode_plan_record(
-        1, "MSN Plus",
-        "$19.95/month, unlimited online time."),
-    _encode_plan_record(
-        2, "MSN Annual",
-        "$49.95/year, unlimited online time. Two months free."),
-]
-
-
-def _build_plans_payload():
+def build_plans_payload():
     """Build the Manage-Subscription plans reply for selector=0x03.
 
     Request wire (after host block): `81 84`
@@ -440,15 +350,13 @@ def _build_plans_payload():
     Our subscriptions reply leaves the per-row pad zeroed, so plan
     id 0 is the current one.
     """
-    blob = b"".join(_PLAN_RECORDS)
+    plans = _default_store.statement.get_plans()
+    blob = b"".join(_encode_plan_record(p) for p in plans)
     return b"".join([
-        build_tagged_reply_byte(len(_PLAN_RECORDS)),
+        build_tagged_reply_byte(len(plans)),
         build_tagged_reply_var(0x84, blob),
         bytes([TAG_END_STATIC]),
     ])
-
-
-_PLANS_PAYLOAD = _build_plans_payload()
 
 
 # Cancel-subscription ack for selector=0x04.  Request wire: one
@@ -488,13 +396,13 @@ class OnlStmtHandler:
 
         if selector == 0x00:
             print("  [OnlStmt] Statement summary (selector 0x00)")
-            reply_payload = _SUMMARY_PAYLOAD
+            reply_payload = build_summary_payload()
         elif selector == 0x02:
             print("  [OnlStmt] Subscriptions (selector 0x02)")
-            reply_payload = _SUBSCRIPTIONS_PAYLOAD
+            reply_payload = build_subscriptions_payload()
         elif selector == 0x03:
             print("  [OnlStmt] Manage subscription / plans (selector 0x03)")
-            reply_payload = _PLANS_PAYLOAD
+            reply_payload = build_plans_payload()
         elif selector == 0x04:
             print("  [OnlStmt] Cancel subscription (selector 0x04)")
             reply_payload = _CANCEL_ACK_PAYLOAD
@@ -502,10 +410,8 @@ class OnlStmtHandler:
             # Request payload: `01 NN ...` — first send param is the
             # period index byte.  Fall back to 0 (current) if absent.
             period = payload[1] if len(payload) >= 2 and payload[0] == 0x01 else 0
-            if period >= len(_DETAILS_PAYLOADS):
-                period = 0
             print(f"  [OnlStmt] Get Details (selector 0x05) period={period}")
-            reply_payload = _DETAILS_PAYLOADS[period]
+            reply_payload = build_details_payload(period)
         else:
             print(f"  [OnlStmt] UNHANDLED class=0x{msg_class:02x} "
                   f"selector=0x{selector:02x} req_id={request_id} "

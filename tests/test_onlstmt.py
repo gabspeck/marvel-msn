@@ -18,18 +18,18 @@ from contextlib import redirect_stdout
 from server.services.onlstmt import (
     OnlStmtHandler,
     _CANCEL_ACK_PAYLOAD,
-    _DETAILS_PAYLOADS,
-    _DETAILS_RECORDS_BY_PERIOD,
-    _PLANS_PAYLOAD,
-    _SUBSCRIPTIONS_PAYLOAD,
-    _SUMMARY_PAYLOAD,
     _encode_record,
     _encode_timestamp,
+    build_details_payload,
+    build_plans_payload,
+    build_subscriptions_payload,
+    build_summary_payload,
 )
+from server.store import default_seed
 from server.config import TAG_END_STATIC
 from server.mpc import parse_host_block, parse_tagged_params
 from server.models import (
-    ByteParam, DwordParam, EndMarker, VarParam, WordParam,
+    ByteParam, DwordParam, EndMarker, WordParam,
 )
 from server.transport import parse_packet
 
@@ -49,8 +49,11 @@ def _extract_host_block(wire_packets):
 class TestSummaryPayload(unittest.TestCase):
     """Static section: 7 tagged primitives in fixed order."""
 
+    def setUp(self):
+        self.payload = build_summary_payload()
+
     def test_parses_to_seven_primitives(self):
-        params = parse_tagged_params(_SUMMARY_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         self.assertEqual(len(params), 7)
         kinds = [type(p) for p in params]
         self.assertEqual(kinds, [
@@ -59,31 +62,36 @@ class TestSummaryPayload(unittest.TestCase):
         ])
 
     def test_currency_slot_is_usd(self):
-        params = parse_tagged_params(_SUMMARY_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         self.assertEqual(params[1].value, 840)  # ISO 4217 USD
 
     def test_period_count_byte_is_three(self):
         # Last primitive = period_count - 1; client clamps to max 4.
         # 0 here would shrink the Get-Details period listbox to one row.
-        params = parse_tagged_params(_SUMMARY_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         self.assertEqual(params[-1].value, 3)
 
     def test_period_count_byte_position_pinned(self):
         # The last byte of the static reply IS the period counter.
         # Pin the byte position to catch a re-order regression.
-        self.assertEqual(_SUMMARY_PAYLOAD[-1], 3)
-        self.assertEqual(_SUMMARY_PAYLOAD[-2], 0x81)
+        self.assertEqual(self.payload[-1], 3)
+        self.assertEqual(self.payload[-2], 0x81)
 
 
 class TestDetailsPayloads(unittest.TestCase):
+    def setUp(self):
+        self.seed = default_seed()
+        self.payloads = [build_details_payload(i)
+                         for i in range(len(self.seed.statement_transactions))]
+
     def test_one_payload_per_period(self):
-        self.assertEqual(len(_DETAILS_PAYLOADS), 4)
-        self.assertEqual(len(_DETAILS_RECORDS_BY_PERIOD), 4)
+        self.assertEqual(len(self.payloads), 4)
+        self.assertEqual(len(self.seed.statement_transactions), 4)
 
     def test_each_payload_has_dynamic_complete_tag(self):
         # Reply must end with a 0x86 dynamic-complete blob — the
         # client's m10 hangs forever otherwise (per onlstmt.py docstring).
-        for period, payload in enumerate(_DETAILS_PAYLOADS):
+        for period, payload in enumerate(self.payloads):
             with self.subTest(period=period):
                 self.assertIn(b"\x86", payload)
                 # 0x87 end-static must precede the 0x86 blob.
@@ -93,11 +101,12 @@ class TestDetailsPayloads(unittest.TestCase):
 
     def test_record_count_word_matches_period(self):
         # First static word = record count for that period.
-        for period, payload in enumerate(_DETAILS_PAYLOADS):
+        for period, payload in enumerate(self.payloads):
             with self.subTest(period=period):
                 self.assertEqual(payload[0], 0x82)
                 count = struct.unpack("<H", payload[1:3])[0]
-                self.assertEqual(count, len(_DETAILS_RECORDS_BY_PERIOD[period]))
+                self.assertEqual(count,
+                                 len(self.seed.statement_transactions[period]))
 
 
 class TestDetailsPeriodDispatch(unittest.TestCase):
@@ -116,25 +125,25 @@ class TestDetailsPeriodDispatch(unittest.TestCase):
 
     def test_period_zero_returned_for_period_byte_0(self):
         reply = self._dispatch(b"\x01\x00")
-        self.assertEqual(reply, _DETAILS_PAYLOADS[0])
+        self.assertEqual(reply, build_details_payload(0))
 
     def test_period_three_returned_for_period_byte_3(self):
         reply = self._dispatch(b"\x01\x03")
-        self.assertEqual(reply, _DETAILS_PAYLOADS[3])
+        self.assertEqual(reply, build_details_payload(3))
 
     def test_period_clamped_when_out_of_range(self):
         # Anything >= 4 falls back to current period.
         reply = self._dispatch(b"\x01\x09")
-        self.assertEqual(reply, _DETAILS_PAYLOADS[0])
+        self.assertEqual(reply, build_details_payload(0))
 
     def test_empty_payload_falls_back_to_period_zero(self):
         reply = self._dispatch(b"")
-        self.assertEqual(reply, _DETAILS_PAYLOADS[0])
+        self.assertEqual(reply, build_details_payload(0))
 
     def test_missing_send_byte_tag_falls_back_to_period_zero(self):
         # If the leading tag isn't 0x01 (send byte), treat as period 0.
         reply = self._dispatch(b"\x02\x03")
-        self.assertEqual(reply, _DETAILS_PAYLOADS[0])
+        self.assertEqual(reply, build_details_payload(0))
 
 
 class TestDetailsRecordEncoding(unittest.TestCase):
@@ -205,9 +214,10 @@ class TestDaysWireBias(unittest.TestCase):
 
     def test_records_in_real_payloads_above_safety_threshold(self):
         # Sanity: every record in our fixture data passes the gate.
-        for period_records in _DETAILS_RECORDS_BY_PERIOD:
-            for rec in period_records:
-                days_wire = struct.unpack("<H", rec[1:3])[0]
+        seed = default_seed()
+        for period_records in seed.statement_transactions:
+            for txn in period_records:
+                days_wire, _ = _encode_timestamp(txn.when)
                 self.assertGreaterEqual(days_wire, 0x63e0)
 
     def test_wraps_within_16_bits(self):
@@ -218,14 +228,17 @@ class TestDaysWireBias(unittest.TestCase):
 
 
 class TestSubscriptionsPayload(unittest.TestCase):
+    def setUp(self):
+        self.payload = build_subscriptions_payload()
+
     def test_ends_with_end_static(self):
-        self.assertEqual(_SUBSCRIPTIONS_PAYLOAD[-1], TAG_END_STATIC)
+        self.assertEqual(self.payload[-1], TAG_END_STATIC)
 
     def test_no_dynamic_section(self):
-        self.assertNotIn(b"\x86", _SUBSCRIPTIONS_PAYLOAD)
+        self.assertNotIn(b"\x86", self.payload)
 
     def test_has_eleven_static_primitives(self):
-        params = parse_tagged_params(_SUBSCRIPTIONS_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         # 11 data primitives + 1 EndMarker
         self.assertEqual(len(params), 12)
         self.assertIsInstance(params[-1], EndMarker)
@@ -235,28 +248,31 @@ class TestSubscriptionsPayload(unittest.TestCase):
         # billing line at the bottom of the tab.  ≠ 0 passes the error
         # 0x1e gate, but a code not in g_rgISOCurrencyCodes renders as
         # "unknown currency" — must be a real ISO 4217 numeric code.
-        params = parse_tagged_params(_SUBSCRIPTIONS_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         self.assertEqual(params[3].value, 840)  # USD
 
     def test_slot4_flag_nonzero(self):
         # Slot 4 byte stored on dialog state +0x0c; purpose unclear but
         # must be non-zero (matches captured server replies).
-        params = parse_tagged_params(_SUBSCRIPTIONS_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         self.assertNotEqual(params[4].value, 0)
 
 
 class TestPlansPayload(unittest.TestCase):
+    def setUp(self):
+        self.payload = build_plans_payload()
+
     def test_ends_with_end_static(self):
-        self.assertEqual(_PLANS_PAYLOAD[-1], TAG_END_STATIC)
+        self.assertEqual(self.payload[-1], TAG_END_STATIC)
 
     def test_count_byte_matches_records(self):
         # First primitive = byte plan_count; it gates listbox 0x418.
-        params = parse_tagged_params(_PLANS_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         self.assertIsInstance(params[0], ByteParam)
         self.assertEqual(params[0].value, 3)
 
     def test_plan_blob_contains_three_records_with_ids_0_1_2(self):
-        params = parse_tagged_params(_PLANS_PAYLOAD)
+        params = parse_tagged_params(self.payload)
         blob = params[1].data
         # Record layout: byte flag=0x01, word plan_id, cstr name, cstr detail
         seen_ids = []

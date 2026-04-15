@@ -11,6 +11,7 @@ from ..mpc import (
     parse_request_params,
 )
 from ..models import VarParam, DwordParam
+from ..store import app_store as _default_store
 
 
 class LOGSRVHandler:
@@ -122,6 +123,7 @@ def _handle_billing_query():
         +0x19  Card number string
     """
     print("  [LOGSRV] Billing/account info query")
+    profile = _default_store.account.get_billing_profile()
     buf = bytearray(0x41c)  # 1052 bytes, zero-filled
 
     # Status = 0 (success)
@@ -129,19 +131,19 @@ def _handle_billing_query():
 
     # OI: address fields (offsets relative to OI start at byte 8)
     oi = 8
-    _put_str(buf, oi + 0x3b, 'Microsoft')      # first name
-    _put_str(buf, oi + 0x69, 'User')            # last name
-    struct.pack_into('<I', buf, oi + 0x1d0, 1)  # country ID (1 = US)
-    _put_str(buf, oi + 0x1d8, '1 Microsoft Way')  # address
-    _put_str(buf, oi + 0x201, 'Redmond')        # city
-    _put_str(buf, oi + 0x253, 'WA')             # state
-    _put_str(buf, oi + 0x27c, '98052')          # ZIP
-    _put_str(buf, oi + 0x2bd, '425-882-8080')   # phone
+    _put_str(buf, oi + 0x3b, profile.first_name)
+    _put_str(buf, oi + 0x69, profile.last_name)
+    struct.pack_into('<I', buf, oi + 0x1d0, profile.country_id)
+    _put_str(buf, oi + 0x1d8, profile.address)
+    _put_str(buf, oi + 0x201, profile.city)
+    _put_str(buf, oi + 0x253, profile.state)
+    _put_str(buf, oi + 0x27c, profile.zip)
+    _put_str(buf, oi + 0x2bd, profile.phone)
 
     # PM: payment method
     pm = 0x300
-    struct.pack_into('<I', buf, pm + 0x00, 1)   # type = CHARGE
-    _put_str(buf, pm + 0x19, '411111******1111')  # card number
+    struct.pack_into('<I', buf, pm + 0x00, profile.payment_type)
+    _put_str(buf, pm + 0x19, profile.card_number)
 
     return build_tagged_reply_var(0x84, bytes(buf))
 

@@ -8,6 +8,7 @@ from ..mpc import (
     build_discovery_payload, decode_dirsrv_request,
 )
 from ..models import DirsrvRequest
+from ..store import app_store as _default_store
 
 
 class DIRSRVHandler:
@@ -74,45 +75,13 @@ def _sz(s):
     return b'\x01' + data + b'\x00'
 
 
-# Content for leaf nodes served to the Properties dialog.
-# Wire letter → General tab field (corrected 2026-04-15 by live observation):
-#   e  → Name            (ASCII cache, type 0x0A)
-#   k  → Go word         (was misidentified as Category)
-#   ca → Category        (was misidentified as category_price_str)
-#   tp → Type
-#   z  → Price DWORD     (0 formats as "Free")
-#   o  → Rating DWORD    (0 formats as "Not rated")
-# Context tab fields (Ghidra FUN_7f401d81):
-#   q=LCID DWORD, r/s/t/n/on/v/w=strings, y=VendorID DWORD, p=size DWORD.
-MSN_TODAY_CONTENT = {
-    'name':        'MSN Today',                                    # e  — Name
-    'go_word':     'today',                                         # k  — Go word
-    'category':    'News',                                          # ca — Category
-    'type_str':    'News & Features',                              # tp — Type
-    'price_dword': 0,                                               # z  — Price (0 = Free)
-    'rating_dword': 0,                                              # o  — Rating (0 = Not rated)
-    'description': 'Your daily window to MSN.',                    # j  — Description
-    'language':    1033,                                            # q  — en-US LCID
-    'topics':      'News, Weather, Entertainment',                 # r  — Topics
-    'people':      'Microsoft editorial staff',                    # s  — People
-    'place':       'Redmond, WA, USA',                             # t  — Place
-    'u_value':     '',                                              # u  — hidden
-    'forum_mgr':   'MSN Editorial',                                # n  — Forum manager
-    'vendor_id':   1,                                               # y  — Vendor ID
-    'owner':       'The Microsoft Network',                        # on — Owner
-    'created':     'August 24, 1995',                              # v  — Created
-    'modified':    'April 15, 2026',                               # w  — Last changed
-    'size_bytes':  5 * 1024 * 1024,                                 # p  — Size (DWORD → FormatSizeString)
-}
-
-
 def build_nav_props(requested_props, *, is_container, c_value=0,
                     mnid_a=b'\x00' * 8, title='MSN Today'):
     """Props for DSNAV GetChildren — the navigation/list view.
 
     Keeps the stable-state encoding proven to not OOM:
     - a/c/h/b/x structural props
-    - e = title string (0x0B UTF-16 cache — icon label reader reads wide).
+    - e = title string (0x0A ASCII cache — icon label + titlebar both ANSI).
     - p = title blob (legacy list-view title; ignored by Context tab here)
     - Unknown content props default to DWORD 0.
     """
@@ -154,6 +123,8 @@ def build_dialog_props(requested_props, content):
     (ANSI). With 0x0B the cache is UTF-16 and PropertySheetA truncates at the
     first wide NUL ("MSN Today" → "M"). 0x0A keeps the cache ASCII so both
     GetProperty (raw) and GetPropSz (ANSI) render the full string.
+
+    `content` is a NodeContent dataclass (server.store.base).
     """
     out = []
     for name in requested_props:
@@ -163,47 +134,47 @@ def build_dialog_props(requested_props, content):
         # is consumed by GetPropSz which runs EnsurePropSzCache's
         # WideCharToMultiByte path to produce the ASCII copy at cache+0xC.
         if name == 'e':
-            out.append((0x0A, 'e', _sz(content['name'])))
+            out.append((0x0A, 'e', _sz(content.name)))
         elif name == 'j':
-            out.append((0x0B, 'j', _sz(content['description'])))
+            out.append((0x0B, 'j', _sz(content.description)))
         elif name == 'k':
-            out.append((0x0B, 'k', _sz(content['go_word'])))
+            out.append((0x0B, 'k', _sz(content.go_word)))
         elif name == 'ca':
-            out.append((0x0B, 'ca', _sz(content['category'])))
+            out.append((0x0B, 'ca', _sz(content.category)))
         elif name == 'tp':
-            out.append((0x0B, 'tp', _sz(content['type_str'])))
+            out.append((0x0B, 'tp', _sz(content.type_str)))
         elif name == 'r':
-            out.append((0x0B, 'r', _sz(content['topics'])))
+            out.append((0x0B, 'r', _sz(content.topics)))
         elif name == 's':
-            out.append((0x0B, 's', _sz(content['people'])))
+            out.append((0x0B, 's', _sz(content.people)))
         elif name == 't':
-            out.append((0x0B, 't', _sz(content['place'])))
+            out.append((0x0B, 't', _sz(content.place)))
         elif name == 'u':
-            out.append((0x0B, 'u', _sz(content['u_value']) if content['u_value']
+            out.append((0x0B, 'u', _sz(content.u_value) if content.u_value
                         else _sz('')))
         elif name == 'n':
-            out.append((0x0B, 'n', _sz(content['forum_mgr'])))
+            out.append((0x0B, 'n', _sz(content.forum_mgr)))
         elif name == 'on':
-            out.append((0x0B, 'on', _sz(content['owner'])))
+            out.append((0x0B, 'on', _sz(content.owner)))
         elif name == 'v':
-            out.append((0x0B, 'v', _sz(content['created'])))
+            out.append((0x0B, 'v', _sz(content.created)))
         elif name == 'w':
-            out.append((0x0B, 'w', _sz(content['modified'])))
+            out.append((0x0B, 'w', _sz(content.modified)))
         elif name == 'p':
             # 'p' is a DWORD byte count. FUN_7f3fba69's special 'p' branch
             # reads `**(cache+4)` (first DWORD of value data) and calls
             # FormatSizeString (vtable+0x140), caching the formatted result
             # at cache+0xC for GetPropSzBuf.
-            out.append((0x03, 'p', struct.pack('<I', content['size_bytes'])))
+            out.append((0x03, 'p', struct.pack('<I', content.size_bytes)))
         # DWORD (type 0x03) — Ghidra-confirmed dword reads
         elif name == 'q':
-            out.append((0x03, 'q', struct.pack('<I', content['language'])))
+            out.append((0x03, 'q', struct.pack('<I', content.language)))
         elif name == 'y':
-            out.append((0x03, 'y', struct.pack('<I', content['vendor_id'])))
+            out.append((0x03, 'y', struct.pack('<I', content.vendor_id)))
         elif name == 'z':
-            out.append((0x03, 'z', struct.pack('<I', content['price_dword'])))
+            out.append((0x03, 'z', struct.pack('<I', content.price_dword)))
         elif name == 'o':
-            out.append((0x03, 'o', struct.pack('<I', content['rating_dword'])))
+            out.append((0x03, 'o', struct.pack('<I', content.rating_dword)))
         # Unknown — safe default
         else:
             out.append((0x03, name, struct.pack('<I', 0)))
@@ -217,12 +188,15 @@ def _is_dialog_request(requested_props):
     )
 
 
-def build_child_props(requested_props, *, is_container, c_value=0,
-                      mnid_a=b'\x00' * 8, content=None, title='MSN Today'):
+def build_child_props(requested_props, node):
+    """Serialize `node` into a property record for the requested prop names."""
     if _is_dialog_request(requested_props):
-        return build_dialog_props(requested_props, content or MSN_TODAY_CONTENT)
-    return build_nav_props(requested_props, is_container=is_container,
-                           c_value=c_value, mnid_a=mnid_a, title=title)
+        return build_dialog_props(requested_props, node.content)
+    return build_nav_props(requested_props,
+                           is_container=node.is_container,
+                           c_value=node.app_id,
+                           mnid_a=node.mnid_a,
+                           title=node.content.name)
 
 
 def build_dirsrv_reply_payload(request=None):
@@ -239,54 +213,21 @@ def build_dirsrv_reply_payload(request=None):
     print(f"[DIRSRV] node={request.node_id} raw={request.node_id_raw.hex()} "
           f"children={is_children} props={requested_props}")
 
+    content_store = _default_store.content
+    node = content_store.get_node(request.node_id)
+
     records = []
 
-    # Map wire node_id → (title, is_container, c_value, mnid_a).
-    # 'c' = registered MOS app_id (see reference_mos_apps_registry.md):
-    #   1 = Directory_Service (for containers in DSNAV)
-    #   7 = Down_Load_And_Run (for browser-URL leaves — MSN Today)
-    node_table = {
-        "0:0":         ("Root",        True,  1, struct.pack('<II', 0x44000c, 0)),
-        "4456460:0":   ("MSN Central", True,  1, struct.pack('<II', 0x44000c, 0)),
-        "0:4456460":   ("MSN Central", True,  1, struct.pack('<II', 0x44000c, 0)),
-        "4456461:0":   ("MSN Today",   False, 7, struct.pack('<II', 0x44000d, 0)),
-    }
-    info = node_table.get(request.node_id,
-                          ("MSN Today", False, 7, struct.pack('<II', 0x44000d, 0)))
-    title, is_container, c_value, mnid_a = info
-
-    msn_central_content = dict(MSN_TODAY_CONTENT, name="MSN Central",
-                               type_str="Directory",
-                               size_bytes=0)
-
     if not is_children:
-        own = build_child_props(
-            requested_props,
-            is_container=is_container, c_value=c_value, mnid_a=mnid_a,
-            content=msn_central_content if title == "MSN Central" else MSN_TODAY_CONTENT,
-            title=title)
-        records.append(build_property_record(own))
+        records.append(build_property_record(build_child_props(requested_props, node)))
     else:
-        # Permissive fallback: GetChildren on any non-"0:0" node returns MSN
-        # Today. This causes visual endless hierarchy (leaf appears as its
-        # own child) but is required for CMosTreeNode::Exec to cache 'z'/'c'
-        # — returning empty broke dispatch with "task cannot be completed".
-        if request.node_id == "0:0":
-            msn_central = build_child_props(
-                requested_props,
-                is_container=True, c_value=1,
-                mnid_a=struct.pack('<II', 0x44000c, 0),
-                content=msn_central_content,
-                title="MSN Central")
-            records.append(build_property_record(msn_central))
-        else:
-            child = build_child_props(
-                requested_props,
-                is_container=False, c_value=7,
-                mnid_a=struct.pack('<II', 0x44000d, 0),
-                content=MSN_TODAY_CONTENT,
-                title="MSN Today")
-            records.append(build_property_record(child))
+        # Permissive fallback: GetChildren on any non-"0:0" node returns the
+        # fallback leaf (MSN Today). This causes visual endless hierarchy
+        # (leaf appears as its own child) but is required for
+        # CMosTreeNode::Exec to cache 'z'/'c' — returning empty broke
+        # dispatch with "task cannot be completed".
+        for child in content_store.get_children(request.node_id):
+            records.append(build_property_record(build_child_props(requested_props, child)))
 
     node_count = len(records)
     dynamic_data = b''.join(records)
