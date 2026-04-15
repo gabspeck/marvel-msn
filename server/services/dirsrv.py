@@ -112,7 +112,7 @@ def build_nav_props(requested_props, *, is_container, c_value=0,
 
     Keeps the stable-state encoding proven to not OOM:
     - a/c/h/b/x structural props
-    - e = DWORD 0 (icon label reads first 4 bytes as int → renders "0")
+    - e = title string (0x0B UTF-16 cache — icon label reader reads wide).
     - p = title blob (legacy list-view title; ignored by Context tab here)
     - Unknown content props default to DWORD 0.
     """
@@ -124,6 +124,12 @@ def build_nav_props(requested_props, *, is_container, c_value=0,
             out.append((0x01, 'b', bytes([0x01 if is_container else 0x00])))
         elif name == 'c':
             out.append((0x03, 'c', struct.pack('<I', c_value)))
+        elif name == 'e':
+            # Icon label reads prop 'e' as a wide string — type 0x0B keeps
+            # the UTF-16 temp buffer in the cache, so the icon renders the
+            # full title. Prior stable state sent DWORD 0 here, which
+            # rendered as the literal "0".
+            out.append((0x0B, 'e', _sz(title)))
         elif name == 'h':
             out.append((0x03, 'h', struct.pack('<I', 1 if is_container else 0)))
         elif name == 'x':
