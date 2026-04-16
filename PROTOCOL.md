@@ -385,7 +385,14 @@ these — client tears down unilaterally.
 
 ### 7.2 DIRSRV
 
-Discovery: one IID, `{00028B27-…-46}` → selector `0x01`.
+Discovery: the DIRSRV IID family `{00028B25..2E-…-46}` → selectors
+`0x01..0x0A`. Selector `0x01` = GetProperties (`{00028B27-…}`);
+selector `0x04` = GetShabby (`{00028B28-…}`). `CTreeNavClient::GetShabby`
+(TREENVCL.DLL `0x7F631BAB`) calls `proxy->method_at_offset_0xC(proxy, 4, ...)`
+— the literal `4` is the slot index that resolves to the GetShabby IID
+via the discovery table, so the server discovery block must publish the
+full family (not just `28B27`) or the client's proxy marshaller will
+route the shabby request to the wrong selector.
 
 #### 7.2.1 GetProperties request (selector 0x01, opcode 0x02)
 
@@ -442,13 +449,13 @@ Both tab requests use `dword_0=1` (GetChildren-shape) against the leaf.
 | `c`  | 0x03 | nav + click | Exec dispatch | Registered MOS app_id (HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>). 1 = Directory_Service, 6 = Media_Viewer, 7 = Down_Load_And_Run (browser URL) |
 | `ca` | 0x0B | dlg-general | Category | — |
 | `e`  | **0x0A** | nav + dlg-general + titlebar | Name (icon label + explorer titlebar + General Name) | ASCII-cache string. Both icon label and `IShellFolder::GetDisplayNameOf` (STRRET ANSI) read 'e'; 0x0B truncates titlebar to "M" |
-| `g`  | ? | nav + dlg-general + dlg-context | (icon) | Global icon/graphic handle. Wire shape unresolved — see Open Questions |
-| `h`  | 0x03 | nav | — | 1 = container/has-children, 0 = leaf |
+| `g`  | 0x03 | nav + dlg-general + dlg-context | — | Purpose unresolved. Ruled out as the icon slot (sentinel sweeps 2026-04-16 showed `mf`/`wv`, not `g`, drive GetShabby). Emit DWORD 0 until a consumer trace pins it down |
+| `h`  | 0x03 | nav | **Secondary icon (GetShabby ICO/EXE/DLL path)** | Shabby ID DWORD of a custom icon-bearing file (.ICO/.EXE/.DLL). `MOSSHELL FUN_7F404786` reads "h" as 4-byte DWORD and, on success, calls `FUN_7F4047C2` → `FUN_7F4049F9` (GetTempFileNameA + vtable[0x74] GetShabbyToFile + ExtractIconExA). On GetProperty failure the whole ICO path is skipped. **Omit entirely** for nodes without a custom icon — emitting `h=0` triggers `GetShabby(shabby_id=0)` → zero-blob reply → NULL HICON → forbidden glyph. Prior container-flag interpretation was wrong (container-ness is carried in `b` bit 0) |
 | `i`  | 0x03 | nav | — | Unknown; send 0 |
 | `j`  | 0x0B | dlg-general | Description / Go word | — |
 | `k`  | 0x0B | dlg-general | Go word | — |
 | `l`  | 0x03 | nav | — | Unknown; send 0 |
-| `mf` | 0x03 | nav | — | Unknown; send 0 |
+| `mf` | **0x03** | nav | **Primary node icon (GetShabby slot B, `req_id=9`)** | Shabby ID DWORD. `MOSSHELL FUN_7F405018` does `GetProperty("mf", &buf, 4)` → 4-byte DWORD → synthesizes filename via `%04X%08X` → if absent, calls `vtable+0x74` → `GetShabbyToFile` → `CTreeNavClient::GetShabby`. **Must not be 0x0E** — as a blob, SVCPROP stores the heap-alloc pointer in the cache and the low 4 bytes of that pointer become the shabby_id (the `0x00BE0400` garbage). Adjacent string `PlaySound` at `0x7F40EBD8` hints `mf` may double as a sound-cue key |
 | `n`  | 0x0B | dlg-context | Forum manager | — |
 | `o`  | 0x03 | dlg-general | Rating | DWORD 0 → "Not rated" |
 | `on` | 0x0B | dlg-context | Owner | Two-letter prop name |
@@ -461,7 +468,7 @@ Both tab requests use `dword_0=1` (GetChildren-shape) against the leaf.
 | `u`  | 0x0B | dlg-context | (hidden) | Requested but no visible field |
 | `v`  | 0x0B | dlg-context | Created | Timestamp string |
 | `w`  | 0x0B | dlg-context | Last changed | Timestamp string |
-| `wv` | 0x0E | nav | — | Unknown blob; send 1-byte NUL |
+| `wv` | **0x03** | nav | **Secondary icon (GetShabby slot A, `req_id=1`)** | Shabby ID DWORD `(format<<24) \| content_id`. Fires GetShabby before `mf` does — likely the list-view/small-icon variant (exact consumer not yet isolated). Same 0x0E blob pitfall as `mf` |
 | `x`  | 0x0E | nav | — | Cmdline args for `HRMOSExec(c, args)`. Empty → length-1 NUL |
 | `y`  | 0x03 | dlg-context | (VendorID, hidden) | `SetDlgItemInt` on item 0x79, not laid out |
 | `z`  | 0x03 | dlg-general | Price | DWORD 0 → "Free" |
@@ -497,6 +504,49 @@ Wire property letters `'a' / 'e'` ≠ internal dispatch keys `'z' / 'c'`.
 `CMosTreeNode::Exec` reads the **cached** `'c'` from the GetChildren reply,
 not from a per-click GetProperties. `c=7` → browser URL; anything else →
 `CreateProcessA` using `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>`.
+
+#### 7.2.7 GetShabby (selector 0x04) — icon fetch
+
+After `GetProperties`/`GetChildren` populates the DSNAV cache, the client
+issues a follow-up GetShabby RPC **per node** to fetch the icon bytes.
+The argument is the DWORD it cached from property `wv` (see §7.2.4).
+
+**Request payload:**
+```
+ [0x03][u32]  shabby_id         — cached value of property 'wv'
+ recv: [0x83][0x85]             — status DWORD + dynamic blob
+```
+
+**Reply payload:**
+```
+ [0x83][u32]  status (0 = success)
+ [0x87]                         — end-static
+ [0x88]                         — dynamic-complete
+ <raw icon file bytes — no length prefix, read to end of packet>
+```
+
+The client writes the blob to a temp file and loads it with the Win32
+API selected by the `shabby_id`'s top byte (decoded by `MOSSHELL.DLL
+FUN_7F405018`):
+
+| Top byte | Loader | Format |
+|----------|--------|--------|
+| 0x01 | `GetEnhMetaFileA` | EMF |
+| 0x03 | `Meta_init/add/play/close` | raw WMF |
+| 0x04 | (magic `0x9AC6CDD7`) | placeable WMF |
+| 0x05 | `LoadImageA(IMAGE_BITMAP, LR_LOADFROMFILE \| LR_DEFAULTSIZE)` | BMP |
+
+Low 24 bits are an opaque content ID — the server's registry decides
+which file to serve. Unknown IDs: reply status=0 with an empty blob;
+client leaves the cache slot NULL and renders the forbidden glyph.
+
+**Reply tag gotcha:** use `0x87/0x88` (end-static + dynamic-complete),
+not `0x85` (length-prefixed dynamic-start). `0x85` hangs
+`MPCCL.ProcessTaggedServiceReply` because it never signals completion
+(the client's dispatch loop waits for `0x88`).
+
+**Slot B:** a second GetShabby fires per node with `req_id=9`. Which
+property drives it is unresolved — see §11.
 
 ### 7.3 FTM
 
@@ -657,9 +707,10 @@ Other keys:
 |------|----------|
 | LOGSRV 0x0E | Real phone-book update contract. Current stub replies dword=0 → client ticks "done" without a real FTM fetch. Need: meaning of send dword=8, whether non-zero reply triggers a fetch, versioning scheme. Tracked in `TODO.md`; Ghidra: `SIGNUP.EXE!FUN_004043C1`. |
 | LOGSRV 0x02 / 0x07 / 0x0D | COM-proxy unmarshaller layer not RE'd. Empty `0x84` reply is the minimum that works — specific semantics unknown. |
-| DIRSRV `g` | Icon/graphic property wire shape unknown. Currently sent as type 0x03 DWORD = 0; icon renders as "forbidden 0" glyph. |
+| DIRSRV `g` | Present in nav + both dialog tabs; purpose unresolved. Ruled out as the icon slot. |
 | DIRSRV `u` | Requested on dlg-context but no visible field — possibly currency/unit tied to price. |
-| DIRSRV `wv` / `l` / `mf` / `i` | Present in nav request group; shapes/meanings unknown. Catch-all defaults. |
+| DIRSRV `l` / `i` | Present in nav request group; shapes/meanings unknown. Catch-all defaults. |
+| DIRSRV `wv` vs `mf` split | Two GetShabby calls fire per node (`req_id=1` driven by `wv`, `req_id=9` driven by `mf` via `FUN_7F405018`). Presumably two icon sizes / display modes, but the exact consumer on the `wv` side isn't traced yet. |
 | Properties titlebar | Blank on **first** open of each node's Properties dialog — only shows "MSN Today" on re-open (cache hit). Suggests 'e' cache-population timing vs `CMosTreeNode::Properties` read order. |
 | `CMosTreeNode::Properties` Context tab | "Cannot open service" (resource 0xDE). Factory call at `FUN_7F402098` returns failure — unrelated to wire format. |
 | MEDVIEW / CONFLOC / CONFSRV | Services referenced in static strings; not implemented. |

@@ -120,23 +120,40 @@ def build_nav_props(
             # NUL. 0x0A stores ASCII in the cache, satisfying both readers.
             out.append((0x0A, "e", _sz(title)))
         elif name == "h":
-            out.append((0x03, "h", struct.pack("<I", 1 if is_container else 0)))
+            # "h" = shabby_id of a custom .ICO/.EXE/.DLL for ExtractIconExA.
+            # MOSSHELL FUN_7f404786 reads "h" as DWORD and passes the value
+            # straight through FUN_7f4047c2 → FUN_7f4049f9 → vtable[0x74]
+            # GetShabbyToFile. Sending h=0 triggers GetShabby(shabby_id=0) —
+            # the server-side zero-blob reply leaves the HICON NULL and the
+            # node renders the forbidden glyph. FUN_7f404786 skips the whole
+            # icon path when GetProperty fails, so omit "h" for nodes that
+            # don't have a custom icon file.
+            continue
         elif name == "x":
             out.append((0x0E, "x", struct.pack("<I", 1) + b"\x00"))
         elif name == "p":
             out.append((0x0E, "p", _blob(title)))
         elif name == "g":
-            # Icon slot — GetShabby #2 argument (sentinel sweep 2026-04-16).
-            # DWORD-inline shabby_id; wv stays blob (DWORD breaks dispatch).
-            out.append((0x03, "g", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
+            # Purpose unresolved — sentinel sweeps ruled out `g` as the
+            # icon slot. Emit DWORD 0 as a harmless default.
+            out.append((0x03, "g", struct.pack("<I", 0)))
         elif name == "wv":
-            # `wv` is the GetShabby slot A (primary icon). Must be emitted
-            # as inline DWORD (0x03) — as a 0x0E blob, SVCPROP stores the
-            # heap-alloc pointer in the cache slot and the client's reader
-            # then echoes that pointer as the shabby_id (explains the
-            # `0x00BE0400` heap-shape we chased for multiple sessions).
+            # `wv` = GetShabby slot A (secondary icon call, req_id=1).
+            # Inline DWORD shabby_id. As a 0x0E blob, SVCPROP stores a
+            # heap-alloc pointer in the cache and the reader echoes the
+            # pointer bytes as the shabby_id (the `0x00BE0400` garbage).
             out.append((0x03, "wv", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
-        elif name in ("tp", "w", "l", "mf"):
+        elif name == "mf":
+            # `mf` = primary node-icon property. MOSSHELL FUN_7F405018
+            # does `GetProperty("mf", &buf, 4)` → 4-byte DWORD shabby_id →
+            # synthesizes cache filename via `%04X%08X` → if file missing
+            # calls vtable+0x74 → GetShabbyToFile → CTreeNavClient::GetShabby
+            # with this DWORD. Must be inline 0x03; as a 0x0E blob the
+            # cache slot holds the heap pointer and the low 4 bytes of
+            # that pointer become the shabby_id (that's what produced
+            # the 0x00BE0400 we chased across multiple sessions).
+            out.append((0x03, "mf", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
+        elif name in ("tp", "w", "l"):
             out.append((0x0E, name, struct.pack("<I", 1) + b"\x00"))
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
@@ -254,7 +271,17 @@ def build_dirsrv_reply_payload(request=None):
 
     records = []
 
+    def _log_record_node(kind, node_for_record):
+        # DIAGNOSTIC: log node_id + full prop list with their packed values.
+        # Helps correlate which node's cache ends up with mf=0 feeding the
+        # second GetShabby(0). Remove once resolved.
+        props = build_child_props(requested_props, node_for_record)
+        summary = ",".join(f"{n}:{v.hex()}" for (_t, n, v) in props)
+        log.info("record_emit kind=%s node=%s mnid_a=%s props=%s",
+                 kind, node_for_record.node_id, node_for_record.mnid_a.hex(), summary)
+
     if not is_children:
+        _log_record_node("self", node)
         records.append(build_property_record(build_child_props(requested_props, node)))
     else:
         # Permissive fallback: GetChildren on any non-"0:0" node returns the
@@ -263,6 +290,7 @@ def build_dirsrv_reply_payload(request=None):
         # CMosTreeNode::Exec to cache 'z'/'c' — returning empty broke
         # dispatch with "task cannot be completed".
         for child in content_store.get_children(request.node_id):
+            _log_record_node("child", child)
             records.append(build_property_record(build_child_props(requested_props, child)))
 
     node_count = len(records)
