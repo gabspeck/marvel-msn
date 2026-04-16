@@ -109,10 +109,20 @@ LOGSRV_INTERFACE_GUIDS = [
 # DIRSRV (directory browsing / tree navigation) interfaces.  Static analysis of
 # TREENVCL.CTreeNavClient (0x7f63113d) confirms IID 00028B27 as the directly
 # resolved DIRSRV interface.  Adjacent memory in TREENVCL holds the contiguous
-# family 00028B25..00028B2E, but only 28B27 has been observed at runtime, so
-# the rest stay unpublished until a real consumer asks for them.
+# family 00028B25..00028B2E.  We advertise all of them so whichever IID the
+# client resolves for GetShabby (TREENVCL 0x7f631bab) gets a selector back —
+# the (IID, selector) tuple for GetShabby is captured by Phase 0 tracing.
 DIRSRV_INTERFACE_GUIDS = [
-    (_guid_le("00028B27-0000-0000-C000-000000000046"), 0x01),
+    (_guid_le("00028B25-0000-0000-C000-000000000046"), 0x01),
+    (_guid_le("00028B26-0000-0000-C000-000000000046"), 0x02),
+    (_guid_le("00028B27-0000-0000-C000-000000000046"), 0x03),
+    (_guid_le("00028B28-0000-0000-C000-000000000046"), 0x04),
+    (_guid_le("00028B29-0000-0000-C000-000000000046"), 0x05),
+    (_guid_le("00028B2A-0000-0000-C000-000000000046"), 0x06),
+    (_guid_le("00028B2B-0000-0000-C000-000000000046"), 0x07),
+    (_guid_le("00028B2C-0000-0000-C000-000000000046"), 0x08),
+    (_guid_le("00028B2D-0000-0000-C000-000000000046"), 0x09),
+    (_guid_le("00028B2E-0000-0000-C000-000000000046"), 0x0A),
 ]
 
 # OLREGSRV (On-Line Registration Service) interfaces.  SIGNUP.EXE holds

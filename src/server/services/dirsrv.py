@@ -5,7 +5,7 @@ import struct
 
 from ..config import DIRSRV_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE, TAG_END_STATIC
 from ..log import TRACE
-from ..models import DirsrvRequest
+from ..models import DirsrvRequest, DwordParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -13,8 +13,16 @@ from ..mpc import (
     build_service_packet,
     build_tagged_reply_dword,
     decode_dirsrv_request,
+    parse_request_params,
 )
 from ..store import app_store as _default_store
+from . import shabby
+
+# Within the DIRSRV interface table, slot 4 (IID 00028B28) is the GetShabby
+# RPC. CTreeNavClient::GetShabby (TREENVCL.DLL 0x7f631bab) calls
+# `proxy->method_at_offset_0xc(proxy, 4, ...)` — the literal 4 is the slot
+# index that resolves to the GetShabby IID via the discovery table.
+DIRSRV_GETSHABBY_SELECTOR = 0x04
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +41,12 @@ class DIRSRVHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        """Handle a DIRSRV GetProperties request."""
-        request = decode_dirsrv_request(payload)
-        reply_payload = build_dirsrv_reply_payload(request)
+        """Handle a DIRSRV request — dispatch by selector."""
+        if selector == DIRSRV_GETSHABBY_SELECTOR:
+            reply_payload = build_get_shabby_reply_payload(payload)
+        else:
+            request = decode_dirsrv_request(payload)
+            reply_payload = build_dirsrv_reply_payload(request)
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
@@ -114,7 +125,18 @@ def build_nav_props(
             out.append((0x0E, "x", struct.pack("<I", 1) + b"\x00"))
         elif name == "p":
             out.append((0x0E, "p", _blob(title)))
-        elif name in ("wv", "tp", "w", "l"):
+        elif name == "g":
+            # Icon slot — GetShabby #2 argument (sentinel sweep 2026-04-16).
+            # DWORD-inline shabby_id; wv stays blob (DWORD breaks dispatch).
+            out.append((0x03, "g", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
+        elif name == "wv":
+            # `wv` is the GetShabby slot A (primary icon). Must be emitted
+            # as inline DWORD (0x03) — as a 0x0E blob, SVCPROP stores the
+            # heap-alloc pointer in the cache slot and the client's reader
+            # then echoes that pointer as the shabby_id (explains the
+            # `0x00BE0400` heap-shape we chased for multiple sessions).
+            out.append((0x03, "wv", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
+        elif name in ("tp", "w", "l", "mf"):
             out.append((0x0E, name, struct.pack("<I", 1) + b"\x00"))
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
@@ -257,6 +279,45 @@ def build_dirsrv_reply_payload(request=None):
     payload.append(TAG_DYNAMIC_COMPLETE)
     payload.extend(dynamic_data)
     return bytes(payload)
+
+
+def build_get_shabby_reply_payload(payload):
+    """Build the reply for a DIRSRV GetShabby request.
+
+    Request payload: `03 [4-byte LE shabby_id] 83 85`
+      - `03` = DwordParam tag, value = the Shabby ID
+      - `83 85` = recv descriptors telling us the reply tags
+
+    Reply: `83 [DWORD status] 87 88 [icon file bytes — raw, to end of packet]`
+    Same shape as GetProperties/LOGSRV: static section terminated by 0x87,
+    then 0x88 dynamic-complete with raw data (no length prefix — client
+    reads to packet end). 0x85 with length-prefix hangs
+    MPCCL.ProcessTaggedServiceReply because it won't signal completion
+    (see onlstmt.py:175-179). On unknown shabby_id we return status=0 with
+    an empty blob; the client handles size==0 by leaving the cache slot
+    NULL (forbidden glyph).
+    """
+    send_params, _ = parse_request_params(payload)
+    shabby_id = next(
+        (p.value for p in send_params if isinstance(p, DwordParam)),
+        0,
+    )
+
+    blob = shabby.load_shabby_bytes(shabby_id) or b""
+    fmt, content_id = shabby.unpack_shabby_id(shabby_id)
+    log.info(
+        "get_shabby shabby_id=0x%08x fmt=0x%02x content_id=%d blob_len=%d",
+        shabby_id,
+        fmt,
+        content_id,
+        len(blob),
+    )
+
+    return (
+        build_tagged_reply_dword(0)
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE])
+        + blob
+    )
 
 
 # --- Payload builders used by tests ---
