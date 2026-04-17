@@ -70,6 +70,17 @@ SIGNUP_LOGSRV_FILENAMES = (
 )
 SIGNUP_LOGSRV_SOURCE = "LOGSRV"
 
+# DIRSRV-originated DnR (c=7) pulls: the CFI name is the source-service tag
+# "DIRSRV", not a filename. The real target is the .HTM that dirsrv emits via
+# the `fn` prop — currently only the MSN Today leaf. Hardcoded here until the
+# store exposes a node_id → filename/content map for additional DnR leaves.
+DIRSRV_SOURCE = "DIRSRV"
+DIRSRV_DEFAULT_FILENAME = "MSNTODAY.HTM"
+DIRSRV_DEFAULT_CONTENT = (
+    b"<html><body><h1>MSN Today</h1>"
+    b"<p>Welcome to The Microsoft Network.</p></body></html>"
+)
+
 
 def _read_signup_file(filename):
     """Return the bytes of a file in the signup data dir, or None."""
@@ -127,6 +138,10 @@ def _resolve_ftm_target(payload):
       counter, not a per-request filename, so we translate the counter
       via SIGNUP_LOGSRV_FILENAMES and then read that file from disk.
       Out-of-range counter falls back to an empty file named "LOGSRV".
+    - name="DIRSRV" → DnR (c=7) content pull triggered by a directory
+      click.  The CFI carries the dirsrv node id at offset 36 but there
+      is only one DnR leaf today (MSN Today), so serve the hardcoded
+      .HTM matching the `fn` prop dirsrv emits for that node.
     - Any other name → treat the name as a filename and serve it from
       server/data/signup/ if it exists; otherwise echo name + empty
       (billing's default is name="plans.txt", which maps straight to
@@ -149,6 +164,9 @@ def _resolve_ftm_target(payload):
             if content is not None:
                 return filename, content
         return source, b""
+
+    if source == DIRSRV_SOURCE:
+        return DIRSRV_DEFAULT_FILENAME, DIRSRV_DEFAULT_CONTENT
 
     content = _read_signup_file(source)
     if content is not None:
