@@ -104,8 +104,18 @@ def build_nav_props(
     - p = title blob (legacy list-view title; ignored by Context tab here)
     - Unknown content props default to DWORD 0.
     """
+    # DnR (c=7) worker ExecUrlWorkerProc → DownloadContentToTempPath calls
+    # vt[0x40]("fn", buf, len, 1) on the node cache to build the temp file
+    # name. The client's GetChildren request doesn't ask for `fn`, so we
+    # emit it unilaterally — SVCPROP caches by name, so extra records are
+    # absorbed. Without this, phase 1 of the worker bails before the FTM
+    # download step and MSN Today renders blank.
+    props_to_emit = list(requested_props)
+    if c_value == 7 and "fn" not in props_to_emit:
+        props_to_emit.append("fn")
+
     out = []
-    for name in requested_props:
+    for name in props_to_emit:
         if name == "a":
             out.append((0x0E, "a", struct.pack("<I", len(mnid_a)) + mnid_a))
         elif name == "b":
@@ -155,6 +165,11 @@ def build_nav_props(
             out.append((0x03, "mf", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
         elif name in ("tp", "w", "l"):
             out.append((0x0E, name, struct.pack("<I", 1) + b"\x00"))
+        elif name == "fn":
+            # DnR temp filename base — DownloadContentToTempPath reads this
+            # into a stack buf via vt[0x40]. Extension determines the handler
+            # ShellExecute uses when dnr.exe launches the file. .HTM → browser.
+            out.append((0x0A, "fn", _sz("MSNTODAY.HTM")))
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
