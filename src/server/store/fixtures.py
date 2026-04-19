@@ -61,10 +61,6 @@ def _container_content(name, type_str="Directory"):
     )
 
 
-# mnid_a blob layout is `struct.pack('<II', <id1>, 0)` — 0x44000d for the
-# MSN Today leaf, 0x44000e+ for Category folders.
-_LEAF_MNID = struct.pack("<II", 0x44000D, 0)
-
 # MSN-root special mnid: `GetSpecialMnid(idx=0) → 1:0:0:0` (MOSSHELL
 # 0x7f3f9b3f). Post-login DIRSRV pipes 4/5 issue `GetProperties(1:0, [a,e])`
 # and `GetChildren(1:0)` to build the breadcrumb/address-bar dropdown.
@@ -148,13 +144,6 @@ DIRECTORY_NODES = [
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
     ),
-    DirectoryNode(
-        node_id="4456461:0",
-        is_container=False,
-        app_id=7,
-        mnid_a=_LEAF_MNID,
-        content=MSN_TODAY_CONTENT,
-    ),
     # Internal menu aliases: these node_ids exist only inside our child list,
     # but their emitted 'a' blobs match the real HOMEBASE command mnids the
     # client later requests over DIRSRV.
@@ -211,7 +200,6 @@ DIRECTORY_CHILDREN = {
     "4:0": [],
     "3:1": [],
     "1:1": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
-    "4456461:0": [],
 }
 
 

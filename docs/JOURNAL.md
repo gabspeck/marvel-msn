@@ -1706,8 +1706,7 @@ mnid_a)` in `server/services/dirsrv.py` now centralises:
 A `node_table` keyed by wire `node_id` (`f0:f8` decoded from the 8-byte
 `_MosLid64` `'a'` blob) selects `(title, is_container, c_value, mnid_a)`
 per node. `0:0` → "Root" (container), `0:4456460`/`4456460:0` → "MSN
-Central" (container), `4456461:0` → "MSN Today" (leaf), unknown ids
-default to "MSN Today" leaf.
+Central" (container), unknown ids default to "MSN Today" leaf.
 
 ### Observed behaviour (this session)
 
