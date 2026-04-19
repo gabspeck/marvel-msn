@@ -19,7 +19,7 @@ class InMemoryContentStore:
         # to [fallback]. CMosTreeNode::Exec caches 'z'/'c' from the GetChildren
         # reply, so returning [] breaks dispatch with "task cannot be completed".
         ids = self._children.get(node_id)
-        if not ids:
+        if ids is None:
             return [self._fallback]
         return [self._nodes[i] for i in ids]
 

@@ -62,17 +62,72 @@ def _container_content(name, type_str="Directory"):
 
 
 # mnid_a blob layout is `struct.pack('<II', <id1>, 0)` — 0x44000c for
-# containers, 0x44000d for the MSN Today leaf.
+# containers, 0x44000d for the MSN Today leaf, 0x44000e+ for Category folders.
 _CONTAINER_MNID = struct.pack("<II", 0x44000C, 0)
 _LEAF_MNID = struct.pack("<II", 0x44000D, 0)
 
+# MSN-root special mnid: `GetSpecialMnid(idx=0) → 1:0:0:0` (MOSSHELL
+# 0x7f3f9b3f). Post-login DIRSRV pipes 4/5 issue `GetProperties(1:0, [a,e])`
+# and `GetChildren(1:0)` to build the breadcrumb/address-bar dropdown.
+_MSN_ROOT_MNID = struct.pack("<II", 1, 0)
+# HOMEBASE/GUIDENAV also synthesize MSN Today as the small special node
+# `1:4:0:0`; on the wire DIRSRV only sees the 8-byte `_MosLid64` prefix,
+# which our decoder logs as `4:0`.
+_MSN_TODAY_SPECIAL_MNID = struct.pack("<II", 4, 0)
+
 MSN_CENTRAL_CONTENT = _container_content("MSN Central")
 ROOT_CONTENT = _container_content("Root")
+MSN_ROOT_CONTENT = _container_content("The Microsoft Network")
+
+# Categories sub-folders listed when the HOMEBASE "Categories" JUMP browses
+# MSN Central's children. Each is a Browse container (app_id=1), so clicking
+# one opens its own child list rather than triggering DnR.
+CATEGORY_DEFS = (
+    (0x44000E, "The News"),
+    (0x44000F, "Entertainment"),
+    (0x440010, "Computers & Software"),
+    (0x440011, "Business & Finance"),
+    (0x440012, "Sports, Health & Fitness"),
+    (0x440013, "Science & Technology"),
+    (0x440014, "Arts & Entertainment"),
+    (0x440015, "Education & Reference"),
+)
+
+
+def _category_node(id1, name):
+    return DirectoryNode(
+        node_id=f"{id1}:0",
+        is_container=True,
+        app_id=1,
+        mnid_a=struct.pack("<II", id1, 0),
+        content=_container_content(name),
+    )
 
 
 DIRECTORY_NODES = [
     DirectoryNode(
         node_id="0:0", is_container=True, app_id=1, mnid_a=_CONTAINER_MNID, content=ROOT_CONTENT
+    ),
+    # MSN root as the client's GetSpecialMnid(idx=0) sees it. Served so that
+    # post-login breadcrumb walks `GetProperties(1:0, [a,e])` get the real
+    # "The Microsoft Network" identity instead of falling back to MSN Today.
+    DirectoryNode(
+        node_id="1:0",
+        is_container=True,
+        app_id=1,
+        mnid_a=_MSN_ROOT_MNID,
+        content=MSN_ROOT_CONTENT,
+    ),
+    # Alias for the client-synthesized MSN Today startup node. The shell asks
+    # DIRSRV for `GetProperties(4:0, [a,e])` while rendering built-in startup
+    # surfaces, so map it to the real MSN Today leaf instead of falling
+    # through to the unknown-node sentinel.
+    DirectoryNode(
+        node_id="4:0",
+        is_container=False,
+        app_id=7,
+        mnid_a=_MSN_TODAY_SPECIAL_MNID,
+        content=MSN_TODAY_CONTENT,
     ),
     DirectoryNode(
         node_id="4456460:0",
@@ -96,15 +151,41 @@ DIRECTORY_NODES = [
         mnid_a=_LEAF_MNID,
         content=MSN_TODAY_CONTENT,
     ),
+    *[_category_node(id1, name) for id1, name in CATEGORY_DEFS],
 ]
 
 
 DIRECTORY_CHILDREN = {
     "0:0": ["4456460:0"],
+    # Start the MSN-root breadcrumb with a single child so the experiment
+    # can tell whether server-vended entries surface at all before we
+    # expand the real nav tree (Favorite Places / Categories / etc.).
+    "1:0": ["4456460:0"],
+    # The client's startup-time `4:0` special node is a leaf: explicit empty
+    # children avoid the sentinel fallback path that previously introduced
+    # `FFFFFFFF:FFFFFFFF` into the rendered hierarchy.
+    "4:0": [],
+    "4456460:0": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
+    "4456461:0": [],
 }
 
 
-DIRECTORY_FALLBACK_NODE = DIRECTORY_NODES[-1]  # MSN Today leaf
+# Sentinel container for unknown mnid lookups. mnid_a must NOT alias an
+# existing node's blob — otherwise the client caches "unknown == that node"
+# and clicks on the unknown mnid generate a spurious `-MOS:` command line
+# targeting the aliased node (e.g. MSN Central → `dsnav.nav -MOS:1:4456460:0:0
+# .`, which fails "Cannot run command" when dsnav.nav is absent from the VM).
+# Using UINT32_MAX:UINT32_MAX keeps the fallback's identity distinct from any
+# real node while still satisfying CMosTreeNode::Exec's 'c' caching (empty
+# child list breaks dispatch).
+_FALLBACK_MNID = struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF)
+DIRECTORY_FALLBACK_NODE = DirectoryNode(
+    node_id="4294967295:4294967295",
+    is_container=True,
+    app_id=1,
+    mnid_a=_FALLBACK_MNID,
+    content=_container_content(""),
+)
 
 
 BILLING_PROFILE = BillingProfile(

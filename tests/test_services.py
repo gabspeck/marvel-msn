@@ -251,6 +251,30 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = build_dirsrv_reply_payload(request)
         self.assertIn(b"MSN Central", payload)
 
+    def test_special_msn_today_node_returns_title(self):
+        request = DirsrvRequest(
+            node_id="4:0",
+            node_id_raw=struct.pack("<II", 4, 0),
+            dword_0=0,
+            dword_1=1,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"MSN Today", payload)
+
+    def test_explicit_leaf_children_do_not_fall_back_to_unknown_sentinel(self):
+        request = DirsrvRequest(
+            node_id="4:0",
+            node_id_raw=struct.pack("<II", 4, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00b\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
+
 
 class TestOLREGSRVServiceMap(unittest.TestCase):
     def test_payload_size(self):
