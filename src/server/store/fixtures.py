@@ -61,27 +61,30 @@ def _container_content(name, type_str="Directory"):
     )
 
 
-# mnid_a blob layout is `struct.pack('<II', <id1>, 0)` — 0x44000c for
-# containers, 0x44000d for the MSN Today leaf, 0x44000e+ for Category folders.
-_CONTAINER_MNID = struct.pack("<II", 0x44000C, 0)
+# mnid_a blob layout is `struct.pack('<II', <id1>, 0)` — 0x44000d for the
+# MSN Today leaf, 0x44000e+ for Category folders.
 _LEAF_MNID = struct.pack("<II", 0x44000D, 0)
 
 # MSN-root special mnid: `GetSpecialMnid(idx=0) → 1:0:0:0` (MOSSHELL
 # 0x7f3f9b3f). Post-login DIRSRV pipes 4/5 issue `GetProperties(1:0, [a,e])`
 # and `GetChildren(1:0)` to build the breadcrumb/address-bar dropdown.
 _MSN_ROOT_MNID = struct.pack("<II", 1, 0)
-# HOMEBASE/GUIDENAV also synthesize MSN Today as the small special node
-# `1:4:0:0`; on the wire DIRSRV only sees the 8-byte `_MosLid64` prefix,
-# which our decoder logs as `4:0`.
+# HOMEBASE/GUIDENAV menu commands route through special mnids. On the wire
+# DIRSRV only sees the 8-byte `_MosLid64` prefix: [field_0][field_8].
 _MSN_TODAY_SPECIAL_MNID = struct.pack("<II", 4, 0)
+_FAVORITE_PLACES_SPECIAL_MNID = struct.pack("<II", 3, 1)
+_MEMBER_ASSISTANCE_SPECIAL_MNID = struct.pack("<II", 1, 1)
+_CATEGORIES_SPECIAL_MNID = struct.pack("<II", 1, 0)
 
-MSN_CENTRAL_CONTENT = _container_content("MSN Central")
 ROOT_CONTENT = _container_content("Root")
 MSN_ROOT_CONTENT = _container_content("The Microsoft Network")
+FAVORITE_PLACES_CONTENT = _container_content("Favorite Places")
+MEMBER_ASSISTANCE_CONTENT = _container_content("Member Assistance")
+CATEGORIES_CONTENT = _container_content("Categories")
 
-# Categories sub-folders listed when the HOMEBASE "Categories" JUMP browses
-# MSN Central's children. Each is a Browse container (app_id=1), so clicking
-# one opens its own child list rather than triggering DnR.
+# Categories sub-folders returned when the client browses the special
+# categories/member-assistance nodes. Each is a Browse container (app_id=1),
+# so clicking one opens its own child list rather than triggering DnR.
 CATEGORY_DEFS = (
     (0x44000E, "The News"),
     (0x44000F, "Entertainment"),
@@ -104,9 +107,25 @@ def _category_node(id1, name):
     )
 
 
+def _special_alias(node_id, *, mnid_a, content, is_container=True, app_id=1):
+    """Internal alias node whose emitted 'a' blob is the real client mnid."""
+    return DirectoryNode(
+        node_id=node_id,
+        is_container=is_container,
+        app_id=app_id,
+        mnid_a=mnid_a,
+        content=content,
+    )
+
+
 DIRECTORY_NODES = [
+    # Wire root alias. The client probes `GetProperties(0:0, [a,e])` during
+    # login, then immediately browses whatever 8-byte mnid comes back in `a`.
+    # Advertising the old synthetic container mnid `0x44000c:0` sent the
+    # client into the stale "MSN Central" path; alias it to the real special
+    # root `1:0` instead so the subsequent browse matches the post-login tree.
     DirectoryNode(
-        node_id="0:0", is_container=True, app_id=1, mnid_a=_CONTAINER_MNID, content=ROOT_CONTENT
+        node_id="0:0", is_container=True, app_id=1, mnid_a=_MSN_ROOT_MNID, content=MSN_ROOT_CONTENT
     ),
     # MSN root as the client's GetSpecialMnid(idx=0) sees it. Served so that
     # post-login breadcrumb walks `GetProperties(1:0, [a,e])` get the real
@@ -130,42 +149,68 @@ DIRECTORY_NODES = [
         content=MSN_TODAY_CONTENT,
     ),
     DirectoryNode(
-        node_id="4456460:0",
-        is_container=True,
-        app_id=1,
-        mnid_a=_CONTAINER_MNID,
-        content=MSN_CENTRAL_CONTENT,
-    ),
-    # Alias — the wire id "0:4456460" resolves to the same MSN Central node.
-    DirectoryNode(
-        node_id="0:4456460",
-        is_container=True,
-        app_id=1,
-        mnid_a=_CONTAINER_MNID,
-        content=MSN_CENTRAL_CONTENT,
-    ),
-    DirectoryNode(
         node_id="4456461:0",
         is_container=False,
         app_id=7,
         mnid_a=_LEAF_MNID,
         content=MSN_TODAY_CONTENT,
     ),
+    # Internal menu aliases: these node_ids exist only inside our child list,
+    # but their emitted 'a' blobs match the real HOMEBASE command mnids the
+    # client later requests over DIRSRV.
+    _special_alias(
+        "menu:favorite_places",
+        mnid_a=_FAVORITE_PLACES_SPECIAL_MNID,
+        content=FAVORITE_PLACES_CONTENT,
+    ),
+    _special_alias(
+        "menu:member_assistance",
+        mnid_a=_MEMBER_ASSISTANCE_SPECIAL_MNID,
+        content=MEMBER_ASSISTANCE_CONTENT,
+    ),
+    _special_alias(
+        "menu:categories",
+        mnid_a=_CATEGORIES_SPECIAL_MNID,
+        content=CATEGORIES_CONTENT,
+    ),
+    # Concrete request targets for the special mnids trapped from HOMEBASE.
+    DirectoryNode(
+        node_id="3:1",
+        is_container=True,
+        app_id=1,
+        mnid_a=_FAVORITE_PLACES_SPECIAL_MNID,
+        content=FAVORITE_PLACES_CONTENT,
+    ),
+    DirectoryNode(
+        node_id="1:1",
+        is_container=True,
+        app_id=1,
+        mnid_a=_MEMBER_ASSISTANCE_SPECIAL_MNID,
+        content=MEMBER_ASSISTANCE_CONTENT,
+    ),
     *[_category_node(id1, name) for id1, name in CATEGORY_DEFS],
 ]
 
 
 DIRECTORY_CHILDREN = {
-    "0:0": ["4456460:0"],
-    # Start the MSN-root breadcrumb with a single child so the experiment
-    # can tell whether server-vended entries surface at all before we
-    # expand the real nav tree (Favorite Places / Categories / etc.).
-    "1:0": ["4456460:0"],
+    # The wire root should enumerate the client's real special root, not an
+    # invented "MSN Central" browse node.
+    "0:0": ["1:0"],
+    # HOMEBASE/GUIDENAV routes visible menu buttons through the special mnids
+    # 1:4:0:0, 3:1:0:0, 1:1:0:0, and 1:0:0:0. Enumerate those directly under
+    # the special root so startup and browse follow the same mnids.
+    "1:0": [
+        "4:0",
+        "menu:favorite_places",
+        "menu:member_assistance",
+        "menu:categories",
+    ],
     # The client's startup-time `4:0` special node is a leaf: explicit empty
     # children avoid the sentinel fallback path that previously introduced
     # `FFFFFFFF:FFFFFFFF` into the rendered hierarchy.
     "4:0": [],
-    "4456460:0": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
+    "3:1": [],
+    "1:1": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
     "4456461:0": [],
 }
 

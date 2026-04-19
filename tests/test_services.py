@@ -241,7 +241,7 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(0x87, payload)
         self.assertIn(0x88, payload)
 
-    def test_children_contains_msn_central(self):
+    def test_children_contains_msn_root(self):
         request = DirsrvRequest(
             dword_0=1,
             dword_1=14,
@@ -249,7 +249,21 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(b"MSN Central", payload)
+        self.assertIn(b"The Microsoft Network", payload)
+        self.assertIn(struct.pack("<II", 1, 0), payload)
+
+    def test_root_properties_alias_to_special_msn_root(self):
+        request = DirsrvRequest(
+            node_id="0:0",
+            node_id_raw=struct.pack("<II", 0, 0),
+            dword_0=0,
+            dword_1=1,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"The Microsoft Network", payload)
+        self.assertIn(struct.pack("<II", 1, 0), payload)
 
     def test_special_msn_today_node_returns_title(self):
         request = DirsrvRequest(
@@ -274,6 +288,54 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_dirsrv_reply_payload(request)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
+
+    def test_msn_root_children_emit_homebase_menu_mnids(self):
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(struct.pack("<II", 4, 0), payload)
+        self.assertIn(struct.pack("<II", 3, 1), payload)
+        self.assertIn(struct.pack("<II", 1, 1), payload)
+        self.assertIn(struct.pack("<II", 1, 0), payload)
+        self.assertIn(b"MSN Today", payload)
+        self.assertIn(b"Favorite Places", payload)
+        self.assertIn(b"Member Assistance", payload)
+        self.assertIn(b"Categories", payload)
+
+    def test_special_menu_mnid_aliases_resolve_to_named_nodes(self):
+        for node_id, raw, expected_name in (
+            ("3:1", struct.pack("<II", 3, 1), b"Favorite Places"),
+            ("1:1", struct.pack("<II", 1, 1), b"Member Assistance"),
+        ):
+            request = DirsrvRequest(
+                node_id=node_id,
+                node_id_raw=raw,
+                dword_0=0,
+                dword_1=1,
+                prop_group="a\x00e",
+                recv_descriptors=[0x83, 0x83, 0x85],
+            )
+            payload = build_dirsrv_reply_payload(request)
+            self.assertIn(expected_name, payload)
+
+    def test_member_assistance_children_return_category_nodes(self):
+        request = DirsrvRequest(
+            node_id="1:1",
+            node_id_raw=struct.pack("<II", 1, 1),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"The News", payload)
+        self.assertIn(b"Entertainment", payload)
 
 
 class TestOLREGSRVServiceMap(unittest.TestCase):
