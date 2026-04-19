@@ -308,6 +308,54 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Member Assistance", payload)
         self.assertIn(b"Categories", payload)
 
+    def test_browse_nodes_localize_to_themselves_first(self):
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self_pos = payload.find(struct.pack("<II", 1, 0))
+        msn_today_pos = payload.find(struct.pack("<II", 4, 0))
+        fav_pos = payload.find(struct.pack("<II", 3, 1))
+        member_pos = payload.find(struct.pack("<II", 1, 1))
+        self.assertNotEqual(self_pos, -1)
+        self.assertLess(self_pos, msn_today_pos)
+        self.assertLess(self_pos, fav_pos)
+        self.assertLess(self_pos, member_pos)
+
+        request = DirsrvRequest(
+            node_id="1:1",
+            node_id_raw=struct.pack("<II", 1, 1),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self_pos = payload.find(struct.pack("<II", 1, 1))
+        category_pos = payload.find(struct.pack("<II", 0x44000E, 0))
+        self.assertNotEqual(self_pos, -1)
+        self.assertLess(self_pos, category_pos)
+
+        for node_id, raw in (
+            ("3:1", struct.pack("<II", 3, 1)),
+            ("4456462:0", struct.pack("<II", 0x44000E, 0)),
+        ):
+            request = DirsrvRequest(
+                node_id=node_id,
+                node_id_raw=raw,
+                dword_0=1,
+                dword_1=14,
+                prop_group="a\x00e",
+                recv_descriptors=[0x83, 0x83, 0x85],
+            )
+            payload = build_dirsrv_reply_payload(request)
+            self.assertIn(raw, payload)
+
     def test_special_menu_mnid_aliases_resolve_to_named_nodes(self):
         for node_id, raw, expected_name in (
             ("3:1", struct.pack("<II", 3, 1), b"Favorite Places"),

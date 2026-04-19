@@ -185,10 +185,14 @@ DIRECTORY_CHILDREN = {
     # The wire root should enumerate the client's real special root, not an
     # invented "MSN Central" browse node.
     "0:0": ["1:0"],
+    # `CMosTreeNode::GetLocalizedNode` takes the first returned child and
+    # caches its `a` blob as the localized mnid. Make real browse nodes
+    # self-localize by returning themselves first.
     # HOMEBASE/GUIDENAV routes visible menu buttons through the special mnids
     # 1:4:0:0, 3:1:0:0, 1:1:0:0, and 1:0:0:0. Enumerate those directly under
     # the special root so startup and browse follow the same mnids.
     "1:0": [
+        "1:0",
         "4:0",
         "menu:favorite_places",
         "menu:member_assistance",
@@ -198,8 +202,9 @@ DIRECTORY_CHILDREN = {
     # children avoid the sentinel fallback path that previously introduced
     # `FFFFFFFF:FFFFFFFF` into the rendered hierarchy.
     "4:0": [],
-    "3:1": [],
-    "1:1": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
+    "3:1": ["3:1"],
+    "1:1": ["1:1", *[f"{id1}:0" for id1, _ in CATEGORY_DEFS]],
+    **{f"{id1}:0": [f"{id1}:0"] for id1, _ in CATEGORY_DEFS},
 }
 
 
