@@ -33,8 +33,21 @@ ROUTING_CONTROL = 0xFFFF
 ROUTING_PIPE_OPEN = 0x0000
 
 # --- MPC reply tags ---
-TAG_END_STATIC = 0x87  # End of static section marker
-TAG_DYNAMIC_COMPLETE = 0x88  # Dynamic complete — remaining bytes are raw data
+# See MPCCL.ProcessTaggedServiceReply (0x04605187) for the dispatch:
+#   if ((tag & 0x8f) == 0x86) SignalRequestCompletion(this);   // sets +0x18, signals +0x24 (Wait)
+#   else if ((tag & 0x60) != 0x40) FUN_04604e25(this);         // signals +0x28 (iterator chunk)
+#   if ((tag & 0x8f) == 0x88) FUN_04604e52(this);              // signals +0x2c (iterator end)
+# 0x86 and 0x88 both terminate a dynamic section with raw-to-end bytes, but
+# they wake different waiters:
+#   0x86 — wakes the single-shot Wait() on +0x24 (GetShabby, onlstmt).
+#   0x88 — wakes the dynamic-iterator on +0x28/+0x2c (GetChildren, which
+#          consumes property records through MPCCL's iterator).
+# Using the wrong one silently hangs the caller: 0x86 never fires +0x28 so
+# an iterator yields zero records; 0x88 never fires +0x24 so Wait() blocks
+# until the pipe closes and returns 0x8B0B0005.
+TAG_END_STATIC = 0x87               # End of static section marker
+TAG_DYNAMIC_COMPLETE_SIGNAL = 0x86  # single-shot dynamic blob, signals Wait()
+TAG_DYNAMIC_STREAM_END = 0x88       # iterator stream end, signals +0x28/+0x2c
 
 # --- MPC host-block class bits ---
 # Frames whose msg_class has the top three bits set (0xE0 mask) are one-way

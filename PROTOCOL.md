@@ -131,6 +131,77 @@ Five or six `uint32 LE`: `PacketSize, MaxBytes, WindowSize, AckBehind,
 AckTimeout, [Keepalive]`. Keepalive present only if frame > 0x18 bytes.
 Client takes min of server value and its own configured max.
 
+### 3.5 Multi-frame reassembly
+
+When a single logical message (routing_prefix + host_block) exceeds
+`PacketSize` (client default 0x400 = 1024 wire bytes), the sender splits
+it across N continuation frames in N successive packets. Reassembly is
+driven by the `uint16 LE` prefix on the first frame and the `last_data`
+flag on the last — intermediate frames carry **no** length prefix.
+
+```
+Frame 1 (continuation, !last_data):
+  PipeHdr | u16 LE total_pipe_data_len | chunk1
+
+Frame 2..N-1 (continuation, !last_data):
+  PipeHdr | chunk_i                            (no prefix)
+
+Frame N (continuation, last_data):
+  PipeHdr | chunk_N                            (no prefix)
+
+Reassembled content = chunk1 ‖ chunk2 ‖ … ‖ chunk_N
+                    = exactly total_pipe_data_len bytes
+```
+
+Client-side receiver is `MOSCP!WireReceiver_ProcessPacket` (Ghidra:
+`FUN_7f45384f`), which keeps one per-pipe reassembly context at
+`this + (pipe_idx+1)*4`. The context struct (alloc size 0x38 via
+`FUN_7f45a519`) is initialised lazily on the pipe's first frame and
+freed once a message is delivered (`*ctx = 0` for that slot). Relevant
+fields (dword offsets; `puVar12[N]` = `ctx + N*4`):
+
+| Offset | Field | Set by | Notes |
+|--------|-------|--------|-------|
+| +0x14 | `phase` (`puVar12[5]`) | state machine | 0=len-low, 1=len-high, 2=body |
+| +0x08 | `total_len` (`puVar12[2]`) | phase 0→1 | Assembled u16 LE from frame 1 |
+| +0x10 | `write_offset` (`puVar12[4]`) | unstuff worker | Running cursor |
+| +0x28 | `alloc_ptr` (`puVar12[10]`) | phase 1 | `FUN_7f45a519(total_len + 5)` |
+| +0x2C | `buffer_base` (`puVar12[0xb]`) | phase 1 | `alloc_ptr + 5` (5-byte internal header) |
+| +0x18 | `escape_pending` (`puVar12[6]`) | unstuff worker | Set when last byte of frame is `0x1b` |
+
+Phase transitions on the inbound byte stream (per pipe):
+- **phase 0** (frame 1, first byte of u16): stash low byte into
+  `total_len`, advance to phase 1.
+- **phase 1** (frame 1, second byte of u16): combine `(high << 8) | low`
+  into `total_len`, allocate `total_len + 5`, set `buffer_base`,
+  advance to phase 2.
+- **phase 2** (rest of frame 1 + all of frames 2..N): call the unstuff
+  worker `FUN_7f452524(ctx, src, src_len)` which copies into
+  `buffer_base[write_offset..]` until either `src_len` bytes are
+  consumed or `write_offset == total_len`.
+
+The context is retained across packets so long as `last_data` is clear;
+a `last_data` frame ends the message, dispatches the buffer
+(`PipeObj_DeliverData` if routing ≠ 0x0000/0xFFFF), and clears the slot.
+Consequently only frame 1 carries a length prefix — subsequent frames
+are raw unstuff input that feeds directly into the pre-allocated
+`buffer_base`.
+
+**Fatal failure mode** (observed 2026-04-18): if frame 1's prefix is
+anything less than the true total, the buffer fills during frame 1 and
+`write_offset == total_len` before the last frame arrives. The unstuff
+worker then returns 0 consumed (dest full), `local_14` never
+decrements, and `WireReceiver_ProcessPacket` spins forever re-invoking
+unstuff on the same source pointer. Specifically, sending
+`size_prefix = len(chunk1)` instead of `len(total)` hangs MOSCP in a
+tight loop at frame 2's first unstuff call — do **not** use a per-frame
+length convention here, and do **not** prefix frame 2 with its own u16
+(those bytes get written into the buffer as data, skewing the payload).
+
+The `continuation` bit (0x20) is set on every frame in the sequence;
+`last_data` (0x40) is set only on frame N. Server sender at
+`src/server/mpc.py::build_service_packet`.
+
 ---
 
 ## 4. Connection bring-up
@@ -366,8 +437,49 @@ After login reply:
 - T+0.3s: LOGSRV 0x07 enumerator (leave pending).
 - T+0.9–1.4s: four DIRSRV pipes open — pipes 4/5 version `"Uagid=0"`, pipes
   6/7 version `"U"`. Each gets pipe-open reply + discovery block.
-- T+1.5s: pipes 6 and 7 each send DIRSRV `class=0x01, sel=0x02, req_id=0`.
-  Pipes 4/5 remain idle.
+- T+2.8s (pipes 6/7): capability probe `GetProperties(0:0, self, ['q'])` —
+  the `q` LCID prop, reply `q=0` (see §7.2.4). Each probe is followed by
+  a one-byte `0x0F` commit on the same req_id. Not navigation.
+- T+3.2–4.9s (pipes 4/5, in parallel): five-request breadcrumb / address-bar
+  walk. Req IDs increment per pipe.
+
+  | Req | Selector | Shape | Source of mnid |
+  |-----|----------|-------|----------------|
+  | 0 | 0x00 | GetChildren(0:0) | Wire root — 14-prop `nav` group |
+  | 1 | 0x02 | GetProperties(1:0, [a,e]) | `GetSpecialMnid(idx=0)` — MSN root |
+  | 2 | 0x00 | GetChildren(a-blob from req 1) | MSN-root children (14-prop) |
+  | 3 | 0x02 | GetProperties(0:0, [a,e]) | Wire root self |
+  | 4 | 0x00 | GetChildren(a-blob from req 0 rec 0) | Wire-root's first child's children |
+
+  Populates the MOSSHELL address-bar dropdown, which merges client-hardcoded
+  special folders (`Favorite Places`, `Worldwide Categories` — string table)
+  with server-enumerated MSN-root children.
+
+  **Canonical record** — req 0's single reply record (MSN Central, nav
+  group `a,c,h,b,e,g,x,mf,wv,tp,p,w,l,i`), log line 712:
+
+  ```
+  88 00 00 00  0e 00  0e 61 00 08 00 00 00 0c 00 44 00 00 00 00
+  03 63 00 01 00 00 00  03 68 00 01 00 00 00 05  02 01 62 00 00
+  0a 65 00 01 4d 53 4e 20 43 65 6e 74 72 61 6c 00
+  03 67 00 00 00 00 00  0e 78 00 01 00 00 00 00
+  03 6d 66 00 01 00 00 05  03 77 76 00 01 00 00 05
+  0e 74 70 00 01 00 00 00 00
+  0e 70 00 0b 00 00 00 4d 53 4e 20 43 65 6e 74 72 61 6c
+  0e 77 00 01 00 00 00 00  0e 6c 00 01 00 00 00 00
+  03 69 00 00 00 00 00
+  ```
+
+  First 4 bytes = record total size (0x88 = 136). See §7.2.3 for layout.
+  Req 4's first record (category "The News", log line 910) has identical
+  shape with `a` = `0E 00 44 00 00 00 00 00` and `e` = `"The News"`.
+
+  **Fallback trap** — if the server has no fixture for mnid `1:0`, req 1's
+  `a` blob leaks the permissive-fallback node's identity into the client
+  cache. Req 2 then walks `GetChildren` on that blob, and if the fallback
+  is itself self-referencing (e.g. MSN Today leaf), the walk recurses
+  endlessly. Vend a real `1:0` node (see `store/fixtures.py`) and keep
+  the fallback a neutral container.
 
 #### 7.1.5 Sign-out (client-initiated, ~285ms)
 
@@ -445,7 +557,7 @@ Both tab requests use `dword_0=1` (GetChildren-shape) against the leaf.
 | Name | Wire | Context | Consumer / dialog field | Semantics |
 |------|------|---------|-------------------------|-----------|
 | `a`  | 0x0E | nav | — | 8-byte mnid blob `pack('<II', f8, fc)` — builds `_MosNodeId.field_8/_c` in `GetNthChild` |
-| `b`  | 0x01 | nav | — | Browse flags. bit 0 = container, bit 3 = denied (blocks Exec) |
+| `b`  | 0x01 | nav + click | Browse vs Exec gate | Dispatch flags read by `CMosTreeNode::ExecuteCommand` @ 0x7F3FF693. bit 0x01 **CLEAR** = container (click → `HrBrowseObject`, folder view); **SET** = leaf (click → `CMosTreeNode::Exec`, launches App #`c`). bit 0x08 = server-denied (aborts with HRESULT 0x8B0B0041 → "Cannot open service."). Missing / failed property read also triggers the same denied error |
 | `c`  | 0x03 | nav + click | Exec dispatch | Registered MOS app_id (HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>). 1 = Directory_Service, 6 = Media_Viewer, 7 = Down_Load_And_Run (browser URL) |
 | `ca` | 0x0B | dlg-general | Category | — |
 | `e`  | **0x0A** | nav + dlg-general + titlebar | Name (icon label + explorer titlebar + General Name) | ASCII-cache string. Both icon label and `IShellFolder::GetDisplayNameOf` (STRRET ANSI) read 'e'; 0x0B truncates titlebar to "M" |

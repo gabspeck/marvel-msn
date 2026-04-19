@@ -64,9 +64,9 @@ def decode_vli(data, pos=0):
 # --- Host Blocks ---
 
 
-def build_host_block(selector, opcode, request_id, payload=b""):
-    """Build an MPC host block: selector | opcode | VLI request_id | payload."""
-    return bytes([selector, opcode]) + encode_vli(request_id) + payload
+def build_host_block(msg_class, selector, request_id, payload=b""):
+    """Build an MPC host block: msg_class | selector | VLI request_id | payload."""
+    return bytes([msg_class, selector]) + encode_vli(request_id) + payload
 
 
 def build_discovery_host_block(payload, request_id=0):

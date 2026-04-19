@@ -47,6 +47,7 @@ import struct
 from ..config import (
     MPC_CLASS_ONEWAY_MASK,
     ONLSTMT_INTERFACE_GUIDS,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_END_STATIC,
 )
 from ..mpc import (
@@ -197,8 +198,8 @@ def build_details_payload(period_index):
         [
             build_tagged_reply_word(len(records)),
             build_tagged_reply_word(840),  # slot-10 currency: USD
-            bytes([TAG_END_STATIC]),
-            b"\x86" + blob,  # dynamic-complete: no length prefix
+            bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]),
+            blob,  # dynamic-complete: no length prefix
         ]
     )
 
