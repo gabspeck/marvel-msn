@@ -3,7 +3,12 @@
 import logging
 import struct
 
-from ..config import DIRSRV_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE, TAG_END_STATIC
+from ..config import (
+    DIRSRV_INTERFACE_GUIDS,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_STREAM_END,
+    TAG_END_STATIC,
+)
 from ..log import TRACE
 from ..models import DirsrvRequest, DwordParam
 from ..mpc import (
@@ -23,6 +28,46 @@ from . import shabby
 # `proxy->method_at_offset_0xc(proxy, 4, ...)` — the literal 4 is the slot
 # index that resolves to the GetShabby IID via the discovery table.
 DIRSRV_GETSHABBY_SELECTOR = 0x04
+
+# DIRSRV property names. Use PROTOCOL.md semantics for known props; keep
+# unresolved props explicitly UNKNOWN and tentative interpretations as MAYBE.
+PROP_MNID = "a"
+PROP_BROWSE_FLAGS = "b"
+PROP_APP_ID = "c"
+PROP_CATEGORY = "ca"
+PROP_NAME = "e"
+PROP_FILENAME = "fn"
+PROP_UNKNOWN_G = "g"
+PROP_SECONDARY_ICON = "h"
+PROP_UNKNOWN_I = "i"
+PROP_DESCRIPTION = "j"
+PROP_GO_WORD = "k"
+PROP_UNKNOWN_L = "l"
+PROP_PRIMARY_ICON = "mf"
+PROP_FORUM_MANAGER = "n"
+PROP_RATING = "o"
+PROP_OWNER = "on"
+PROP_MAYBE_SIZE_OR_LEGACY_TITLE = "p"
+PROP_LANGUAGE = "q"
+PROP_TOPICS = "r"
+PROP_PEOPLE = "s"
+PROP_PLACE = "t"
+PROP_TYPE = "tp"
+PROP_MAYBE_HIDDEN_U = "u"
+PROP_CREATED = "v"
+PROP_LAST_CHANGED = "w"
+PROP_SECONDARY_ICON_ALT = "wv"
+PROP_EXEC_ARGS = "x"
+PROP_VENDOR_ID = "y"
+PROP_PRICE = "z"
+
+STRUCTURAL_NAV_PROPS = (
+    PROP_MNID,
+    PROP_APP_ID,
+    PROP_SECONDARY_ICON,
+    PROP_BROWSE_FLAGS,
+    PROP_EXEC_ARGS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -111,49 +156,66 @@ def build_nav_props(
     # absorbed. Without this, phase 1 of the worker bails before the FTM
     # download step and MSN Today renders blank.
     props_to_emit = list(requested_props)
-    if c_value == 7 and "fn" not in props_to_emit:
-        props_to_emit.append("fn")
+    if c_value == 7 and PROP_FILENAME not in props_to_emit:
+        props_to_emit.append(PROP_FILENAME)
 
     out = []
     for name in props_to_emit:
-        if name == "a":
-            out.append((0x0E, "a", struct.pack("<I", len(mnid_a)) + mnid_a))
-        elif name == "b":
-            out.append((0x01, "b", bytes([0x01 if is_container else 0x00])))
-        elif name == "c":
-            out.append((0x03, "c", struct.pack("<I", c_value)))
-        elif name == "e":
+        if name == PROP_MNID:
+            out.append((0x0E, PROP_MNID, struct.pack("<I", len(mnid_a)) + mnid_a))
+        elif name == PROP_BROWSE_FLAGS:
+            # PROTOCOL.md §SVCPROP-props (line 448): bit 0x01 CLEAR = container
+            # (Browse), SET = leaf (Exec). ExecuteCommand branches on this bit
+            # to choose HrBrowseObject vs CMosTreeNode::Exec.
+            out.append((0x01, PROP_BROWSE_FLAGS, bytes([0x00 if is_container else 0x01])))
+        elif name == PROP_APP_ID:
+            out.append((0x03, PROP_APP_ID, struct.pack("<I", c_value)))
+        elif name == PROP_NAME:
             # Nav 'e' = title string, wire type 0x0A (ASCII cache). Both
             # the icon label and the explorer window titlebar read 'e' via
             # paths that expect ANSI bytes. 0x0B (UTF-16 cache) rendered
             # the icon but truncated the titlebar to "M" at the first wide
             # NUL. 0x0A stores ASCII in the cache, satisfying both readers.
-            out.append((0x0A, "e", _sz(title)))
-        elif name == "h":
-            # "h" = shabby_id of a custom .ICO/.EXE/.DLL for ExtractIconExA.
-            # MOSSHELL FUN_7f404786 reads "h" as DWORD and passes the value
-            # straight through FUN_7f4047c2 → FUN_7f4049f9 → vtable[0x74]
-            # GetShabbyToFile. Sending h=0 triggers GetShabby(shabby_id=0) —
-            # the server-side zero-blob reply leaves the HICON NULL and the
-            # node renders the forbidden glyph. FUN_7f404786 skips the whole
-            # icon path when GetProperty fails, so omit "h" for nodes that
-            # don't have a custom icon file.
-            continue
-        elif name == "x":
-            out.append((0x0E, "x", struct.pack("<I", 1) + b"\x00"))
-        elif name == "p":
-            out.append((0x0E, "p", _blob(title)))
-        elif name == "g":
+            out.append((0x0A, PROP_NAME, _sz(title)))
+        elif name == PROP_SECONDARY_ICON:
+            # "h" = shabby_id for the listview per-item icon. MOSSHELL
+            # CMosViewWnd::AddPMtnToView (0x7f3f820e) calls FUN_7f404786
+            # which reads "h" as DWORD and (if present) calls FUN_7f4047c2
+            # → FUN_7f4049f9 → vtable[0x74] GetShabbyToFile → ExtractIconExA
+            # on the downloaded temp file. ExtractIconExA expects ICO/EXE/DLL
+            # bytes, not BMP — `mf` (banner) is the BMP channel; `h` is its
+            # per-item counterpart. Emit a shabby_id whose registry blob is
+            # a valid ICO. Omitting "h" makes FUN_7f404786 short-circuit and
+            # LVN_GETDISPINFO returns iImage=0 = default slot (forbidden glyph
+            # loaded from MOSSHELL icon resource #2 in FUN_7f4042a0).
+            out.append(
+                (
+                    0x03,
+                    PROP_SECONDARY_ICON,
+                    struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_ICO, 1)),
+                )
+            )
+        elif name == PROP_EXEC_ARGS:
+            out.append((0x0E, PROP_EXEC_ARGS, struct.pack("<I", 1) + b"\x00"))
+        elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
+            out.append((0x0E, PROP_MAYBE_SIZE_OR_LEGACY_TITLE, _blob(title)))
+        elif name == PROP_UNKNOWN_G:
             # Purpose unresolved — sentinel sweeps ruled out `g` as the
             # icon slot. Emit DWORD 0 as a harmless default.
-            out.append((0x03, "g", struct.pack("<I", 0)))
-        elif name == "wv":
+            out.append((0x03, PROP_UNKNOWN_G, struct.pack("<I", 0)))
+        elif name == PROP_SECONDARY_ICON_ALT:
             # `wv` = GetShabby slot A (secondary icon call, req_id=1).
             # Inline DWORD shabby_id. As a 0x0E blob, SVCPROP stores a
             # heap-alloc pointer in the cache and the reader echoes the
             # pointer bytes as the shabby_id (the `0x00BE0400` garbage).
-            out.append((0x03, "wv", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
-        elif name == "mf":
+            out.append(
+                (
+                    0x03,
+                    PROP_SECONDARY_ICON_ALT,
+                    struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1)),
+                )
+            )
+        elif name == PROP_PRIMARY_ICON:
             # `mf` = primary node-icon property. MOSSHELL FUN_7F405018
             # does `GetProperty("mf", &buf, 4)` → 4-byte DWORD shabby_id →
             # synthesizes cache filename via `%04X%08X` → if file missing
@@ -162,14 +224,20 @@ def build_nav_props(
             # cache slot holds the heap pointer and the low 4 bytes of
             # that pointer become the shabby_id (that's what produced
             # the 0x00BE0400 we chased across multiple sessions).
-            out.append((0x03, "mf", struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1))))
-        elif name in ("tp", "w", "l"):
+            out.append(
+                (
+                    0x03,
+                    PROP_PRIMARY_ICON,
+                    struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1)),
+                )
+            )
+        elif name in (PROP_TYPE, PROP_LAST_CHANGED, PROP_UNKNOWN_L):
             out.append((0x0E, name, struct.pack("<I", 1) + b"\x00"))
-        elif name == "fn":
+        elif name == PROP_FILENAME:
             # DnR temp filename base — DownloadContentToTempPath reads this
             # into a stack buf via vt[0x40]. Extension determines the handler
             # ShellExecute uses when dnr.exe launches the file. .HTM → browser.
-            out.append((0x0A, "fn", _sz("MSNTODAY.HTM")))
+            out.append((0x0A, PROP_FILENAME, _sz("MSNTODAY.HTM")))
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
@@ -195,47 +263,59 @@ def build_dialog_props(requested_props, content):
         # wide NUL ("MSN Today" → "M"). All other strings use 0x0B: their cache
         # is consumed by GetPropSz which runs EnsurePropSzCache's
         # WideCharToMultiByte path to produce the ASCII copy at cache+0xC.
-        if name == "e":
-            out.append((0x0A, "e", _sz(content.name)))
-        elif name == "j":
-            out.append((0x0B, "j", _sz(content.description)))
-        elif name == "k":
-            out.append((0x0B, "k", _sz(content.go_word)))
-        elif name == "ca":
-            out.append((0x0B, "ca", _sz(content.category)))
-        elif name == "tp":
-            out.append((0x0B, "tp", _sz(content.type_str)))
-        elif name == "r":
-            out.append((0x0B, "r", _sz(content.topics)))
-        elif name == "s":
-            out.append((0x0B, "s", _sz(content.people)))
-        elif name == "t":
-            out.append((0x0B, "t", _sz(content.place)))
-        elif name == "u":
-            out.append((0x0B, "u", _sz(content.u_value) if content.u_value else _sz("")))
-        elif name == "n":
-            out.append((0x0B, "n", _sz(content.forum_mgr)))
-        elif name == "on":
-            out.append((0x0B, "on", _sz(content.owner)))
-        elif name == "v":
-            out.append((0x0B, "v", _sz(content.created)))
-        elif name == "w":
-            out.append((0x0B, "w", _sz(content.modified)))
-        elif name == "p":
+        if name == PROP_NAME:
+            out.append((0x0A, PROP_NAME, _sz(content.name)))
+        elif name == PROP_DESCRIPTION:
+            out.append((0x0B, PROP_DESCRIPTION, _sz(content.description)))
+        elif name == PROP_GO_WORD:
+            out.append((0x0B, PROP_GO_WORD, _sz(content.go_word)))
+        elif name == PROP_CATEGORY:
+            out.append((0x0B, PROP_CATEGORY, _sz(content.category)))
+        elif name == PROP_TYPE:
+            out.append((0x0B, PROP_TYPE, _sz(content.type_str)))
+        elif name == PROP_TOPICS:
+            out.append((0x0B, PROP_TOPICS, _sz(content.topics)))
+        elif name == PROP_PEOPLE:
+            out.append((0x0B, PROP_PEOPLE, _sz(content.people)))
+        elif name == PROP_PLACE:
+            out.append((0x0B, PROP_PLACE, _sz(content.place)))
+        elif name == PROP_MAYBE_HIDDEN_U:
+            out.append(
+                (
+                    0x0B,
+                    PROP_MAYBE_HIDDEN_U,
+                    _sz(content.u_value) if content.u_value else _sz(""),
+                )
+            )
+        elif name == PROP_FORUM_MANAGER:
+            out.append((0x0B, PROP_FORUM_MANAGER, _sz(content.forum_mgr)))
+        elif name == PROP_OWNER:
+            out.append((0x0B, PROP_OWNER, _sz(content.owner)))
+        elif name == PROP_CREATED:
+            out.append((0x0B, PROP_CREATED, _sz(content.created)))
+        elif name == PROP_LAST_CHANGED:
+            out.append((0x0B, PROP_LAST_CHANGED, _sz(content.modified)))
+        elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
             # 'p' is a DWORD byte count. FUN_7f3fba69's special 'p' branch
             # reads `**(cache+4)` (first DWORD of value data) and calls
             # FormatSizeString (vtable+0x140), caching the formatted result
             # at cache+0xC for GetPropSzBuf.
-            out.append((0x03, "p", struct.pack("<I", content.size_bytes)))
+            out.append(
+                (
+                    0x03,
+                    PROP_MAYBE_SIZE_OR_LEGACY_TITLE,
+                    struct.pack("<I", content.size_bytes),
+                )
+            )
         # DWORD (type 0x03) — Ghidra-confirmed dword reads
-        elif name == "q":
-            out.append((0x03, "q", struct.pack("<I", content.language)))
-        elif name == "y":
-            out.append((0x03, "y", struct.pack("<I", content.vendor_id)))
-        elif name == "z":
-            out.append((0x03, "z", struct.pack("<I", content.price_dword)))
-        elif name == "o":
-            out.append((0x03, "o", struct.pack("<I", content.rating_dword)))
+        elif name == PROP_LANGUAGE:
+            out.append((0x03, PROP_LANGUAGE, struct.pack("<I", content.language)))
+        elif name == PROP_VENDOR_ID:
+            out.append((0x03, PROP_VENDOR_ID, struct.pack("<I", content.vendor_id)))
+        elif name == PROP_PRICE:
+            out.append((0x03, PROP_PRICE, struct.pack("<I", content.price_dword)))
+        elif name == PROP_RATING:
+            out.append((0x03, PROP_RATING, struct.pack("<I", content.rating_dword)))
         # Unknown — safe default
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
@@ -243,15 +323,19 @@ def build_dialog_props(requested_props, content):
 
 
 def _is_dialog_request(requested_props):
-    """Properties dialog requests never include structural props (a/c/h/b/x)."""
-    return bool(requested_props) and not any(
-        p in requested_props for p in ("a", "c", "h", "b", "x")
-    )
+    """Properties dialog requests never include structural nav props.
+
+    Caller must also gate on `is_children=False`: the Properties dialog always
+    queries a single node (GetProperties), while click dispatch / nav fetches
+    may ask for content-only prop sets (e.g. `fn,g` for ExecUrlWorkerProc)
+    with is_children=True.
+    """
+    return bool(requested_props) and not any(p in requested_props for p in STRUCTURAL_NAV_PROPS)
 
 
-def build_child_props(requested_props, node):
+def build_child_props(requested_props, node, *, is_children):
     """Serialize `node` into a property record for the requested prop names."""
-    if _is_dialog_request(requested_props):
+    if not is_children and _is_dialog_request(requested_props):
         return build_dialog_props(requested_props, node.content)
     return build_nav_props(
         requested_props,
@@ -285,28 +369,16 @@ def build_dirsrv_reply_payload(request=None):
     node = content_store.get_node(request.node_id)
 
     records = []
-
-    def _log_record_node(kind, node_for_record):
-        # DIAGNOSTIC: log node_id + full prop list with their packed values.
-        # Helps correlate which node's cache ends up with mf=0 feeding the
-        # second GetShabby(0). Remove once resolved.
-        props = build_child_props(requested_props, node_for_record)
-        summary = ",".join(f"{n}:{v.hex()}" for (_t, n, v) in props)
-        log.info("record_emit kind=%s node=%s mnid_a=%s props=%s",
-                 kind, node_for_record.node_id, node_for_record.mnid_a.hex(), summary)
-
     if not is_children:
-        _log_record_node("self", node)
-        records.append(build_property_record(build_child_props(requested_props, node)))
+        records.append(
+            build_property_record(build_child_props(requested_props, node, is_children=False))
+        )
     else:
-        # Permissive fallback: GetChildren on any non-"0:0" node returns the
-        # fallback leaf (MSN Today). This causes visual endless hierarchy
-        # (leaf appears as its own child) but is required for
-        # CMosTreeNode::Exec to cache 'z'/'c' — returning empty broke
-        # dispatch with "task cannot be completed".
+        # get_children applies a permissive fallback; see InMemoryContentStore.
         for child in content_store.get_children(request.node_id):
-            _log_record_node("child", child)
-            records.append(build_property_record(build_child_props(requested_props, child)))
+            records.append(
+                build_property_record(build_child_props(requested_props, child, is_children=True))
+            )
 
     node_count = len(records)
     dynamic_data = b"".join(records)
@@ -319,7 +391,11 @@ def build_dirsrv_reply_payload(request=None):
     payload.extend(build_tagged_reply_dword(0))  # status = success
     payload.extend(build_tagged_reply_dword(node_count))  # node count
     payload.append(TAG_END_STATIC)
-    payload.append(TAG_DYNAMIC_COMPLETE)
+    # 0x88 (stream-end), not 0x86: GetChildren's client reads property
+    # records through MPCCL's dynamic iterator, which waits on +0x28/+0x2c.
+    # 0x86 would signal the single-shot Wait() but skip the iterator events,
+    # yielding an empty listview.
+    payload.append(TAG_DYNAMIC_STREAM_END)
     payload.extend(dynamic_data)
     return bytes(payload)
 
@@ -331,14 +407,16 @@ def build_get_shabby_reply_payload(payload):
       - `03` = DwordParam tag, value = the Shabby ID
       - `83 85` = recv descriptors telling us the reply tags
 
-    Reply: `83 [DWORD status] 87 88 [icon file bytes — raw, to end of packet]`
-    Same shape as GetProperties/LOGSRV: static section terminated by 0x87,
-    then 0x88 dynamic-complete with raw data (no length prefix — client
-    reads to packet end). 0x85 with length-prefix hangs
-    MPCCL.ProcessTaggedServiceReply because it won't signal completion
-    (see onlstmt.py:175-179). On unknown shabby_id we return status=0 with
-    an empty blob; the client handles size==0 by leaving the cache slot
-    NULL (forbidden glyph).
+    Reply: `83 [DWORD status] 87 86 [icon file bytes — raw, to end of packet]`
+    Static status DWORD, 0x87 end-static, 0x86 dynamic-complete-signal: the
+    client calls pending->Wait() (MPCCL vtable[4] @ 0x04604921) which listens
+    on the +0x24 completion event. Only 0x86 fires SignalRequestCompletion
+    and wakes that wait. 0x88 would route through the iterator events
+    (+0x28/+0x2c) and leave Wait() blocked until the pipe closes, returning
+    0x8B0B0005 (the 13-second hang we chased earlier). 0x85 with a length
+    prefix would also fail to signal completion. On unknown shabby_id we
+    return status=0 with an empty blob; the client handles size==0 by
+    leaving the cache slot NULL (forbidden glyph).
     """
     send_params, _ = parse_request_params(payload)
     shabby_id = next(
@@ -358,7 +436,7 @@ def build_get_shabby_reply_payload(payload):
 
     return (
         build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE])
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + blob
     )
 
