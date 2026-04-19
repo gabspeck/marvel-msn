@@ -358,11 +358,13 @@ def build_dirsrv_reply_payload(request=None):
     is_children = request.dword_0 == 1
 
     log.info(
-        "get_properties node=%s raw=%s children=%s props=%s",
+        "get_properties node=%s raw=%s children=%s props=%s locale=%s locale_raw=%s",
         request.node_id,
         request.node_id_raw.hex(),
         is_children,
         ",".join(requested_props) or "-",
+        request.locale_str or "-",
+        request.locale_raw.hex() or "-",
     )
 
     content_store = _default_store.content

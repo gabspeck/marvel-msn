@@ -182,6 +182,9 @@ def decode_dirsrv_request(payload):
                 req.node_id_raw = d
             elif var_idx == 1:
                 req.prop_group = p.data.rstrip(b"\x00").decode("ascii", errors="replace")
+            elif var_idx == 2:
+                req.locale_raw = p.data
+                req.locale_str = p.data.rstrip(b"\x00").decode("ascii", errors="replace")
             var_idx += 1
         elif isinstance(p, ByteParam):
             req.flags = p.value
