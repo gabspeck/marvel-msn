@@ -295,7 +295,7 @@ class TestDIRSRVReply(unittest.TestCase):
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=1,
             dword_1=14,
-            prop_group="a\x00e",
+            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
@@ -318,14 +318,9 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self_pos = payload.find(struct.pack("<II", 1, 0))
-        msn_today_pos = payload.find(struct.pack("<II", 4, 0))
-        fav_pos = payload.find(struct.pack("<II", 3, 1))
-        member_pos = payload.find(struct.pack("<II", 1, 1))
-        self.assertNotEqual(self_pos, -1)
-        self.assertLess(self_pos, msn_today_pos)
-        self.assertLess(self_pos, fav_pos)
-        self.assertLess(self_pos, member_pos)
+        self.assertIn(struct.pack("<II", 1, 1), payload)
+        self.assertNotIn(struct.pack("<II", 4, 0), payload)
+        self.assertNotIn(struct.pack("<II", 3, 1), payload)
 
         request = DirsrvRequest(
             node_id="1:1",
@@ -336,10 +331,8 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self_pos = payload.find(struct.pack("<II", 1, 1))
-        category_pos = payload.find(struct.pack("<II", 0x44000E, 0))
-        self.assertNotEqual(self_pos, -1)
-        self.assertLess(self_pos, category_pos)
+        self.assertIn(struct.pack("<II", 1, 0), payload)
+        self.assertNotIn(struct.pack("<II", 0x44000E, 0), payload)
 
         for node_id, raw in (
             ("3:1", struct.pack("<II", 3, 1)),
@@ -355,6 +348,25 @@ class TestDIRSRVReply(unittest.TestCase):
             )
             payload = build_dirsrv_reply_payload(request)
             self.assertIn(raw, payload)
+
+    def test_startup_browse_walk_for_msn_root_stays_unchanged(self):
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self_pos = payload.find(struct.pack("<II", 1, 0))
+        msn_today_pos = payload.find(struct.pack("<II", 4, 0))
+        fav_pos = payload.find(struct.pack("<II", 3, 1))
+        member_pos = payload.find(struct.pack("<II", 1, 1))
+        self.assertNotEqual(self_pos, -1)
+        self.assertLess(self_pos, msn_today_pos)
+        self.assertLess(self_pos, fav_pos)
+        self.assertLess(self_pos, member_pos)
 
     def test_special_menu_mnid_aliases_resolve_to_named_nodes(self):
         for node_id, raw, expected_name in (
@@ -378,7 +390,7 @@ class TestDIRSRVReply(unittest.TestCase):
             node_id_raw=struct.pack("<II", 1, 1),
             dword_0=1,
             dword_1=14,
-            prop_group="a\x00e",
+            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)

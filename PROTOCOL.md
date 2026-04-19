@@ -514,8 +514,9 @@ route the shabby request to the wrong selector.
  [0x03][u32]  request_kind     — 0 or 1
  [0x03][u32]  property count hint
  [0x04][var]  property group   — NUL-separated names
- [0x04][var]  locale string
- recv: [0x83][0x83][0x85]      — two dwords + dynamic
+ [0x04][var]  locale descriptor — observed as 8 bytes `[u32 unknown][u32 lcid]`;
+                                  empty probe/fallback requests send `00000000`
+recv: [0x83][0x83][0x85]      — two dwords + dynamic
 ```
 
 #### 7.2.2 GetProperties reply

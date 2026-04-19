@@ -29,7 +29,7 @@ From `CMosTreeNode::OkToGetChildren`:
 | 3 | `0` | reserved / flags |
 | 4 | `this->field_2D` (+0xB4 dword) | handle / token |
 | 5 | `ppuVar5` | **requested property tag list** |
-| 6 | `&DAT_7F40B038` | locale |
+| 6 | `&DAT_7F40B038` | locale descriptor / LCID blob |
 | 7 | `&this->field_2C` (+0xB0) | out: child count |
 | 8 | `&this->field_29` (+0xA4) | out: children array ptr |
 

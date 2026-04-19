@@ -184,7 +184,9 @@ def decode_dirsrv_request(payload):
                 req.prop_group = p.data.rstrip(b"\x00").decode("ascii", errors="replace")
             elif var_idx == 2:
                 req.locale_raw = p.data
-                req.locale_str = p.data.rstrip(b"\x00").decode("ascii", errors="replace")
+                if len(p.data) >= 8:
+                    _unknown_locale_dword, locale_lcid = struct.unpack("<II", p.data[:8])
+                    req.locale_lcid = locale_lcid
             var_idx += 1
         elif isinstance(p, ByteParam):
             req.flags = p.value
