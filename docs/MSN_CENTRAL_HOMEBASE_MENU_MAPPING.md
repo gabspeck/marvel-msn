@@ -11,6 +11,12 @@ Static reconstruction from:
 - `binaries/HOMEBASE.DLL` resource type `RCDATA`, name `HOMEBASE`
 - `GUIDENAV.NAV` loader `FUN_7f5123ce`
 
+Direct confirmation from raw resources:
+
+- `wrestool -x --raw --type=10 --name='HOMEBASE' binaries/HOMEBASE.DLL`
+- `wrestool -x --raw --type=6 --name=1 binaries/HOMEBASE.DLL`
+- `wrestool -x --raw --type=6 --name=2 binaries/HOMEBASE.DLL`
+
 `FUN_7f5123ce` reads the HOMEBASE RCDATA table as:
 
 - `u16 item_count`
@@ -33,6 +39,36 @@ Accepted verbs in `GUIDENAV` are:
 - `EMAIL`
 
 `EMAIL` is a separate direct-launch path and does not go through `HrGetPMtn`.
+
+## Raw Resource Decode
+
+Direct decode of the `HOMEBASE` RCDATA record list plus string tables yields
+these seven entries:
+
+1. label `F&avorite Places`
+   - rect: `(16,160)-(493,200)`
+   - command: `JUMP 3:1:0:0`
+2. label `Member A&ssistance`
+   - rect: `(16,213)-(493,253)`
+   - command: `LJUMP 1:1:0:0`
+3. label `&Categories`
+   - rect: `(15,264)-(493,304)`
+   - command: `LJUMP 1:0:0:0`
+4. label `Worldwide Member Assistance`
+   - rect: `(0,0)-(0,0)`
+   - command: `JUMP 1:0:0:0`
+5. label `Worldwide Categories`
+   - rect: `(0,0)-(0,0)`
+   - command: `JUMP 1:1:0:0`
+6. label `MSN T&oday`
+   - rect: `(16,53)-(493,92)`
+   - command: `LJUMP 1:4:0:0`
+7. label `E-&Mail`
+   - rect: `(16,107)-(493,148)`
+   - command: `EMAIL`
+
+The ampersands are accelerator markers from the original string-table
+resources; they do not change the mnid mapping.
 
 ## Visible MSN Central Buttons
 

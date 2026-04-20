@@ -31,11 +31,18 @@ From `CMosTreeNode::OkToGetChildren`:
 | 5 | `ppuVar5` | **requested property tag list** |
 | 6 | `&DAT_7F40B038` | locale descriptor / LCID blob |
 | 7 | `&this->field_2C` (+0xB0) | out: child count |
-| 8 | `&this->field_29` (+0xA4) | out: children array ptr |
+| 8 | `&this->field_29` (+0xA4) | out: TREENVCL dynamic handle / iterator wrapper |
 
-On success, child count and array pointer land in the node struct. On zero
+On success, child count and the dynamic handle land in the node struct. On zero
 children the `no-more-children` flag (`flags_3B |= 4`) gets set, suppressing
-future calls. On wire error the array pointer is cleared to 0.
+future calls. On wire error the dynamic handle is cleared to 0.
+
+`OkToGetChildren` does **not** allocate a finished `CMosTreeNode[]` array here.
+That happens lazily in `CMosTreeNode::GetNthChild` (`7F3FDFC4`): it calls
+`CTreeNavClient::GetNthNode` against the cached handle, decompresses one
+DIRSRV record into `CServiceProperties`, reads wire prop `'a'` as the child
+mnid, calls `HrGetPMtn` to instantiate/reuse the child node, then copies the
+requested properties into that node's property cache.
 
 ## Property tag request lists
 
@@ -102,6 +109,12 @@ NodeIterator_GetAtIndex      (7F63238A)
   status 0xB0B000B → end-of-block, fetch next
   status 0x100     → data error; status 0x105 → exhausted
   per-record: FDecompressPropClnt(record_data, record_size, &out_props)
+
+MOSSHELL!CMosTreeNode::GetNthChild (7F3FDFC4)
+  CTreeNavClient::GetNthNode(handle, parent->field_29, idx, &props)
+  CServiceProperties::FGet(..., "a", ...)         ; child mnid blob
+  HrGetPMtn(mnid, &child, 0)                      ; materialize/reuse node
+  child->vtbl[10](child, &props, requested_tags)  ; cache props on node
 ```
 
 ### SVCPROP.DLL — record parser

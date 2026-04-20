@@ -102,18 +102,6 @@ def _category_node(id1, name):
         content=_container_content(name),
     )
 
-
-def _special_alias(node_id, *, mnid_a, content, is_container=True, app_id=1):
-    """Internal alias node whose emitted 'a' blob is the real client mnid."""
-    return DirectoryNode(
-        node_id=node_id,
-        is_container=is_container,
-        app_id=app_id,
-        mnid_a=mnid_a,
-        content=content,
-    )
-
-
 DIRECTORY_NODES = [
     # Wire root alias. The client probes `GetProperties(0:0, [a,e])` during
     # login, then immediately browses whatever 8-byte mnid comes back in `a`.
@@ -144,24 +132,6 @@ DIRECTORY_NODES = [
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
     ),
-    # Internal menu aliases: these node_ids exist only inside our child list,
-    # but their emitted 'a' blobs match the real HOMEBASE command mnids the
-    # client later requests over DIRSRV.
-    _special_alias(
-        "menu:favorite_places",
-        mnid_a=_FAVORITE_PLACES_SPECIAL_MNID,
-        content=FAVORITE_PLACES_CONTENT,
-    ),
-    _special_alias(
-        "menu:member_assistance",
-        mnid_a=_MEMBER_ASSISTANCE_SPECIAL_MNID,
-        content=MEMBER_ASSISTANCE_CONTENT,
-    ),
-    _special_alias(
-        "menu:categories",
-        mnid_a=_CATEGORIES_SPECIAL_MNID,
-        content=CATEGORIES_CONTENT,
-    ),
     # Concrete request targets for the special mnids trapped from HOMEBASE.
     DirectoryNode(
         node_id="3:1",
@@ -185,26 +155,19 @@ DIRECTORY_CHILDREN = {
     # The wire root should enumerate the client's real special root, not an
     # invented "MSN Central" browse node.
     "0:0": ["1:0"],
-    # `CMosTreeNode::GetLocalizedNode` takes the first returned child and
-    # caches its `a` blob as the localized mnid. Make real browse nodes
-    # self-localize by returning themselves first.
-    # HOMEBASE/GUIDENAV routes visible menu buttons through the special mnids
-    # 1:4:0:0, 3:1:0:0, 1:1:0:0, and 1:0:0:0. Enumerate those directly under
-    # the special root so startup and browse follow the same mnids.
-    "1:0": [
-        "1:0",
-        "4:0",
-        "menu:favorite_places",
-        "menu:member_assistance",
-        "menu:categories",
-    ],
+    # The upper-left dropdown merges client-hardcoded special folders with the
+    # server-enumerated children of the MSN root. Only enumerate the real
+    # category browse nodes here; advertising the HOMEBASE menu mnids as
+    # children makes the dropdown collapse nodes together and cross-wire the
+    # Categories / Member Assistance views.
+    "1:0": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
     # The client's startup-time `4:0` special node is a leaf: explicit empty
     # children avoid the sentinel fallback path that previously introduced
     # `FFFFFFFF:FFFFFFFF` into the rendered hierarchy.
     "4:0": [],
-    "3:1": ["3:1"],
-    "1:1": ["1:1", *[f"{id1}:0" for id1, _ in CATEGORY_DEFS]],
-    **{f"{id1}:0": [f"{id1}:0"] for id1, _ in CATEGORY_DEFS},
+    "3:1": [],
+    "1:1": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
+    **{f"{id1}:0": [] for id1, _ in CATEGORY_DEFS},
 }
 
 

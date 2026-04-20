@@ -289,7 +289,7 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = build_dirsrv_reply_payload(request)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
-    def test_msn_root_children_emit_homebase_menu_mnids(self):
+    def test_msn_root_children_emit_category_nodes(self):
         request = DirsrvRequest(
             node_id="1:0",
             node_id_raw=struct.pack("<II", 1, 0),
@@ -299,16 +299,15 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(struct.pack("<II", 4, 0), payload)
-        self.assertIn(struct.pack("<II", 3, 1), payload)
-        self.assertIn(struct.pack("<II", 1, 1), payload)
-        self.assertIn(struct.pack("<II", 1, 0), payload)
-        self.assertIn(b"MSN Today", payload)
-        self.assertIn(b"Favorite Places", payload)
-        self.assertIn(b"Member Assistance", payload)
-        self.assertIn(b"Categories", payload)
+        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
+        self.assertIn(struct.pack("<II", 0x44000F, 0), payload)
+        self.assertIn(b"The News", payload)
+        self.assertIn(b"Entertainment", payload)
+        self.assertNotIn(struct.pack("<II", 4, 0), payload)
+        self.assertNotIn(struct.pack("<II", 3, 1), payload)
+        self.assertNotIn(struct.pack("<II", 1, 1), payload)
 
-    def test_browse_nodes_localize_to_themselves_first(self):
+    def test_narrow_root_children_request_returns_category_nodes(self):
         request = DirsrvRequest(
             node_id="1:0",
             node_id_raw=struct.pack("<II", 1, 0),
@@ -318,9 +317,11 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(struct.pack("<II", 1, 1), payload)
+        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
+        self.assertIn(b"The News", payload)
         self.assertNotIn(struct.pack("<II", 4, 0), payload)
         self.assertNotIn(struct.pack("<II", 3, 1), payload)
+        self.assertNotIn(struct.pack("<II", 1, 1), payload)
 
         request = DirsrvRequest(
             node_id="1:1",
@@ -331,8 +332,8 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(struct.pack("<II", 1, 0), payload)
-        self.assertNotIn(struct.pack("<II", 0x44000E, 0), payload)
+        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
+        self.assertIn(b"The News", payload)
 
         for node_id, raw in (
             ("3:1", struct.pack("<II", 3, 1)),
@@ -347,9 +348,12 @@ class TestDIRSRVReply(unittest.TestCase):
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
             payload = build_dirsrv_reply_payload(request)
-            self.assertIn(raw, payload)
+            if node_id == "3:1":
+                self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
+            else:
+                self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
-    def test_startup_browse_walk_for_msn_root_stays_unchanged(self):
+    def test_startup_browse_walk_for_msn_root_omits_menu_aliases(self):
         request = DirsrvRequest(
             node_id="1:0",
             node_id_raw=struct.pack("<II", 1, 0),
@@ -359,14 +363,12 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self_pos = payload.find(struct.pack("<II", 1, 0))
-        msn_today_pos = payload.find(struct.pack("<II", 4, 0))
-        fav_pos = payload.find(struct.pack("<II", 3, 1))
-        member_pos = payload.find(struct.pack("<II", 1, 1))
-        self.assertNotEqual(self_pos, -1)
-        self.assertLess(self_pos, msn_today_pos)
-        self.assertLess(self_pos, fav_pos)
-        self.assertLess(self_pos, member_pos)
+        self.assertNotIn(struct.pack("<II", 1, 0), payload)
+        self.assertNotIn(struct.pack("<II", 4, 0), payload)
+        self.assertNotIn(struct.pack("<II", 3, 1), payload)
+        self.assertNotIn(struct.pack("<II", 1, 1), payload)
+        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
+        self.assertIn(struct.pack("<II", 0x44000F, 0), payload)
 
     def test_special_menu_mnid_aliases_resolve_to_named_nodes(self):
         for node_id, raw, expected_name in (

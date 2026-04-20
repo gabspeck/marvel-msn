@@ -345,25 +345,6 @@ def build_child_props(requested_props, node, *, is_children):
         title=node.content.name,
     )
 
-
-def _get_children_for_request(content_store, request, requested_props):
-    child_nodes = content_store.get_children(request.node_id)
-
-    # `GetLocalizedNode` issues a narrow GetChildren request for just `a,e`
-    # and then treats the first returned child as the locale-specific target.
-    # The HOMEBASE button mnids are crossed against the hidden DSNAV
-    # "Worldwide ..." aliases, so preserve the broad startup/root walks but
-    # swap the narrow localization target:
-    #   Categories button        (1:0) -> Worldwide Categories        (1:1)
-    #   Member Assistance button (1:1) -> Worldwide Member Assistance (1:0)
-    if requested_props == [PROP_MNID, PROP_NAME]:
-        if request.node_id == "1:0":
-            return [content_store.get_node("1:1")]
-        if request.node_id == "1:1":
-            return [content_store.get_node("1:0")]
-    return child_nodes
-
-
 def build_dirsrv_reply_payload(request=None):
     """Build a DIRSRV GetProperties reply.
 
@@ -395,7 +376,7 @@ def build_dirsrv_reply_payload(request=None):
         )
     else:
         # get_children applies a permissive fallback; see InMemoryContentStore.
-        for child in _get_children_for_request(content_store, request, requested_props):
+        for child in content_store.get_children(request.node_id):
             records.append(
                 build_property_record(build_child_props(requested_props, child, is_children=True))
             )
