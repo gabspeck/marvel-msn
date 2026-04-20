@@ -49,6 +49,8 @@ class LOGSRVHandler:
 
         if selector == 0x00:
             reply_payload = _BOOTSTRAP_PAYLOAD
+        elif selector == 0x0F:
+            reply_payload = _handle_osr2_bootstrap(payload)
         elif selector == 0x01:
             reply_payload = _handle_password_change(payload)
         elif selector == 0x02:
@@ -228,6 +230,18 @@ def _handle_signup_query(request_payload):
     """
     log.info("signup_query payload_len=%d", len(request_payload))
     return build_tagged_reply_var(0x84, b"")
+
+
+def _handle_osr2_bootstrap(request_payload):
+    """LOGSRV selector 0x0f — OSR2 (MSN 2.5+) login bootstrap.
+
+    Replaces selector 0x00 for the newer client. Request is 240 bytes
+    (vs 103 for 0x00) so it carries extra account/machine params we
+    haven't RE'd yet. Probe with the old 7-dword + 0x84 reply shape and
+    log the request bytes so we can diff against 0x00 offline.
+    """
+    log.info("osr2_bootstrap payload_len=%d hex=%s", len(request_payload), request_payload.hex())
+    return _BOOTSTRAP_PAYLOAD
 
 
 def _handle_password_change(request_payload):
