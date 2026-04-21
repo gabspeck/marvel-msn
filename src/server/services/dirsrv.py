@@ -114,6 +114,56 @@ def build_property_record(properties):
     return header + bytes(body)
 
 
+def _format_props_for_log(properties):
+    """Render (type, name, value_bytes) tuples as `name=<decoded>` pairs.
+
+    Matches the wire types we emit in build_nav_props / build_dialog_props:
+      0x01 byte     -> name=0xNN
+      0x03 DWORD    -> name=<decimal>   (icon props flagged 0x%08x)
+      0x0A / 0x0B   -> name="..."       (strip flag byte + trailing NUL)
+      0x0C FILETIME -> name=<u64>
+      0x0E blob     -> name=<hex>
+    """
+    _ICON_PROPS = {PROP_PRIMARY_ICON, PROP_SECONDARY_ICON, PROP_SECONDARY_ICON_ALT}
+    parts = []
+    for ptype, pname, pvalue in properties:
+        if ptype == 0x01 and len(pvalue) == 1:
+            parts.append(f"{pname}=0x{pvalue[0]:02x}")
+        elif ptype == 0x03 and len(pvalue) == 4:
+            (val,) = struct.unpack("<I", pvalue)
+            if pname in _ICON_PROPS:
+                parts.append(f"{pname}=0x{val:08x}")
+            else:
+                parts.append(f"{pname}={val}")
+        elif ptype in (0x0A, 0x0B):
+            text = _decode_flag_byte_string(pvalue)
+            parts.append(f"{pname}={text!r}")
+        elif ptype == 0x0C and len(pvalue) == 8:
+            (val,) = struct.unpack("<Q", pvalue)
+            parts.append(f"{pname}={val}")
+        elif ptype == 0x0E:
+            parts.append(f"{pname}=<{len(pvalue)}B>{pvalue.hex()}")
+        else:
+            parts.append(f"{pname}=<0x{ptype:02x}>{pvalue.hex()}")
+    return " ".join(parts)
+
+
+def _decode_flag_byte_string(value):
+    """Decode the flag-byte wire body produced by _sz().
+
+    flag & 0x02 = empty; flag & 0x01 = ASCII + NUL; else UTF-16LE + wide NUL.
+    """
+    if not value:
+        return ""
+    flag = value[0]
+    body = value[1:]
+    if flag & 0x02:
+        return ""
+    if flag & 0x01:
+        return body.split(b"\x00", 1)[0].decode("ascii", errors="replace")
+    return body.split(b"\x00\x00", 1)[0].decode("utf-16le", errors="replace")
+
+
 def _blob(s):
     """Length-prefixed ASCII blob body for a type-0x0E property."""
     data = s.encode("ascii", errors="replace")
@@ -429,27 +479,34 @@ def build_dirsrv_reply_payload(request=None):
     content_store = _default_store.content
     node = content_store.get_node(request.node_id)
 
-    records = []
+    props_per_record = []  # for logging: list of (source_node_id, prop_tuples)
     if not is_children:
-        records.append(
-            build_property_record(build_child_props(requested_props, node, is_children=False))
-        )
+        props = build_child_props(requested_props, node, is_children=False)
+        props_per_record.append((node.node_id, props))
     elif node.node_id == "4:0":
         # The client issues nav-shaped requests directly against the special
         # MSN Today leaf. Return the leaf's own nav record so click-path
         # experiments on props like 'b' have something to read.
-        records.append(
-            build_property_record(build_child_props(requested_props, node, is_children=True))
-        )
+        props = build_child_props(requested_props, node, is_children=True)
+        props_per_record.append((node.node_id, props))
     else:
         # get_children applies a permissive fallback; see InMemoryContentStore.
         for child in content_store.get_children(request.node_id):
-            records.append(
-                build_property_record(build_child_props(requested_props, child, is_children=True))
-            )
+            props = build_child_props(requested_props, child, is_children=True)
+            props_per_record.append((child.node_id, props))
 
+    records = [build_property_record(props) for _node_id, props in props_per_record]
     node_count = len(records)
     dynamic_data = b"".join(records)
+
+    log.info("get_properties_reply status=0 node_count=%d", node_count)
+    for i, (src_node_id, props) in enumerate(props_per_record):
+        log.info(
+            "get_properties_reply idx=%d node=%s %s",
+            i,
+            src_node_id,
+            _format_props_for_log(props),
+        )
 
     if log.isEnabledFor(TRACE):
         for i, rec in enumerate(records):
@@ -501,6 +558,7 @@ def build_get_shabby_reply_payload(payload):
         content_id,
         len(blob),
     )
+    log.info("get_shabby_reply status=0 blob_len=%d", len(blob))
 
     return (
         build_tagged_reply_dword(0)

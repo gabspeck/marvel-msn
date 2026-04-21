@@ -105,10 +105,17 @@ class FTMHandler:
             filename, content = _resolve_ftm_target(payload)
             log.info("request_download filename=%s content_len=%d", filename, len(content))
             reply_payload = _build_request_download_reply(filename, len(content))
+            log.info(
+                "request_download_reply status=0 size=%d flags=0x%02x filename=%r",
+                len(content),
+                FTM_REQUEST_REPLY_FLAGS,
+                filename,
+            )
         elif selector == FTM_SELECTOR_BILL_CLIENT:
             _, content = _resolve_ftm_target(payload)
             log.info("bill_client content_len=%d", len(content))
             reply_payload = _build_bill_client_reply(content)
+            log.info("bill_client_reply status=0 payload_len=%d", len(content))
         else:
             return None
 

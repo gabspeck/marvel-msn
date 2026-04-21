@@ -75,6 +75,18 @@ def build_summary_payload():
     """
     statement = _default_store.statement
     s = statement.get_summary()
+    period_count = statement.period_count()
+    log.info(
+        "statement_summary_reply balance_cents=%d currency=%d date=%04d-%02d-%02d"
+        " free_minutes=%d period_count=%d",
+        s.balance_cents,
+        s.currency_iso,
+        s.year,
+        s.month,
+        s.day,
+        s.free_connect_minutes,
+        period_count,
+    )
     return b"".join(
         [
             build_tagged_reply_dword(s.balance_cents),
@@ -83,7 +95,7 @@ def build_summary_payload():
             build_tagged_reply_byte(s.month),
             build_tagged_reply_byte(s.day),
             build_tagged_reply_word(s.free_connect_minutes),
-            build_tagged_reply_byte(max(statement.period_count() - 1, 0)),
+            build_tagged_reply_byte(max(period_count - 1, 0)),
         ]
     )
 
@@ -193,6 +205,17 @@ def build_details_payload(period_index):
         )
         for t in txns
     ]
+    sample = ",".join(
+        f'{t.when.strftime("%Y-%m-%dT%H:%M")}|{t.description!r}|amt={t.amount_minor}|tot={t.total_minor}'
+        for t in txns[:3]
+    )
+    log.info(
+        "get_details_reply period=%d record_count=%d currency=840 txns=[%s%s]",
+        period_index,
+        len(records),
+        sample,
+        "" if len(txns) <= 3 else f",...+{len(txns) - 3}",
+    )
     blob = _DETAILS_HEADER + b"".join(records)
     return b"".join(
         [
@@ -302,6 +325,17 @@ def build_subscriptions_payload():
     """
     subs = _default_store.statement.get_subscriptions()
     records_blob = b"".join(_encode_subscription_record(s) for s in subs)
+    sample = ",".join(
+        f"kind=0x{s.kind:02x}|{s.name!r}|price={s.price_minor}|cur={s.price_currency}"
+        for s in subs[:3]
+    )
+    log.info(
+        "subscriptions_reply count=%d balance_cents=495 currency=840"
+        " first_date=2026-12-31 second_date=2026-05-01 subs=[%s%s]",
+        len(subs),
+        sample,
+        "" if len(subs) <= 3 else f",...+{len(subs) - 3}",
+    )
     return b"".join(
         [
             build_tagged_reply_byte(len(subs)),
@@ -367,6 +401,13 @@ def build_plans_payload():
     """
     plans = _default_store.statement.get_plans()
     blob = b"".join(_encode_plan_record(p) for p in plans)
+    sample = ",".join(f"id={p.plan_id}|{p.name!r}" for p in plans[:3])
+    log.info(
+        "plans_reply count=%d plans=[%s%s]",
+        len(plans),
+        sample,
+        "" if len(plans) <= 3 else f",...+{len(plans) - 3}",
+    )
     return b"".join(
         [
             build_tagged_reply_byte(len(plans)),
@@ -428,6 +469,7 @@ class OnlStmtHandler:
         elif selector == 0x04:
             log.info("cancel_subscription")
             reply_payload = _CANCEL_ACK_PAYLOAD
+            log.info("cancel_subscription_reply status=1")
         elif selector == 0x05:
             # Request payload: `01 NN ...` — first send param is the
             # period index byte.  Fall back to 0 (current) if absent.

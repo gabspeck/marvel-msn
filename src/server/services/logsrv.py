@@ -49,6 +49,7 @@ class LOGSRVHandler:
 
         if selector == 0x00:
             reply_payload = _BOOTSTRAP_PAYLOAD
+            log.info("login_bootstrap_reply status=0 dword_count=7 padding=16B")
         elif selector == 0x0F:
             reply_payload = _handle_osr2_bootstrap(payload)
         elif selector == 0x01:
@@ -104,6 +105,7 @@ def _handle_pm_commit():
     BILLADD.DLL BillingDlg_CommitPM @ 0x00434b81 submits a 0x11c PM buffer.
     """
     log.info("pm_commit status=0")
+    log.info("pm_commit_reply status=0")
     return _COMMIT_OK_REPLY
 
 
@@ -114,6 +116,7 @@ def _handle_billing_commit():
     continuations (filtered out by MPC_CLASS_ONEWAY_MASK).
     """
     log.info("billing_commit status=0")
+    log.info("billing_commit_reply status=0")
     return _COMMIT_OK_REPLY
 
 
@@ -160,6 +163,21 @@ def _handle_billing_query():
     struct.pack_into("<I", buf, pm + 0x00, profile.payment_type)
     _put_str(buf, pm + 0x19, profile.card_number)
 
+    masked_card = (
+        f"****{profile.card_number[-4:]}" if len(profile.card_number) >= 4 else "****"
+    )
+    log.info(
+        "billing_query_reply status=0 type=%d first=%r last=%r country=%d"
+        " city=%r state=%r zip=%r card=%s",
+        profile.payment_type,
+        profile.first_name,
+        profile.last_name,
+        profile.country_id,
+        profile.city,
+        profile.state,
+        profile.zip,
+        masked_card,
+    )
     return build_tagged_reply_var(0x84, bytes(buf))
 
 
@@ -179,6 +197,7 @@ def _handle_signup_post_transfer(request_payload):
     that satisfies the unmarshaller so we can see what the client does next.
     """
     log.info("signup_post_transfer payload_len=%d", len(request_payload))
+    log.info("signup_post_transfer_reply var_len=0")
     return build_tagged_reply_var(0x84, b"")
 
 
@@ -197,6 +216,7 @@ def _handle_post_signup_query(request_payload):
         send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else None
     )
     log.info("post_signup_query country_id=%s", country if country is not None else "?")
+    log.info("post_signup_query_reply var_len=0")
     return build_tagged_reply_var(0x84, b"")
 
 
@@ -214,6 +234,7 @@ def _handle_existing_member_phonebook_query(request_payload):
     send_params, _ = parse_request_params(request_payload)
     dw = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else None
     log.info("existing_member_phonebook dword=%s", dw if dw is not None else "?")
+    log.info("existing_member_phonebook_reply dword=0")
     return build_tagged_reply_dword(0)
 
 
@@ -229,6 +250,7 @@ def _handle_signup_query(request_payload):
     can observe whatever it does next.
     """
     log.info("signup_query payload_len=%d", len(request_payload))
+    log.info("signup_query_reply var_len=0")
     return build_tagged_reply_var(0x84, b"")
 
 
@@ -241,6 +263,7 @@ def _handle_osr2_bootstrap(request_payload):
     log the request bytes so we can diff against 0x00 offline.
     """
     log.info("osr2_bootstrap payload_len=%d hex=%s", len(request_payload), request_payload.hex())
+    log.info("osr2_bootstrap_reply status=0 dword_count=7 padding=16B")
     return _BOOTSTRAP_PAYLOAD
 
 
@@ -257,6 +280,7 @@ def _handle_password_change(request_payload):
     if len(send_params) > 1 and isinstance(send_params[1], VarParam):
         new_pw = send_params[1].data.split(b"\x00", 1)[0].decode("ascii", errors="replace")
     log.info("password_change old=%s new=%s", old_pw, new_pw)
+    log.info("password_change_reply status=0")
     return build_tagged_reply_dword(0)
 
 

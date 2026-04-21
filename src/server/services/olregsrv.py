@@ -57,6 +57,7 @@ class OLREGSRVHandler:
         # into its status word before the switch runs, so the success
         # branch fires and the error dialog (res=0xd2) is skipped.
         reply_body = build_tagged_reply_dword(0)
+        log.info("commit_reply status=0 class=0x%02x selector=0x%02x", msg_class, selector)
         host_block = build_host_block(msg_class, selector, request_id, reply_body)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
