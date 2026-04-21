@@ -38,6 +38,7 @@ class DirectoryNode:
     app_id: int  # wire 'c' property — registered MOS app id
     mnid_a: bytes  # 8-byte opaque 'a' blob
     content: NodeContent
+    browse_flags: int | None = None  # wire 'b' override; None = derive from is_container
 
 
 @dataclass(frozen=True)

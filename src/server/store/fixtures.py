@@ -6,6 +6,8 @@ import datetime
 import struct
 from dataclasses import dataclass
 
+from ..config import DIRSRV_BROWSE_FLAGS_CONTAINER
+from ..mos_apps import APP_DIRECTORY_SERVICE, APP_WHATS_NEW
 from .base import (
     BillingProfile,
     DirectoryNode,
@@ -60,7 +62,6 @@ def _container_content(name, type_str="Directory"):
         size_bytes=0,
     )
 
-
 # MSN-root special mnid: `GetSpecialMnid(idx=0) → 1:0:0:0` (MOSSHELL
 # 0x7f3f9b3f). Post-login DIRSRV pipes 4/5 issue `GetProperties(1:0, [a,e])`
 # and `GetChildren(1:0)` to build the breadcrumb/address-bar dropdown.
@@ -68,6 +69,7 @@ _MSN_ROOT_MNID = struct.pack("<II", 1, 0)
 # HOMEBASE/GUIDENAV menu commands route through special mnids. On the wire
 # DIRSRV only sees the 8-byte `_MosLid64` prefix: [field_0][field_8].
 _MSN_TODAY_SPECIAL_MNID = struct.pack("<II", 4, 0)
+_MSN_TODAY_BROWSE_FLAGS = DIRSRV_BROWSE_FLAGS_CONTAINER
 _FAVORITE_PLACES_SPECIAL_MNID = struct.pack("<II", 3, 1)
 _MEMBER_ASSISTANCE_SPECIAL_MNID = struct.pack("<II", 1, 1)
 _CATEGORIES_SPECIAL_MNID = struct.pack("<II", 1, 0)
@@ -97,7 +99,7 @@ def _category_node(id1, name):
     return DirectoryNode(
         node_id=f"{id1}:0",
         is_container=True,
-        app_id=1,
+        app_id=APP_DIRECTORY_SERVICE,
         mnid_a=struct.pack("<II", id1, 0),
         content=_container_content(name),
     )
@@ -109,7 +111,7 @@ DIRECTORY_NODES = [
     # client into the stale "MSN Central" path; alias it to the real special
     # root `1:0` instead so the subsequent browse matches the post-login tree.
     DirectoryNode(
-        node_id="0:0", is_container=True, app_id=1, mnid_a=_MSN_ROOT_MNID, content=MSN_ROOT_CONTENT
+        node_id="0:0", is_container=True, app_id=APP_DIRECTORY_SERVICE, mnid_a=_MSN_ROOT_MNID, content=MSN_ROOT_CONTENT
     ),
     # MSN root as the client's GetSpecialMnid(idx=0) sees it. Served so that
     # post-login breadcrumb walks `GetProperties(1:0, [a,e])` get the real
@@ -117,7 +119,7 @@ DIRECTORY_NODES = [
     DirectoryNode(
         node_id="1:0",
         is_container=True,
-        app_id=1,
+        app_id=APP_DIRECTORY_SERVICE,
         mnid_a=_MSN_ROOT_MNID,
         content=MSN_ROOT_CONTENT,
     ),
@@ -128,22 +130,23 @@ DIRECTORY_NODES = [
     DirectoryNode(
         node_id="4:0",
         is_container=False,
-        app_id=7,
+        app_id=APP_WHATS_NEW,
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
+        browse_flags=_MSN_TODAY_BROWSE_FLAGS,
     ),
     # Concrete request targets for the special mnids trapped from HOMEBASE.
     DirectoryNode(
         node_id="3:1",
         is_container=True,
-        app_id=1,
+        app_id=APP_DIRECTORY_SERVICE,
         mnid_a=_FAVORITE_PLACES_SPECIAL_MNID,
         content=FAVORITE_PLACES_CONTENT,
     ),
     DirectoryNode(
         node_id="1:1",
         is_container=True,
-        app_id=1,
+        app_id=APP_DIRECTORY_SERVICE,
         mnid_a=_MEMBER_ASSISTANCE_SPECIAL_MNID,
         content=MEMBER_ASSISTANCE_CONTENT,
     ),

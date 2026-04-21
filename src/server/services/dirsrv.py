@@ -5,6 +5,8 @@ import struct
 
 from ..config import (
     DIRSRV_INTERFACE_GUIDS,
+    DIRSRV_BROWSE_FLAGS_CONTAINER,
+    DIRSRV_BROWSE_FLAGS_LEAF,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
@@ -139,7 +141,13 @@ def _sz(s):
 
 
 def build_nav_props(
-    requested_props, *, is_container, c_value=0, mnid_a=b"\x00" * 8, title="MSN Today"
+    requested_props,
+    *,
+    is_container,
+    c_value=0,
+    mnid_a=b"\x00" * 8,
+    title="MSN Today",
+    browse_flags=None,
 ):
     """Props for DSNAV GetChildren — the navigation/list view.
 
@@ -167,7 +175,12 @@ def build_nav_props(
             # PROTOCOL.md §SVCPROP-props (line 448): bit 0x01 CLEAR = container
             # (Browse), SET = leaf (Exec). ExecuteCommand branches on this bit
             # to choose HrBrowseObject vs CMosTreeNode::Exec.
-            out.append((0x01, PROP_BROWSE_FLAGS, bytes([0x00 if is_container else 0x01])))
+            flag = (
+                browse_flags
+                if browse_flags is not None
+                else (DIRSRV_BROWSE_FLAGS_CONTAINER if is_container else DIRSRV_BROWSE_FLAGS_LEAF)
+            )
+            out.append((0x01, PROP_BROWSE_FLAGS, bytes([flag & 0xFF])))
         elif name == PROP_APP_ID:
             out.append((0x03, PROP_APP_ID, struct.pack("<I", c_value)))
         elif name == PROP_NAME:
@@ -343,6 +356,7 @@ def build_child_props(requested_props, node, *, is_children):
         c_value=node.app_id,
         mnid_a=node.mnid_a,
         title=node.content.name,
+        browse_flags=node.browse_flags,
     )
 
 def build_dirsrv_reply_payload(request=None):
@@ -373,6 +387,13 @@ def build_dirsrv_reply_payload(request=None):
     if not is_children:
         records.append(
             build_property_record(build_child_props(requested_props, node, is_children=False))
+        )
+    elif node.node_id == "4:0":
+        # The client issues nav-shaped requests directly against the special
+        # MSN Today leaf. Return the leaf's own nav record so click-path
+        # experiments on props like 'b' have something to read.
+        records.append(
+            build_property_record(build_child_props(requested_props, node, is_children=True))
         )
     else:
         # get_children applies a permissive fallback; see InMemoryContentStore.
