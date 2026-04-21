@@ -242,6 +242,13 @@ class ConnectionState:
         self.advance_seq()
 
         handler_cls = SERVICE_HANDLERS.get(msg.svc_name)
+        if handler_cls is None:
+            self.warning(
+                "pipe_open_unknown_service pipe=%d svc=%s version=%d",
+                msg.client_pipe_idx,
+                msg.svc_name,
+                msg.version,
+            )
         if handler_cls:
             handler = handler_cls(msg.client_pipe_idx, msg.svc_name)
             self.services[msg.client_pipe_idx] = handler

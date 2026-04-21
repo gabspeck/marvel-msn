@@ -117,6 +117,13 @@ class FTMHandler:
             reply_payload = _build_bill_client_reply(content)
             log.info("bill_client_reply status=0 payload_len=%d", len(content))
         else:
+            log.warning(
+                "unhandled class=0x%02x selector=0x%02x req_id=%d payload_len=%d",
+                msg_class,
+                selector,
+                request_id,
+                len(payload),
+            )
             return None
 
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)

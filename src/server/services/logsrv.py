@@ -69,6 +69,13 @@ class LOGSRVHandler:
         elif selector == 0x0E:
             reply_payload = _handle_existing_member_phonebook_query(payload)
         else:
+            log.warning(
+                "unhandled class=0x%02x selector=0x%02x req_id=%d payload_len=%d",
+                msg_class,
+                selector,
+                request_id,
+                len(payload),
+            )
             return None
 
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
