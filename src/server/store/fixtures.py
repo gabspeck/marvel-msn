@@ -18,6 +18,23 @@ from .base import (
     TransactionRecord,
 )
 
+_FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
+
+
+def _date_string_to_wire_filetime(s):
+    """Parse a fixture `%B %d, %Y` date into a Windows FILETIME (UTC midnight).
+
+    Returns 0 for empty input — callers use 0 as the "no date" sentinel so
+    the server skips emitting the `w` property and the listview cell stays
+    blank instead of rendering 1601-01-01.
+    """
+    if not s:
+        return 0
+    dt = datetime.datetime.strptime(s, "%B %d, %Y").replace(tzinfo=datetime.UTC)
+    delta = dt - _FILETIME_EPOCH
+    return delta.days * 86400 * 10_000_000 + delta.seconds * 10_000_000
+
+
 MSN_TODAY_CONTENT = NodeContent(
     name="MSN Today",
     go_word="today",
@@ -37,6 +54,7 @@ MSN_TODAY_CONTENT = NodeContent(
     created="August 24, 1995",
     modified="April 15, 2026",
     size_bytes=5 * 1024 * 1024,
+    modified_filetime=_date_string_to_wire_filetime("April 15, 2026"),
 )
 
 

@@ -113,7 +113,7 @@ project on this pass; raw addresses are the entry points.
 | `0x7F6313B4` | 3 | `CTreeNavClient::~CTreeNavClient` | dtor | Disconnect via `marshal->vtbl[0x2c](mode)` (mode = 0x40 if `f_interactive`, 0x80 otherwise), unregister own sink, release marshal/channel/co_init_hresult, free strdups, `DeleteCriticalSection`. |
 | `0x7F631487` | 12 | `CTreeNavClient::AddRef(CMosEvents*)` | ref | EnterCS; `++ref_count`; if sink != NULL also `marshal->vtbl[6](sink)` (register listener); LeaveCS. |
 | `0x7F6314C2` | 34 | `CTreeNavClient::Release(CMosEvents*)` | ref | EnterCS; if sink != NULL `marshal->vtbl[7](sink)` (unregister); `--ref_count`; LeaveCS; if 0 → `~CTreeNavClient` + `operator delete`. |
-| `0x7F631515` | 28 | `CTreeNavClient::GetProperties(mnid, prop_count, &tags, *locale, &out_total, &out_iter)` | RPC | Selector ?: open channel pipe, pack `prop_count`, pack tag-name buffer, packs locale, send + receive into `NodeIterator`. Returns iterator wrapper containing the raw property record(s) for **the addressed node itself**. |
+| `0x7F631515` | 28 | `CTreeNavClient::GetProperties(mnid, prop_count, &tags, *locale, &out_total, &out_iter)` | RPC | Selector 0: open channel pipe, pack `prop_count`, pack tag-name buffer, packs locale, send + receive into `NodeIterator`. Returns iterator wrapper containing the raw property record(s) for **the addressed node itself**. |
 | `0x7F631752` | 27 | `CTreeNavClient::GetParents(mnid, max, &tags, *locale, &out_count, &out_iter)` | RPC | `GetRelatives(this, 1, ...)` — direction = parents. |
 | `0x7F631778` | 19 | `CTreeNavClient::GetChildren(mnid, max, flags, &tags, *locale, &out_count, &out_iter)` | RPC | `GetRelatives(this, 0, ...)` — direction = children. |
 | `0x7F63179F` | 21 | `CTreeNavClient::GetDeidFromGoWord(go_word, *locale, *out_deid)` | RPC | Selector 3: ANSI→wide, send wide string + locale, receive 8-byte deid. |
@@ -228,10 +228,10 @@ ulong GetProperties( CTreeNavClient* this,
 ```
 
 Same shape as GetRelatives but for **a single node's own** properties
-(returns one record). The wire selector is distinct from selectors
-1/2 (the ctor RPC opcode table is laid out for at least 8 selectors;
-GetProperties uses one of the entries past 1/2/3/4/5/6 — exact value
-not yet pinned down, see §14).
+(returns one record). The wire selector is 0 — confirmed by static
+disassembly (each sibling RPC pushes its selector as an immediate
+constant before the `channel->vtbl[3]` open-pipe call; see §14 for the
+exact push-site addresses).
 
 ### 5.3 GetShabby
 
@@ -520,13 +520,24 @@ the HRESULT → DS-status mapping; the rest of the file just calls into it.
 
 ## 14. Known gaps / follow-ups
 
-- **`GetProperties` selector** — not pinned down. The opcode-table
-  init functions allocate room for 8 selectors per class; selectors 1,
-  2, 3, 4, 5, 6 are accounted for by GetParents / GetChildren /
-  GetDeidFromGoWord / GetShabby / EnumShn / ResolveMoniker. GetProperties
-  uses one of the remaining slots; identifying which would need a live
-  trace (e.g. SoftICE bp on the marshal `vtbl[3]` open) or a more careful
-  decompile of the deadcode-mangled GetProperties body.
+- **`GetProperties` selector** — confirmed 2026-04-21 as **selector 0**
+  by static disassembly of the six sibling call sites (each pushes the
+  selector as an immediate constant before `channel->vtbl[3]`, the
+  open-pipe call):
+
+  | Site | Selector push | RPC |
+  |---|---|---|
+  | `0x7F631576` | `PUSH 0x0` | `GetProperties` |
+  | `0x7F63195F` | `PUSH 0x1` | `GetRelatives(direction=1)` = `GetParents` |
+  | `0x7F631963` | `PUSH 0x2` | `GetRelatives(direction=0)` = `GetChildren` |
+  | `0x7F631802` | `PUSH 0x3` | `GetDeidFromGoWord` |
+  | `0x7F631BE1` | `PUSH 0x4` | `GetShabby` |
+  | `0x7F631D47` | `PUSH 0x5` | `EnumShn` |
+  | `0x7F631EC4` | `PUSH 0x6` | `ResolveMoniker` |
+
+  The 8-slot IID table at `0x7F633270..0x7F6332EC` is indexed 0..7;
+  selector 0 corresponds to the first IID `00028B27`. Selectors 7 is
+  still unused by this DLL.
 - **Marshal vtable shape** — slots `+0x04` (AddRef-ish?), `+0x08`
   (Release), `+0x0c` (open-pipe/operation), `+0x10` (Init: 4 args),
   `+0x18` (RegisterListener), `+0x1c` (UnregisterListener), `+0x24`

@@ -193,7 +193,7 @@ lists`: MOSSHELL merges DSNAV's extras on top of the default set
 | 1 | `0x7F587054` | `wv` | secondary icon variant (DWORD shabby_id). |
 | 2 | `0x7F587050` | `tp` | localized type label (ASCII string). |
 | 3 | `0x7F58704C` | `p`  | size, DWORD (MOSSHELL `FormatSizeString`). |
-| 4 | `0x7F587048` | `w`  | last-changed timestamp, DWORD. |
+| 4 | `0x7F587048` | `w`  | last-changed timestamp, **FILETIME (type 0x0C, 8 bytes)** — see §14.2 for the MOSSHELL column-format trace. |
 | 5 | `0x7F587044` | `l`  | unresolved; reserved column. |
 | 6 | `0x7F587040` | `i`  | unresolved; reserved column. |
 
@@ -464,7 +464,7 @@ blank columns, not a broken listview.
 | `wv` | DSNAV | `0x03` DWORD | No | secondary icon variant shabby_id. Same encoding rule as `mf`. | Fallback to base icon. | As `mf`. |
 | `tp` | DSNAV | `0x0A` ASCIIZ | No | "Type" column text (column 1 in RCDATA 0x81). | Blank "Type" cell. | Wrong type → truncation or cache miss. |
 | `p`  | DSNAV | `0x03` DWORD | No | size in bytes; FormatSizeString in the "Size" column. | Blank "Size" cell. | Wrong size display. |
-| `w`  | DSNAV | `0x03` DWORD | No | last-changed timestamp; "Date Modified" column. | Blank "Date" cell. | Wrong timestamp. |
+| `w`  | DSNAV | `0x0C` FILETIME (8 B) | No | last-changed timestamp; "Date Modified" column. MOSSHELL `FUN_7F3FBC12` case `0xC` passes the 8 bytes straight to `FileTimeToSz` → `GetDateFormatA` + `GetTimeFormatA`. DWORD encoding does **not** work — only prop name `_D` triggers the DWORD-as-`time_t` fast path (BBSNAV territory). | Blank "Date" cell. | `0x03` DWORD → renders as `%u` decimal, not a date. |
 | `l`  | DSNAV | *unresolved* | No | Advertised by DSNAV but no read-site confirmed in this pass. Server emits DWORD 0 as a safe default. | — | — |
 | `i`  | DSNAV | *unresolved* | No | Advertised by DSNAV; no read-site confirmed. Server emits DWORD 0. | — | — |
 
@@ -533,15 +533,45 @@ Verified on 2026-04-21 after the §12 alignment pass. All 14 tags now match.
 | `wv` | `0x03` DWORD (BMP shabby) | `0x03` DWORD | ✓ |
 | `tp` | `0x0A` ASCIIZ (from `NodeContent.type_str`) | `0x0A` ASCIIZ | ✓ |
 | `p`  | `0x03` DWORD (from `NodeContent.size_bytes`) | `0x03` DWORD (size) | ✓ |
-| `w`  | `0x03` DWORD 0 | `0x03` DWORD (timestamp) | ✓ (safe default — DWORD format not yet RE-confirmed; follow-up) |
+| `w`  | `0x0C` FILETIME (from `NodeContent.modified_filetime`); skipped when 0 | `0x0C` FILETIME (timestamp) | ✓ (confirmed 2026-04-21 — see trace below) |
 | `l`  | `0x03` DWORD 0 | unresolved; §12 safe default is DWORD 0 | ✓ |
 | `i`  | `0x03` DWORD 0 | unresolved; §12 safe default is DWORD 0 | ✓ |
 
-Remaining follow-up: the `w` timestamp format (Unix epoch seconds vs FILETIME
-low-word vs MS-DOS packed) is not RE-confirmed yet. The server ships DWORD 0
-so the column parses and renders consistently; once the format is pinned down,
-`NodeContent` can grow a real `modified_dword` field and the fixture dates
-can flow through to the listview.
+**`w` format — confirmed 2026-04-21** via static disassembly of the
+MOSSHELL column formatter `FUN_7F3FBC12` (the one caller of
+`FileTimeToSz`, reached through `GetPropSz` / `GetPropSzBuf` on every
+listview cell paint):
+
+- Type `0x03` (DWORD) path: `wsprintfA(buf, "%u", value)` by default.
+  Only property **name** `"_D"` (hard-coded string at MOSSHELL
+  `DAT_7F40EA08`) triggers the `TimetToFileTime → FileTimeToSz` fast
+  path that treats the DWORD as a Unix `time_t`. `"_D"` is a BBSNAV
+  property, not a DSNAV one — so `w`-as-DWORD was silently rendering as
+  raw decimal (or "0" for the old DWORD-0 default).
+- Type `0x0C` (8-byte qword) path: `FileTimeToSz(value_ptr, buf, 260)`
+  directly — the cache's 8 bytes ARE the `FILETIME`. Formats as
+  `GetDateFormatA(DATE_SHORTDATE) + " " + GetTimeFormatA(TIME_NOSECONDS)`
+  on the localized SYSTEMTIME (after
+  `FileTimeToLocalFileTime → FileTimeToSystemTime`).
+
+SVCPROP's per-type decoder (see
+`DIRSRV_GETCHILDREN_CLIENT_PATH.md §"DecodePropertyValue"`) consumes 8
+bytes for type `0x0C`, matching this shape.
+
+Server wiring: `NodeContent.modified_filetime` carries the 64-bit
+FILETIME (100-ns intervals since 1601-01-01 UTC). Fixtures translate
+the human-readable `"April 15, 2026"` form through
+`_date_string_to_wire_filetime` in `src/server/store/fixtures.py` and
+populate it only on leaves with a real date (today: just MSN Today).
+Containers keep `modified_filetime = 0`, which `build_nav_props` uses
+as the skip sentinel — `w` is omitted entirely so the listview cell
+stays blank rather than rendering a bogus 1601-01-01 date.
+
+Ghidra session for the MOSSHELL trace: `759698c6b00f47acb7b4d1f44356aac1`
+(read-only); the findings are already captured in the plate comments
+above and in the unit assertions `test_dsnav_details_column_tags_use_documented_type_bytes`
+/ `test_msn_today_leaf_emits_nonzero_size_dword` in
+`tests/test_services.py`.
 
 ## 15. Ghidra annotations shipped in this pass
 

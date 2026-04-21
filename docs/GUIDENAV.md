@@ -235,15 +235,49 @@ GUIDENAV renders.
 
 ## 8. Pointers for further work
 
-- Ghidra function annotations already in the MSN95 project:
+- Ghidra function annotations in the MSN95 project:
   `LoadHomebaseMenuTable`, `ExecuteHomebaseEntryAction`,
-  `ResolveHomebaseEntryNode`.  Untouched helpers worth naming: the
-  paint helper `FUN_7F512B28`, the hit-tester `FUN_7F51278D`, the
-  accelerator dispatcher `FUN_7F51298A`, the non-root
-  `GetDetailsStruct` at `FUN_7F511F87`, the vtables at `0x7F516858`
-  (root) and `0x7F516A58` (Favorite Places).
+  `ResolveHomebaseEntryNode` (prior passes) plus the four helpers and
+  two vtables named in the 2026-04-21 pass — see §9 below.
 - Ordinal-to-vtable mapping for the two installed vtables has not been
   fully resolved in this pass (21 self-override slots + ~34 thunks).
   If the shell's view-window hooks (`CMosViewWnd` block after the
   `0x00,0xFF,0xFF` separator in each vtable) become relevant, that is
   the next thing to chase.
+
+## 9. Ghidra annotations shipped in this pass
+
+All changes live in the MSN95 project (`MSN95.gpr`), session
+`5a4d41c981bc4ea2a0e8e099a044c691` for `/GUIDENAV.NAV` (2026-04-21).
+Renamed functions and labeled globals:
+
+- Functions (4):
+  - `CGuideNavFavPlaces_GetDetailsStruct` (was `FUN_7F511F87`) — the
+    Favorite Places-class `GetDetailsStruct` override. Delegates to the
+    real-node via vtable `+0x18`; fallback loads RCDATA 1000.
+  - `PaintHomebaseLabels` (was `FUN_7F512B28`) — welcome-screen label
+    paint helper. `SystemParametersInfoA(SPI_GETKEYBOARDCUES)` +
+    `ExtTextOutA` over the cached HOMEBASE bitmap.
+  - `HitTestHomebaseEntry` (was `FUN_7F51278D`) — mouse hit-tester on
+    the 80-byte record array. `PtInRect` on `RECT` at `+0x28`.
+  - `DispatchHomebaseAccelerator` (was `FUN_7F51298A`) — keyboard
+    accelerator dispatcher. Walks entries, matches accel char at
+    `+0x20` via `lstrcmpiA`, tail-calls `ExecuteHomebaseEntryAction`.
+- Labels (2):
+  - `vtbl_CGuideNavWelcomeScreen` (was `PTR_LAB_7f516858`) — root /
+    welcome-screen `CMosTreeNode` vtable, 89 slots. Installed by the
+    240-byte ctor `FUN_7F511051`.
+  - `vtbl_CGuideNavFavPlaces` (was `PTR_LAB_7f516a58`) — Favorite
+    Places `CMosTreeNode` vtable, 89 slots. Installed by the 520-byte
+    ctor `FUN_7F511B3F`. Slot at `+0x70` is
+    `CGuideNavFavPlaces_GetDetailsStruct`.
+- Plate comments authored on every renamed function and on both
+  vtables; the vtable plates enumerate the GUIDENAV-local (non-thunk)
+  override addresses so future passes can reconstruct slot↔method
+  mapping without re-dumping the table.
+
+Intentionally **not** tackled: naming individual slots of either
+vtable. The thunk band `0x7F512E50..0x7F512FE2` makes the
+ordinal-to-slot map mechanical if anyone needs it, but without a
+consumer driving the work (e.g. a WndProc hook chase) the labels would
+be speculative.

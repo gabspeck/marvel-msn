@@ -85,6 +85,16 @@ freed via `CMosXAllocator::Free(&g_mxa, ...)` after the wire call.
 
 ## Where the reply gets parsed
 
+> Selector context: GetChildren uses DIRSRV selector 2
+> (`CTreeNavClient::GetRelatives(direction=0)`). The sibling
+> `GetProperties` on the same channel uses selector 0. See
+> `docs/TREENVCL.md` §14 for the full selector → RPC table. The server
+> handler at `src/server/services/dirsrv.py:90-98` lumps both into the
+> default branch (only selector 4 / `GetShabby` forks off early) and
+> distinguishes them via the payload's `dword_0` flag: `0` = properties
+> request, `1` = children request. See `mpc.py:161-199` and
+> `dirsrv.py:402-403`.
+
 ### TREENVCL.DLL — record walker
 
 ```

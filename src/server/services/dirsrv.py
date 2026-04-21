@@ -150,6 +150,7 @@ def build_nav_props(
     browse_flags=None,
     type_str="",
     size_bytes=0,
+    modified_filetime=0,
 ):
     """Props for DSNAV GetChildren — the navigation/list view.
 
@@ -159,7 +160,7 @@ def build_nav_props(
     - e = title string (0x0A ASCII cache — icon label + titlebar both ANSI).
     - tp = localized Type label (0x0A ASCIIZ) for the details-view column.
     - p  = size in bytes (0x03 DWORD) → MOSSHELL FormatSizeString.
-    - w  = last-changed timestamp (0x03 DWORD) for the Date Modified column.
+    - w  = last-changed timestamp (0x0C FILETIME, 8 bytes) → FileTimeToSz.
     - l, i = DSNAV-advertised but no read-site confirmed; emit DWORD 0 per §12.
     """
     # DnR (c=7) worker ExecUrlWorkerProc → DownloadContentToTempPath calls
@@ -266,11 +267,23 @@ def build_nav_props(
             # cache in ASCII so MOSSHELL's column render reads it straight.
             out.append((0x0A, PROP_TYPE, _sz(type_str)))
         elif name == PROP_LAST_CHANGED:
-            # `w` = Date Modified column (DSNAV.md §12; col 3). Expected wire
-            # type is 0x03 DWORD timestamp. Exact format (epoch vs FILETIME
-            # low-word) is not RE-confirmed yet, so we ship DWORD 0 per §12's
-            # "safe default" guidance until the format is pinned down.
-            out.append((0x03, PROP_LAST_CHANGED, struct.pack("<I", 0)))
+            # `w` = Date Modified column (DSNAV.md §12/§14.2; col 3). Wire type
+            # 0x0C (8-byte FILETIME in 100-ns intervals since 1601-01-01 UTC).
+            # MOSSHELL 0x7F3FBC12 case 0xC passes the 8-byte cache value to
+            # FileTimeToSz → GetDateFormatA + GetTimeFormatA on the localized
+            # SYSTEMTIME. Sending `w` as 0x03 DWORD lands in the case-3 "%u"
+            # branch (only property name "_D" triggers the DWORD-as-time_t
+            # fast path; "_D" is BBSNAV territory). Skip emitting when the
+            # fixture has no date (modified_filetime == 0) so the listview
+            # cell stays blank instead of rendering 1601-01-01.
+            if modified_filetime:
+                out.append(
+                    (
+                        0x0C,
+                        PROP_LAST_CHANGED,
+                        struct.pack("<Q", modified_filetime & 0xFFFFFFFFFFFFFFFF),
+                    )
+                )
         elif name == PROP_UNKNOWN_L:
             # `l` advertised by DSNAV but no read-site confirmed. DSNAV.md §12
             # recommends DWORD 0 as the safe default; matches the `i` branch
@@ -389,6 +402,7 @@ def build_child_props(requested_props, node, *, is_children):
         browse_flags=node.browse_flags,
         type_str=node.content.type_str,
         size_bytes=node.content.size_bytes,
+        modified_filetime=node.content.modified_filetime,
     )
 
 def build_dirsrv_reply_payload(request=None):

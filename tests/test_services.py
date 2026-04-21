@@ -414,8 +414,8 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Entertainment", payload)
 
     def test_dsnav_details_column_tags_use_documented_type_bytes(self):
-        # DSNAV.md §12 pins the wire types for the details-view columns:
-        # tp=0x0A ASCIIZ, p=0x03 DWORD (size), w=0x03 DWORD (timestamp).
+        # DSNAV.md §12/§14.2 pins the wire types for the details-view columns:
+        # tp=0x0A ASCIIZ, p=0x03 DWORD (size), w=0x0C FILETIME (8-byte).
         # `l` is advertised but unread — DWORD 0 is the safe default (§12).
         request = DirsrvRequest(
             node_id="1:0",
@@ -431,13 +431,16 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"\x0atp\x00\x01Directory\x00", payload)
         # Category containers have size_bytes=0 → inline 0x03 DWORD 0.
         self.assertIn(b"\x03p\x00\x00\x00\x00\x00", payload)
-        # w and l always DWORD 0 for now.
-        self.assertIn(b"\x03w\x00\x00\x00\x00\x00", payload)
+        # Category containers have empty modified → `w` is skipped entirely so
+        # the listview cell renders blank instead of a bogus 1601 date.
+        # Check every plausible wire-type + name combination is absent.
+        for type_byte in (0x03, 0x0C, 0x0E, 0x0B, 0x0A):
+            self.assertNotIn(bytes([type_byte]) + b"w\x00", payload)
+        # `l` still emits as DWORD 0 (§12 safe default for unresolved tags).
         self.assertIn(b"\x03l\x00\x00\x00\x00\x00", payload)
         # Regression guard: the old 0x0E blob emit must be gone for these tags.
         self.assertNotIn(b"\x0etp\x00", payload)
         self.assertNotIn(b"\x0ep\x00", payload)
-        self.assertNotIn(b"\x0ew\x00", payload)
         self.assertNotIn(b"\x0el\x00", payload)
 
     def test_msn_today_leaf_emits_nonzero_size_dword(self):
@@ -456,6 +459,16 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"\x03p\x00" + struct.pack("<I", 5 * 1024 * 1024), payload)
         # tp carries the MSN Today fixture's type_str "News & Features".
         self.assertIn(b"\x0atp\x00\x01News & Features\x00", payload)
+        # `w` ships as 0x0C + 8-byte FILETIME (100-ns since 1601-01-01 UTC).
+        # Fixture date "April 15, 2026" → FILETIME. Recompute here to stay in
+        # sync with `_date_string_to_wire_filetime` in store/fixtures.py.
+        from server.store.fixtures import _date_string_to_wire_filetime
+        ft = _date_string_to_wire_filetime("April 15, 2026")
+        self.assertGreater(ft, 0)
+        self.assertIn(b"\x0cw\x00" + struct.pack("<Q", ft), payload)
+        # Regression guards: `w` must not land as DWORD or as blob.
+        self.assertNotIn(b"\x03w\x00", payload)
+        self.assertNotIn(b"\x0ew\x00", payload)
 
 
 class TestOLREGSRVServiceMap(unittest.TestCase):

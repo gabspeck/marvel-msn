@@ -27,6 +27,14 @@ class NodeContent:
     created: str
     modified: str
     size_bytes: int
+    # 64-bit FILETIME (100-ns intervals since 1601-01-01 UTC) for the DSNAV
+    # "Date Modified" listview column. Wire type 0x0C — MOSSHELL 0x7F3FBC12
+    # case 0xC passes the 8-byte value straight to FileTimeToSz, which runs
+    # GetDateFormatA + GetTimeFormatA on the localized SYSTEMTIME. Sending `w`
+    # as DWORD would fall into the case-3 "%u" branch (only prop name "_D"
+    # triggers the DWORD-as-time_t path; "_D" is BBSNAV territory). 0 = no
+    # cached date → server skips emitting `w`, cell renders blank.
+    modified_filetime: int = 0
 
 
 @dataclass(frozen=True)
