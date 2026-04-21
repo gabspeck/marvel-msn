@@ -102,7 +102,7 @@ NodeIterator_GetNext         (7F632370)
   if idx >= count return 0x105 (no-more-nodes)
   return NodeIterator_GetAtIndex(this, idx, &props)
 
-NodeIterator_GetAtIndex      (7F63238A)
+NodeIterator_GetAtIndex      (7F63238A)    ; full DLL writeup: docs/TREENVCL.md
   walks dynamic-section buffer as back-to-back records
   each record begins with [u32 stride to next]
   block-fetch via data->vtbl[7]; advance via data->vtbl[5]
