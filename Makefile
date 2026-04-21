@@ -1,4 +1,4 @@
-.PHONY: install test coverage coverage-html lint format typecheck
+.PHONY: install test coverage coverage-html lint format typecheck ftp
 
 install:
 	uv sync --all-extras
@@ -28,3 +28,6 @@ format:
 
 typecheck:
 	uv run mypy src
+
+ftp:
+	uv run --with pyftpdlib python -m pyftpdlib -p 2121 -w -d ./ftp --permit-foreign-addresses
