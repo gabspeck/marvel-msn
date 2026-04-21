@@ -20,3 +20,15 @@
   modern flag/field combinations. We control account validity so
   the AUTHENTICATE can be rubber-stamped — no real LM/NT hash
   verification needed.
+
+- Align the DIRSRV Categories surface with the connected-client reference
+  screenshot. The live client shows a localized `Categories (US)` wrapper,
+  a separate top-of-folder shabby bitmap strip, and distinct server-delivered
+  per-node icons that are not present in local client assets. Current fixtures
+  still stub this as a plain `Categories` container with eight children and
+  shared default shabby assets. Follow-up: trace where the country suffix and
+  `UNITED STATES:` header come from, confirm which shabby property feeds the
+  top strip (`mf` vs `wv`), and replace the one-icon fallback with per-node
+  icon ids/assets. The screenshot also implies a richer category set than the
+  current stub; visible object count needs reconciliation before fixtures are
+  expanded.
