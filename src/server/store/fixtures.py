@@ -6,8 +6,7 @@ import datetime
 import struct
 from dataclasses import dataclass
 
-from ..config import DIRSRV_BROWSE_FLAGS_CONTAINER
-from ..mos_apps import APP_DIRECTORY_SERVICE, APP_WHATS_NEW
+from ..mos_apps import APP_DIRECTORY_SERVICE
 from .base import (
     BillingProfile,
     DirectoryNode,
@@ -87,7 +86,6 @@ _MSN_ROOT_MNID = struct.pack("<II", 1, 0)
 # HOMEBASE/GUIDENAV menu commands route through special mnids. On the wire
 # DIRSRV only sees the 8-byte `_MosLid64` prefix: [field_0][field_8].
 _MSN_TODAY_SPECIAL_MNID = struct.pack("<II", 4, 0)
-_MSN_TODAY_BROWSE_FLAGS = DIRSRV_BROWSE_FLAGS_CONTAINER
 _MEMBER_ASSISTANCE_SPECIAL_MNID = struct.pack("<II", 1, 1)
 _CATEGORIES_SPECIAL_MNID = struct.pack("<II", 1, 0)
 
@@ -141,15 +139,17 @@ DIRECTORY_NODES = [
     ),
     # Alias for the client-synthesized MSN Today startup node. The shell asks
     # DIRSRV for `GetProperties(4:0, [a,e])` while rendering built-in startup
-    # surfaces, so map it to the real MSN Today leaf instead of falling
-    # through to the unknown-node sentinel.
+    # surfaces, so map it to the real MSN Today node instead of falling
+    # through to the unknown-node sentinel. Shaped as a regular Browse
+    # container (same as the category nodes) — empty children list means
+    # clicking it just opens an empty folder view, matching what the shell
+    # expects.
     DirectoryNode(
         node_id="4:0",
-        is_container=False,
-        app_id=APP_WHATS_NEW,
+        is_container=True,
+        app_id=APP_DIRECTORY_SERVICE,
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
-        browse_flags=_MSN_TODAY_BROWSE_FLAGS,
     ),
     DirectoryNode(
         node_id="1:1",
@@ -172,9 +172,9 @@ DIRECTORY_CHILDREN = {
     # children makes the dropdown collapse nodes together and cross-wire the
     # Categories / Member Assistance views.
     "1:0": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
-    # The client's startup-time `4:0` special node is a leaf: explicit empty
-    # children avoid the sentinel fallback path that previously introduced
-    # `FFFFFFFF:FFFFFFFF` into the rendered hierarchy.
+    # Explicit empty children for the `4:0` startup node — avoids the
+    # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
+    # into the rendered hierarchy.
     "4:0": [],
     "3:1": [],
     "1:1": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],

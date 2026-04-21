@@ -469,6 +469,45 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertNotIn(b"\x03w\x00", payload)
         self.assertNotIn(b"\x0ew\x00", payload)
 
+    def test_msn_today_mixed_content_request_returns_fixture_values(self):
+        """Client can mix nav and content props on is_children=True and get real values."""
+        request = DirsrvRequest(
+            node_id="4:0",
+            node_id_raw=struct.pack("<II", 4, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="e\x00j\x00k\x00ca\x00tp\x00z\x00o\x00g",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"\x0ae\x00\x01MSN Today\x00", payload)
+        self.assertIn(b"\x0bj\x00\x01Your daily window to MSN.\x00", payload)
+        self.assertIn(b"\x0bk\x00\x01today\x00", payload)
+        self.assertIn(b"\x0bca\x00\x01News\x00", payload)
+        self.assertIn(b"\x0atp\x00\x01News & Features\x00", payload)
+        # z, o are DWORD 0 in the fixture — but emitted as 0x03 (not the old
+        # else-branch DWORD 0 that masked whether the builder knew the prop).
+        self.assertIn(b"\x03z\x00" + struct.pack("<I", 0), payload)
+        self.assertIn(b"\x03o\x00" + struct.pack("<I", 0), payload)
+        # g still DWORD 0 (purpose unresolved).
+        self.assertIn(b"\x03g\x00" + struct.pack("<I", 0), payload)
+
+    def test_msn_today_properties_dialog_request_uses_dialog_wire_types(self):
+        """Properties dialog (is_children=False) gets 0x0B tp and 0x0B w string."""
+        request = DirsrvRequest(
+            node_id="4:0",
+            node_id_raw=struct.pack("<II", 4, 0),
+            dword_0=0,
+            dword_1=1,
+            prop_group="e\x00tp\x00w\x00j",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"\x0ae\x00\x01MSN Today\x00", payload)
+        self.assertIn(b"\x0btp\x00\x01News & Features\x00", payload)
+        self.assertIn(b"\x0bw\x00\x01April 15, 2026\x00", payload)
+        self.assertIn(b"\x0bj\x00\x01Your daily window to MSN.\x00", payload)
+
 
 class TestOLREGSRVServiceMap(unittest.TestCase):
     def test_payload_size(self):

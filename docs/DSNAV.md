@@ -475,7 +475,7 @@ Additional notes:
 - `fn` is not in DSNAV's advertised set but the server emits it for
   `c == 7` (`APP_DOWNLOAD_AND_RUN`) because DnR's `ExecUrlWorkerProc`
   reads it for the temp filename. That path is orthogonal to DSNAV —
-  see the comment in `build_nav_props` about the DnR worker.
+  see the comment in `build_props` about the DnR worker.
 
 ## 13. Comparison to the other NAV plug-ins
 
@@ -516,7 +516,7 @@ listview or ship its own WndProc. The shell's generic `CDIBWindow`/
   suggest the full MOSSHELL base classes have more virtual methods; this
   document only captures the slot DSNAV actually installs.
 
-### 14.2 Server cross-check (`src/server/services/dirsrv.py::build_nav_props`)
+### 14.2 Server cross-check (`src/server/services/dirsrv.py::build_props`)
 
 Verified on 2026-04-21 after the §12 alignment pass. All 14 tags now match.
 
@@ -563,7 +563,7 @@ FILETIME (100-ns intervals since 1601-01-01 UTC). Fixtures translate
 the human-readable `"April 15, 2026"` form through
 `_date_string_to_wire_filetime` in `src/server/store/fixtures.py` and
 populate it only on leaves with a real date (today: just MSN Today).
-Containers keep `modified_filetime = 0`, which `build_nav_props` uses
+Containers keep `modified_filetime = 0`, which `build_props` uses
 as the skip sentinel — `w` is omitted entirely so the listview cell
 stays blank rather than rendering a bogus 1601-01-01 date.
 

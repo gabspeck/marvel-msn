@@ -224,13 +224,54 @@ From `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md § Property tag request lists`:
 | `x`  | 0x0E blob | — | Consumed by launcher paths (`CMosTreeNode::Exec` slot `+0xCC` implementations). |
 | `_F` | 0x01 byte (sub-object flag) | `GetDisplayNameOf` via `GetSubObject` (vtable `+0xC4`). Cap 2, type 2. | Bit `0x20` triggers STRINGTABLE 0x88 suffix append to the `e` string. |
 | `tp` | 0x0A ASCIIZ (DSNAV contract) | `CDsNavTreeNode::GetDetailsStruct` (DSNAV §10) | "Type" column — tag travels through MOSSHELL only as an opaque cache slot. |
-| `p`  | 0x03 DWORD | Properties dialog `FUN_7F3FBA69` special branch | Formats as "Size" via `FormatSizeString`. |
+| `p`  | 0x03 DWORD | Properties dialog `FUN_7F3FBA69` special branch | Formats as "Size" via `FormatSizeString`; see §4.3 for the `pInner` delegation that leaves the dialog field blank on `app_id=1` nodes. |
 | `w`  | 0x03 DWORD | Column descriptor (DSNAV) | "Date Modified" column. |
 | `l`, `i` | reserved | — | No confirmed read site. |
 
 **Full server cross-check is in `docs/DSNAV.md` §12 and §14.2.** MOSSHELL
 itself is tag-agnostic for everything except `a`, `b`, `c`, `e`, `h`, `mf`,
 and `_F` — the rest flow through to plug-ins or column descriptors.
+
+### 4.3 `p` rendering in the Properties dialog
+
+The Context tab (`FUN_7F401D81`) reads `p` through a three-step chain:
+
+1. `EnsurePropertyGroup(&PTR_DAT_7F40E988)` batches
+   `{q,r,s,t,u,n,y,on,v,w,p}` into one `GetProperties(children=True)`
+   wire request.
+2. For each prop, `RememberProperty` (`CMosTreeNode` slot 11, offset
+   `+0x2C`) inserts the wire bytes into the node's per-prop cache. Inner
+   helper `FUN_7F3FBA69` runs a name-matched special branch for `"p"`:
+   `vtable[+0x140] FormatSizeString(this, **(cache+4), buf, 0x104)` —
+   the DWORD is formatted into `buf`, then `lstrcpyA`-ed to `cache+0xC`
+   (the ANSI copy slot read by `GetPropSz`).
+3. The dialog finally does
+   `SetDlgItemTextA(hwnd, 0x7F, GetPropSzBuf("p"))`, rendering whatever
+   is at `cache+0xC`.
+
+`CMosTreeNode::FormatSizeString @ 0x7F3FFE00` branches on `node+0xBC`
+(`pInner`):
+
+```c
+if (pInner == NULL)
+    wsprintfA(buf, "%d", dword);       // raw decimal — e.g. "5242880"
+else
+    pInner->vtable[+0x24](pInner, pInner, dword, buf, 0x104);
+```
+
+`pInner` is populated lazily by DSNAV's `EnsureInner` (slot 72) when the
+shell first needs a per-app plug-in node — for `app_id=1` DIRSRV
+containers, that resolves to **DSED** (`App #18`, `dsned.ned`) through
+`DSNAV_LoadAppPluginNode` (DSNAV §6.1). Once cached, every subsequent
+`FormatSizeString` delegates to DSED's slot `+0x24`, which empirically
+writes an empty string and returns success. `lstrlenA(buf)==0` makes
+`cache+0xC` a 1-byte `""` allocation, and the Properties-dialog Size
+field renders blank.
+
+The Size column in the DSNAV details-view listview does not go through
+this path — MOSSHELL reads `p` directly from the cache into
+`FormatSizeString` with the listview's own column buffer, so the column
+still renders. The blank-Size behavior is specific to the dialog.
 
 ## 5. Enumeration pipeline
 
@@ -588,7 +629,7 @@ Complete table is in `docs/DSNAV.md` §14.2. MOSSHELL-specific notes:
 - `'e'` must be type **0x0A**. 0x0B truncates to "M" because SVCPROP stores
   the raw UTF-16 temp buffer in the cache and the ANSI readers (both
   `GetDisplayNameOf` and the titlebar paint path) stop at the first wide
-  NUL. Server is correct at `src/server/services/dirsrv.py :: build_nav_props`.
+  NUL. Server is correct at `src/server/services/dirsrv.py :: build_props`.
 - `'mf'` and `'wv'` must be type **0x03 DWORD** (inline). A 0x0E blob puts
   a heap pointer in the cache slot and the low 4 bytes of the pointer
   become the shabby_id — this was the "0x00BE0400 garbage" symptom chased

@@ -63,14 +63,6 @@ PROP_EXEC_ARGS = "x"
 PROP_VENDOR_ID = "y"
 PROP_PRICE = "z"
 
-STRUCTURAL_NAV_PROPS = (
-    PROP_MNID,
-    PROP_APP_ID,
-    PROP_SECONDARY_ICON,
-    PROP_BROWSE_FLAGS,
-    PROP_EXEC_ARGS,
-)
-
 log = logging.getLogger(__name__)
 
 
@@ -117,7 +109,7 @@ def build_property_record(properties):
 def _format_props_for_log(properties):
     """Render (type, name, value_bytes) tuples as `name=<decoded>` pairs.
 
-    Matches the wire types we emit in build_nav_props / build_dialog_props:
+    Matches the wire types we emit in build_props:
       0x01 byte     -> name=0xNN
       0x03 DWORD    -> name=<decimal>   (icon props flagged 0x%08x)
       0x0A / 0x0B   -> name="..."       (strip flag byte + trailing NUL)
@@ -164,12 +156,6 @@ def _decode_flag_byte_string(value):
     return body.split(b"\x00\x00", 1)[0].decode("utf-16le", errors="replace")
 
 
-def _blob(s):
-    """Length-prefixed ASCII blob body for a type-0x0E property."""
-    data = s.encode("ascii", errors="replace")
-    return struct.pack("<I", len(data)) + data
-
-
 def _sz(s):
     """Value body for a type-0x0A or 0x0B string property.
 
@@ -190,73 +176,64 @@ def _sz(s):
     return b"\x01" + data + b"\x00"
 
 
-def build_nav_props(
-    requested_props,
-    *,
-    is_container,
-    c_value=0,
-    mnid_a=b"\x00" * 8,
-    title="MSN Today",
-    browse_flags=None,
-    type_str="",
-    size_bytes=0,
-    modified_filetime=0,
-):
-    """Props for DSNAV GetChildren — the navigation/list view.
+def build_props(requested_props, node, *, is_children):
+    """Serialize `node` into (type, name, value) property tuples.
 
-    Per `docs/DSNAV.md` §12 (node-shape contract), the 14 tags MOSSHELL + DSNAV
-    request must land with the exact wire types the consumer expects:
-    - a/c/h/b/x/g/mf/wv structural + icon props.
-    - e = title string (0x0A ASCII cache — icon label + titlebar both ANSI).
-    - tp = localized Type label (0x0A ASCIIZ) for the details-view column.
-    - p  = size in bytes (0x03 DWORD) → MOSSHELL FormatSizeString.
-    - w  = last-changed timestamp (0x0C FILETIME, 8 bytes) → FileTimeToSz.
-    - l, i = DSNAV-advertised but no read-site confirmed; emit DWORD 0 per §12.
+    Most props have a single canonical wire type regardless of caller; only
+    `tp` and `w` switch on `is_children`:
+      - is_children=True  → DSNAV details-view / MOSSHELL listview
+                            (tp = 0x0A ASCIIZ, w = 0x0C FILETIME)
+      - is_children=False → Properties dialog
+                            (tp = 0x0B UTF-16, w = 0x0B string)
+
+    Empirical source for the dialog wire types: memory
+    `project_dirsrv_dialog_props_investigation` (2026-04-15). `e` is 0x0A for
+    all callers — CMosTreeNode::Properties raw-memcpies cache into
+    PropertySheetA (ANSI); 0x0B would store UTF-16 and truncate at the first
+    wide NUL ("MSN Today" → "M").
+
+    TODO: a GetParents-style caller that arrives with dword_0=1 but a
+    dialog-shaped reader on the client side would get listview wire types for
+    tp/w and render wrong. No such caller is known today.
     """
+    content = node.content
+
     # DnR (c=7) worker ExecUrlWorkerProc → DownloadContentToTempPath calls
     # vt[0x40]("fn", buf, len, 1) on the node cache to build the temp file
     # name. The client's GetChildren request doesn't ask for `fn`, so we
-    # emit it unilaterally — SVCPROP caches by name, so extra records are
-    # absorbed. Without this, phase 1 of the worker bails before the FTM
-    # download step and MSN Today renders blank.
+    # emit it unilaterally for DnR leaves — SVCPROP caches by name, so extra
+    # records are absorbed. Without this, phase 1 of the worker bails before
+    # the FTM download step and MSN Today renders blank.
     props_to_emit = list(requested_props)
-    if c_value == 7 and PROP_FILENAME not in props_to_emit:
+    if node.app_id == 7 and PROP_FILENAME not in props_to_emit:
         props_to_emit.append(PROP_FILENAME)
 
     out = []
     for name in props_to_emit:
         if name == PROP_MNID:
-            out.append((0x0E, PROP_MNID, struct.pack("<I", len(mnid_a)) + mnid_a))
+            out.append((0x0E, PROP_MNID, struct.pack("<I", len(node.mnid_a)) + node.mnid_a))
         elif name == PROP_BROWSE_FLAGS:
-            # PROTOCOL.md §SVCPROP-props (line 448): bit 0x01 CLEAR = container
-            # (Browse), SET = leaf (Exec). ExecuteCommand branches on this bit
-            # to choose HrBrowseObject vs CMosTreeNode::Exec.
+            # PROTOCOL.md §SVCPROP-props: bit 0x01 CLEAR = container (Browse),
+            # SET = leaf (Exec). ExecuteCommand branches on this bit to choose
+            # HrBrowseObject vs CMosTreeNode::Exec.
             flag = (
-                browse_flags
-                if browse_flags is not None
-                else (DIRSRV_BROWSE_FLAGS_CONTAINER if is_container else DIRSRV_BROWSE_FLAGS_LEAF)
+                node.browse_flags
+                if node.browse_flags is not None
+                else (DIRSRV_BROWSE_FLAGS_CONTAINER if node.is_container else DIRSRV_BROWSE_FLAGS_LEAF)
             )
             out.append((0x01, PROP_BROWSE_FLAGS, bytes([flag & 0xFF])))
         elif name == PROP_APP_ID:
-            out.append((0x03, PROP_APP_ID, struct.pack("<I", c_value)))
+            out.append((0x03, PROP_APP_ID, struct.pack("<I", node.app_id)))
         elif name == PROP_NAME:
-            # Nav 'e' = title string, wire type 0x0A (ASCII cache). Both
-            # the icon label and the explorer window titlebar read 'e' via
-            # paths that expect ANSI bytes. 0x0B (UTF-16 cache) rendered
-            # the icon but truncated the titlebar to "M" at the first wide
-            # NUL. 0x0A stores ASCII in the cache, satisfying both readers.
-            out.append((0x0A, PROP_NAME, _sz(title)))
+            # Must be 0x0A (ASCII cache). Both the dialog titlebar
+            # (PropertySheetA raw memcpy) and the nav icon label expect ANSI.
+            # 0x0B would store UTF-16 and truncate at the first wide NUL.
+            out.append((0x0A, PROP_NAME, _sz(content.name)))
         elif name == PROP_SECONDARY_ICON:
-            # "h" = shabby_id for the listview per-item icon. MOSSHELL
-            # CMosViewWnd::AddPMtnToView (0x7f3f820e) calls FUN_7f404786
-            # which reads "h" as DWORD and (if present) calls FUN_7f4047c2
-            # → FUN_7f4049f9 → vtable[0x74] GetShabbyToFile → ExtractIconExA
-            # on the downloaded temp file. ExtractIconExA expects ICO/EXE/DLL
-            # bytes, not BMP — `mf` (banner) is the BMP channel; `h` is its
-            # per-item counterpart. Emit a shabby_id whose registry blob is
-            # a valid ICO. Omitting "h" makes FUN_7f404786 short-circuit and
-            # LVN_GETDISPINFO returns iImage=0 = default slot (forbidden glyph
-            # loaded from MOSSHELL icon resource #2 in FUN_7f4042a0).
+            # 'h' = shabby_id for the listview per-item icon. MOSSHELL
+            # FUN_7f404786 reads it as DWORD → vtable[0x74] GetShabbyToFile →
+            # ExtractIconExA (ICO/EXE/DLL bytes, not BMP). Omitting falls
+            # back to LVN_GETDISPINFO iImage=0 = forbidden glyph.
             out.append(
                 (
                     0x03,
@@ -267,27 +244,24 @@ def build_nav_props(
         elif name == PROP_EXEC_ARGS:
             out.append((0x0E, PROP_EXEC_ARGS, struct.pack("<I", 1) + b"\x00"))
         elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
-            # `p` = byte count for the "Size" details column. DSNAV.md §12 +
-            # CDsNavTreeNode::GetDetailsStruct (col 2 in RCDATA 0x81) read it
-            # as an inline DWORD and pipe it through MOSSHELL FormatSizeString.
-            # The old 0x0E blob (length-prefixed title) left FormatSizeString
-            # working off a heap pointer → garbage cell.
+            # `p` = byte count, read inline as DWORD. Feeds MOSSHELL
+            # FormatSizeString (listview Size column + Properties dialog Size
+            # field — same vtable slot 0x140 either way).
             out.append(
                 (
                     0x03,
                     PROP_MAYBE_SIZE_OR_LEGACY_TITLE,
-                    struct.pack("<I", size_bytes & 0xFFFFFFFF),
+                    struct.pack("<I", content.size_bytes & 0xFFFFFFFF),
                 )
             )
         elif name == PROP_UNKNOWN_G:
-            # Purpose unresolved — sentinel sweeps ruled out `g` as the
-            # icon slot. Emit DWORD 0 as a harmless default.
+            # Purpose unresolved — sentinel sweeps ruled out `g` as the icon
+            # slot. Emit DWORD 0 as a harmless default.
             out.append((0x03, PROP_UNKNOWN_G, struct.pack("<I", 0)))
         elif name == PROP_SECONDARY_ICON_ALT:
-            # `wv` = GetShabby slot A (secondary icon call, req_id=1).
-            # Inline DWORD shabby_id. As a 0x0E blob, SVCPROP stores a
-            # heap-alloc pointer in the cache and the reader echoes the
-            # pointer bytes as the shabby_id (the `0x00BE0400` garbage).
+            # 'wv' = GetShabby slot A. Must be inline DWORD — as a 0x0E blob
+            # the cache holds a heap pointer whose low 4 bytes become the
+            # shabby_id (the "0x00BE0400 garbage").
             out.append(
                 (
                     0x03,
@@ -296,14 +270,9 @@ def build_nav_props(
                 )
             )
         elif name == PROP_PRIMARY_ICON:
-            # `mf` = primary node-icon property. MOSSHELL FUN_7F405018
-            # does `GetProperty("mf", &buf, 4)` → 4-byte DWORD shabby_id →
-            # synthesizes cache filename via `%04X%08X` → if file missing
-            # calls vtable+0x74 → GetShabbyToFile → CTreeNavClient::GetShabby
-            # with this DWORD. Must be inline 0x03; as a 0x0E blob the
-            # cache slot holds the heap pointer and the low 4 bytes of
-            # that pointer become the shabby_id (that's what produced
-            # the 0x00BE0400 we chased across multiple sessions).
+            # 'mf' = primary node-icon DWORD shabby_id. MOSSHELL FUN_7F405018
+            # does GetProperty('mf', &buf, 4) expecting an inline DWORD. See
+            # PROP_SECONDARY_ICON_ALT for the 0x0E-vs-0x03 hazard.
             out.append(
                 (
                     0x03,
@@ -311,74 +280,47 @@ def build_nav_props(
                     struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1)),
                 )
             )
-        elif name == PROP_TYPE:
-            # `tp` = localized type label for the details-view "Type" column
-            # (DSNAV.md §12; RCDATA 0x81 col 1). Wire type 0x0A keeps the
-            # cache in ASCII so MOSSHELL's column render reads it straight.
-            out.append((0x0A, PROP_TYPE, _sz(type_str)))
-        elif name == PROP_LAST_CHANGED:
-            # `w` = Date Modified column (DSNAV.md §12/§14.2; col 3). Wire type
-            # 0x0C (8-byte FILETIME in 100-ns intervals since 1601-01-01 UTC).
-            # MOSSHELL 0x7F3FBC12 case 0xC passes the 8-byte cache value to
-            # FileTimeToSz → GetDateFormatA + GetTimeFormatA on the localized
-            # SYSTEMTIME. Sending `w` as 0x03 DWORD lands in the case-3 "%u"
-            # branch (only property name "_D" triggers the DWORD-as-time_t
-            # fast path; "_D" is BBSNAV territory). Skip emitting when the
-            # fixture has no date (modified_filetime == 0) so the listview
-            # cell stays blank instead of rendering 1601-01-01.
-            if modified_filetime:
-                out.append(
-                    (
-                        0x0C,
-                        PROP_LAST_CHANGED,
-                        struct.pack("<Q", modified_filetime & 0xFFFFFFFFFFFFFFFF),
-                    )
-                )
         elif name == PROP_UNKNOWN_L:
-            # `l` advertised by DSNAV but no read-site confirmed. DSNAV.md §12
-            # recommends DWORD 0 as the safe default; matches the `i` branch
-            # below and keeps the cache slot non-pointer-sized.
+            # DSNAV advertises 'l' but no read-site confirmed; DSNAV.md §12
+            # safe default is DWORD 0.
             out.append((0x03, PROP_UNKNOWN_L, struct.pack("<I", 0)))
+        elif name == PROP_UNKNOWN_I:
+            # DSNAV advertises 'i' but no read-site confirmed; DSNAV.md §12
+            # safe default is DWORD 0.
+            out.append((0x03, PROP_UNKNOWN_I, struct.pack("<I", 0)))
         elif name == PROP_FILENAME:
-            # DnR temp filename base — DownloadContentToTempPath reads this
-            # into a stack buf via vt[0x40]. Extension determines the handler
-            # ShellExecute uses when dnr.exe launches the file. .HTM → browser.
+            # DnR temp filename base — DownloadContentToTempPath reads via
+            # vt[0x40]. Extension drives ShellExecute dispatch; .HTM → browser.
             out.append((0x0A, PROP_FILENAME, _sz("MSNTODAY.HTM")))
-        else:
-            out.append((0x03, name, struct.pack("<I", 0)))
-    return out
-
-
-def build_dialog_props(requested_props, content):
-    """Props for the Properties dialog — types from MOSSHELL Ghidra decode.
-
-    Strings use wire type 0x0A (not 0x0B). Both share the same flag-byte wire
-    body, but 0x0A causes SVCPROP to run WideCharToMultiByte so the cache
-    holds ASCII. CMosTreeNode::Properties @ 0x7f3fef12 reads prop 'e' via
-    GetProperty (raw memcpy) and passes the buffer straight to PropertySheetA
-    (ANSI). With 0x0B the cache is UTF-16 and PropertySheetA truncates at the
-    first wide NUL ("MSN Today" → "M"). 0x0A keeps the cache ASCII so both
-    GetProperty (raw) and GetPropSz (ANSI) render the full string.
-
-    `content` is a NodeContent dataclass (server.store.base).
-    """
-    out = []
-    for name in requested_props:
-        # 'e' must be 0x0A (ASCII cache) — CMosTreeNode::Properties raw-memcpies
-        # it to PropertySheetA (ANSI). With 0x0B it would truncate at the first
-        # wide NUL ("MSN Today" → "M"). All other strings use 0x0B: their cache
-        # is consumed by GetPropSz which runs EnsurePropSzCache's
-        # WideCharToMultiByte path to produce the ASCII copy at cache+0xC.
-        if name == PROP_NAME:
-            out.append((0x0A, PROP_NAME, _sz(content.name)))
+        elif name == PROP_TYPE:
+            # Details-view column uses 0x0A (ASCII cache for MOSSHELL's column
+            # render); Properties dialog uses 0x0B (UTF-16 cache for GetPropSz).
+            ptype = 0x0A if is_children else 0x0B
+            out.append((ptype, PROP_TYPE, _sz(content.type_str)))
+        elif name == PROP_LAST_CHANGED:
+            # Details-view cell = 0x0C FILETIME (8-byte, 100-ns since 1601)
+            # → MOSSHELL 0x7F3FBC12 case 0xC → FileTimeToSz. DWORD path only
+            # matches prop name "_D" (BBSNAV territory).
+            # Properties dialog = 0x0B human-formatted string.
+            # On is_children, skip entirely when modified_filetime == 0 so
+            # the listview cell stays blank vs rendering 1601-01-01.
+            if is_children:
+                if content.modified_filetime:
+                    out.append(
+                        (
+                            0x0C,
+                            PROP_LAST_CHANGED,
+                            struct.pack("<Q", content.modified_filetime & 0xFFFFFFFFFFFFFFFF),
+                        )
+                    )
+            else:
+                out.append((0x0B, PROP_LAST_CHANGED, _sz(content.modified)))
         elif name == PROP_DESCRIPTION:
             out.append((0x0B, PROP_DESCRIPTION, _sz(content.description)))
         elif name == PROP_GO_WORD:
             out.append((0x0B, PROP_GO_WORD, _sz(content.go_word)))
         elif name == PROP_CATEGORY:
             out.append((0x0B, PROP_CATEGORY, _sz(content.category)))
-        elif name == PROP_TYPE:
-            out.append((0x0B, PROP_TYPE, _sz(content.type_str)))
         elif name == PROP_TOPICS:
             out.append((0x0B, PROP_TOPICS, _sz(content.topics)))
         elif name == PROP_PEOPLE:
@@ -386,34 +328,13 @@ def build_dialog_props(requested_props, content):
         elif name == PROP_PLACE:
             out.append((0x0B, PROP_PLACE, _sz(content.place)))
         elif name == PROP_MAYBE_HIDDEN_U:
-            out.append(
-                (
-                    0x0B,
-                    PROP_MAYBE_HIDDEN_U,
-                    _sz(content.u_value) if content.u_value else _sz(""),
-                )
-            )
+            out.append((0x0B, PROP_MAYBE_HIDDEN_U, _sz(content.u_value)))
         elif name == PROP_FORUM_MANAGER:
             out.append((0x0B, PROP_FORUM_MANAGER, _sz(content.forum_mgr)))
         elif name == PROP_OWNER:
             out.append((0x0B, PROP_OWNER, _sz(content.owner)))
         elif name == PROP_CREATED:
             out.append((0x0B, PROP_CREATED, _sz(content.created)))
-        elif name == PROP_LAST_CHANGED:
-            out.append((0x0B, PROP_LAST_CHANGED, _sz(content.modified)))
-        elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
-            # 'p' is a DWORD byte count. FUN_7f3fba69's special 'p' branch
-            # reads `**(cache+4)` (first DWORD of value data) and calls
-            # FormatSizeString (vtable+0x140), caching the formatted result
-            # at cache+0xC for GetPropSzBuf.
-            out.append(
-                (
-                    0x03,
-                    PROP_MAYBE_SIZE_OR_LEGACY_TITLE,
-                    struct.pack("<I", content.size_bytes),
-                )
-            )
-        # DWORD (type 0x03) — Ghidra-confirmed dword reads
         elif name == PROP_LANGUAGE:
             out.append((0x03, PROP_LANGUAGE, struct.pack("<I", content.language)))
         elif name == PROP_VENDOR_ID:
@@ -422,38 +343,10 @@ def build_dialog_props(requested_props, content):
             out.append((0x03, PROP_PRICE, struct.pack("<I", content.price_dword)))
         elif name == PROP_RATING:
             out.append((0x03, PROP_RATING, struct.pack("<I", content.rating_dword)))
-        # Unknown — safe default
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
 
-
-def _is_dialog_request(requested_props):
-    """Properties dialog requests never include structural nav props.
-
-    Caller must also gate on `is_children=False`: the Properties dialog always
-    queries a single node (GetProperties), while click dispatch / nav fetches
-    may ask for content-only prop sets (e.g. `fn,g` for ExecUrlWorkerProc)
-    with is_children=True.
-    """
-    return bool(requested_props) and not any(p in requested_props for p in STRUCTURAL_NAV_PROPS)
-
-
-def build_child_props(requested_props, node, *, is_children):
-    """Serialize `node` into a property record for the requested prop names."""
-    if not is_children and _is_dialog_request(requested_props):
-        return build_dialog_props(requested_props, node.content)
-    return build_nav_props(
-        requested_props,
-        is_container=node.is_container,
-        c_value=node.app_id,
-        mnid_a=node.mnid_a,
-        title=node.content.name,
-        browse_flags=node.browse_flags,
-        type_str=node.content.type_str,
-        size_bytes=node.content.size_bytes,
-        modified_filetime=node.content.modified_filetime,
-    )
 
 def build_dirsrv_reply_payload(request=None):
     """Build a DIRSRV GetProperties reply.
@@ -481,18 +374,19 @@ def build_dirsrv_reply_payload(request=None):
 
     props_per_record = []  # for logging: list of (source_node_id, prop_tuples)
     if not is_children:
-        props = build_child_props(requested_props, node, is_children=False)
+        props = build_props(requested_props, node, is_children=False)
         props_per_record.append((node.node_id, props))
     elif node.node_id == "4:0":
-        # The client issues nav-shaped requests directly against the special
-        # MSN Today leaf. Return the leaf's own nav record so click-path
-        # experiments on props like 'b' have something to read.
-        props = build_child_props(requested_props, node, is_children=True)
+        # Topology special-case: DIRECTORY_CHILDREN["4:0"] is empty, so an
+        # ordinary GetChildren would return zero records. Return 4:0's own
+        # record instead so the client has something to read on the MSN
+        # Today startup path.
+        props = build_props(requested_props, node, is_children=True)
         props_per_record.append((node.node_id, props))
     else:
         # get_children applies a permissive fallback; see InMemoryContentStore.
         for child in content_store.get_children(request.node_id):
-            props = build_child_props(requested_props, child, is_children=True)
+            props = build_props(requested_props, child, is_children=True)
             props_per_record.append((child.node_id, props))
 
     records = [build_property_record(props) for _node_id, props in props_per_record]
