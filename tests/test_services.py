@@ -289,6 +289,20 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = build_dirsrv_reply_payload(request)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
+    def test_special_msn_today_leaf_children_emit_self_nav_record(self):
+        request = DirsrvRequest(
+            node_id="4:0",
+            node_id_raw=struct.pack("<II", 4, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00b\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(struct.pack("<II", 4, 0), payload)
+        self.assertIn(b"MSN Today", payload)
+        self.assertIn(b"\x01b\x00\x00", payload)
+
     def test_msn_root_children_emit_category_nodes(self):
         request = DirsrvRequest(
             node_id="1:0",
