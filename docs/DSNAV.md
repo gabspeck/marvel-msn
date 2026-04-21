@@ -518,7 +518,7 @@ listview or ship its own WndProc. The shell's generic `CDIBWindow`/
 
 ### 14.2 Server cross-check (`src/server/services/dirsrv.py::build_nav_props`)
 
-Verified on 2026-04-20. Entries matching §12 are unflagged.
+Verified on 2026-04-21 after the §12 alignment pass. All 14 tags now match.
 
 | Tag | Server emits | §12 says | Status |
 |---|---|---|---|
@@ -531,17 +531,17 @@ Verified on 2026-04-20. Entries matching §12 are unflagged.
 | `x`  | `0x0E` blob | `0x0E` blob | ✓ |
 | `mf` | `0x03` DWORD (BMP shabby) | `0x03` DWORD | ✓ |
 | `wv` | `0x03` DWORD (BMP shabby) | `0x03` DWORD | ✓ |
-| `tp` | `0x0E` blob (1-byte zero payload) | `0x0A` ASCIIZ | **mismatch — "Type" column will not render DSNAV text.** |
-| `p`  | `0x0E` blob (length-prefixed title) | `0x03` DWORD (size) | **mismatch — "Size" column will show FormatSizeString of a pointer, not byte count.** Reference `project_dirsrv_dialog_props_investigation` (dialog path already uses `0x03`). |
-| `w`  | `0x0E` blob (length-prefixed title) | `0x03` DWORD (timestamp) | **mismatch — "Date Modified" column undefined.** |
-| `l`  | `0x0E` blob (1-byte zero) | unresolved | likely safe; no consumer identified. |
-| `i`  | `0x03` DWORD 0 (else branch) | unresolved | likely safe. |
+| `tp` | `0x0A` ASCIIZ (from `NodeContent.type_str`) | `0x0A` ASCIIZ | ✓ |
+| `p`  | `0x03` DWORD (from `NodeContent.size_bytes`) | `0x03` DWORD (size) | ✓ |
+| `w`  | `0x03` DWORD 0 | `0x03` DWORD (timestamp) | ✓ (safe default — DWORD format not yet RE-confirmed; follow-up) |
+| `l`  | `0x03` DWORD 0 | unresolved; §12 safe default is DWORD 0 | ✓ |
+| `i`  | `0x03` DWORD 0 | unresolved; §12 safe default is DWORD 0 | ✓ |
 
-The three mismatches (`tp` / `p` / `w`) are follow-ups, not regressions —
-the DIRSRV listview currently ships with unpopulated "Type" / "Size" /
-"Date Modified" columns, which is less visible than a broken icon or
-truncated name. When someone is ready to populate the columns, the
-§10 column descriptor + §12 read-type table is the contract.
+Remaining follow-up: the `w` timestamp format (Unix epoch seconds vs FILETIME
+low-word vs MS-DOS packed) is not RE-confirmed yet. The server ships DWORD 0
+so the column parses and renders consistently; once the format is pinned down,
+`NodeContent` can grow a real `modified_dword` field and the fixture dates
+can flow through to the listview.
 
 ## 15. Ghidra annotations shipped in this pass
 

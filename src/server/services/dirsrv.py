@@ -148,14 +148,19 @@ def build_nav_props(
     mnid_a=b"\x00" * 8,
     title="MSN Today",
     browse_flags=None,
+    type_str="",
+    size_bytes=0,
 ):
     """Props for DSNAV GetChildren — the navigation/list view.
 
-    Keeps the stable-state encoding proven to not OOM:
-    - a/c/h/b/x structural props
+    Per `docs/DSNAV.md` §12 (node-shape contract), the 14 tags MOSSHELL + DSNAV
+    request must land with the exact wire types the consumer expects:
+    - a/c/h/b/x/g/mf/wv structural + icon props.
     - e = title string (0x0A ASCII cache — icon label + titlebar both ANSI).
-    - p = title blob (legacy list-view title; ignored by Context tab here)
-    - Unknown content props default to DWORD 0.
+    - tp = localized Type label (0x0A ASCIIZ) for the details-view column.
+    - p  = size in bytes (0x03 DWORD) → MOSSHELL FormatSizeString.
+    - w  = last-changed timestamp (0x03 DWORD) for the Date Modified column.
+    - l, i = DSNAV-advertised but no read-site confirmed; emit DWORD 0 per §12.
     """
     # DnR (c=7) worker ExecUrlWorkerProc → DownloadContentToTempPath calls
     # vt[0x40]("fn", buf, len, 1) on the node cache to build the temp file
@@ -211,7 +216,18 @@ def build_nav_props(
         elif name == PROP_EXEC_ARGS:
             out.append((0x0E, PROP_EXEC_ARGS, struct.pack("<I", 1) + b"\x00"))
         elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
-            out.append((0x0E, PROP_MAYBE_SIZE_OR_LEGACY_TITLE, _blob(title)))
+            # `p` = byte count for the "Size" details column. DSNAV.md §12 +
+            # CDsNavTreeNode::GetDetailsStruct (col 2 in RCDATA 0x81) read it
+            # as an inline DWORD and pipe it through MOSSHELL FormatSizeString.
+            # The old 0x0E blob (length-prefixed title) left FormatSizeString
+            # working off a heap pointer → garbage cell.
+            out.append(
+                (
+                    0x03,
+                    PROP_MAYBE_SIZE_OR_LEGACY_TITLE,
+                    struct.pack("<I", size_bytes & 0xFFFFFFFF),
+                )
+            )
         elif name == PROP_UNKNOWN_G:
             # Purpose unresolved — sentinel sweeps ruled out `g` as the
             # icon slot. Emit DWORD 0 as a harmless default.
@@ -244,8 +260,22 @@ def build_nav_props(
                     struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1)),
                 )
             )
-        elif name in (PROP_TYPE, PROP_LAST_CHANGED, PROP_UNKNOWN_L):
-            out.append((0x0E, name, struct.pack("<I", 1) + b"\x00"))
+        elif name == PROP_TYPE:
+            # `tp` = localized type label for the details-view "Type" column
+            # (DSNAV.md §12; RCDATA 0x81 col 1). Wire type 0x0A keeps the
+            # cache in ASCII so MOSSHELL's column render reads it straight.
+            out.append((0x0A, PROP_TYPE, _sz(type_str)))
+        elif name == PROP_LAST_CHANGED:
+            # `w` = Date Modified column (DSNAV.md §12; col 3). Expected wire
+            # type is 0x03 DWORD timestamp. Exact format (epoch vs FILETIME
+            # low-word) is not RE-confirmed yet, so we ship DWORD 0 per §12's
+            # "safe default" guidance until the format is pinned down.
+            out.append((0x03, PROP_LAST_CHANGED, struct.pack("<I", 0)))
+        elif name == PROP_UNKNOWN_L:
+            # `l` advertised by DSNAV but no read-site confirmed. DSNAV.md §12
+            # recommends DWORD 0 as the safe default; matches the `i` branch
+            # below and keeps the cache slot non-pointer-sized.
+            out.append((0x03, PROP_UNKNOWN_L, struct.pack("<I", 0)))
         elif name == PROP_FILENAME:
             # DnR temp filename base — DownloadContentToTempPath reads this
             # into a stack buf via vt[0x40]. Extension determines the handler
@@ -357,6 +387,8 @@ def build_child_props(requested_props, node, *, is_children):
         mnid_a=node.mnid_a,
         title=node.content.name,
         browse_flags=node.browse_flags,
+        type_str=node.content.type_str,
+        size_bytes=node.content.size_bytes,
     )
 
 def build_dirsrv_reply_payload(request=None):

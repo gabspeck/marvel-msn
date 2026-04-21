@@ -413,6 +413,50 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"The News", payload)
         self.assertIn(b"Entertainment", payload)
 
+    def test_dsnav_details_column_tags_use_documented_type_bytes(self):
+        # DSNAV.md §12 pins the wire types for the details-view columns:
+        # tp=0x0A ASCIIZ, p=0x03 DWORD (size), w=0x03 DWORD (timestamp).
+        # `l` is advertised but unread — DWORD 0 is the safe default (§12).
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        # Containers emit type_str="Directory" via _container_content default.
+        # ASCII string bodies use the shared flag-byte wire body: \x01 + asciiz.
+        self.assertIn(b"\x0atp\x00\x01Directory\x00", payload)
+        # Category containers have size_bytes=0 → inline 0x03 DWORD 0.
+        self.assertIn(b"\x03p\x00\x00\x00\x00\x00", payload)
+        # w and l always DWORD 0 for now.
+        self.assertIn(b"\x03w\x00\x00\x00\x00\x00", payload)
+        self.assertIn(b"\x03l\x00\x00\x00\x00\x00", payload)
+        # Regression guard: the old 0x0E blob emit must be gone for these tags.
+        self.assertNotIn(b"\x0etp\x00", payload)
+        self.assertNotIn(b"\x0ep\x00", payload)
+        self.assertNotIn(b"\x0ew\x00", payload)
+        self.assertNotIn(b"\x0el\x00", payload)
+
+    def test_msn_today_leaf_emits_nonzero_size_dword(self):
+        # The MSN Today fixture carries size_bytes=5*1024*1024; `p` must land
+        # as an inline 0x03 DWORD so MOSSHELL's FormatSizeString formats it,
+        # not the low-4 of a heap pointer.
+        request = DirsrvRequest(
+            node_id="4:0",
+            node_id_raw=struct.pack("<II", 4, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"\x03p\x00" + struct.pack("<I", 5 * 1024 * 1024), payload)
+        # tp carries the MSN Today fixture's type_str "News & Features".
+        self.assertIn(b"\x0atp\x00\x01News & Features\x00", payload)
+
 
 class TestOLREGSRVServiceMap(unittest.TestCase):
     def test_payload_size(self):

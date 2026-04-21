@@ -443,18 +443,26 @@ class TestFullFeatureSession(unittest.TestCase):
         self.assertEqual(params[0].value, 0)
         self.assertGreaterEqual(params[1].value, 1)
 
+        # Real post-login GetChildren: MOSSHELL default 7 + DSNAV extra 7.
+        # The title lives in `e` (0x0A ASCIIZ), not `p` (which is now a
+        # byte-count DWORD per docs/DSNAV.md §12).
         prop_group = (
             b"\x00".join(
                 [
-                    b"p",
-                    b"c",
-                    b"h",
                     b"a",
-                    b"i",
+                    b"c",
+                    b"b",
+                    b"e",
+                    b"g",
+                    b"h",
+                    b"x",
+                    b"mf",
                     b"wv",
                     b"tp",
+                    b"p",
                     b"w",
                     b"l",
+                    b"i",
                 ]
             )
             + b"\x00"
