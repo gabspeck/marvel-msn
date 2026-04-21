@@ -302,6 +302,16 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(struct.pack("<II", 4, 0), payload)
         self.assertIn(b"MSN Today", payload)
         self.assertIn(b"\x01b\x00\x00", payload)
+        # c must be 7 (APP_DOWNLOAD_AND_RUN). Post-login ParseDisplayName('T')
+        # auto-Execs 4:0 with NO 'b' gate (docs/MOSSHELL.md §7.4). c=7 takes
+        # the URL-worker path (FTM-download `fn`, launch dnr.exe); c=1
+        # (DSNAV) made HRMOSExec CreateProcessA dsnav.nav as an EXE and
+        # popped "MSN Network cannot run ...".
+        self.assertIn(b"\x03c\x00" + struct.pack("<I", 7), payload)
+        self.assertNotIn(b"\x03c\x00" + struct.pack("<I", 1), payload)
+        # Server auto-injects `fn` when app_id==7 so the URL worker can
+        # build the temp path even though GetChildren didn't request it.
+        self.assertIn(b"\x0afn\x00\x01MSNTODAY.HTM\x00", payload)
 
     def test_msn_root_children_emit_category_nodes(self):
         request = DirsrvRequest(

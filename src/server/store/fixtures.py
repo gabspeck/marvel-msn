@@ -6,7 +6,7 @@ import datetime
 import struct
 from dataclasses import dataclass
 
-from ..mos_apps import APP_DIRECTORY_SERVICE
+from ..mos_apps import APP_DIRECTORY_SERVICE, APP_DOWNLOAD_AND_RUN
 from .base import (
     BillingProfile,
     DirectoryNode,
@@ -137,17 +137,31 @@ DIRECTORY_NODES = [
         mnid_a=_MSN_ROOT_MNID,
         content=MSN_ROOT_CONTENT,
     ),
-    # Alias for the client-synthesized MSN Today startup node. The shell asks
-    # DIRSRV for `GetProperties(4:0, [a,e])` while rendering built-in startup
-    # surfaces, so map it to the real MSN Today node instead of falling
-    # through to the unknown-node sentinel. Shaped as a regular Browse
-    # container (same as the category nodes) — empty children list means
-    # clicking it just opens an empty folder view, matching what the shell
-    # expects.
+    # MSN Today: dual-role node.
+    #
+    # Click path (HOMEBASE icon → ExecuteCommand(0x3000) → `'b'` gate): with
+    # `is_container=True` we ship `b=0`, so the shell takes HrBrowseObject
+    # and opens an empty folder view (no children; `DIRECTORY_CHILDREN["4:0"]
+    # = []`). Same shape as the category browse nodes.
+    #
+    # Startup auto-Exec path ("Show MSN Today on startup" user preference →
+    # CCAPI!MOSX_GotoMosLocation(8) builds `explorer.exe …,[T]<mnid>` →
+    # CMosShellFolder::ParseDisplayName 'T' branch at MOSSHELL 0x7F3F2984):
+    # the 'T' branch unconditionally calls CMosTreeNode::Exec with NO `'b'`
+    # gate (see docs/MOSSHELL.md §7.4). Exec dispatches on `'c'`:
+    #   c == 7 → CreateOleWorkerThread(ExecUrlWorkerProc): FTM-downloads the
+    #            `fn`-named file, launches `dnr.exe -"<temp>"`, browser opens.
+    #   c != 7 → HRMOSExec(c, "-MOS:c:…") → CreateProcessA(App#c.Filename).
+    # Shipping c=1 (DSNAV) made CreateProcessA try to run `dsnav.nav` as an
+    # EXE (it's a LoadLibrary plug-in DLL) and MCM popped "MSN Network cannot
+    # run …". `APP_DOWNLOAD_AND_RUN` (7) takes the worker path and honors
+    # the design intent. Server already emits `fn=MSNTODAY.HTM` when
+    # app_id==7 (dirsrv.py:208,294) and FTM serves the content
+    # (ftm.py:175-176).
     DirectoryNode(
         node_id="4:0",
         is_container=True,
-        app_id=APP_DIRECTORY_SERVICE,
+        app_id=APP_DOWNLOAD_AND_RUN,
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
     ),

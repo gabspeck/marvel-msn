@@ -516,6 +516,108 @@ via `SetWindowLongA(-16, …)`, sort toggles, IDM 0x2100-0x2200 forwards to
 the currently-selected node's `vtable[+0xF4]` with verb `0x300D`. IDM
 0x2200-0x2300 `SendMessage(listview, LVM_…)` for column-specific cell ops.
 
+### 7.4 `CMosShellFolder::ParseDisplayName` 'T'/'F' — startup auto-Exec entry
+
+`CMosShellFolder::ParseDisplayName @ 0x7F3F2984` is the `IShellFolder`
+tear-off method Explorer calls to resolve a display name string to a PIDL.
+For the MSN namespace it dispatches on the **second** ANSI byte of the
+display name (`szAnsi[1]`, after `WideCharToMultiByte`):
+
+| Dispatch | `GetSpecialMnid` arg | Target | Action |
+|---|---|---|---|
+| `'A'` | — | absolute mnid (hex) | `SzToMnid` + `HrGetPMtn` + `MFP_FAdd` (favorites-style). |
+| `'X'` | — | registry-stashed PIDL | `FUN_7F3F28BC` pulls bytes from `HKCU\SOFTWARE\Microsoft\MOS\Mosxapi\<key>` (see §7.4.1 below on how CCAPI populates this). |
+| `'T'` | 4 | MSN Today (shn `4:0`) | `HrGetPMtn` → `GetLocalizedNode` → `Exec`. **No `'b'` gate.** |
+| `'F'` | 5 | Favorite Places (shn `3:1`) | Same shape as `'T'`. |
+
+**This is the sole path that reaches `CMosTreeNode::Exec` without honoring
+the `'b'` leaf/container gate.** `ExecuteCommand` (§7.1) is the only other
+Exec caller and requires `'b' & 0x01 == 1` (leaf); an exhaustive
+`search_instructions` sweep for `CALL [<reg>+0xCC]` across every address
+mode confirms no third site hits `CMosTreeNode::vftable[0xCC] = Exec @
+0x7F3FEBA6` (data-ref at `0x7F40CBAC`).
+
+Decomp excerpt of the 'T'/'F' branch:
+
+```c
+GetSpecialMnid((dispatchChar == 'F') + 4, mnid);
+hr = HrGetPMtn(mnid, &pNode, 0);
+if (hr < 0) goto LAB_7f3f2afe;
+hr = (*pNode->vtable[0xC8])(pNode, &pSubNode);    // GetLocalizedNode
+(*pNode->vtable[0x08])(pNode);                    // Release pNode
+if (hr < 0) goto LAB_7f3f2afe;
+(*pSubNode->vtable[0xCC])(pSubNode, 0);           // ← CMosTreeNode::Exec, unconditional
+(*pSubNode->vtable[0x08])(pSubNode);              // Release pSubNode
+```
+
+#### 7.4.1 The "Show MSN Today on startup" flag (CCAPI contract)
+
+The 'T' branch is the MOSSHELL half of a two-DLL contract with CCAPI that
+implements the **"Show MSN Today on startup"** user preference. When the
+preference is set (likely a value under
+`HKCU\SOFTWARE\Microsoft\MOS\Preferences`; exact value-name not yet
+pinned), startup code invokes **`CCAPI!MOSX_GotoMosLocation @ 0x05563394`**
+with case 8:
+
+```c
+case 8:
+    pCVar5 = &DAT_05565390;
+    cVar4 = 'T';
+    goto LAB_05563625;       // FUN_05562d2e('T', pCVar5, 0)
+```
+
+Case 9 is the 'F' / Favorite Places twin; cases 0/1/3/4/5/6 are the
+Go-menu commands listed in §7.2. `CCAPI!FUN_05562D2E` builds a compound
+Explorer command line and `ShellExecuteA`s it:
+
+```
+explorer.exe /root,{00028B00-…},"<…>TheMic~1.msn",[T]<mnid>
+```
+
+(Format string `",[%c]"` at `0x0556527C`; the quoted `.msn` path is the
+Marvel desktop file located via `FEnsureMarvelDesktopFile`.) Windows
+launches a new Explorer instance mounting the MSN namespace; Explorer's
+path parser calls `IShellFolder::ParseDisplayName` with the `[T]<mnid>`
+tail, landing in the 'T' branch above.
+
+The `'X'` row in the table earlier is the same mechanism one level down:
+`CCAPI!MOSX_HrExecPidl @ 0x05562EBD` stashes an arbitrary PIDL under
+`HKCU\…\Mosxapi\PidlEx %pid %d`, then spawns Explorer with
+`,[X]PidlEx %pid %d`; ParseDisplayName 'X' re-reads the registry and
+resolves to the original PIDL. It is the generic "goto this node"
+contract; 'T'/'F' are the hardcoded specials.
+
+#### 7.4.2 `Exec` behavior by `'c'` on the unguarded 'T'/'F' path
+
+Since the 'T' branch ignores `'b'`, what happens after
+`CMosTreeNode::Exec @ 0x7F3FEBA6` runs depends entirely on the wire
+`'c'` (app_id) property cached on the node:
+
+- **`c = 7`** (APP_DOWNLOAD_AND_RUN) — intended design. `Exec` takes the
+  `CreateOleWorkerThread(ExecUrlWorkerProc)` branch at `0x7F3FED53`.
+  The worker reads the node's `'fn'` property, FTM-downloads the named
+  file to a temp path, then calls `HRMOSExec(7, "-\"<tempfile>\"")`.
+  App #7's registered Filename is `dnr.exe`; DNR's command-line parser
+  (`DNR.EXE 0x7F591046`, the entire EXE is 3 functions +
+  `ShellExecuteExA`) only accepts the `-"<quotedpath>"` form, then
+  `ShellExecuteExA`'s it with `lpVerb=NULL` — `.htm` opens in the
+  default browser.
+- **`c != 7`** — `Exec` falls through to the synchronous
+  `HRMOSExec(c, cmdstr, node.f10, node.f20, &node.f18)` branch.
+  MCM's `HRMOSExec` reads
+  `HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>\Filename`,
+  formats `"<Filename> -MOS:c:shn0:shn1:w"` via `FormatMosArgTail`, and
+  `CreateProcessA`s it. If App #c has no registered `Filename`,
+  `HRMOSExec` returns 0 silently — no dialog. If `Filename` resolves
+  to a `.nav` plug-in (DSNAV / BBSNAV / GUIDENAV — LoadLibrary-only,
+  not a PE with an entry point), `CreateProcessA` fails and MCM pops
+  `MosErrorP(0x529)` "MSN Network cannot run …".
+
+Notably: the `-MOS:…` argument format is only produced on the
+`c != 7` sync path. The `dnr.exe` worker path never sees it — the
+worker constructs its own `-"<tempfile>"` command line after the
+download completes, matching DNR's parser.
+
 ## 8. Plug-in hand-off
 
 ### 8.1 `HrGetPMtn` @ `0x7F3FB546` — the gateway
