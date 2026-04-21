@@ -20,6 +20,7 @@ from server.mpc import (
     parse_tagged_params,
 )
 from server.services.dirsrv import (
+    SUPPORTED_BROWSE_LCIDS,
     build_dirsrv_reply_payload,
     build_dirsrv_service_map_payload,
     build_property_record,
@@ -520,6 +521,67 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"\x0btp\x00\x01News & Features\x00", payload)
         self.assertIn(b"\x0bw\x00\x01April 15, 2026\x00", payload)
         self.assertIn(b"\x0bj\x00\x01Your daily window to MSN.\x00", payload)
+
+    def test_language_prop_ships_as_qword_with_lcid_at_offset_four(self):
+        # Per-node `q` lookup (not the 0:0 language-list short-circuit):
+        # MSN Today's language travels on the wire as type 0x04 qword
+        # so the client's `*(u32*)(value + 4)` read lands on the LCID
+        # instead of adjacent heap. Packing as type 0x03 DWORD would
+        # put the LCID at offset 0 and the +4 read would fall off the
+        # 4-byte buffer — root cause of the garbage combobox.
+        request = DirsrvRequest(
+            node_id="4:0",
+            node_id_raw=struct.pack("<II", 4, 0),
+            dword_0=0,
+            dword_1=1,
+            prop_group="q",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        # Wire: type 0x04, name "q\0", 8-byte qword = [header_u32][lcid_u32].
+        self.assertIn(b"\x04q\x00" + struct.pack("<II", 0, 1033), payload)
+        # Regression guard: the old 4-byte DWORD emit must be gone.
+        self.assertNotIn(b"\x03q\x00" + struct.pack("<I", 1033), payload)
+
+    def test_language_list_request_returns_one_record_per_supported_locale(self):
+        # The MCM browse-language worker opens a DIRSRV pipe with
+        # ver_param="U" and asks for `q` on node 0:0 with a 4-byte zero
+        # locale. Observed on the wire as selector 0x02 (dword_0=0,
+        # is_children=False) — NOT the GetChildren selector the static
+        # RE suggested. Gate on propList=["q"] so we short-circuit to a
+        # per-locale reply regardless of is_children.
+        for dword_0 in (0, 1):
+            request = DirsrvRequest(
+                node_id="0:0",
+                node_id_raw=struct.pack("<II", 0, 0),
+                dword_0=dword_0,
+                dword_1=1,
+                prop_group="q",
+                recv_descriptors=[0x83, 0x83, 0x85],
+            )
+            payload = build_dirsrv_reply_payload(request)
+            for lcid in SUPPORTED_BROWSE_LCIDS:
+                self.assertIn(
+                    b"\x04q\x00" + struct.pack("<II", 0, lcid),
+                    payload,
+                    f"LCID 0x{lcid:04x} missing when dword_0={dword_0}",
+                )
+        # Address-bar enumeration (different propList) still resolves
+        # through the regular content tree — no language leakage.
+        addrbar_request = DirsrvRequest(
+            node_id="0:0",
+            node_id_raw=struct.pack("<II", 0, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        addrbar_payload = build_dirsrv_reply_payload(addrbar_request)
+        self.assertIn(b"The Microsoft Network", addrbar_payload)
+        for lcid in SUPPORTED_BROWSE_LCIDS:
+            self.assertNotIn(
+                b"\x04q\x00" + struct.pack("<II", 0, lcid), addrbar_payload
+            )
 
 
 class TestOLREGSRVServiceMap(unittest.TestCase):

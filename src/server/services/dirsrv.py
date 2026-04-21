@@ -63,6 +63,17 @@ PROP_EXEC_ARGS = "x"
 PROP_VENDOR_ID = "y"
 PROP_PRICE = "z"
 
+# Browse-language LCIDs advertised in GetChildren replies with propList=["q"].
+# Each value becomes a row in the View > Options > General "Content view"
+# combobox after GetLocaleInfoA translates it to a display name. LCIDs missing
+# from the Win95 client's national-language tables make GetLocaleInfoA return 0
+# (success=FALSE), leaving the caller's 260-byte stack buffer uninitialised —
+# so keep the list to locales actually installed in the stock VM.
+SUPPORTED_BROWSE_LCIDS = (
+    0x0409,  # English (United States)
+    0x0416,  # Portuguese (Brazil)
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -133,6 +144,12 @@ def _format_props_for_log(properties):
         elif ptype == 0x0C and len(pvalue) == 8:
             (val,) = struct.unpack("<Q", pvalue)
             parts.append(f"{pname}={val}")
+        elif ptype == 0x04 and len(pvalue) == 8:
+            hdr, lo = struct.unpack("<II", pvalue)
+            if pname == PROP_LANGUAGE:
+                parts.append(f"{pname}=0x{lo:04x}" + (f"/h=0x{hdr:08x}" if hdr else ""))
+            else:
+                parts.append(f"{pname}=0x{hdr:08x}:0x{lo:08x}")
         elif ptype == 0x0E:
             parts.append(f"{pname}=<{len(pvalue)}B>{pvalue.hex()}")
         else:
@@ -336,7 +353,18 @@ def build_props(requested_props, node, *, is_children):
         elif name == PROP_CREATED:
             out.append((0x0B, PROP_CREATED, _sz(content.created)))
         elif name == PROP_LANGUAGE:
-            out.append((0x03, PROP_LANGUAGE, struct.pack("<I", content.language)))
+            # Wire 'q' is an 8-byte qword: [unknown_header:u32][lcid:u32].
+            # MCM's browse-language worker (MCM!FUN_0410438e) reads the
+            # LCID as `*(u32*)(value + 4)`, so the DWORD at offset 0 is a
+            # header we don't yet understand (pack 0 until an on-wire
+            # capture settles it). Type 0x04 = 8-byte qword per SVCPROP's
+            # DecodePropertyValue dispatch; type 0x03 would only allocate
+            # a 4-byte buffer and the client's +4 read would pick up
+            # adjacent heap bytes (the root cause of the garbage combobox
+            # in View > Options > General "Content view").
+            out.append(
+                (0x04, PROP_LANGUAGE, struct.pack("<II", 0, content.language))
+            )
         elif name == PROP_VENDOR_ID:
             out.append((0x03, PROP_VENDOR_ID, struct.pack("<I", content.vendor_id)))
         elif name == PROP_PRICE:
@@ -373,7 +401,24 @@ def build_dirsrv_reply_payload(request=None):
     node = content_store.get_node(request.node_id)
 
     props_per_record = []  # for logging: list of (source_node_id, prop_tuples)
-    if not is_children:
+    if request.node_id == "0:0" and requested_props == [PROP_LANGUAGE]:
+        # MCM!FUN_0410438e drives the View > Options > General "Content
+        # view" combobox by asking DIRSRV for every available browse
+        # LCID in one call: node=0:0, propList=["q"], 4-byte zero
+        # locale, opened on its own pipe (ver_param="U"). The worker
+        # iterates the reply records and reads `*(u32*)(value + 4)` on
+        # each `q` to build a packed-LCID array, caches it in HKLM, and
+        # feeds it to GetLocaleInfoA for display. The observed wire
+        # dispatches on selector 0x02 (is_children=False) rather than
+        # the selector 0x00 GetChildren that the TREENVCL RE implied,
+        # so gate on (node, propList) — works regardless of dword_0.
+        # Scoped to 0:0 so per-node `q` lookups (e.g. a fixture asking
+        # what language MSN Today is in) keep returning the node's own
+        # language instead of the advertised browse list.
+        for lcid in SUPPORTED_BROWSE_LCIDS:
+            props = [(0x04, PROP_LANGUAGE, struct.pack("<II", 0, lcid))]
+            props_per_record.append((f"lang:0x{lcid:04x}", props))
+    elif not is_children:
         props = build_props(requested_props, node, is_children=False)
         props_per_record.append((node.node_id, props))
     elif node.node_id == "4:0":
