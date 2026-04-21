@@ -83,7 +83,7 @@ Registered as App #6 (`Media_Viewer`) in the MOS Applications table (see `archiv
 - `CreateMediaViewWindow` [1]
 - `MosViewInit` [2], `MosViewStartConnection` [3], `MosViewTerminate` [4]
 
-**Ghidra status**: Not imported. **Imports**: `MVCL14N`, `MMVDIB12`, `MOSCOMP`, `MCM`, `CCAPI`.
+**Ghidra status**: Annotated. **Imports**: `MVCL14N`, `MMVDIB12`, `MOSCOMP`, `MCM`, `CCAPI`. **Notes**: see `docs/MOSVIEW.md` for the launch contract, single-instance table, title selector formats, and embedded MedView command language.
 
 ### SIGNUP.EXE — *New-member sign-up host* (EXE, 163 KB)
 
@@ -285,7 +285,7 @@ Client wrapper for the File Transfer service — chunked downloads with resume, 
 
 ### MOSCUDLL.DLL — *MOS Client Utility DLL* (DLL, 21 KB)
 
-Kitchen-sink utilities: OLE worker-thread factory (used by MSN Today), price/currency formatting, menu merging, FTM-with-UI wrapper.
+Kitchen-sink utilities: OLE worker-thread factory (used by the login path and by DnR c==7 `Exec`), price/currency formatting, menu merging, FTM-with-UI wrapper.
 
 **Key exports**
 - `?CreateOleWorkerThread@@` [1], `?PulseOleWorkerThread@@` [14], `?ShutdownOleWorkerThread@@` [15], `?WaitForOleWorkerThread@@` [17]
@@ -297,7 +297,7 @@ Kitchen-sink utilities: OLE worker-thread factory (used by MSN Today), price/cur
 - `?GetAssociatedExecutable@@` [6]
 - `FEnsureMarvelDesktopFile` [20]
 
-**Ghidra status**: Annotated. **Notes**: `CreateOleWorkerThread` has two callers — sync login vs async MSN Today `Exec c==7` (`project_msn_today_worker_debug.md`).
+**Ghidra status**: Annotated. **Notes**: `CreateOleWorkerThread` has two callers — sync login vs async DnR (`Exec c==7` / `ExecUrlWorkerProc`) (`project_msn_today_worker_debug.md`). MSN Today itself dispatches via App #6 (MOSVIEW.EXE), not this worker.
 
 ### CONFAPI.DLL — *Conference API* (DLL, 22 KB)
 

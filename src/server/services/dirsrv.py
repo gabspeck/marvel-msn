@@ -38,7 +38,6 @@ PROP_BROWSE_FLAGS = "b"
 PROP_APP_ID = "c"
 PROP_CATEGORY = "ca"
 PROP_NAME = "e"
-PROP_FILENAME = "fn"
 PROP_UNKNOWN_G = "g"
 PROP_SECONDARY_ICON = "h"
 PROP_UNKNOWN_I = "i"
@@ -215,18 +214,8 @@ def build_props(requested_props, node, *, is_children):
     """
     content = node.content
 
-    # DnR (c=7) worker ExecUrlWorkerProc → DownloadContentToTempPath calls
-    # vt[0x40]("fn", buf, len, 1) on the node cache to build the temp file
-    # name. The client's GetChildren request doesn't ask for `fn`, so we
-    # emit it unilaterally for DnR leaves — SVCPROP caches by name, so extra
-    # records are absorbed. Without this, phase 1 of the worker bails before
-    # the FTM download step and MSN Today renders blank.
-    props_to_emit = list(requested_props)
-    if node.app_id == 7 and PROP_FILENAME not in props_to_emit:
-        props_to_emit.append(PROP_FILENAME)
-
     out = []
-    for name in props_to_emit:
+    for name in requested_props:
         if name == PROP_MNID:
             out.append((0x0E, PROP_MNID, struct.pack("<I", len(node.mnid_a)) + node.mnid_a))
         elif name == PROP_BROWSE_FLAGS:
@@ -305,10 +294,6 @@ def build_props(requested_props, node, *, is_children):
             # DSNAV advertises 'i' but no read-site confirmed; DSNAV.md §12
             # safe default is DWORD 0.
             out.append((0x03, PROP_UNKNOWN_I, struct.pack("<I", 0)))
-        elif name == PROP_FILENAME:
-            # DnR temp filename base — DownloadContentToTempPath reads via
-            # vt[0x40]. Extension drives ShellExecute dispatch; .HTM → browser.
-            out.append((0x0A, PROP_FILENAME, _sz("MSNTODAY.HTM")))
         elif name == PROP_TYPE:
             # Details-view column uses 0x0A (ASCII cache for MOSSHELL's column
             # render); Properties dialog uses 0x0B (UTF-16 cache for GetPropSz).

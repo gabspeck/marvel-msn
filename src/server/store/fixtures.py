@@ -6,7 +6,7 @@ import datetime
 import struct
 from dataclasses import dataclass
 
-from ..mos_apps import APP_DIRECTORY_SERVICE, APP_DOWNLOAD_AND_RUN
+from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
 from .base import (
     BillingProfile,
     DirectoryNode,
@@ -137,7 +137,7 @@ DIRECTORY_NODES = [
         mnid_a=_MSN_ROOT_MNID,
         content=MSN_ROOT_CONTENT,
     ),
-    # MSN Today: strictly a DnR (Download-and-Run) leaf.
+    # MSN Today: MedView-title leaf served by App #6 (MOSVIEW.EXE).
     #
     # Both entry points — the HOMEBASE icon click (LJUMP 1:4:0:0 →
     # CMosTreeNode::ExecuteCommand 0x3000 → 'b' bit 0x01 set → Exec) and
@@ -145,14 +145,17 @@ DIRECTORY_NODES = [
     # case 8 builds `explorer.exe …,[T]<mnid>`, Explorer calls
     # CMosShellFolder::ParseDisplayName 'T' branch, which also lands in
     # Exec without any 'b' gate — see docs/MOSSHELL.md §7.4) — terminate in
-    # CMosTreeNode::Exec @ MOSSHELL 0x7F3FEBA6 with c=7, which takes the
-    # CreateOleWorkerThread(ExecUrlWorkerProc) path: FTM-download the
-    # `fn`-named file and hand it to `dnr.exe -"<temp>"` so the OS opens
-    # the HTM in the default browser.
+    # CMosTreeNode::Exec @ MOSSHELL 0x7F3FEBA6 with c=6, taking the
+    # synchronous HRMOSExec(6, …) fall-through. MCM resolves App #6's
+    # registered Filename to `mosview.exe`, formats
+    # `mosview.exe -MOS:6:<shn0>:<shn1>:w` via FormatMosArgTail, and
+    # CreateProcessA launches it. MOSVIEW.EXE reads the tail with
+    # FGetCmdLineInfo, derives a MedView title selector from the 4:0 mnid
+    # (docs/MOSVIEW.md §3.3), and opens the title through MVCL14N.
     DirectoryNode(
         node_id="4:0",
         is_container=False,
-        app_id=APP_DOWNLOAD_AND_RUN,
+        app_id=APP_MEDIA_VIEWER,
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
     ),

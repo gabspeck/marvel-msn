@@ -302,20 +302,22 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = build_dirsrv_reply_payload(request)
         self.assertIn(struct.pack("<II", 4, 0), payload)
         self.assertIn(b"MSN Today", payload)
-        # 4:0 is a DnR leaf: b=0x01 (LEAF), so HOMEBASE click goes through
-        # ExecuteCommand's Exec branch (not Browse) into the URL worker.
+        # 4:0 is a leaf: b=0x01 (LEAF), so HOMEBASE click goes through
+        # ExecuteCommand's Exec branch (not Browse).
         self.assertIn(b"\x01b\x00\x01", payload)
-        # c=7 (APP_DOWNLOAD_AND_RUN). Both click (via ExecuteCommand 0x3000
-        # leaf path) and the "Show MSN Today on startup" auto-Exec (via
-        # CMosShellFolder::ParseDisplayName 'T' branch with NO 'b' gate —
-        # docs/MOSSHELL.md §7.4) land in CMosTreeNode::Exec, which on c=7
-        # takes the CreateOleWorkerThread(ExecUrlWorkerProc) worker path
-        # (FTM-download `fn`, hand to dnr.exe, browser opens the HTM).
-        self.assertIn(b"\x03c\x00" + struct.pack("<I", 7), payload)
+        # c=6 (APP_MEDIA_VIEWER / MOSVIEW.EXE). Both click (via
+        # ExecuteCommand 0x3000 leaf path) and the "Show MSN Today on
+        # startup" auto-Exec (via CMosShellFolder::ParseDisplayName 'T'
+        # branch with NO 'b' gate — docs/MOSSHELL.md §7.4) land in
+        # CMosTreeNode::Exec, which on c!=7 falls through to the sync
+        # HRMOSExec(6, …) path: MCM formats `mosview.exe -MOS:6:<shn>:w`
+        # and CreateProcessA's it (docs/MOSVIEW.md §3.1).
+        self.assertIn(b"\x03c\x00" + struct.pack("<I", 6), payload)
+        self.assertNotIn(b"\x03c\x00" + struct.pack("<I", 7), payload)
         self.assertNotIn(b"\x03c\x00" + struct.pack("<I", 1), payload)
-        # Server auto-injects `fn` when app_id==7 so the URL worker can
-        # build the temp path even though GetChildren didn't request it.
-        self.assertIn(b"\x0afn\x00\x01MSNTODAY.HTM\x00", payload)
+        # No `fn` on a MOSVIEW leaf — the launcher reads the mnid off
+        # the wire cmdline, not a DnR temp filename.
+        self.assertNotIn(b"fn\x00\x01MSNTODAY.HTM", payload)
 
     def test_msn_root_children_emit_category_nodes(self):
         request = DirsrvRequest(

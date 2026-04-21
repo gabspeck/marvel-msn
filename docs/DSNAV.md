@@ -472,10 +472,11 @@ Additional notes:
 
 - DSNAV does NOT ask for `'z'` in the `GetChildren` request — see
   `project_dirsrv_getchildren_pipeline`. Server can omit it there.
-- `fn` is not in DSNAV's advertised set but the server emits it for
-  `c == 7` (`APP_DOWNLOAD_AND_RUN`) because DnR's `ExecUrlWorkerProc`
-  reads it for the temp filename. That path is orthogonal to DSNAV —
-  see the comment in `build_props` about the DnR worker.
+- `fn` is not in DSNAV's advertised set. It is read only by DnR's
+  `ExecUrlWorkerProc` (`c == 7` / `APP_DOWNLOAD_AND_RUN`) to build the
+  temp filename. No fixture currently advertises a DnR leaf, so the
+  server does not emit `fn` today; if/when one is added, emission must
+  be gated on the node's `c`.
 
 ## 13. Comparison to the other NAV plug-ins
 
