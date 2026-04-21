@@ -24,3 +24,5 @@ session_capture*.log
 # Coverage tooling
 .coverage
 htmlcov/
+
+ftp/
