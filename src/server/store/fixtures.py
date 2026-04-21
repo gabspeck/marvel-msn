@@ -88,13 +88,11 @@ _MSN_ROOT_MNID = struct.pack("<II", 1, 0)
 # DIRSRV only sees the 8-byte `_MosLid64` prefix: [field_0][field_8].
 _MSN_TODAY_SPECIAL_MNID = struct.pack("<II", 4, 0)
 _MSN_TODAY_BROWSE_FLAGS = DIRSRV_BROWSE_FLAGS_CONTAINER
-_FAVORITE_PLACES_SPECIAL_MNID = struct.pack("<II", 3, 1)
 _MEMBER_ASSISTANCE_SPECIAL_MNID = struct.pack("<II", 1, 1)
 _CATEGORIES_SPECIAL_MNID = struct.pack("<II", 1, 0)
 
 ROOT_CONTENT = _container_content("Root")
 MSN_ROOT_CONTENT = _container_content("The Microsoft Network")
-FAVORITE_PLACES_CONTENT = _container_content("Favorite Places")
 MEMBER_ASSISTANCE_CONTENT = _container_content("Member Assistance")
 CATEGORIES_CONTENT = _container_content("Categories")
 
@@ -152,14 +150,6 @@ DIRECTORY_NODES = [
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
         browse_flags=_MSN_TODAY_BROWSE_FLAGS,
-    ),
-    # Concrete request targets for the special mnids trapped from HOMEBASE.
-    DirectoryNode(
-        node_id="3:1",
-        is_container=True,
-        app_id=APP_DIRECTORY_SERVICE,
-        mnid_a=_FAVORITE_PLACES_SPECIAL_MNID,
-        content=FAVORITE_PLACES_CONTENT,
     ),
     DirectoryNode(
         node_id="1:1",

@@ -386,7 +386,6 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_special_menu_mnid_aliases_resolve_to_named_nodes(self):
         for node_id, raw, expected_name in (
-            ("3:1", struct.pack("<II", 3, 1), b"Favorite Places"),
             ("1:1", struct.pack("<II", 1, 1), b"Member Assistance"),
         ):
             request = DirsrvRequest(
