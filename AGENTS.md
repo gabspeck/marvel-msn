@@ -1,6 +1,11 @@
 Guidelines
 ===
 
+Debugging
+---
+* Always check for the correct `ADDR` context on SoftIce before setting a breakpoint. Most of them will be set on the
+EXPLORER.EXE instance that hosts MOSSHELL.DLL.
+
 Searching for resources
 ---
 * Use `strings -fel *` in the `binaries` directory a resource string comes from, then  with the filename, look it up in
