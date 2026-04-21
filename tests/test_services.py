@@ -758,9 +758,12 @@ class TestServicePacketFragmentation(unittest.TestCase):
         # With default 1024 limit, this fits in one packet
         pkts_default = build_service_packet(3, host_block, 5, 5)
         self.assertEqual(len(pkts_default), 1)
-        # With a tight limit, it should fragment
+        # With a tight limit, it fragments. Every packet must stay under
+        # the limit — no "first two frames + overflow on the last" bug.
         pkts_tight = build_service_packet(3, host_block, 5, 5, max_wire_bytes=100)
-        self.assertEqual(len(pkts_tight), 2)
+        self.assertGreaterEqual(len(pkts_tight), 2)
+        for p in pkts_tight:
+            self.assertLessEqual(len(p), 100)
 
 
 class TestContinuationFrame(unittest.TestCase):
@@ -875,10 +878,10 @@ class TestServicePacketBoundaries(unittest.TestCase):
         self.assertEqual(chunk1 + chunk2, expected)
 
     def test_stuffing_margin_absorbs_small_burst(self):
-        # The 20-byte stuffing margin in build_service_packet exists so
-        # a modest sprinkling of stuffed bytes (0x1b, 0x0d) inside an
-        # otherwise normal payload doesn't push chunk1 past the wire
-        # limit.  Verify the margin holds for ~15 stuffed bytes.
+        # A modest sprinkling of stuffed bytes (0x1b, 0x0d) inside an
+        # otherwise normal payload must not push any wire packet past
+        # the max_wire_bytes limit.  Content-aware splitting (not a
+        # fixed margin) keeps packets in range.
         body = (b"\x00" * 1037) + (b"\x1b" * 15)
         host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, body))
         pkts = build_service_packet(8, host_block, 10, 10)
@@ -887,6 +890,73 @@ class TestServicePacketBoundaries(unittest.TestCase):
             self.assertLessEqual(len(pkt), 1024)
             parsed = parse_packet(pkt[:-1])
             self.assertTrue(parsed.crc_ok)
+
+    def test_dense_stuffing_still_fits(self):
+        # A payload with enough stuffable bytes to blow past the old
+        # fixed 20-byte margin must still produce all-in-range packets.
+        # default.ico had 25 stuffable bytes and used to emit a 1029-byte
+        # first frame — exactly the bug this file now prevents.
+        body = (b"\x00" * 1000) + (b"\x1b" * 50)
+        host_block = build_host_block(0x06, 0x0A, 0, build_tagged_reply_var(0x84, body))
+        pkts = build_service_packet(8, host_block, 10, 10)
+        self.assertGreaterEqual(len(pkts), 2)
+        for pkt in pkts:
+            self.assertLessEqual(len(pkt), 1024)
+
+
+class TestGetShabbyReplyFragmentation(unittest.TestCase):
+    """End-to-end test for the DIRSRV GetShabby reply carrying default.ico.
+
+    Guards the specific regression described in Phase-1 diagnosis:
+    default.ico (1078 bytes, 25 stuffable bytes) produced a first frame
+    of 1029 wire bytes — over the MOSCP PacketSize=1024 limit — which
+    MOSCP silently dropped, causing ExtractIconEx to miss the file and
+    every node to render the forbidden glyph.
+    """
+
+    def _build_get_shabby_reply_packets(self, shabby_id):
+        from server.config import TAG_DYNAMIC_COMPLETE_SIGNAL, TAG_END_STATIC
+        from server.mpc import build_tagged_reply_dword
+        from server.services import shabby as shabby_mod
+
+        blob = shabby_mod.load_shabby_bytes(shabby_id) or b""
+        reply_payload = (
+            build_tagged_reply_dword(0)
+            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+            + blob
+        )
+        host_block = build_host_block(0x06, 0x04, 7, reply_payload)
+        return blob, host_block, build_service_packet(4, host_block, 5, 5)
+
+    def test_default_ico_reply_packets_fit_packet_size(self):
+        from server.services import shabby as shabby_mod
+
+        shabby_id = shabby_mod.pack_shabby_id(shabby_mod.FORMAT_ICO, 1)
+        blob, _, pkts = self._build_get_shabby_reply_packets(shabby_id)
+        self.assertEqual(len(blob), 1078)  # the file we're guarding
+        self.assertGreaterEqual(len(pkts), 2)
+        for pkt in pkts:
+            self.assertLessEqual(len(pkt), 1024)
+
+    def test_default_ico_reply_reassembles_to_original_blob(self):
+        from server.services import shabby as shabby_mod
+
+        shabby_id = shabby_mod.pack_shabby_id(shabby_mod.FORMAT_ICO, 1)
+        blob, host_block, pkts = self._build_get_shabby_reply_packets(shabby_id)
+
+        # Strip per-frame header/prefix and reassemble pipe_data.
+        parsed = [parse_packet(p[:-1]) for p in pkts]
+        if len(parsed) == 1:
+            chunk = parsed[0].payload[3:]  # hdr + size_prefix
+        else:
+            chunks = [parsed[0].payload[3:]] + [p.payload[1:] for p in parsed[1:]]
+            chunk = b"".join(chunks)
+
+        routing = struct.unpack("<H", chunk[:2])[0]
+        self.assertEqual(routing, 4)
+        self.assertEqual(chunk[2:], host_block)
+        # And the blob body is literally default.ico.
+        self.assertTrue(host_block.endswith(blob))
 
 
 if __name__ == "__main__":

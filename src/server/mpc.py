@@ -284,19 +284,30 @@ def build_service_packet(pipe_idx, host_block, server_seq, client_ack, max_wire_
 
     Returns a list of wire packets.  When the payload fits in a single
     transport packet (≤ max_wire_bytes on the wire), the list has one
-    element.  Larger payloads are split across two packets using MOSCP's
-    multi-frame pipe reassembly:
+    element.  Larger payloads are split into as many frames as needed to
+    keep every wire packet under the limit, using MOSCP's multi-frame
+    pipe reassembly:
 
-      Packet 1 — continuation frame (no last_data):
+      Frame 1 — continuation, last_data=0:
         header_byte + uint16_le(total_pipe_data_len) + chunk1
 
-      Packet 2 — continuation frame (last_data):
-        header_byte + chunk2   (no size prefix — pipe context already
-        allocated from packet 1's prefix)
+      Frames 2..N-1 — continuation, last_data=0:
+        header_byte + chunkK   (no size prefix)
 
-    MOSCP allocates the pipe buffer from the 2-byte prefix in the first
-    frame and preserves the pipe slot across packets when last_data is
-    not set.
+      Frame N — continuation, last_data=1:
+        header_byte + chunkN   (no size prefix)
+
+    MOSCP allocates the pipe buffer from the 2-byte prefix in frame 1
+    and keeps appending to it across frames until last_data is seen.
+
+    Split points are chosen by binary-searching the largest chunk whose
+    wire packet (after byte-stuffing) stays ≤ max_wire_bytes.  A fixed
+    margin is not enough — byte-stuffing expansion is content-dependent
+    and a dense run of 0x1B/0x0D/0x10/0x0B/0x8D/0x90/0x8B bytes can
+    inflate the wire more than a static estimate leaves room for.  The
+    GetShabby reply for default.ico (25 stuffable bytes in 1078 blob
+    bytes) is exactly the case that broke the old fixed-20 margin — the
+    first frame landed at 1029 wire bytes and MOSCP dropped it.
     """
     routing_prefix = struct.pack("<H", pipe_idx)
     pipe_data = routing_prefix + host_block
@@ -307,24 +318,43 @@ def build_service_packet(pipe_idx, host_block, server_seq, client_ack, max_wire_
     if len(pkt) <= max_wire_bytes:
         return [pkt]
 
-    # Split across two packets.
-    # Frame 1 overhead: header(1) + size_prefix(2) = 3 bytes in payload.
-    # Packet overhead: seq(1) + ack(1) + CRC(4) + terminator(1) = 7 bytes.
-    # Leave margin for byte-stuffing expansion.
     size_prefix = struct.pack("<H", len(pipe_data))
-    overhead1 = 7 + 1 + 2  # packet framing + frame header + size prefix
-    chunk1_max = max_wire_bytes - overhead1 - 20  # 20-byte stuffing margin
-    chunk1 = pipe_data[:chunk1_max]
-    chunk2 = pipe_data[chunk1_max:]
+    packets = []
+    pos = 0
+    seq = server_seq
+    frame_idx = 0
 
-    frame1 = _build_continuation_frame(pipe_idx, size_prefix + chunk1, last=False)
-    pkt1 = build_packet(server_seq, client_ack, frame1)
+    while pos < len(pipe_data):
+        frame_idx += 1
+        prefix = size_prefix if frame_idx == 1 else b""
+        remaining = len(pipe_data) - pos
 
-    seq2 = (server_seq + 1) & 0x7F
-    frame2 = _build_continuation_frame(pipe_idx, chunk2, last=True)
-    pkt2 = build_packet(seq2, client_ack, frame2)
+        # Binary-search the largest chunk whose wire packet fits.  The
+        # last_data flag only flips the header byte by a single bit —
+        # stuffing behavior is identical either way, so we can probe
+        # using the terminal last_data value for this split.
+        lo, hi = 1, remaining
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            is_last = pos + mid == len(pipe_data)
+            probe_frame = _build_continuation_frame(
+                pipe_idx, prefix + pipe_data[pos : pos + mid], last=is_last
+            )
+            if len(build_packet(seq, client_ack, probe_frame)) <= max_wire_bytes:
+                lo = mid
+            else:
+                hi = mid - 1
 
-    return [pkt1, pkt2]
+        chunk_size = lo
+        is_last = pos + chunk_size == len(pipe_data)
+        frame = _build_continuation_frame(
+            pipe_idx, prefix + pipe_data[pos : pos + chunk_size], last=is_last
+        )
+        packets.append(build_packet(seq, client_ack, frame))
+        pos += chunk_size
+        seq = (seq + 1) & 0x7F
+
+    return packets
 
 
 def _build_continuation_frame(pipe_idx, content, last=True):
