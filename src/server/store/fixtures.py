@@ -137,30 +137,21 @@ DIRECTORY_NODES = [
         mnid_a=_MSN_ROOT_MNID,
         content=MSN_ROOT_CONTENT,
     ),
-    # MSN Today: dual-role node.
+    # MSN Today: strictly a DnR (Download-and-Run) leaf.
     #
-    # Click path (HOMEBASE icon → ExecuteCommand(0x3000) → `'b'` gate): with
-    # `is_container=True` we ship `b=0`, so the shell takes HrBrowseObject
-    # and opens an empty folder view (no children; `DIRECTORY_CHILDREN["4:0"]
-    # = []`). Same shape as the category browse nodes.
-    #
-    # Startup auto-Exec path ("Show MSN Today on startup" user preference →
-    # CCAPI!MOSX_GotoMosLocation(8) builds `explorer.exe …,[T]<mnid>` →
-    # CMosShellFolder::ParseDisplayName 'T' branch at MOSSHELL 0x7F3F2984):
-    # the 'T' branch unconditionally calls CMosTreeNode::Exec with NO `'b'`
-    # gate (see docs/MOSSHELL.md §7.4). Exec dispatches on `'c'`:
-    #   c == 7 → CreateOleWorkerThread(ExecUrlWorkerProc): FTM-downloads the
-    #            `fn`-named file, launches `dnr.exe -"<temp>"`, browser opens.
-    #   c != 7 → HRMOSExec(c, "-MOS:c:…") → CreateProcessA(App#c.Filename).
-    # Shipping c=1 (DSNAV) made CreateProcessA try to run `dsnav.nav` as an
-    # EXE (it's a LoadLibrary plug-in DLL) and MCM popped "MSN Network cannot
-    # run …". `APP_DOWNLOAD_AND_RUN` (7) takes the worker path and honors
-    # the design intent. Server already emits `fn=MSNTODAY.HTM` when
-    # app_id==7 (dirsrv.py:208,294) and FTM serves the content
-    # (ftm.py:175-176).
+    # Both entry points — the HOMEBASE icon click (LJUMP 1:4:0:0 →
+    # CMosTreeNode::ExecuteCommand 0x3000 → 'b' bit 0x01 set → Exec) and
+    # the "Show MSN Today on startup" preference (CCAPI!MOSX_GotoMosLocation
+    # case 8 builds `explorer.exe …,[T]<mnid>`, Explorer calls
+    # CMosShellFolder::ParseDisplayName 'T' branch, which also lands in
+    # Exec without any 'b' gate — see docs/MOSSHELL.md §7.4) — terminate in
+    # CMosTreeNode::Exec @ MOSSHELL 0x7F3FEBA6 with c=7, which takes the
+    # CreateOleWorkerThread(ExecUrlWorkerProc) path: FTM-download the
+    # `fn`-named file and hand it to `dnr.exe -"<temp>"` so the OS opens
+    # the HTM in the default browser.
     DirectoryNode(
         node_id="4:0",
-        is_container=True,
+        is_container=False,
         app_id=APP_DOWNLOAD_AND_RUN,
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,

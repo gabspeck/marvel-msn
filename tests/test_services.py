@@ -301,12 +301,15 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = build_dirsrv_reply_payload(request)
         self.assertIn(struct.pack("<II", 4, 0), payload)
         self.assertIn(b"MSN Today", payload)
-        self.assertIn(b"\x01b\x00\x00", payload)
-        # c must be 7 (APP_DOWNLOAD_AND_RUN). Post-login ParseDisplayName('T')
-        # auto-Execs 4:0 with NO 'b' gate (docs/MOSSHELL.md §7.4). c=7 takes
-        # the URL-worker path (FTM-download `fn`, launch dnr.exe); c=1
-        # (DSNAV) made HRMOSExec CreateProcessA dsnav.nav as an EXE and
-        # popped "MSN Network cannot run ...".
+        # 4:0 is a DnR leaf: b=0x01 (LEAF), so HOMEBASE click goes through
+        # ExecuteCommand's Exec branch (not Browse) into the URL worker.
+        self.assertIn(b"\x01b\x00\x01", payload)
+        # c=7 (APP_DOWNLOAD_AND_RUN). Both click (via ExecuteCommand 0x3000
+        # leaf path) and the "Show MSN Today on startup" auto-Exec (via
+        # CMosShellFolder::ParseDisplayName 'T' branch with NO 'b' gate —
+        # docs/MOSSHELL.md §7.4) land in CMosTreeNode::Exec, which on c=7
+        # takes the CreateOleWorkerThread(ExecUrlWorkerProc) worker path
+        # (FTM-download `fn`, hand to dnr.exe, browser opens the HTM).
         self.assertIn(b"\x03c\x00" + struct.pack("<I", 7), payload)
         self.assertNotIn(b"\x03c\x00" + struct.pack("<I", 1), payload)
         # Server auto-injects `fn` when app_id==7 so the URL worker can
