@@ -182,11 +182,11 @@ def _build_title_open_reply_payload(title_body):
 
     Static shape (7 tagged primitives, exact order required by MVTTL14C
     TitleOpenEx recv loop):
-        0x81 <byte=title_id>      → title struct +0x02 (primary tid)
-        0x81 <byte=service_byte>  → title struct +0x44 (echoed on later RPCs)
-        0x83 <dword=0>            → title struct +0x46
-        0x83 <dword=0>            → title struct +0x48
-        0x83 <dword=0>            → title struct +0x4A
+        0x81 <byte=title_id>      → title struct +0x02 (primary tid, must be nonzero)
+        0x81 <byte=hfs_volume>    → title struct +0x88 (HFS vol byte for baggage)
+        0x83 <dword=contents_va>  → title struct +0x8c (`vaGetContents`)
+        0x83 <dword=???>          → title struct +0x90 (unresolved)
+        0x83 <dword=topic_count>  → title struct +0x94 (`TitleGetInfo(0x0B)`)
         0x83 <dword=chk1>         → persisted to MVCache\\<title>.tmp
         0x83 <dword=chk2>         → persisted to MVCache\\<title>.tmp
         0x87                      end-static
@@ -196,6 +196,11 @@ def _build_title_open_reply_payload(title_body):
     Wait() on slot 0x24 (same pattern as DIRSRV GetShabby — see
     PROTOCOL.md §MPC reply tags).  0x88 would route through the
     dynamic-iterator instead and leave Wait() blocked.
+
+    All three server-supplied DWORDs ship as zero today — rendering is
+    blocked on the 9-section body's record formats, not on the scalar
+    values here.  See plan `eager-pondering-flute.md` and
+    `docs/MEDVIEW.md §4.3` for the gate analysis.
     """
     chk1, chk2 = _derive_checksums(title_body)
     static = b"".join(

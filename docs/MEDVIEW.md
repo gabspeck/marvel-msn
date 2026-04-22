@@ -193,14 +193,20 @@ Static section (exactly these tags, in order):
 | Tag | Bytes | Role |
 |-----|-------|------|
 | `0x81` | 1 | `title_id` — any nonzero byte. Must NOT be zero; a zero byte routes to `LAB_7e8432d4` and title open returns NULL (viewer fails). |
-| `0x81` | 1 | `title_id_byte2` — stored as the "service byte" the client sends back on subsequent per-title RPCs. |
-| `0x83` | 4 LE | DWORD → title+0x46 |
-| `0x83` | 4 LE | DWORD → title+0x48 |
-| `0x83` | 4 LE | DWORD → title+0x4A |
+| `0x81` | 1 | `hfs_volume` — low byte of `*(u32 *)(title+0x88)`. Served locally via `TitleGetInfo(info_kind=0x69)`; passed into baggage as the HFS mode byte (`HfOpenHfs`, §6c). |
+| `0x83` | 4 LE | DWORD → `title+0x8c` = **contents va**. Served locally via `vaGetContents @ 0x7E841D48`. This is the entry-point virtual address navigation hands to the MedView engine (`NavigateViewerSelection` → `vaMVGetContents` → paint). `0xFFFFFFFF` / `0` both route `NavigateViewerSelection` into the "hideOnFailure" branch — **nothing paints**. |
+| `0x83` | 4 LE | DWORD → `title+0x90` — purpose unresolved on MSN Today's path. Observed unread by local `TitleGetInfo` paths; possibly a notification-epoch token consumed by the async-subscription pump. |
+| `0x83` | 4 LE | DWORD → `title+0x94` = **topic count**. Served locally via `TitleGetInfo(info_kind=0x0B)`. `hMVTopicListFromTopicNo(title, N)` uses this as the upper bound; zero means no topic resolves. |
 | `0x83` | 4 LE | New checksum 1 |
 | `0x83` | 4 LE | New checksum 2 |
 | `0x87` | 0 | End of static |
 | `0x86` | var | Dynamic "title body" — raw bytes to end of host block (see §4.4). Sent as `TAG_DYNAMIC_COMPLETE_SIGNAL` so the client's `Wait()` on slot `0x48` fires (same pattern as DIRSRV GetShabby). |
+
+All three server-supplied DWORDs are gated on the respective `info_kind`
+returning a nonzero value to MVCL14N. Shipping zeros there is what
+keeps MSN Today at the caption-only state today: `vaGetContents`
+returns 0 → `NavigateViewerSelection` hides the pane, no paint ever
+fires, baggage is never asked for.
 
 ### 4.4 Title body layout
 
@@ -210,35 +216,46 @@ stream**. Ground-truth from the `MVTTL14C!TitleOpenEx @ 0x7E842D4E` and
 
 1. `TitleOpenEx` saves `B` at `title + 0x52` and its length at
    `title + 0x54`.
-2. It reads `b0 = *(u16 LE)B` as the size of a **structural header**
-   consumed by `TitleOpenEx` itself (purpose not yet pinned — see §10):
+2. It reads `b0 = *(u16 LE)B` as the size of **section 0**, the
+   **font table**. Served to MVCL14N via `TitleGetInfo(info_kind=0x6F)`
+   which returns `*(HGLOBAL *)(title+0x08)` — the same allocation built
+   in this step. `fMVSetTitle` passes that handle to `hMVSetFontTable`.
    - `b0 == 0` → branch `LAB_7e8432c4`: skip the header decode, zero
-     `title[4]`/`title[5]`. **This is the safe path.**
+     `title+0x08` (no font table). `TitleGetInfo(0x6F)` returns `0`.
+     The MedView engine runs on its default font table with whatever
+     built-in faces it has, but custom fonts for the title are absent.
+     **This is the safe path** — what the server ships today.
    - `b0 != 0` → `GlobalAlloc(GPTR=0x40, b0)`, `MOVSD.REP` the `b0`
-     bytes from `B+2`, then read `*(u32 LE)` of the copy as a
-     **child-count** and zero that many dword slots starting at
-     `psVar7 + psVar7[8]` (word-index 8 = byte offset 0x10). That
-     "count + slot array at +0x10" deserialization pattern argues
-     against this being a bitmap (nobody interprets DIB bytes that
-     way); it looks more like a MedView object descriptor with
-     placeholder child pointers the engine fills in later.
+     bytes from `B+2`, then:
+     - Read `i16` at copy+0x00 as **font count** (sign-extended; zero
+       swapped to 1 for the zero-loop's bound).
+     - Read `i16` at copy+0x10 as **slots_offset** (signed, relative to
+       copy base).
+     - Zero `count` dwords starting at `copy + slots_offset`. These are
+       the HFONT slots the engine fills at runtime as fonts get loaded.
+     Raw-instruction source: `MOVSX ECX, [EAX]` at `0x7E843291` and
+     `MOVSX ESI, [EAX+0x10]` at `0x7E8432A9`. The 14 bytes between the
+     two signed halfwords carry the font descriptors (face name /
+     charset / size index) the runtime consumes to populate slots —
+     exact field layout is not yet RE'd and is not required for the
+     empty-table path.
 3. `TitleGetInfo` walks the remaining 8 sections on demand to answer
    field queries. Its `param_2` argument is the **selector kind**, not
    a section index — the dispatch table maps selector → section.
 
 Section-by-section (`u16` = little-endian 16-bit):
 
-| # | `TitleGetInfo` selector(s) | Header | Payload |
-|--:|---------------------------|--------|---------|
-| 0 | — (consumed by TitleOpenEx) | `[u16 size]` | Structural header (u32 child-count + slot array at +0x10); exact layout unknown — **not a bitmap**, see §10 |
-| 1 | `7` | `[u16 size]` | array of fixed **43-byte** records (10 u32 + u16 + byte) |
-| 2 | `8` | `[u16 size]` | array of fixed **31-byte** records (7 u32 + u16 + byte) |
-| 3 | `6` | `[u16 size]` | array of fixed **152-byte** records (38 u32) |
-| 4 | `1` | `[u16 size]` | raw blob |
-| 5 | `2` | `[u16 size]` | raw blob |
-| 6 | `0x6A` | `[u16 size]` | raw blob |
-| 7 | `0x13` | `[u16 size][u16 count]` | `count × [u16 len][bytes]` (length-prefixed records) |
-| 8 | `4` (fallthrough for `4`/`0x6B`/`0x6D`/`0x6E`) | `[u16 count]` | `count × ASCIIZ` — **the string table** |
+| # | `TitleGetInfo` selector(s) | Header | Payload | Role |
+|--:|---------------------------|--------|---------|------|
+| 0 | `0x6F` (returns `title+0x08`, the copy handle) | `[u16 size]` | Font table — `i16 count @ +0x00`, `i16 slots_offset @ +0x10`, engine zeros `count` dwords at `base+slots_offset` at load time. 14 bytes of font descriptors in the gap (unresolved). | font table |
+| 1 | `7` | `[u16 size]` | array of fixed **43-byte** records (10 u32 + u16 + byte) | topic / TOC table |
+| 2 | `8` | `[u16 size]` | array of fixed **31-byte** records (7 u32 + u16 + byte) | link / jump table |
+| 3 | `6` | `[u16 size]` | array of fixed **152-byte** records (38 u32) | per-title layout / style table |
+| 4 | `1` | `[u16 size]` | raw blob | title caption (ASCII) |
+| 5 | `2` | `[u16 size]` | raw blob | second string (subtitle / copyright) |
+| 6 | `0x6A` | `[u16 size]` | raw blob | "title string" — `fMVSetTitle` allocates it to `view+0x1c` when called with NULL path; purpose beyond cache key not yet pinned |
+| 7 | `0x13` | `[u16 size][u16 count]` | `count × [u16 len][bytes]` (length-prefixed records) | context / hash records (unresolved) |
+| 8 | `4` (fallthrough for `4`/`0x6B`/`0x6D`/`0x6E`) | `[u16 count]` | `count × ASCIIZ` — **the string table** | strings referenced by the record arrays |
 
 Section 7's empty form is just `[u16 size=0]` (the walker uses
 `(size==0) ? 2 : size+4` to advance). Sections 0-6 are straight
@@ -333,8 +350,18 @@ decompile).
 ### 5.1 Local path (no RPC)
 
 `info_kind` in {`0x01`, `0x02`, `0x04`, `0x06`, `0x07`, `0x08`, `0x0B`,
-`0x13`, `0x69`, `0x6A`, `0x6E`, `0x6F`} is served from the saved body
-bytes (see §4.4) without any network traffic.
+`0x13`, `0x69`, `0x6A`, `0x6E`, `0x6F`} is served locally without any
+network traffic. Three of those are **scalars read from the title
+struct** (populated from the TitleOpen reply, not the body bytes):
+
+| `info_kind` | Returns | Source |
+|------------:|---------|--------|
+| `0x0B` | `*(u32 *)(title + 0x94)` — **topic count** | TitleOpen reply DWORD 3 |
+| `0x69` | `*(u32 *)(title + 0x88)` — HFS volume byte (low 8 bits live in the DWORD) | TitleOpen reply byte 2 |
+| `0x6F` | `*(HGLOBAL *)(title + 0x08)` — **font table handle** | Section 0 of body → GlobalAlloc copy |
+
+All other local kinds read the body directly — see the per-section
+table in §4.4.
 
 ### 5.2 Wire path (when RPC is needed)
 
@@ -433,6 +460,185 @@ feeds at startup.
 
 ---
 
+## 6b. Content selectors (va / addr / highlight resolution)
+
+MVCL14N's render path pulls most content off a local 3-list cache at
+`MVTTL14C.DLL:PTR_DAT_7e84e130`, keyed by `(title_byte, topic_no)`
+(list 0), `(title_byte, hash)` (list 1), `(title_byte, va)` (list 2).
+The primary consumers walk the cache via `FUN_7e841ac9` / `FUN_7e841b21`:
+
+- `vaGetContents(title) @ 0x7E841D48` — returns `*(u32 *)(title+0x8c)`
+  (TitleOpen reply DWORD 1). No RPC.
+- `vaConvertTopicNumber(title, N) @ 0x7E841FCF` — cache lookup first;
+  on miss, fires wire **selector `0x07`** with `{0x01=title_byte,
+  0x03=topic_no}` then polls the cache with a 30 s timeout.
+- `vaConvertHash(title, hash) @ 0x7E841E9A` — same shape, wire
+  **selector `0x06`**.
+- `addrConvertTopicNumber`, `addrConvertContextString`, `vaConvertAddr`
+  are thin wrappers that feed the same two fallback selectors.
+- `HighlightsInTopic(title, topic) @ 0x7E841526` — wire **selector
+  `0x10`**; dynamic-iterator reply (slot `0x14` + slot `0x48` wait).
+  Reply bytes are consumed by `FUN_7e844738`.
+
+The selectors `0x06` / `0x07` do NOT themselves return a va in the
+reply — the client waits on `slot 0x48`, releases immediately, and
+re-checks the cache. The actual answer arrives **through the async
+subscription channel** (selector `0x17`, one iterator per notification
+type; see §6a). `FUN_7e844c7c @ 0x7E844C7C` is the pump thread that
+reads chunks via `piVar1->m0x1c(iter, &chunk)` and hands them to the
+per-type callback registered in the subscriber struct at `+0x20`.
+
+### Subscription types and callbacks
+
+`hrAttachToService @ 0x7E844114` installs 5 subscribers, one per
+notification type index sent on selector `0x17`:
+
+| Type | Callback | Purpose (inferred) |
+|-----:|----------|--------------------|
+| 0 | `FUN_7e8452d3` | Topic metadata / string attachments (opcodes `0xBF`, `0xA5`, `0x37`) |
+| 1 | `LAB_7e849251` | Picture / download status |
+| 2 | `FUN_7e841109` | Context-string / global-state updates (writes `DAT_7e84d02c`-family tables) |
+| 3 | `FUN_7e8451ec` | **va / addr cache pushes** (populates `PTR_DAT_7e84e130`) |
+| 4 | `FUN_7e8468d5` | WordWheel / key-index refresh |
+
+### Type-3 frame format (cache push)
+
+`FUN_7e8451ec @ 0x7E8451EC` is the callback. Each chunk the pump
+delivers is a sequence of framed messages:
+
+```
++0x00  u16 op_code   (1..5; 0 and >5 skipped silently)
++0x02  u16 length    (includes the 4-byte header; must be ≤ chunk remaining)
++0x04  payload       (length - 4 bytes, op_code-specific)
+```
+
+Op-code dispatch inside type-3:
+
+| op_code | Dispatch | Handles |
+|--------:|----------|---------|
+| 1, 2 | `FUN_7e846bb1` | Topic / hash invalidation |
+| 3 | — (silently skipped, length still consumed) | Reserved |
+| **4** | `FUN_7e8420f6` | **va / addr cache insert** |
+| 5 | `FUN_7e8424f5` | Secondary cache (unresolved) |
+
+### Op-code 4 payload (14 bytes)
+
+| Offset | Size | Kind 0 (topic→va+addr) | Kind 1 (hash→va) | Kind 2 (va→addr) |
+|-------:|-----:|------------------------|------------------|------------------|
+| +0 | 1 | title_byte | title_byte | title_byte |
+| +1 | 1 | `0x00` | `0x01` | `0x02` |
+| +2 | 4 LE | topic_no | hash | (any; stored at cache+0xC, not consulted by list-2 lookup) |
+| +6 | 4 LE | va | va | va (becomes cache+4 — the lookup key) |
+| +10 | 4 LE | addr | (ignored but stored) | addr (becomes cache+8 — the return value) |
+
+Total framed message = 18 bytes. Kinds 0/1/2 route into the three
+parallel lists at `PTR_DAT_7e84e130[0..2]`. Lookups:
+
+- Kind 0: `FUN_7e841ac9` matches `(title_byte, topic_no@+0xC)` →
+  returns `(va, addr)` from `(+4, +8)`.
+- Kind 1: `FUN_7e841b21(list=1)` matches `(title_byte, hash@+4)` →
+  returns `va` from `+8`.
+- Kind 2: `FUN_7e841b21(list=2)` matches `(title_byte, va@+4)` →
+  returns `addr` from `+8`.
+
+### Server implications
+
+- Selectors `0x06` / `0x07` can ack with static-only `0x87`. The actual
+  delivery must be pushed as **selector `0x17` type-3 op-code 4**
+  frames on the subscription iterator so the client's cache pump
+  populates the `(title_byte, topic_no) → va` (or `hash → va`) entry.
+- To open the type-3 channel the server must reply to the subscribe
+  call (selector `0x17` with `type=3`) with a **non-empty dynamic
+  section** — the dynamic iterator's handle is what gets stored at
+  `subscriber+0x28` and drives the pump. Ack-only today means
+  `this+0x28 == NULL` → pump exits immediately (`FUN_7e844a3b` guard
+  at entry) → no pushes flow.
+- Until the notification pump is lit up, `vaConvertTopicNumber` times
+  out after 30 s and returns `0xFFFFFFFF` → no navigation.
+- Shortcut: ship a nonzero **`vaGetContents`** value in TitleOpen reply
+  DWORD 1 (title struct `+0x8c`). If the engine accepts the va
+  directly without demanding a companion addr, `NavigateViewerSelection`
+  enters the paint path. But `FUN_7e841c32 (va→addr)` consults only
+  the cache, so first paint still needs a matching kind-2 push unless
+  the engine has a direct-va-without-addr code path (unverified).
+
+## 6c. Baggage (HFS file access, selectors `0x1A` / `0x1B` / `0x1C`)
+
+MVTTL14C exports a 7-function Baggage API (ordinals 15-22) that
+routes to either a local Win16 `_lopen` file handle or an HFS
+("Hierarchical File System") handle opened over the wire:
+
+| Export | Addr | Wire? | Wire selector |
+|--------|------|------|---|
+| `BaggageOpen` | `0x7E848205` | only when `param_3 != 0` (HFS mode) | delegates to `HfOpenHfs` |
+| `HfOpenHfs` | `0x7E847656` | yes | **`0x1A`** |
+| `BaggageRead` / `LcbReadHf` / `LcbReadHfProgressive` | `0x7E84818E` / `0x7E847C45` / `0x7E847DF6` | HFS mode only | **`0x1B`** |
+| `BaggageClose` / `RcCloseHf` / `FUN_7e847bd8` | `0x7E848023` / `0x7E847BAD` / `0x7E847BD8` | HFS mode only | **`0x1C`** |
+| `BaggageSize` / `LcbSizeHf` | `0x7E848084` / `0x7E847F1E` | no (size cached at open) | — |
+| `BaggageSeek` / `LSeekHf` / `LTellHf` | `0x7E848123` / `0x7E847ED1` / `0x7E848015` | no (position in-process) | — |
+| `BaggageSeekRead` / `BaggageGetFile` | `0x7E80ED` / `0x7E82B8` | via Open+Seek+Read+Close | — |
+
+The HFS mode byte is `(char)*(u32 *)(title + 0x88)` — the low byte of
+TitleOpen reply byte 2. Zero → local-file path. Nonzero → HFS path
+through the wire.
+
+### `0x1A` HfOpenHfs — request / reply
+
+Request (in order):
+
+| Tag | Value |
+|-----|-------|
+| `0x01` | HFS mode byte (from title+0x88) |
+| `0x04` | ASCIIZ filename + length |
+| `0x01` | open mode byte (`2` in the observed call site) |
+| `0x81` | Recv: byte — new HFS handle byte (stored at the returned 12-byte struct offset 0x08) |
+| `0x83` | Recv: DWORD — file size (stored at offset 0x00; `LcbSizeHf` returns it) |
+
+Reply: static ack + byte + DWORD; if byte is nonzero the client
+allocates a 12-byte tracking struct and returns it. Zero byte declines
+the open.
+
+### `0x1B` LcbReadHf — request / reply
+
+Request:
+
+| Tag | Value |
+|-----|-------|
+| `0x01` | HFS handle byte (from the open struct's `+0x08`) |
+| `0x03` | byte count requested |
+| `0x03` | current read position (maintained client-side) |
+| `0x81` | Recv: byte — status (0 on success) |
+
+Reply: static ack + dynamic-iterator. Client calls `iter->m0x10(iter)`
+to get chunk length and `iter->m0xC(iter)` to get the bytes. Position
+advances by the returned length. Standard DIRSRV-`GetShabby`-style
+fragmentation applies (>1024 B requires chunking through
+`build_service_packet`).
+
+### `0x1C` HfCloseHf — request / reply
+
+Request:
+
+| Tag | Value |
+|-----|-------|
+| `0x01` | HFS handle byte |
+
+Reply: static ack. Client immediately frees the local tracking struct.
+
+### When does the client call these?
+
+**Not on the MSN Today initial-open path.** Empirically, the current
+server log with a caption-only body never receives `0x1A/0x1B/0x1C`.
+The baggage callers in MVCL14N are `MVGroupLoad` (ordinal 15) and
+the internal functions `FUN_7e883c50 / 7e886980 / 7e886b80` —
+triggered by authored content referencing baggage by filename during
+render, not by title open.
+
+Baggage fires the first time the MedView engine's `MVFileIOProc` hits
+a file the content graph references. So exercising this code path
+requires MSN Today to actually enter its render path first (which
+depends on `vaGetContents` returning non-zero; see §6b).
+
 ## 7. Post-TitleOpen calls made by MOSVIEW
 
 `MOSVIEW!OpenMediaTitleSession` enumerates the cached body via
@@ -499,26 +705,32 @@ MSN Today open path.
 
 ## 10. Open questions
 
-- **Dialect of `info_kind`**. `TitleGetInfo` serves constants we haven't
-  mapped to MedView API names (`0x13`, `0x6A`, `0x6E`, `0x6F`, `0x69`,
-  `0x0B`). MVCL14N's `lMVTitleGetInfo` wrapper is the authoritative
-  mapping — Phase 4 catalogued the MSN-facing surface only.
+- **Info_kind dialect on the wire path**. `TitleGetInfo`'s wire
+  dispatch serves constants the local path doesn't
+  (`0x03/0x05/0x0A/0x0C`..`0x10/0x0E/0x66-0x6E`). The
+  local-path catalogue is now pinned: `0x6F` → font table handle
+  (`title+0x08`), `0x69` → HFS volume byte (`title+0x88`), `0x0B` →
+  topic count (`title+0x94`). Everything else is a body-section read.
+- **TitleOpen reply DWORD 2** (`title+0x90`). Not read by any
+  currently-catalogued `TitleGetInfo` local path; possibly a
+  notification-epoch / session cookie consumed by the subscription
+  pump (`FUN_7e844c7c`). Unverified.
+- **Font table field layout** (section 0, bytes 2-15 and trailing
+  descriptor block). The count + slot-offset pair is pinned but the
+  font descriptor format the engine reads to populate HFONT slots is
+  not. Safe today because the empty body path (`u16 size=0`) skips the
+  decode entirely; MedView renders with its built-in default font.
+- **152-byte record field layout** (section 3). Largest of the fixed
+  records and the least documented in the MedView literature. MVTTL14C
+  exposes no setters — the engine is the sole consumer. Blocks any
+  attempt to synthesise layout/style from `4.ttl` content.
+- **Cache notification format** (selectors `0x06` / `0x07` push
+  answers). The wire payload shape used by the 1996 server to populate
+  `PTR_DAT_7e84e130` via the subscription iterators is not yet RE'd —
+  trace `FUN_7e844a3b @ 0x7E841A75` (third reference to the cache
+  head) to recover it. Until then, va conversions fall through.
 - **Checksum semantics**. The new checksums returned in the TitleOpen
   reply are written back into `MVCache\<title>.tmp`. Whether the server
   treats them as (a) a content hash, (b) a version stamp, or (c) a
   client-opaque token is not yet nailed down; for the MVP they can be any
   stable non-zero pair.
-- **Section 0 semantics**. The first section of the body is copied into
-  a separate `GPTR GlobalAlloc`'d buffer and the first DWORD of the copy
-  is read as a **child-count**; that many dword slots at offset `+0x10`
-  are zeroed. The "count + slot array" deserialization rules out a
-  bitmap — this looks more like a MedView top-level object descriptor
-  (a CTitle header with placeholder children the engine fills in later).
-  Exact field layout is not yet RE'd; shipping an empty body (`u16 0`)
-  takes the safe `LAB_7e8432c4` path and sidesteps the decode entirely.
-  (Earlier docs in this repo described section 0 as "the title banner"
-  — that was a guess based on the `MOVSD.REP` superficially resembling
-  bitmap handling; the directory-node banner painted by `CDIBWindow`
-  on DSNAV/BBSNAV nodes is a **different** thing, sourced via the
-  `'mf'` DIRSRV property and MOSSHELL's shabby-fetch path. See
-  `docs/MOSSHELL.md` §6.3 and `docs/DSNAV.md` §11.1.)
