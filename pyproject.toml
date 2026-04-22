@@ -3,7 +3,9 @@ name = "marvel-msn"
 version = "0.1.0"
 description = "MSN95 (Marvel) reverse-engineered server"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "olefile>=0.46",
+]
 
 [project.optional-dependencies]
 dev = [

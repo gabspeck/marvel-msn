@@ -6,6 +6,8 @@ __pycache__/
 # Ghidra lock files (local state only)
 MSN95.lock
 MSN95.lock~
+Blackbird.lock
+Blackbird.lock~
 
 # Original MSN95 binaries (see README for how to obtain)
 binaries/

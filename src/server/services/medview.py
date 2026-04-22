@@ -9,13 +9,20 @@ body shipped in TitleOpen's 0x86 dynamic section is a flat 9-section
 stream consumed by `MVTTL14C!TitleOpenEx @ 0x7E842D4E` + TitleGetInfo —
 NOT Blackbird's "Release" OLE2 compound file (that's the authoring-side
 format; see `docs/BLACKBIRD.md` §4.4).  The 1996 MSN server synthesised
-the 9-section stream at query-time from the Blackbird publish upload;
-this handler replicates the synthesis directly from a deid-keyed name
-table (Tier A: name only, no banner / record arrays).
+the 9-section stream at query-time from the Blackbird publish upload.
+
+This handler replicates that synthesis from the authored `.ttl`
+compound file: `resources/titles/<deid>.ttl` → `Title` object → body
+with `CTitle.name` placed in section 4 (info_kind=1), the only field
+MSN Today actually reads at startup (see docs/MEDVIEW.md §4.4).  The
+remaining sections stay empty pending RE of COSCL's `extract_object`
+compression scheme (tracked in docs/BLACKBIRD.md §7).
 """
 
 import logging
+import os
 import struct
+from pathlib import Path
 
 from ..config import (
     MEDVIEW_INTERFACE_GUIDS,
@@ -37,20 +44,47 @@ from ..mpc import (
     build_tagged_reply_dword,
     parse_request_params,
 )
+from .ttl import Title, TTLError
 
 log = logging.getLogger(__name__)
 
 
-# Human-readable title names, keyed by the <name> field of the TitleOpen
-# spec `:<svcid>[<name>]<serial>` — on the standard HRMOSExec(c=6) path
-# that's MCM's deid formatted via `%X` (see docs/MOSVIEW.md §5.3), so a
-# DIRSRV node like MSN Today (wire deid `4:0`) lands as `"4"`.  Anything
-# missing from this table falls through to `"Title <deid>"` so the
-# viewer still shows something informative instead of the
-# "Unknown Title Name" default.
-_TITLE_NAMES = {
-    "4": "MSN Today",  # DIRSRV node 4:0 (App #6)
-}
+# Root directory for per-title fixtures.  Override with MSN_TITLES_ROOT;
+# default is the repo's `resources/titles/` checked in alongside the
+# server source (4 levels up from services/medview.py:
+# services → server → src → repo).
+def _titles_root() -> Path:
+    env = os.environ.get("MSN_TITLES_ROOT")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[3] / "resources" / "titles"
+
+
+def _resolve_display_name(deid: str) -> str:
+    """Map a DIRSRV deid to the title caption shown in MSN Today.
+
+    Parses `<_titles_root()>/<deid>.ttl` when present and returns the
+    authored `CTitle.name`; otherwise falls back to `"Title <deid>"`
+    so unknown deids still show something informative instead of the
+    client's `"Unknown Title Name"` default.
+    """
+    if not deid:
+        return "Untitled"
+    path = _titles_root() / f"{deid}.ttl"
+    if not path.is_file():
+        log.info("ttl_missing deid=%r path=%s — using deid fallback", deid, path)
+        return f"Title {deid}"
+    try:
+        title = Title.from_path(str(path))
+    except TTLError as exc:
+        log.warning("ttl_parse_failed deid=%r path=%s: %s", deid, path, exc)
+        return f"Title {deid}"
+    name = title.display_name
+    if not name:
+        log.warning("ttl_no_display_name deid=%r path=%s types=%r", deid, path, title.types)
+        return f"Title {deid}"
+    log.info("ttl_loaded deid=%r path=%s display_name=%r", deid, path, name)
+    return name
 
 
 def _build_title_body(display_name: str) -> bytes:
@@ -94,17 +128,12 @@ def _build_title_body(display_name: str) -> bytes:
 
 def _load_title_body(title_spec: str) -> bytes:
     """Resolve a TitleOpen spec to a synthesized 9-section title body."""
-    name = _title_name_from_spec(title_spec).strip()
-    display = _TITLE_NAMES.get(name) or (f"Title {name}" if name else "Untitled")
-    if name and name not in _TITLE_NAMES:
-        log.warning(
-            "unknown_title_deid spec=%r deid=%r — using %r fallback",
-            title_spec, name, display,
-        )
+    deid = _title_name_from_spec(title_spec).strip()
+    display = _resolve_display_name(deid)
     body = _build_title_body(display)
     log.info(
         "synthesized_title_body spec=%r deid=%r display=%r body_len=%d",
-        title_spec, name, display, len(body),
+        title_spec, deid, display, len(body),
     )
     return body
 

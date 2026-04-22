@@ -302,14 +302,17 @@ standard `HRMOSExec(c=6, deid, …)` path it's the deid formatted via
 nodes like MSN Today (`4:0`) it reduces to the decimal deid (`"4"`)
 with no hex width.
 
-The MEDVIEW handler resolves `<name>` to a human-readable display name
-via a small deid-keyed lookup (`src/server/services/medview.py`
-`_TITLE_NAMES`), then synthesizes a 9-section body whose only
-non-empty section is the string-table entry for that name. Unknown
-deids fall back to `"Title <deid>"`. Rich content (banner + fixed-size
-record arrays) is out of scope until the COSCL compound-file format
-shipped by Blackbird's `PUBLISH.DLL!CPublisher_PublishToMSN` is
-decoded (`docs/BLACKBIRD.md` §4.4, §7).
+The display name the authoring tool intends to surface here is
+`CTitle.name` — a single ASCIIZ in the CTitle storage's
+`\x03properties` stream inside the authored `.ttl` compound file
+(`docs/BLACKBIRD.md` §3.1.2). The MedView viewer reads it via
+`TitleGetInfo(info_kind=1)` against section 4 of the 9-section body
+(§4.4) and runs it through `UnquoteCommandArgument` before storing at
+`title+0x58` as the window caption. Rich content — banner DIB
+(section 0) and the fixed-size record arrays (sections 1/2/3/7) — is
+carried in the compound file's per-class `\x03object` streams, which
+are opaque pending RE of `COSCL.DLL!extract_object` and the MS-stock
+compression on larger streams (`docs/BLACKBIRD.md` §3.1.3 and §7).
 
 ---
 

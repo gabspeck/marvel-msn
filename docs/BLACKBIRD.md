@@ -58,6 +58,68 @@ Persistence goes through **COSCL** rather than direct ole32 calls:
 
 `resources/titles/4.ttl` (8704 B) is a Local-target snapshot of this compound-file layout: a stripped-down CTitle graph written by the same `extract_object` path the MSN publisher uses.
 
+### 3.1 Compound file layout
+
+The root and per-storage streams produced by `extract_object` (as observed on `resources/titles/4.ttl`, confirmed against the COSCL import surface):
+
+| Path | Size | Purpose |
+|---|---:|---|
+| `\x03type_names_map` | 87 B | Maps storage id → class name (see §3.1.1). |
+| `\x03ref_1` … `\x03ref_N` | 81-89 B | `CDPORef*` / `CDPORefHc`/`CDPORefHC` records. Cross-object monikers with GUID + FILETIME. One entry per serialized object. |
+| `<id>/0/\x03object` | var | Opaque class instance bytes (see §3.1.3). |
+| `<id>/0/\x03properties` | var | Single-property `CPropertyTable` — every named class carries `name=<ASCIIZ>`. |
+| `<id>/0/\x03handles` | 12 B | `[u32 count][GUID-handle][GUID-handle]…` of references this storage emits. Absent on leaf classes (e.g., CBFrame, CStyleSheet, CVForm on `4.ttl`). |
+
+The storage id in `type_names_map` matches the decimal storage directory name — `<id>/0/…` reaches the instance.
+
+#### 3.1.1 `\x03type_names_map`
+
+```
+u32 count                     // number of entries (6 on 4.ttl)
+u16 opaque                    // mirrors `count` on 4.ttl; semantics not pinned
+for `count` entries:
+  u8  name_len
+  char name[name_len]         // ASCII class name, no NUL
+  u32 storage_id              // matches the `<id>/0/...` substorage
+```
+
+4.ttl's table (in file order):
+
+| name | storage_id |
+|---|---:|
+| CTitle | 1 |
+| CBForm | 5 |
+| CBFrame | 3 |
+| CVForm | 6 |
+| CStyleSheet | 4 |
+| CResourceFolder | 2 |
+
+#### 3.1.2 `\x03properties` (per-storage)
+
+COSCL's `CPropertyTable` persisted form. Every named class on 4.ttl carries a single `name` string; the format supports more but only string (type 0x08) has been observed:
+
+```
+u32 prop_count
+for `prop_count` entries:
+  u8  name_len
+  char name[name_len]         // ASCII key
+  u8  type_tag                // 0x08 = ASCIIZ string; others reserved
+  u8  flags                   // observed 0x00; opaque
+  u32 value_len               // includes trailing NUL when type_tag=0x08
+  char value[value_len]
+```
+
+The CTitle `name` (`"MSN Today"` on 4.ttl) is the authored display name the MSN Today viewer surfaces as the window caption; see `docs/MEDVIEW.md` §4.4 for how the server relays it in the 9-section MedView body.
+
+#### 3.1.3 `\x03object` (per-storage)
+
+The opaque instance stream produced by `extract_object`. On 4.ttl:
+
+- Small classes (CTitle 40 B, CBFrame 36 B, CBForm 45 B, CStyleSheet 46 B, CResourceFolder 25 B) store serialized C++ members directly.
+- CVForm (534 B on 4.ttl) carries a 9-byte header (`01 [u32 uncompressed_size] [u32 compressed_size]`) followed by a compressed body. The algorithm is some MS-stock legacy variant (not zlib / deflate / gzip); decompression requires RE of `COSCL.DLL!extract_object` and the matching decoder.
+
+The 9-section MedView body the viewer consumes (`docs/MEDVIEW.md` §4.4) does NOT need these bytes for the caption — only `CTitle.name` from §3.1.2 drives that — but populating the fixed-size record sections (1/2/3/7) of the MedView body from authored content would require decoding this layer.
+
 ---
 
 ## 4. Release targets

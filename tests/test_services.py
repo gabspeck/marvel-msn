@@ -1197,8 +1197,9 @@ class TestMEDVIEWHandshake(unittest.TestCase):
 class TestMEDVIEWTitleOpen(unittest.TestCase):
     # TitleOpen spec format is `:%d[%s]%d` (docs/MOSVIEW.md §5.3); on the
     # HRMOSExec(c=6) path MSN Today lands as `:2[4]0` — svcid=2, deid=4,
-    # serial=0.  The `_title_name_from_spec` helper extracts "4" which
-    # hits the _TITLE_NAMES table → "MSN Today".
+    # serial=0.  `_title_name_from_spec` extracts "4", the handler then
+    # reads `resources/titles/4.ttl` and pulls CTitle.name ("MSN Today")
+    # via the TTL parser (see src/server/services/ttl.py and docs/BLACKBIRD.md §3).
     _MSN_TODAY_REQ = (
         b"\x04\x87:2[4]0\x00"        # tag=0x04 var, len|0x80=0x87, 7-byte ASCIIZ
         b"\x03\x00\x00\x00\x00"      # cached checksum 1 = 0
