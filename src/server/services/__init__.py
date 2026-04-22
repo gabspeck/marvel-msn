@@ -1,6 +1,7 @@
 from .dirsrv import DIRSRVHandler
 from .ftm import FTMHandler
 from .logsrv import LOGSRVHandler
+from .medview import MEDVIEWHandler
 from .olregsrv import OLREGSRVHandler
 from .onlstmt import OnlStmtHandler
 
@@ -10,4 +11,5 @@ SERVICE_HANDLERS = {
     "FTM": FTMHandler,
     "OLREGSRV": OLREGSRVHandler,
     "OnlStmt": OnlStmtHandler,
+    "MEDVIEW": MEDVIEWHandler,
 }

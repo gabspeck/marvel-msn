@@ -410,7 +410,7 @@ Image/metafile decompression + progressive rendering (PITS — Progressive Image
 - `?ProgCreate@@` [9], `?ProgAddData@@` [7], `?ProgPaint@@` [10]
 - `ghUniversalPalette` [38], `g_dwXFactor` / `g_dwYFactor` [36,37]
 
-**Ghidra status**: Not imported. **Imports**: only `KERNEL32`/`GDI32`/`USER32` — low-level rendering.
+**Ghidra status**: Imported (auto-analyzed, image base `0x7f470000`, 188 functions). **Imports**: only `KERNEL32`/`GDI32`/`USER32` — low-level rendering.
 
 ### MOSCC.DLL — *MOS Custom Controls* (DLL, 46 KB)
 
@@ -504,7 +504,7 @@ The MedView rendering/scrolling/selection engine — 154 exports, all `MV*` / `f
 - `MVBaggageAsyncClose` [2], `MVBaggageAsyncGetFile` [3], `MVBaggageAsyncState` [4]
 - `fMVSetHotspotCallback` [74], `fMVGetHotspotInfo` [59]
 
-**Ghidra status**: Not imported.
+**Ghidra status**: Imported (auto-analyzed, image base `0x7e880000`, 434 functions).
 
 ### MVPR14N.DLL — *MedView Presenter* (DLL, 50 KB)
 
@@ -546,7 +546,7 @@ MedView DIB display extension with a MedView hotspot cursor. **Subsystem 1** in 
 - `gMVDIBHotSpotCursor` [7]
 - `WEP` [1]
 
-**Ghidra status**: Not imported. **Imports**: `CCAPI.DLL`, `MVTTL14C`, `MOSCOMP.DLL`, `MVCL14N`. **Notes**: Role inferred from imports + name; no wire evidence.
+**Ghidra status**: Imported (auto-analyzed, image base `0x7f4f0000`, 222 functions). **Imports**: `CCAPI.DLL`, `MVTTL14C`, `MOSCOMP.DLL`, `MVCL14N`. **Notes**: Role inferred from imports + name; no wire evidence.
 
 ---
 

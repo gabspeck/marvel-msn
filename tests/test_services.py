@@ -6,10 +6,18 @@ import unittest
 from server.config import (
     DIRSRV_INTERFACE_GUIDS,
     LOGSRV_INTERFACE_GUIDS,
+    MEDVIEW_INTERFACE_GUIDS,
+    MEDVIEW_SELECTOR_HANDSHAKE,
+    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+    MEDVIEW_SELECTOR_TITLE_GET_INFO,
+    MEDVIEW_SELECTOR_TITLE_OPEN,
+    MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
     OLREGSRV_INTERFACE_GUIDS,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_LAST_DATA,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_END_STATIC,
 )
 from server.models import DirsrvRequest, DwordParam, EndMarker, VarParam
 from server.mpc import (
@@ -39,6 +47,7 @@ from server.services.logsrv import (
     build_logsrv_bootstrap_payload,
     build_logsrv_service_map_payload,
 )
+from server.services.medview import MEDVIEWHandler
 from server.services.olregsrv import (
     OLREGSRVHandler,
     build_olregsrv_service_map_payload,
@@ -1129,6 +1138,212 @@ class TestGetShabbyReplyFragmentation(unittest.TestCase):
         self.assertEqual(chunk[2:], host_block)
         # And the blob body is literally default.ico.
         self.assertTrue(host_block.endswith(blob))
+
+
+class TestMEDVIEWServiceMap(unittest.TestCase):
+    def test_guid_count(self):
+        # docs/MEDVIEW.md §2.1 — 42 IIDs sourced from MVTTL14C.DLL:0x7E84C1B0.
+        self.assertEqual(len(MEDVIEW_INTERFACE_GUIDS), 42)
+
+    def test_selectors_are_1_based_contiguous(self):
+        # Client indexes the array at call time; selectors must match
+        # position + 1 so the hard-coded 0x1F (handshake) resolves to
+        # IID 00028BB8 at position 30.
+        for i, (_guid, sel) in enumerate(MEDVIEW_INTERFACE_GUIDS):
+            self.assertEqual(sel, i + 1)
+
+    def test_handshake_selector_is_0x1F(self):
+        self.assertEqual(MEDVIEW_SELECTOR_HANDSHAKE, 0x1F)
+
+    def test_title_open_selector_is_0x01(self):
+        self.assertEqual(MEDVIEW_SELECTOR_TITLE_OPEN, 0x01)
+
+    def test_discovery_payload_size(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        pkts = handler.build_discovery_packet(3, 3)
+        self.assertIsInstance(pkts, list)
+        self.assertGreaterEqual(len(pkts), 1)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertIsNotNone(parsed)
+        self.assertTrue(parsed.crc_ok)
+
+
+class TestMEDVIEWHandshake(unittest.TestCase):
+    def test_handshake_reply_is_nonzero_dword(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # Request: 0x01 0x01 (byte=1), 0x04 with 12 zero bytes, 0x83 recv.
+        req_payload = bytes.fromhex("01 01 04 8c 00 00 20 00 06 40 00 00 09 04 00 00 83")
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_HANDSHAKE, 0, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        # Extract the host block payload from the pipe frame.
+        # Layout: header byte + size_prefix (2B) + routing (2B) + host_block
+        # host_block: class + selector + VLI req_id + reply_payload
+        body = parsed.payload
+        # Skip: header(1) + size(2) + routing(2) + class(1) + selector(1) + vli(1)
+        reply_payload = body[8:]
+        self.assertEqual(reply_payload[0], 0x83)  # dword tag
+        validation = struct.unpack("<I", reply_payload[1:5])[0]
+        self.assertNotEqual(validation, 0)
+        self.assertEqual(reply_payload[5], TAG_END_STATIC)
+
+    def test_handshake_unknown_selector_returns_none(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        pkt = handler.handle_request(0x01, 0x99, 0, b"", 5, 5)
+        self.assertIsNone(pkt)
+
+
+class TestMEDVIEWTitleOpen(unittest.TestCase):
+    # TitleOpen spec format is `:%d[%s]%d` (docs/MOSVIEW.md §5.3); on the
+    # HRMOSExec(c=6) path MSN Today lands as `:2[4]0` — svcid=2, deid=4,
+    # serial=0.  The `_title_name_from_spec` helper extracts "4" which
+    # hits the _TITLE_NAMES table → "MSN Today".
+    _MSN_TODAY_REQ = (
+        b"\x04\x87:2[4]0\x00"        # tag=0x04 var, len|0x80=0x87, 7-byte ASCIIZ
+        b"\x03\x00\x00\x00\x00"      # cached checksum 1 = 0
+        b"\x03\x00\x00\x00\x00"      # cached checksum 2 = 0
+        b"\x81\x81\x83\x83\x83\x83\x83"
+    )
+
+    def _decode_reply(self, req_payload):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, req_payload, 5, 5,
+        )
+        self.assertIsNotNone(pkts)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        # Frame layout: header(1) + size(2) + routing(2) + class(1)
+        # + selector(1) + vli(1) — reply tagged stream starts at +8.
+        return parsed.payload[8:]
+
+    def test_title_open_reply_has_static_plus_dynamic(self):
+        reply = self._decode_reply(self._MSN_TODAY_REQ)
+        # Must start with 0x81 (title_id byte), nonzero value.
+        self.assertEqual(reply[0], 0x81)
+        self.assertNotEqual(reply[1], 0)  # title_id must be nonzero!
+        # Second byte: 0x81 service_byte
+        self.assertEqual(reply[2], 0x81)
+        # Then 5×0x83 dwords
+        pos = 4
+        for _ in range(5):
+            self.assertEqual(reply[pos], 0x83)
+            pos += 5
+        # End-static
+        self.assertEqual(reply[pos], TAG_END_STATIC)
+        pos += 1
+        # Dynamic-complete
+        self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
+
+    def test_title_open_body_is_nine_section_with_msn_today_label(self):
+        # After 2×0x81 + 5×0x83 static + 0x87 + 0x86 the dynamic body runs
+        # to end-of-frame.  For MSN Today (deid="4") the synthesized body
+        # places "MSN Today\0" in section 4 (the raw-blob the title-name
+        # query at MOSVIEW!0x7F3C6575 actually reads via info_kind=1).
+        reply = self._decode_reply(self._MSN_TODAY_REQ)
+        # Static prefix: 2×2 (tagged bytes) + 5×5 (tagged dwords) + 1 (0x87)
+        # + 1 (0x86) = 31 bytes before the dynamic payload.
+        body = reply[31:]
+        self.assertEqual(body[:8], b"\x00\x00" * 4)      # Sections 0-3 empty
+        self.assertEqual(body[8:10], b"\x0a\x00")        # Section 4 size=10
+        self.assertEqual(body[10:20], b"MSN Today\x00")  # Section 4 data
+        self.assertEqual(body[20:26], b"\x00\x00" * 3)   # Sections 5-7 empty
+        self.assertEqual(body[26:28], b"\x00\x00")       # Section 8 count=0
+        self.assertEqual(len(body), 28)
+
+    def test_title_open_body_falls_back_to_deid_for_unknown(self):
+        # deid "42" isn't in _TITLE_NAMES — the handler synthesizes
+        # "Title 42\0" so the viewer still shows something informative
+        # instead of "Unknown Title Name".
+        req = (
+            b"\x04\x88:2[42]0\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x81\x81\x83\x83\x83\x83\x83"
+        )
+        reply = self._decode_reply(req)
+        body = reply[31:]
+        self.assertEqual(body[:8], b"\x00\x00" * 4)
+        self.assertEqual(body[8:10], b"\x09\x00")        # "Title 42\0" = 9 bytes
+        self.assertEqual(body[10:19], b"Title 42\x00")
+        self.assertEqual(body[19:25], b"\x00\x00" * 3)
+        self.assertEqual(body[25:27], b"\x00\x00")
+
+
+class TestMEDVIEWTitleGetInfo(unittest.TestCase):
+    def test_get_info_reply_size_zero(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # Request: 0x01 <title_byte>, 3× 0x03 dword, 0x83 recv.
+        req_payload = bytes.fromhex(
+            "01 01"
+            "03 07 00 00 00"    # info_kind=7 (0x2B records)
+            "03 00 00 2b 00"    # bufsize=0x002b, index=0
+            "03 00 00 00 00"    # buffer_ptr=0
+            "83"
+        )
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_GET_INFO, 2, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        body = parsed.payload
+        reply = body[8:]
+        # 0x83 <dword=0>
+        self.assertEqual(reply[0], 0x83)
+        size = struct.unpack("<I", reply[1:5])[0]
+        self.assertEqual(size, 0)
+        # 0x87 end-static
+        self.assertEqual(reply[5], TAG_END_STATIC)
+        # 0x86 dynamic-complete-signal
+        self.assertEqual(reply[6], TAG_DYNAMIC_COMPLETE_SIGNAL)
+
+
+class TestMEDVIEWTitlePreNotify(unittest.TestCase):
+    def test_pre_notify_reply_is_end_static_only(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # Request: 0x01 0x00, 0x02 0x0a 0x00 (opcode=10), 0x04 with 6 bytes.
+        req_payload = bytes.fromhex("01 00 02 0a 00 04 86 00 00 00 00 00 00")
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY, 3, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        body = parsed.payload
+        reply = body[8:]
+        # Single 0x87 end-static, nothing else.
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+
+class TestMEDVIEWSubscribeNotification(unittest.TestCase):
+    def test_subscribe_reply_is_end_static_only(self):
+        # Each of the 5 subscribers hrAttachToService allocates calls
+        # selector 0x17 with `01 <type> 88`: tagged byte (the
+        # notification-type index) + one recv descriptor for the async
+        # handle.  Server declines with static-only so slot 0x48 on the
+        # client reads *ppvVar1 == NULL and the subscribe is skipped.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        for notification_type in range(5):
+            req_payload = bytes([0x01, notification_type, 0x88])
+            pkts = handler.handle_request(
+                0x01,
+                MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+                notification_type,
+                req_payload,
+                5,
+                5,
+            )
+            self.assertIsNotNone(pkts)
+            parsed = parse_packet(pkts[0][:-1])
+            self.assertTrue(parsed.crc_ok)
+            reply = parsed.payload[8:]
+            self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+
+class TestMEDVIEWOneway(unittest.TestCase):
+    def test_oneway_continuation_returns_none(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # class=0xE6 → one-way continuation, no reply expected.
+        pkt = handler.handle_request(0xE6, 0x01, 0, b"\x00" * 16, 5, 5)
+        self.assertIsNone(pkt)
 
 
 if __name__ == "__main__":

@@ -29,13 +29,28 @@ From `CMosTreeNode::OkToGetChildren`:
 | 3 | `0` | reserved / flags |
 | 4 | `this->field_2D` (+0xB4 dword) | handle / token |
 | 5 | `ppuVar5` | **requested property tag list** |
-| 6 | `&DAT_7F40B038` | locale descriptor / LCID blob |
+| 6 | `&DAT_7F40B038` | locale_raw: `[u32 filter_on][u32 lcid?]` — 4 bytes if `filter_on=0`, 8 bytes if `filter_on=1` (see below) |
 | 7 | `&this->field_2C` (+0xB0) | out: child count |
 | 8 | `&this->field_29` (+0xA4) | out: TREENVCL dynamic handle / iterator wrapper |
 
 On success, child count and the dynamic handle land in the node struct. On zero
 children the `no-more-children` flag (`flags_3B |= 4`) gets set, suppressing
 future calls. On wire error the dynamic handle is cleared to 0.
+
+### `locale_raw` shape
+
+Arg 6 is a variable-length blob: either `[u32 filter_on=0]` (4 bytes, language-agnostic)
+or `[u32 filter_on=1][u32 lcid]` (8 bytes, filter to `lcid`). MOSSHELL and DSNAV
+nav paths always pass the 4-byte form (`&DAT_7F40B038 = 00 00 00 00`). MOSFIND
+is the only caller that alternates between shapes: it flips to the 8-byte form
+when `HKCU\Software\Microsoft\MOS\Preferences\ShowAllLanguages` is FALSE and
+fills `lcid` from `BrowseLanguage`.
+
+Server-side, `filter_on=1` means "honour the language filter"; the server is
+also expected to echo the same `filter_on` byte back into the upper dword of
+any per-record `q` property value it emits (see `project_dirsrv_language_list`
+memory for the q-list fetch shape). In practice the q-list path only ever
+requests with `filter_on=0`, so the echoed upper dword is always `0`.
 
 `OkToGetChildren` does **not** allocate a finished `CMosTreeNode[]` array here.
 That happens lazily in `CMosTreeNode::GetNthChild` (`7F3FDFC4`): it calls

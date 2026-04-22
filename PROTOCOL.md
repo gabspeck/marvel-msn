@@ -353,7 +353,7 @@ a final `0x84` completion slot — server must **not** send data for it.
 | FTM | — | File Transfer Manager (signup RTFs, billing plans) | working |
 | OLREGSRV | — | Signup wizard Submit | working |
 | ONLSTMT | 3 | Account statement (subscriptions, usage, plans) | working |
-| MEDVIEW | 0x1400800A | Multimedia content viewer | not implemented |
+| MEDVIEW | 0x1400800A | Multimedia content viewer (MOSVIEW titles) | MVP (see `docs/MEDVIEW.md`) |
 | CONFLOC | — | Conference locator (chat) | not implemented |
 | CONFSRV | — | Conference server (chat) | not implemented |
 
@@ -716,7 +716,31 @@ Encodings:
 - Currency: ISO 4217 numeric code.
 - Date wire form: `days_wire = days_since_1970 + 0x63DF`.
 
-### 7.6 MEDVIEW / CONFLOC / CONFSRV
+### 7.6 MEDVIEW
+
+Service version `0x1400800A`. Host = `MOSVIEW.EXE` (App #6). Used by MSN
+Today (`4:0`, App #6, selector `T`) and any content surface that hands
+control to the MedView viewer.
+
+**Discovery**: 42 IIDs (`00028B71..74`, `78..79`, `81..86`, `8A..91`,
+`A0..A1`, `B0..B8`, `C0..CA` in the Marvel `-…C000-…46` template). Selector
+assignment is 1-based in array order, so `00028BB8` → selector `0x1F`
+(handshake) and `00028BB7` → selector `0x1E` (TitlePreNotify).
+
+**Selectors used on the initial-open path**:
+
+| Sel | Purpose | Request | Reply |
+|----:|---------|---------|-------|
+| `0x1F` | Handshake | `0x01 <byte=1>` + `0x04 <12B: 0x2000, 0x4006, lcid>` + `0x83` | `0x83 <nonzero>` + `0x87` |
+| `0x1E` | TitlePreNotify | `0x01 <title_byte>` + `0x02 <opcode>` + `0x04 <body>` | `0x87` |
+| `0x01` | TitleOpen | `0x04 <title_spec>` + `0x03 <chk1>` + `0x03 <chk2>` + 7 recv descriptors | 2×`0x81` + 5×`0x83` + `0x87` + `0x86 <title body>` |
+| `0x03` | TitleGetInfo | `0x01 <title_byte>` + 3×`0x03 <dword>` + `0x83` | `0x83 <size>` + `0x87` + `0x86 <buffer>` |
+
+See `docs/MEDVIEW.md` for full details including the title body layout
+(DIB section + fixed-size record arrays + string lists) and the MVP
+handler checklist.
+
+### 7.7 CONFLOC / CONFSRV
 
 Static-only — not implemented on the server side. See Open Questions.
 
@@ -826,7 +850,8 @@ Other keys:
 | DIRSRV `wv` vs `mf` split | Two GetShabby calls fire per node (`req_id=1` driven by `wv`, `req_id=9` driven by `mf` via `FUN_7F405018`). Presumably two icon sizes / display modes, but the exact consumer on the `wv` side isn't traced yet. |
 | Properties titlebar | Blank on **first** open of each node's Properties dialog — only shows "MSN Today" on re-open (cache hit). Suggests 'e' cache-population timing vs `CMosTreeNode::Properties` read order. |
 | `CMosTreeNode::Properties` Context tab | "Cannot open service" (resource 0xDE). Factory call at `FUN_7F402098` returns failure — unrelated to wire format. |
-| MEDVIEW / CONFLOC / CONFSRV | Services referenced in static strings; not implemented. |
+| CONFLOC / CONFSRV | Conference services referenced in static strings; not implemented. |
+| MEDVIEW title body | MVP ships 9-section stream with only the string-table populated (deid-keyed title name). Rich content (banner + fixed-size record arrays) requires decoding Blackbird's COSCL compound-file upload; see `docs/MEDVIEW.md` §4.4 and `docs/BLACKBIRD.md` §4.4. |
 | X.25 handshake | Static analysis only; never exercised. |
 
 ---

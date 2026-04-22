@@ -217,4 +217,44 @@ ONLSTMT_INTERFACE_GUIDS = [
     (_guid_le("00028BCA-0000-0000-C000-000000000046"), 0x1B),
 ]
 
+# MEDVIEW (MedView title loader — MOSVIEW.EXE).  Client-side IID array at
+# MVTTL14C.DLL:0x7E84C1B0 — 42 IIDs consulted by hrAttachToService when
+# the factory resolves the service's interface table.  Selectors assigned
+# 1-based in array order, matching the in-code immediates used by
+# MVTTL14C (TitleOpen=1, TitleGetInfo=3, TitlePreNotify=0x1E, handshake=0x1F).
+# See docs/MEDVIEW.md §2.1.
+MEDVIEW_INTERFACE_GUIDS = [
+    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
+    for sel, xx in enumerate(
+        (
+            0x71, 0x72, 0x73, 0x74, 0x78, 0x79,
+            0x81, 0x82, 0x83, 0x84, 0x85, 0x86,
+            0x8A, 0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x90, 0x91,
+            0xA0, 0xA1,
+            0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8,
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA,
+        ),
+        start=0x01,
+    )
+]
+
+# MEDVIEW service version advertised at pipe-open time.  Value at
+# MVTTL14C.DLL:hrAttachToService (factory slot 0x24, 5th arg).  The client
+# stores it locally only — the server just has to accept the pipe.
+MEDVIEW_SERVICE_VERSION = 0x1400800A
+
+# MEDVIEW selectors used on the initial-open path.  Hard-coded in
+# MVTTL14C as integer immediates to slot 0x0C on the service proxy.
+MEDVIEW_SELECTOR_TITLE_OPEN = 0x01
+MEDVIEW_SELECTOR_TITLE_GET_INFO = 0x03
+# Async-notification subscribe: `hrAttachToService` allocates 5 callback
+# slots via `FUN_7e84485f`, each of which fires `FUN_7e844ee6` to call
+# selector 0x17 with a single byte (the notification-type index, 0-7).
+# The reply is expected to carry an async-iterator handle; an empty
+# static-only reply tells the client "subscribe declined" so it stops
+# retrying this slot.  No live notification feed exists server-side yet.
+MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION = 0x17
+MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY = 0x1E
+MEDVIEW_SELECTOR_HANDSHAKE = 0x1F
+
 del _guid_le
