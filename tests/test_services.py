@@ -251,7 +251,10 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(0x87, payload)
         self.assertIn(0x88, payload)
 
-    def test_children_contains_msn_root(self):
+    def test_children_of_default_root_return_localized_wrappers(self):
+        # DirsrvRequest() defaults to node_id="0:0". MSN root is server wire
+        # "0:0" (GetSpecialMnid(0) → field_8=0, field_c=0). Its children list
+        # is the address-bar dropdown: Cats US / MA US / WW Cat / WW MA.
         request = DirsrvRequest(
             dword_0=1,
             dword_1=14,
@@ -259,10 +262,12 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(b"The Microsoft Network", payload)
-        self.assertIn(struct.pack("<II", 1, 0), payload)
+        self.assertIn(b"Categories (US)", payload)
+        self.assertIn(b"Worldwide Member Assistance", payload)
 
-    def test_root_properties_alias_to_special_msn_root(self):
+    def test_msn_root_self_properties_return_correct_name(self):
+        # Client's MSN root wire = "0:0". Self-query returns "The Microsoft
+        # Network" with mnid_a = (0, 0) — its own (field_8, field_c).
         request = DirsrvRequest(
             node_id="0:0",
             node_id_raw=struct.pack("<II", 0, 0),
@@ -273,7 +278,6 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_dirsrv_reply_payload(request)
         self.assertIn(b"The Microsoft Network", payload)
-        self.assertIn(struct.pack("<II", 1, 0), payload)
 
     def test_special_msn_today_node_returns_title(self):
         request = DirsrvRequest(
@@ -328,25 +332,48 @@ class TestDIRSRVReply(unittest.TestCase):
         # the wire cmdline, not a DnR temp filename.
         self.assertNotIn(b"fn\x00\x01MSNTODAY.HTM", payload)
 
-    def test_msn_root_children_emit_category_nodes(self):
+    def test_msn_root_children_emit_localized_wrappers(self):
+        # Server "0:0" is the HOMEBASE Categories LJUMP target (LJUMP 1:0:0:0
+        # resolves to the client's MSN root which has wire key "0:0" on the
+        # server). GetLocalizedNode on this node takes the first child, so
+        # Cats US must lead the list for the Categories button to land there.
         request = DirsrvRequest(
-            node_id="1:0",
-            node_id_raw=struct.pack("<II", 1, 0),
+            node_id="0:0",
+            node_id_raw=struct.pack("<II", 0, 0),
             dword_0=1,
             dword_1=14,
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
-        self.assertIn(struct.pack("<II", 0x44000F, 0), payload)
-        self.assertIn(b"The News", payload)
-        self.assertIn(b"Entertainment", payload)
+        self.assertIn(struct.pack("<II", 1, 0x10), payload)  # Categories (US) 'a'
+        self.assertIn(struct.pack("<II", 1, 0x11), payload)  # Member Assistance (US) 'a'
+        self.assertIn(struct.pack("<II", 1, 0x12), payload)  # Worldwide Categories 'a'
+        self.assertIn(struct.pack("<II", 1, 0), payload)     # WW MA (aliased to wire "1:0")
+        self.assertIn(b"Categories (US)", payload)
+        self.assertIn(b"Member Assistance (US)", payload)
+        self.assertIn(b"Worldwide Categories", payload)
+        self.assertIn(b"Worldwide Member Assistance", payload)
+        self.assertNotIn(struct.pack("<II", 4, 0), payload)  # no MSN Today
+        self.assertNotIn(struct.pack("<II", 3, 1), payload)  # no Favorite Places
+
+    def test_narrow_root_children_request_returns_localized_wrappers(self):
+        request = DirsrvRequest(
+            node_id="0:0",
+            node_id_raw=struct.pack("<II", 0, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(struct.pack("<II", 1, 0x10), payload)
+        self.assertIn(b"Categories (US)", payload)
         self.assertNotIn(struct.pack("<II", 4, 0), payload)
         self.assertNotIn(struct.pack("<II", 3, 1), payload)
-        self.assertNotIn(struct.pack("<II", 1, 1), payload)
 
-    def test_narrow_root_children_request_returns_category_nodes(self):
+        # Server "1:0" is the LJUMP 1:1:0:0 target (client's MSN Central /
+        # Worldwide Member Assistance hub). Its children are MA US + MA BR.
         request = DirsrvRequest(
             node_id="1:0",
             node_id_raw=struct.pack("<II", 1, 0),
@@ -356,27 +383,14 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
-        self.assertIn(b"The News", payload)
-        self.assertNotIn(struct.pack("<II", 4, 0), payload)
-        self.assertNotIn(struct.pack("<II", 3, 1), payload)
-        self.assertNotIn(struct.pack("<II", 1, 1), payload)
+        self.assertIn(struct.pack("<II", 1, 0x11), payload)
+        self.assertIn(b"Member Assistance (US)", payload)
 
-        request = DirsrvRequest(
-            node_id="1:1",
-            node_id_raw=struct.pack("<II", 1, 1),
-            dword_0=1,
-            dword_1=14,
-            prop_group="a\x00e",
-            recv_descriptors=[0x83, 0x83, 0x85],
-        )
-        payload = build_dirsrv_reply_payload(request)
-        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
-        self.assertIn(b"The News", payload)
-
+        # Unknown / terminal-leaf nodes must not leak the fallback sentinel
+        # (FFFFFFFF:FFFFFFFF) into the listview.
         for node_id, raw in (
             ("3:1", struct.pack("<II", 3, 1)),
-            ("4456462:0", struct.pack("<II", 0x44000E, 0)),
+            (f"1:{0x100}", struct.pack("<II", 1, 0x100)),  # Arts and Entertainment
         ):
             request = DirsrvRequest(
                 node_id=node_id,
@@ -387,12 +401,42 @@ class TestDIRSRVReply(unittest.TestCase):
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
             payload = build_dirsrv_reply_payload(request)
-            if node_id == "3:1":
-                self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
-            else:
-                self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
+            self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
     def test_startup_browse_walk_for_msn_root_omits_menu_aliases(self):
+        request = DirsrvRequest(
+            node_id="0:0",
+            node_id_raw=struct.pack("<II", 0, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        # MSN Today and Favorite Places are client-side HOMEBASE aliases; they
+        # must not appear in the server-enumerated root listing.
+        self.assertNotIn(struct.pack("<II", 4, 0), payload)
+        self.assertNotIn(struct.pack("<II", 3, 1), payload)
+        # The localized wrappers must be present — these are the
+        # GetLocalizedNode targets for the Categories / MA buttons.
+        self.assertIn(struct.pack("<II", 1, 0x10), payload)
+        self.assertIn(struct.pack("<II", 1, 0x11), payload)
+
+    def test_worldwide_member_assistance_hub_self_identity(self):
+        # Server wire "1:0" = client's MSN Central, overloaded as Worldwide
+        # Member Assistance. Self-query returns the WMA name.
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=0,
+            dword_1=1,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"Worldwide Member Assistance", payload)
+
+    def test_worldwide_member_assistance_children_return_locale_wrappers(self):
         request = DirsrvRequest(
             node_id="1:0",
             node_id_raw=struct.pack("<II", 1, 0),
@@ -402,40 +446,87 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertNotIn(struct.pack("<II", 1, 0), payload)
-        self.assertNotIn(struct.pack("<II", 4, 0), payload)
-        self.assertNotIn(struct.pack("<II", 3, 1), payload)
-        self.assertNotIn(struct.pack("<II", 1, 1), payload)
-        self.assertIn(struct.pack("<II", 0x44000E, 0), payload)
-        self.assertIn(struct.pack("<II", 0x44000F, 0), payload)
+        self.assertIn(b"Member Assistance (US)", payload)
+        self.assertIn(b"Member Assistance (BR)", payload)
 
-    def test_special_menu_mnid_aliases_resolve_to_named_nodes(self):
-        for node_id, raw, expected_name in (
-            ("1:1", struct.pack("<II", 1, 1), b"Member Assistance"),
-        ):
-            request = DirsrvRequest(
-                node_id=node_id,
-                node_id_raw=raw,
-                dword_0=0,
-                dword_1=1,
-                prop_group="a\x00e",
-                recv_descriptors=[0x83, 0x83, 0x85],
-            )
-            payload = build_dirsrv_reply_payload(request)
-            self.assertIn(expected_name, payload)
-
-    def test_member_assistance_children_return_category_nodes(self):
+    def test_member_assistance_us_children_emit_nine_entries_with_msn_today_link(self):
+        # 1:17 = Member Assistance (US). Its children include the live 4:0
+        # MSN Today leaf so clicking the in-MA entry launches MOSVIEW exactly
+        # as the HOMEBASE MSN Today button does.
         request = DirsrvRequest(
-            node_id="1:1",
-            node_id_raw=struct.pack("<II", 1, 1),
+            node_id=f"1:{0x11}",
+            node_id_raw=struct.pack("<II", 1, 0x11),
             dword_0=1,
             dword_1=14,
-            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
+            prop_group="a\x00c\x00b\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_dirsrv_reply_payload(request)
-        self.assertIn(b"The News", payload)
-        self.assertIn(b"Entertainment", payload)
+        self.assertIn(b"The MSN Member Lobby", payload)
+        self.assertIn(b"MSN Beta Center", payload)
+        self.assertIn(b"MSN Today", payload)
+        self.assertIn(b"Member Agreement", payload)
+        self.assertIn(struct.pack("<II", 4, 0), payload)  # live MOSVIEW leaf
+
+    def test_categories_us_children_emit_fourteen_categories(self):
+        request = DirsrvRequest(
+            node_id=f"1:{0x10}",
+            node_id_raw=struct.pack("<II", 1, 0x10),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00b\x00e\x00tp",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"Arts and Entertainment", payload)
+        self.assertIn(b"The Microsoft Network Beta", payload)
+        # "Folder"-tagged entries still surface as distinct listview rows.
+        self.assertIn(b"Interest, Leisure and Hobbies", payload)
+
+    def test_arts_and_entertainment_children_emit_subleaves(self):
+        request = DirsrvRequest(
+            node_id=f"1:{0x100}",
+            node_id_raw=struct.pack("<II", 1, 0x100),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"Books and Writing", payload)
+        self.assertIn(b"Coming Attractions", payload)
+        self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
+
+    def test_filter_on_locale_scopes_worldwide_children_to_matching_lcid(self):
+        # filter_on=1, lcid=pt-BR → WW MA's children (server "1:0") drop
+        # MA (US) and keep only MA (BR).
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            locale_raw=struct.pack("<II", 1, 0x0416),
+            locale_lcid=0x0416,
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"Member Assistance (BR)", payload)
+        self.assertNotIn(b"Member Assistance (US)", payload)
+
+        # filter_on=0 — the 4-byte form — keeps everything.
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            locale_raw=b"\x00\x00\x00\x00",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_dirsrv_reply_payload(request)
+        self.assertIn(b"Member Assistance (US)", payload)
+        self.assertIn(b"Member Assistance (BR)", payload)
 
     def test_dsnav_details_column_tags_use_documented_type_bytes(self):
         # DSNAV.md §12/§14.2 pins the wire types for the details-view columns:
@@ -588,7 +679,10 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         addrbar_payload = build_dirsrv_reply_payload(addrbar_request)
-        self.assertIn(b"The Microsoft Network", addrbar_payload)
+        # Regular GetChildren on MSN root returns the localized wrappers
+        # (the address-bar entries); the language-list short-circuit is
+        # scoped to propList=["q"] only, so this reply carries nav data.
+        self.assertIn(b"Categories (US)", addrbar_payload)
         for lcid in SUPPORTED_BROWSE_LCIDS:
             self.assertNotIn(
                 b"\x04q\x00" + struct.pack("<II", 0, lcid), addrbar_payload

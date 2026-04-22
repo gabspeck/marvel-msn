@@ -473,7 +473,7 @@ class TestFullFeatureSession(unittest.TestCase):
             + _send_param_dword(1)  # children=True
         )
         pkts = self._call_selector(self.PIPE_DIRSRV, 0x01, 0x01, kids_req, req_id=1)
-        self.assertIn(b"The Microsoft Network", self._reply_payload(pkts))
+        self.assertIn(b"Categories (US)", self._reply_payload(pkts))
 
     def _exercise_ftm(self):
         self._open_pipe(self.PIPE_FTM, "FTM", 1)

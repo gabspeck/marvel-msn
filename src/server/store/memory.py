@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import struct
+
 from .base import AppStore
 
 
@@ -14,14 +16,23 @@ class InMemoryContentStore:
     def get_node(self, node_id):
         return self._nodes.get(node_id, self._fallback)
 
-    def get_children(self, node_id):
+    def get_children(self, node_id, locale_raw=None):
         # Permissive fallback: any node without an explicit child list resolves
         # to [fallback]. CMosTreeNode::Exec caches 'z'/'c' from the GetChildren
         # reply, so returning [] breaks dispatch with "task cannot be completed".
         ids = self._children.get(node_id)
         if ids is None:
             return [self._fallback]
-        return [self._nodes[i] for i in ids]
+        nodes = [self._nodes[i] for i in ids]
+        # 8-byte locale_raw = [filter_on:u32][lcid:u32]. When filter_on=1 the
+        # client wants locale-scoped results; drop children whose language is
+        # neither the requested LCID nor 0 (Worldwide containers are tagged
+        # language=0 specifically so they survive every filter).
+        if locale_raw and len(locale_raw) >= 8:
+            filter_on, lcid = struct.unpack("<II", locale_raw[:8])
+            if filter_on:
+                nodes = [n for n in nodes if n.content.language in (0, lcid)]
+        return nodes
 
 
 class InMemoryAccountStore:

@@ -57,7 +57,11 @@ MSN_TODAY_CONTENT = NodeContent(
 )
 
 
-def _container_content(name, type_str="Directory"):
+_LCID_EN_US = 0x0409
+_LCID_PT_BR = 0x0416
+
+
+def _container_content(name, type_str="Directory", language=_LCID_EN_US):
     return NodeContent(
         name=name,
         go_word="",
@@ -66,7 +70,7 @@ def _container_content(name, type_str="Directory"):
         price_dword=0,
         rating_dword=0,
         description="",
-        language=1033,
+        language=language,
         topics="",
         people="",
         place="",
@@ -79,59 +83,134 @@ def _container_content(name, type_str="Directory"):
         size_bytes=0,
     )
 
-# MSN-root special mnid: `GetSpecialMnid(idx=0) → 1:0:0:0` (MOSSHELL
-# 0x7f3f9b3f). Post-login DIRSRV pipes 4/5 issue `GetProperties(1:0, [a,e])`
-# and `GetChildren(1:0)` to build the breadcrumb/address-bar dropdown.
-_MSN_ROOT_MNID = struct.pack("<II", 1, 0)
-# HOMEBASE/GUIDENAV menu commands route through special mnids. On the wire
-# DIRSRV only sees the 8-byte `_MosLid64` prefix: [field_0][field_8].
-_MSN_TODAY_SPECIAL_MNID = struct.pack("<II", 4, 0)
-_MEMBER_ASSISTANCE_SPECIAL_MNID = struct.pack("<II", 1, 1)
-_CATEGORIES_SPECIAL_MNID = struct.pack("<II", 1, 0)
+
+def _mnid_key(f0, f8):
+    """Wire-form node_id (decimal `f0:f8`) and the 8-byte `a` blob.
+
+    Server node_id keys are `"wire_dword_0:wire_dword_1"`, which on the
+    client side are `(field_8, field_c)` of the 24-byte `_MosNodeId`
+    (GetNthChild @ MOSSHELL 0x7f3fe131 stores `'a'[0]` into the child's
+    `field_8` slot and `'a'[1]` into `field_c`; `field_0` is inherited
+    from the parent). So if a fixture's wire key is `"X:Y"`, its `'a'`
+    payload must equal `(X, Y)`, which is what this helper packs.
+    """
+    return f"{f0}:{f8}", struct.pack("<II", f0, f8)
+
+
+# MSN root — GetSpecialMnid(idx=0) returns `(field_0=1, field_8=0, field_c=0)`,
+# which lands on the wire as `(field_8=0, field_c=0)` → server key "0:0".
+# This is the LJUMP 1:0:0:0 target (HOMEBASE Categories button).
+_MSN_ROOT_KEY, _MSN_ROOT_MNID = _mnid_key(0, 0)
+# HOMEBASE MSN Today button — LJUMP 1:4:0:0. GetSpecialMnid(idx=4) gives
+# `(field_0=1, field_8=4, field_c=0)`, wire "4:0".
+_MSN_TODAY_KEY, _MSN_TODAY_SPECIAL_MNID = _mnid_key(4, 0)
+# Client's MSN Central — GetSpecialMnid(idx=1) returns `(field_0=1, field_8=1,
+# field_c=0)`, wire "1:0". HOMEBASE Member Assistance button (LJUMP 1:1:0:0)
+# dispatches here, and GetLocalizedNode descends one level. We overload this
+# node as the Worldwide Member Assistance hub; its first child (MA US) is
+# where clicking the button lands.
+_WORLDWIDE_MEMBER_ASSISTANCE_KEY, _WORLDWIDE_MEMBER_ASSISTANCE_MNID = _mnid_key(1, 0)
+# Localized wrapper mnids. The wire key `"f8:f_c"` on the server maps to the
+# client's `(field_0=1 inherited, field_8, field_c)`.
+_CATEGORIES_US_KEY, _CATEGORIES_US_MNID = _mnid_key(1, 0x10)
+_MEMBER_ASSISTANCE_US_KEY, _MEMBER_ASSISTANCE_US_MNID = _mnid_key(1, 0x11)
+_WORLDWIDE_CATEGORIES_KEY, _WORLDWIDE_CATEGORIES_MNID = _mnid_key(1, 0x12)
+_CATEGORIES_BR_KEY, _CATEGORIES_BR_MNID = _mnid_key(1, 0x13)
+_MEMBER_ASSISTANCE_BR_KEY, _MEMBER_ASSISTANCE_BR_MNID = _mnid_key(1, 0x14)
 
 ROOT_CONTENT = _container_content("Root")
 MSN_ROOT_CONTENT = _container_content("The Microsoft Network")
-MEMBER_ASSISTANCE_CONTENT = _container_content("Member Assistance")
-CATEGORIES_CONTENT = _container_content("Categories")
 
-# Categories sub-folders returned when the client browses the special
-# categories/member-assistance nodes. Each is a Browse container (app_id=1),
-# so clicking one opens its own child list rather than triggering DnR.
-CATEGORY_DEFS = (
-    (0x44000E, "The News"),
-    (0x44000F, "Entertainment"),
-    (0x440010, "Computers & Software"),
-    (0x440011, "Business & Finance"),
-    (0x440012, "Sports, Health & Fitness"),
-    (0x440013, "Science & Technology"),
-    (0x440014, "Arts & Entertainment"),
-    (0x440015, "Education & Reference"),
+# Localized wrappers. `language=0` on the Worldwide containers marks them as
+# locale-neutral so a future `filter_on=1` request with any LCID still
+# accepts them.
+CATEGORIES_US_CONTENT = _container_content("Categories (US)", language=_LCID_EN_US)
+MEMBER_ASSISTANCE_US_CONTENT = _container_content(
+    "Member Assistance (US)", language=_LCID_EN_US
+)
+CATEGORIES_BR_CONTENT = _container_content("Categories (BR)", language=_LCID_PT_BR)
+MEMBER_ASSISTANCE_BR_CONTENT = _container_content(
+    "Member Assistance (BR)", language=_LCID_PT_BR
+)
+WORLDWIDE_CATEGORIES_CONTENT = _container_content("Worldwide Categories", language=0)
+WORLDWIDE_MEMBER_ASSISTANCE_CONTENT = _container_content(
+    "Worldwide Member Assistance", language=0
 )
 
 
-def _category_node(id1, name):
+# Categories (US) — KNOWN-CONTENT.md §"Categories (US)". `tp` is "Folder" for
+# the two entries the video shows with the generic folder icon, "Category"
+# for the rest.
+CATEGORY_DEFS = (
+    (0x100, "Arts and Entertainment", "Category"),
+    (0x101, "Business and Finance", "Category"),
+    (0x102, "Computers and Software", "Category"),
+    (0x103, "Education and Reference", "Category"),
+    (0x104, "Home and Family", "Category"),
+    (0x105, "Interest, Leisure and Hobbies", "Folder"),
+    (0x106, "People and Communities", "Category"),
+    (0x107, "Public Affairs", "Category"),
+    (0x108, "Science and Technology", "Category"),
+    (0x109, "Special Events", "Category"),
+    (0x10A, "Sports, Health and Fitness", "Category"),
+    (0x10B, "The Internet Center", "Category"),
+    (0x10C, "The MSN Member Lobby", "Folder"),
+    (0x10D, "The Microsoft Network Beta", "Category"),
+)
+
+
+# Arts and Entertainment's sub-tree — KNOWN-CONTENT.md §"Arts and Entertainment".
+A_AND_E_CHILD_DEFS = (
+    (0x200, "Books and Writing"),
+    (0x201, "Movies"),
+    (0x202, "Art and Design"),
+    (0x203, "Television and Radio"),
+    (0x204, "Arts and Entertainment Kiosk"),
+    (0x205, "Arts Suggestion Box"),
+    (0x206, "The Big Chip"),
+    (0x207, "Genres"),
+    (0x208, "Comedy and Humor"),
+    (0x209, "The Music Forum"),
+    (0x20A, "Theater and Performance"),
+    (0x20B, "Other Entertaining Places to Visit"),
+    (0x20C, "Coming Attractions"),
+)
+
+
+# Member Assistance (US) — KNOWN-CONTENT.md §"Member assistance (US)". Slot
+# index 2 ("MSN Today") is NOT in this list — the children wiring inserts
+# the existing 4:0 node there so clicking it launches MOSVIEW (c=6) the same
+# way the HOMEBASE MSN Today button does.
+MEMBER_ASSISTANCE_LEAF_DEFS = (
+    (0x300, "The MSN Member Lobby"),
+    (0x301, "MSN Beta Center"),
+    (0x303, "Member Assistance Kiosk - July 19"),
+    (0x304, "First-Time-User Experience"),
+    (0x305, "Member Guidelines"),
+    (0x306, "MSN Beta News Flash - July 19"),
+    (0x307, "Member Guidelines"),
+    (0x308, "Member Agreement"),
+)
+
+
+def _dirsrv_container(f0, f8, name, *, type_str="Directory", language=_LCID_EN_US):
+    key, mnid = _mnid_key(f0, f8)
     return DirectoryNode(
-        node_id=f"{id1}:0",
+        node_id=key,
         is_container=True,
         app_id=APP_DIRECTORY_SERVICE,
-        mnid_a=struct.pack("<II", id1, 0),
-        content=_container_content(name),
+        mnid_a=mnid,
+        content=_container_content(name, type_str=type_str, language=language),
     )
 
+
 DIRECTORY_NODES = [
-    # Wire root alias. The client probes `GetProperties(0:0, [a,e])` during
-    # login, then immediately browses whatever 8-byte mnid comes back in `a`.
-    # Advertising the old synthetic container mnid `0x44000c:0` sent the
-    # client into the stale "MSN Central" path; alias it to the real special
-    # root `1:0` instead so the subsequent browse matches the post-login tree.
+    # MSN root (wire "0:0") — client's GetSpecialMnid(idx=0). Listed as the
+    # LJUMP 1:0:0:0 target (Categories button). GetLocalizedNode on this node
+    # descends one level and takes the first child; the children list below
+    # puts Cats US first so clicking Categories lands on Categories (US).
     DirectoryNode(
-        node_id="0:0", is_container=True, app_id=APP_DIRECTORY_SERVICE, mnid_a=_MSN_ROOT_MNID, content=MSN_ROOT_CONTENT
-    ),
-    # MSN root as the client's GetSpecialMnid(idx=0) sees it. Served so that
-    # post-login breadcrumb walks `GetProperties(1:0, [a,e])` get the real
-    # "The Microsoft Network" identity instead of falling back to MSN Today.
-    DirectoryNode(
-        node_id="1:0",
+        node_id=_MSN_ROOT_KEY,
         is_container=True,
         app_id=APP_DIRECTORY_SERVICE,
         mnid_a=_MSN_ROOT_MNID,
@@ -159,34 +238,111 @@ DIRECTORY_NODES = [
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
         content=MSN_TODAY_CONTENT,
     ),
+    # Worldwide Member Assistance hub at server wire "1:0" — which is also
+    # client's MSN Central (GetSpecialMnid(idx=1)). HOMEBASE Member Assistance
+    # button (LJUMP 1:1:0:0) dispatches here, and GetLocalizedNode takes the
+    # first child. Children are ordered so MA US comes first: clicking the
+    # button lands on Member Assistance (US) with its 9 leaves visible.
     DirectoryNode(
-        node_id="1:1",
+        node_id=_WORLDWIDE_MEMBER_ASSISTANCE_KEY,
         is_container=True,
         app_id=APP_DIRECTORY_SERVICE,
-        mnid_a=_MEMBER_ASSISTANCE_SPECIAL_MNID,
-        content=MEMBER_ASSISTANCE_CONTENT,
+        mnid_a=_WORLDWIDE_MEMBER_ASSISTANCE_MNID,
+        content=WORLDWIDE_MEMBER_ASSISTANCE_CONTENT,
     ),
-    *[_category_node(id1, name) for id1, name in CATEGORY_DEFS],
+    # Localized Categories / Member Assistance wrappers and the Worldwide
+    # Categories hub, following KNOWN-CONTENT.md's address-bar hierarchy.
+    DirectoryNode(
+        node_id=_CATEGORIES_US_KEY,
+        is_container=True,
+        app_id=APP_DIRECTORY_SERVICE,
+        mnid_a=_CATEGORIES_US_MNID,
+        content=CATEGORIES_US_CONTENT,
+    ),
+    DirectoryNode(
+        node_id=_MEMBER_ASSISTANCE_US_KEY,
+        is_container=True,
+        app_id=APP_DIRECTORY_SERVICE,
+        mnid_a=_MEMBER_ASSISTANCE_US_MNID,
+        content=MEMBER_ASSISTANCE_US_CONTENT,
+    ),
+    DirectoryNode(
+        node_id=_WORLDWIDE_CATEGORIES_KEY,
+        is_container=True,
+        app_id=APP_DIRECTORY_SERVICE,
+        mnid_a=_WORLDWIDE_CATEGORIES_MNID,
+        content=WORLDWIDE_CATEGORIES_CONTENT,
+    ),
+    DirectoryNode(
+        node_id=_CATEGORIES_BR_KEY,
+        is_container=True,
+        app_id=APP_DIRECTORY_SERVICE,
+        mnid_a=_CATEGORIES_BR_MNID,
+        content=CATEGORIES_BR_CONTENT,
+    ),
+    DirectoryNode(
+        node_id=_MEMBER_ASSISTANCE_BR_KEY,
+        is_container=True,
+        app_id=APP_DIRECTORY_SERVICE,
+        mnid_a=_MEMBER_ASSISTANCE_BR_MNID,
+        content=MEMBER_ASSISTANCE_BR_CONTENT,
+    ),
+    *[_dirsrv_container(1, f8, name, type_str=tp) for f8, name, tp in CATEGORY_DEFS],
+    *[_dirsrv_container(1, f8, name) for f8, name in A_AND_E_CHILD_DEFS],
+    *[_dirsrv_container(1, f8, name) for f8, name in MEMBER_ASSISTANCE_LEAF_DEFS],
 ]
 
 
+# MSN root's children double as the address-bar combobox under "The Microsoft
+# Network" (per KNOWN-CONTENT.md) and as the LJUMP 1:0:0:0 GetLocalizedNode
+# target list. Cats US is listed first so the Categories button lands on it.
+# WW MA is referenced by its server key (`"1:0"`) because it aliases client's
+# MSN Central — same physical node, two roles (address-bar entry + LJUMP
+# 1:1:0:0 target).
+_ARTS_AND_ENTERTAINMENT_KEY = f"1:{0x100}"
 DIRECTORY_CHILDREN = {
-    # The wire root should enumerate the client's real special root, not an
-    # invented "MSN Central" browse node.
-    "0:0": ["1:0"],
-    # The upper-left dropdown merges client-hardcoded special folders with the
-    # server-enumerated children of the MSN root. Only enumerate the real
-    # category browse nodes here; advertising the HOMEBASE menu mnids as
-    # children makes the dropdown collapse nodes together and cross-wire the
-    # Categories / Member Assistance views.
-    "1:0": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
+    _MSN_ROOT_KEY: [
+        _CATEGORIES_US_KEY,
+        _MEMBER_ASSISTANCE_US_KEY,
+        _WORLDWIDE_CATEGORIES_KEY,
+        _WORLDWIDE_MEMBER_ASSISTANCE_KEY,
+    ],
+    # MSN Central / WW MA hub — LJUMP 1:1:0:0 target. MA US first so the
+    # HOMEBASE Member Assistance click descends to Member Assistance (US).
+    _WORLDWIDE_MEMBER_ASSISTANCE_KEY: [
+        _MEMBER_ASSISTANCE_US_KEY,
+        _MEMBER_ASSISTANCE_BR_KEY,
+    ],
+    _CATEGORIES_US_KEY: [f"1:{f8}" for f8, _, _ in CATEGORY_DEFS],
+    _MEMBER_ASSISTANCE_US_KEY: [
+        f"1:{0x300}",        # The MSN Member Lobby
+        f"1:{0x301}",        # MSN Beta Center
+        "4:0",               # MSN Today — reuse existing MOSVIEW leaf
+        f"1:{0x303}",        # Member Assistance Kiosk - July 19
+        f"1:{0x304}",        # First-Time-User Experience
+        f"1:{0x305}",        # Member Guidelines (MOSVIEW)
+        f"1:{0x306}",        # MSN Beta News Flash - July 19
+        f"1:{0x307}",        # Member Guidelines (document?)
+        f"1:{0x308}",        # Member Agreement (document?)
+    ],
+    _WORLDWIDE_CATEGORIES_KEY: [_CATEGORIES_US_KEY, _CATEGORIES_BR_KEY],
+    _CATEGORIES_BR_KEY: [],
+    _MEMBER_ASSISTANCE_BR_KEY: [],
+    _ARTS_AND_ENTERTAINMENT_KEY: [f"1:{f8}" for f8, _ in A_AND_E_CHILD_DEFS],
     # Explicit empty children for the `4:0` startup node — avoids the
     # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
-    # into the rendered hierarchy.
+    # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.
     "4:0": [],
     "3:1": [],
-    "1:1": [f"{id1}:0" for id1, _ in CATEGORY_DEFS],
-    **{f"{id1}:0": [] for id1, _ in CATEGORY_DEFS},
+    # Every remaining category/A&E/MA leaf is terminal — explicit empty list
+    # keeps the fallback sentinel out of their listviews.
+    **{
+        f"1:{f8}": []
+        for f8, _, _ in CATEGORY_DEFS
+        if f8 != 0x100
+    },
+    **{f"1:{f8}": [] for f8, _ in A_AND_E_CHILD_DEFS},
+    **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_LEAF_DEFS},
 }
 
 

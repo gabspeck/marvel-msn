@@ -95,7 +95,7 @@ class DIRSRVHandler:
             reply_payload = build_get_shabby_reply_payload(payload)
         else:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_dirsrv_reply_payload(request)
+            reply_payload = build_dirsrv_reply_payload(request, selector=selector)
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
@@ -361,21 +361,39 @@ def build_props(requested_props, node, *, is_children):
     return out
 
 
-def build_dirsrv_reply_payload(request=None):
+DIRSRV_SELECTOR_GET_PROPERTIES = 0x00
+DIRSRV_SELECTOR_GET_PARENTS = 0x01
+DIRSRV_SELECTOR_GET_CHILDREN = 0x02
+
+
+def build_dirsrv_reply_payload(request=None, *, selector=None):
     """Build a DIRSRV GetProperties reply.
 
     Reply: dword(status) + dword(node_count) + end-static + dynamic-complete + property records.
+
+    Selector semantics (TREENVCL IID table 0x7F633270..0x7F6332EC):
+      0x00 GetProperties — return self record
+      0x02 GetChildren   — return children (GetRelatives dir=0)
+    Post-login breadcrumb walks (CMosTreeNode::GetNthChild path) use selector
+    0x00 with dword_0=1 as a "return children" override, so we also treat that
+    as children. GetLocalizedNode calls selector 0x02 with dword_0=0 — without
+    this selector gate, that fell into the properties branch and returned the
+    parent's own record, poisoning the localized-child cache with self.
     """
     if request is None:
         request = DirsrvRequest()
 
     requested_props = [p for p in request.prop_group.split("\x00") if p]
-    is_children = request.dword_0 == 1
+    is_children = (
+        selector == DIRSRV_SELECTOR_GET_CHILDREN
+        or request.dword_0 == 1
+    )
 
     log.info(
-        "get_properties node=%s raw=%s children=%s props=%s locale_lcid=%s locale_raw=%s",
+        "get_properties node=%s raw=%s selector=%s children=%s props=%s locale_lcid=%s locale_raw=%s",
         request.node_id,
         request.node_id_raw.hex(),
+        f"0x{selector:02x}" if selector is not None else "-",
         is_children,
         ",".join(requested_props) or "-",
         f"0x{request.locale_lcid:04x}" if request.locale_lcid is not None else "-",
@@ -415,7 +433,10 @@ def build_dirsrv_reply_payload(request=None):
         props_per_record.append((node.node_id, props))
     else:
         # get_children applies a permissive fallback; see InMemoryContentStore.
-        for child in content_store.get_children(request.node_id):
+        # Pass locale_raw so `filter_on=1` requests scope the reply to the
+        # client's BrowseLanguage — GetLocalizedNode relies on this to pick
+        # the first localized child when descending into 1:0 / 1:1.
+        for child in content_store.get_children(request.node_id, request.locale_raw):
             props = build_props(requested_props, child, is_children=True)
             props_per_record.append((child.node_id, props))
 
