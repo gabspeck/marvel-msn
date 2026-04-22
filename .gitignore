@@ -17,7 +17,6 @@ session_capture*.log
 
 # Development tools
 .codex
-.claude/
 .junie/
 
 # Stray PDFs in root (reference material lives in reference/)
@@ -28,3 +27,5 @@ session_capture*.log
 htmlcov/
 
 ftp/
+
+*.lock
