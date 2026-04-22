@@ -337,7 +337,7 @@ Each row is 12 bytes:
 
 | Offset | Size | Field |
 |---:|---:|---|
-| `0x00` | `u32` | `app_id` (matches `src/server/mos_apps.py`). |
+| `0x00` | `u32` | `app_id` (the MOS Applications table entry the plug-in registers against; see `docs/BINARIES.md` §3 for the catalogue). |
 | `0x04` | `u16` | verb word (`SzToUnsLong(prop_value)`, or `0xFFFF` sentinel for submenu headers). |
 | `0x06` | `u16` | pad. |
 | `0x08` | `LPSTR` | malloc'd ASCII label (freed in `DSNAV_Cleanup`). |
@@ -441,15 +441,14 @@ classes; DSNAV ships no own WndProc.
   whatever name string the shell stamps into the instance.
 - No DSNAV vtable is shipped for this class.
 
-## 12. Node-shape contract from the server's perspective
+## 12. Node-shape contract DSNAV expects on the wire
 
-This is the **actionable table** for `src/server/services/dirsrv.py`.
-Combined list = default 7 + DSNAV's 7 extras = 14 tags that every DIRSRV
-`GetChildren` response must carry (or explicitly decide to skip). The
-"Purpose in DSNAV" column reflects the READ path after
-`CServiceProperties::FInit` has parsed the per-child record; unless a tag
-is flagged **Required**, sending it at the wrong type generally produces
-blank columns, not a broken listview.
+Combined list = default 7 + DSNAV's 7 extras = 14 tags every DIRSRV
+`GetChildren` reply must carry (or explicitly decide to skip) for the
+DSNAV read path to populate its view. The "Purpose in DSNAV" column
+reflects the READ path after `CServiceProperties::FInit` has parsed the
+per-child record; unless a tag is flagged **Required**, wrong-type data
+generally produces blank columns rather than a broken listview.
 
 | Tag | Set | Wire type | Required? | Purpose in DSNAV | Failure mode when missing | Failure mode when wrong-type |
 |---|---|---|---|---|---|---|
@@ -457,7 +456,7 @@ blank columns, not a broken listview.
 | `c`  | default | `0x03` DWORD | **Yes** | app_id; slot 72 reads it via GetProperty("c",4) to pick the NED DLL. | Slot 72 fails → slots 71/82 return `E_UNEXPECTED`. | Cache slot holds 4 wrong bytes → wrong NED loaded. |
 | `b`  | default | `0x01` byte | **Yes** | browse-flags; bit 0 clear = container (Browse), set = leaf (Exec). Read by MOSSHELL's `ExecuteCommand` and by DSNAV slot 56. | `ExecuteCommand` falls back to base → Browse/Exec choice becomes wrong. | As missing. |
 | `e`  | default | `0x0A` ASCIIZ | **Yes** | display name; icon label AND explorer titlebar both consume ANSI cache. | Blank title/label. | `0x0B` truncates to "M" (see `project_dirsrv_nav_e_encoding`). |
-| `g`  | default | `0x03` DWORD | No | unresolved ("unknown g" — sentinel sweeps ruled out icon slot). Server emits 0. | No observable effect. | — |
+| `g`  | default | `0x03` DWORD | No | unresolved ("unknown g" — sentinel sweeps ruled out icon slot). Safe wire value is 0. | No observable effect. | — |
 | `h`  | default | `0x03` DWORD | *Conditional* | secondary icon shabby_id; if present, `FUN_7F404786` kicks off the per-item ICO `ExtractIconEx` path (see `project_dirsrv_h_property_icon_path`). | `iImage=0` → forbidden-glyph default icon. | Non-DWORD breaks the shabby-id readback. |
 | `x`  | default | `0x0E` blob | No | exec-args; consumed only by launcher paths, not the listview. | — | — |
 | `mf` | DSNAV | `0x03` DWORD | *Conditional* | primary icon (banner); MOSSHELL `FUN_7F405018` reads as DWORD and feeds `GetShabbyToFile`. **Must be inline 0x03** — 0x0E blob stores a pointer and the low-4 become garbage. | Blank banner. | Wrong bytes → wrong shabby, banner loads fail. |
@@ -465,18 +464,17 @@ blank columns, not a broken listview.
 | `tp` | DSNAV | `0x0A` ASCIIZ | No | "Type" column text (column 1 in RCDATA 0x81). | Blank "Type" cell. | Wrong type → truncation or cache miss. |
 | `p`  | DSNAV | `0x03` DWORD | No | size in bytes; FormatSizeString in the "Size" column. | Blank "Size" cell. | Wrong size display. |
 | `w`  | DSNAV | `0x0C` FILETIME (8 B) | No | last-changed timestamp; "Date Modified" column. MOSSHELL `FUN_7F3FBC12` case `0xC` passes the 8 bytes straight to `FileTimeToSz` → `GetDateFormatA` + `GetTimeFormatA`. DWORD encoding does **not** work — only prop name `_D` triggers the DWORD-as-`time_t` fast path (BBSNAV territory). | Blank "Date" cell. | `0x03` DWORD → renders as `%u` decimal, not a date. |
-| `l`  | DSNAV | *unresolved* | No | Advertised by DSNAV but no read-site confirmed in this pass. Server emits DWORD 0 as a safe default. | — | — |
-| `i`  | DSNAV | *unresolved* | No | Advertised by DSNAV; no read-site confirmed. Server emits DWORD 0. | — | — |
+| `l`  | DSNAV | *unresolved* | No | Advertised by DSNAV but no read-site confirmed in this pass. DWORD 0 is a safe wire value. | — | — |
+| `i`  | DSNAV | *unresolved* | No | Advertised by DSNAV; no read-site confirmed. DWORD 0 is a safe wire value. | — | — |
 
 Additional notes:
 
 - DSNAV does NOT ask for `'z'` in the `GetChildren` request — see
-  `project_dirsrv_getchildren_pipeline`. Server can omit it there.
+  `project_dirsrv_getchildren_pipeline`. Wire replies can omit it.
 - `fn` is not in DSNAV's advertised set. It is read only by DnR's
   `ExecUrlWorkerProc` (`c == 7` / `APP_DOWNLOAD_AND_RUN`) to build the
-  temp filename. No fixture currently advertises a DnR leaf, so the
-  server does not emit `fn` today; if/when one is added, emission must
-  be gated on the node's `c`.
+  temp filename. DnR leaves are the only nodes that need `fn`; non-DnR
+  children can leave it out entirely.
 
 ## 13. Comparison to the other NAV plug-ins
 
@@ -517,62 +515,34 @@ listview or ship its own WndProc. The shell's generic `CDIBWindow`/
   suggest the full MOSSHELL base classes have more virtual methods; this
   document only captures the slot DSNAV actually installs.
 
-### 14.2 Server cross-check (`src/server/services/dirsrv.py::build_props`)
+### 14.2 `w` format — FILETIME vs DWORD
 
-Verified on 2026-04-21 after the §12 alignment pass. All 14 tags now match.
-
-| Tag | Server emits | §12 says | Status |
-|---|---|---|---|
-| `a`  | `0x0E` blob (4-byte length + 8-byte mnid) | `0x0E` blob | ✓ |
-| `b`  | `0x01` byte | `0x01` byte | ✓ |
-| `c`  | `0x03` DWORD | `0x03` DWORD | ✓ |
-| `e`  | `0x0A` ASCIIZ | `0x0A` ASCIIZ | ✓ |
-| `g`  | `0x03` DWORD 0 | `0x03` DWORD | ✓ |
-| `h`  | `0x03` DWORD (ICO shabby) | `0x03` DWORD | ✓ |
-| `x`  | `0x0E` blob | `0x0E` blob | ✓ |
-| `mf` | `0x03` DWORD (BMP shabby) | `0x03` DWORD | ✓ |
-| `wv` | `0x03` DWORD (BMP shabby) | `0x03` DWORD | ✓ |
-| `tp` | `0x0A` ASCIIZ (from `NodeContent.type_str`) | `0x0A` ASCIIZ | ✓ |
-| `p`  | `0x03` DWORD (from `NodeContent.size_bytes`) | `0x03` DWORD (size) | ✓ |
-| `w`  | `0x0C` FILETIME (from `NodeContent.modified_filetime`); skipped when 0 | `0x0C` FILETIME (timestamp) | ✓ (confirmed 2026-04-21 — see trace below) |
-| `l`  | `0x03` DWORD 0 | unresolved; §12 safe default is DWORD 0 | ✓ |
-| `i`  | `0x03` DWORD 0 | unresolved; §12 safe default is DWORD 0 | ✓ |
-
-**`w` format — confirmed 2026-04-21** via static disassembly of the
-MOSSHELL column formatter `FUN_7F3FBC12` (the one caller of
-`FileTimeToSz`, reached through `GetPropSz` / `GetPropSzBuf` on every
-listview cell paint):
+Confirmed 2026-04-21 via static disassembly of the MOSSHELL column
+formatter `FUN_7F3FBC12` (the one caller of `FileTimeToSz`, reached
+through `GetPropSz` / `GetPropSzBuf` on every listview cell paint):
 
 - Type `0x03` (DWORD) path: `wsprintfA(buf, "%u", value)` by default.
   Only property **name** `"_D"` (hard-coded string at MOSSHELL
   `DAT_7F40EA08`) triggers the `TimetToFileTime → FileTimeToSz` fast
   path that treats the DWORD as a Unix `time_t`. `"_D"` is a BBSNAV
-  property, not a DSNAV one — so `w`-as-DWORD was silently rendering as
-  raw decimal (or "0" for the old DWORD-0 default).
+  property, not a DSNAV one — so `w`-as-DWORD renders as raw decimal
+  (or "0" when the DWORD is 0).
 - Type `0x0C` (8-byte qword) path: `FileTimeToSz(value_ptr, buf, 260)`
-  directly — the cache's 8 bytes ARE the `FILETIME`. Formats as
+  directly — the cache's 8 bytes ARE the `FILETIME` (100-ns intervals
+  since 1601-01-01 UTC). Formats as
   `GetDateFormatA(DATE_SHORTDATE) + " " + GetTimeFormatA(TIME_NOSECONDS)`
   on the localized SYSTEMTIME (after
   `FileTimeToLocalFileTime → FileTimeToSystemTime`).
 
 SVCPROP's per-type decoder (see
 `DIRSRV_GETCHILDREN_CLIENT_PATH.md §"DecodePropertyValue"`) consumes 8
-bytes for type `0x0C`, matching this shape.
-
-Server wiring: `NodeContent.modified_filetime` carries the 64-bit
-FILETIME (100-ns intervals since 1601-01-01 UTC). Fixtures translate
-the human-readable `"April 15, 2026"` form through
-`_date_string_to_wire_filetime` in `src/server/store/fixtures.py` and
-populate it only on leaves with a real date (today: just MSN Today).
-Containers keep `modified_filetime = 0`, which `build_props` uses
-as the skip sentinel — `w` is omitted entirely so the listview cell
-stays blank rather than rendering a bogus 1601-01-01 date.
+bytes for type `0x0C`, matching this shape. Conclusion: emit `w` as
+type `0x0C` FILETIME when a real timestamp is available; omit the tag
+entirely when there isn't one, so the listview cell stays blank rather
+than rendering a `1601-01-01` placeholder.
 
 Ghidra session for the MOSSHELL trace: `759698c6b00f47acb7b4d1f44356aac1`
-(read-only); the findings are already captured in the plate comments
-above and in the unit assertions `test_dsnav_details_column_tags_use_documented_type_bytes`
-/ `test_msn_today_leaf_emits_nonzero_size_dword` in
-`tests/test_services.py`.
+(read-only); the findings are captured in the plate comments above.
 
 ## 15. Ghidra annotations shipped in this pass
 

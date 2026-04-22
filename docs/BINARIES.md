@@ -31,7 +31,7 @@ Everything else is ordinal/class-object mediated (no named method exports).
 
 ### MOSCP.EXE — *MOS Communication Provider* (EXE, 68 KB)
 
-The process that owns the actual modem/TAPI connection to the MSN data centre. No exports (it's a host, not a library). Ground truth for the **1024-byte client receive buffer** (see `project_client_recv_buffer.md`) — any server reply larger than that must be fragmented at the wire layer.
+The process that owns the actual modem/TAPI connection to the MSN data centre. No exports (it's a host, not a library). Ground truth for the **1024-byte client receive buffer** (see `project_client_recv_buffer.md`) — any inbound reply larger than that must be fragmented at the wire layer.
 
 **Imports**: `USER32`, `KERNEL32`, `ADVAPI32`, `MOSMISC.DLL`, `TAPI32.dll`.
 
@@ -137,7 +137,7 @@ App #8-ish in the MOS table — shows billing statements pulled from the server.
 
 **Imports**: `MOSCUDLL`, `MCM`, `COMCTL32`, `ole32`.
 
-**Ghidra status**: Imported (per `gitStatus`: `src/server/services/onlstmt.py` is tracked — server side handled; client is raw).
+**Ghidra status**: Imported; client side not annotated yet.
 
 ---
 
@@ -217,7 +217,7 @@ The "business-logic" DLLs: each wraps a service interface on top of MPCCL.
 
 ### SVCPROP.DLL — *Service Properties* (DLL, 11 KB)
 
-Shared `CServiceProperties` property-bag used by every service. Serialises/deserialises the tagged-property blobs that travel on the wire — the structure read by `FDecompressPropClnt` is what the Python server writes in `src/server/store/fixtures.py`.
+Shared `CServiceProperties` property-bag used by every service. Serialises/deserialises the tagged-property blobs that travel on the wire — `FDecompressPropClnt` is the client-side reader for the per-record `[u32 size][u16 prop_count]{[u8 type][asciiz][value]}*` shape documented in `DIRSRV_GETCHILDREN_CLIENT_PATH.md`.
 
 **Key exports**
 - `?FDecompressPropClnt@@` [14], `?FDecompressPropSrv@@` [15], `?FDecompressPropSrvFromSrv@@` [16]
@@ -636,7 +636,7 @@ Role **unknown**. 10 KB opaque binary — 256 distinct byte values, ~30% zero, n
 
 ### MSNVER.TXT — *Client build tag* (text, 4 B)
 
-Single token: `5699` (no newline). This is the build number referenced by `GUIDE.EXE`'s `FMsnVer`-style checks and the server-side "client version" gate. Matches the MSN 1.0 retail build date range.
+Single token: `5699` (no newline). This is the build number referenced by `GUIDE.EXE`'s `FMsnVer`-style checks and advertised back to the data centre as the client's version identifier. Matches the MSN 1.0 retail build date range.
 
 **Ghidra status**: N/A.
 

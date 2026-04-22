@@ -87,28 +87,26 @@ if (iVar1 != 0)
 `field_2E+0x18C` (count) and `field_2E+0x400` (pointer). The merged buffer is
 freed via `CMosXAllocator::Free(&g_mxa, ...)` after the wire call.
 
-## Consequences for server fixtures
+## Wire-side consequences
 
-- `'z'` is **never** in the request list on this call — the client doesn't want
-  it back from GetChildren on the DIRSRV tree path. Sending it wastes bytes
-  but shouldn't break parsing (unknown tags are ignored by the walker, assumed).
-- `'h'` **is** in the default list — if your icon property isn't taking effect,
-  the drop is downstream of the wire (parser side in TREENVCL).
-- The `'c'`, `'b'`, `'e'` fields the server sends are all asked for in the
-  default case; mismatches between wire encoding and parser type will show up
-  as truncated strings or dropped children.
+- `'z'` is **never** in the request list on this call — the client doesn't
+  ask for it back from GetChildren on the DIRSRV tree path. Unknown tags
+  are ignored by the walker, so sending it is a byte waste but not a
+  parse break.
+- `'h'` **is** in the default list — if an icon doesn't render, the drop
+  is downstream of the wire (TREENVCL parser or MOSSHELL cache).
+- `'c'`, `'b'`, `'e'` are all in the default list; type mismatches between
+  the wire encoding and what TREENVCL's walker expects show up as
+  truncated strings or dropped children.
 
 ## Where the reply gets parsed
 
 > Selector context: GetChildren uses DIRSRV selector 2
 > (`CTreeNavClient::GetRelatives(direction=0)`). The sibling
 > `GetProperties` on the same channel uses selector 0. See
-> `docs/TREENVCL.md` §14 for the full selector → RPC table. The server
-> handler at `src/server/services/dirsrv.py:90-98` lumps both into the
-> default branch (only selector 4 / `GetShabby` forks off early) and
-> distinguishes them via the payload's `dword_0` flag: `0` = properties
-> request, `1` = children request. See `mpc.py:161-199` and
-> `dirsrv.py:402-403`.
+> `docs/TREENVCL.md` §14 for the full selector → RPC table. The two
+> requests share the same wire shape up to a leading flag dword:
+> `0` = properties request, `1` = children request.
 
 ### TREENVCL.DLL — record walker
 

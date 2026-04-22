@@ -217,7 +217,7 @@ From `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md § Property tag request lists`:
 | `b`  | 0x01 byte | `CMosTreeNode::ExecuteCommand` @ `0x7F3FF693`; `HrResolvePidlAndWaitChildren` @ `0x7F3F270A`. Slot `+0x40`, cap 1, type 1. | **Bit 0x01 clear → Browse (HrBrowseObject); set → Exec (vtable[+0xCC]).** Bit `0x08` set → server-denied, abort. |
 | `c`  | 0x03 DWORD | `HrResolvePidlAndWaitChildren` @ `0x7F3F270A`. Slot `+0x40`, cap 4, type 0. | `c == 7` (Download-and-Run) → wait for children indefinitely. Also drives DSNAV plug-in delegation (§7). |
 | `e`  | 0x0A ASCIIZ | `CMosShellFolder::GetDisplayNameOf` @ `0x7F3F3161`. Slot `+0x40`, cap 0x104, **type 1 (ANSI)**. | Listview label + address-bar + explorer titlebar. 0x0B truncates at first wide NUL → "M" bug; memory `project_dirsrv_nav_e_encoding`. |
-| `g`  | 0x03 DWORD | — | No MOSSHELL read site identified; server emits 0 as safe default. |
+| `g`  | 0x03 DWORD | — | No MOSSHELL read site identified; DWORD 0 is a safe wire value. |
 | `h`  | 0x03 DWORD (ICO shabby_id) | `CacheNodeIconsIntoImageLists` @ `0x7F4047C2` → `FetchShabbyIconToTempAndExtract` @ `0x7F4049F9`. | Per-item listview icon (`ExtractIconExA` on downloaded ICO/EXE/DLL). Missing → forbidden-glyph default icon. |
 | `mf` | 0x03 DWORD (BMP/WMF/EMF shabby_id, packed `fmt<<24 \| content_id24`) | `LoadShabbyIconForNode` @ `0x7F405018`. Slot `+0x40`, cap 4, type 0. | Banner + primary-icon paint. Format byte selects loader: `1`=EMF, `3`=raw WMF, `4`=placeable WMF, `5`=BMP. |
 | `wv` | 0x03 DWORD | — (handed to `LoadShabbyIconForNode`-style paths by plug-ins via `GetShabbyProp`) | Variant icon. |
@@ -486,7 +486,7 @@ computes SBSP flags from (a) verb, (b) `SingleWindowMode` preference
 Calls `HrBrowseObject(pShellBrowser, NULL, pidl, flags)` and frees the
 pidl with `IDL_Free` on return.
 
-**Single source of truth for the `'b'` bit:** `0` = folder (Browse), `1` = leaf (Exec). See plate comment on `CMosTreeNode::ExecuteCommand` in the Ghidra project. Server side: `src/server/config.py :: DIRSRV_BROWSE_FLAGS_CONTAINER / _LEAF`.
+**Single source of truth for the `'b'` bit:** `0` = folder (Browse), `1` = leaf (Exec). See plate comment on `CMosTreeNode::ExecuteCommand` in the Ghidra project.
 
 ### 7.2 `IMosShellView::OnCommand` @ `0x7F3F5406` — frame-window menu dispatcher
 
@@ -731,19 +731,16 @@ Complete table is in `docs/DSNAV.md` §14.2. MOSSHELL-specific notes:
 - `'e'` must be type **0x0A**. 0x0B truncates to "M" because SVCPROP stores
   the raw UTF-16 temp buffer in the cache and the ANSI readers (both
   `GetDisplayNameOf` and the titlebar paint path) stop at the first wide
-  NUL. Server is correct at `src/server/services/dirsrv.py :: build_props`.
+  NUL.
 - `'mf'` and `'wv'` must be type **0x03 DWORD** (inline). A 0x0E blob puts
   a heap pointer in the cache slot and the low 4 bytes of the pointer
   become the shabby_id — this was the "0x00BE0400 garbage" symptom chased
   across multiple sessions. Fixed.
 - `'h'` must be type **0x03 DWORD** (ICO shabby_id). Missing → forbidden
   glyph; wrong type → random id, download fails, forbidden glyph anyway.
-- `'b'` is a **single byte**. `DIRSRV_BROWSE_FLAGS_CONTAINER / _LEAF` in
-  `src/server/config.py` must agree with §7.1: bit 0 clear = folder, set
-  = leaf.
+- `'b'` is a **single byte**: bit 0 clear = folder, set = leaf (§7.1).
 - Column-descriptor tags (`tp`, `p`, `w`) are consumed by DSNAV, not
-  MOSSHELL directly; see DSNAV §10 and §14.2 for the current mismatch list
-  (`tp`/`p`/`w` are emitted as 0x0E but should be 0x0A/0x03/0x03).
+  MOSSHELL directly; see DSNAV §12 for the wire-type contract.
 
 ## 12. Ghidra annotations shipped in this pass
 

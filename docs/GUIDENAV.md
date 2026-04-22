@@ -196,27 +196,28 @@ surface.  Key evidence:
 Fallback placeholder `"(Item not valid)"` (string id 132) is used when
 MFP hands out a stale or unresolvable mnid.
 
-## 6. Node-shape contract from the server's perspective
+## 6. DIRSRV node-shape expectations
 
-Because GUIDENAV is reached through client-local HOMEBASE JUMPs and the
-client-local MFP store, **our DIRSRV server does not need to serve any
-node with `app_id = APP_GUIDE_SERVICE`**.  Confirmed by the imports:
-GUIDENAV does not link `TREENVCL`/`SVCPROP` and never reads DIRSRV
-properties (`e`/`n`/`d`/`y`/`t`/`u`/`h`/`p`/`c`/`b`/`a` — none of these
-token names appear anywhere in the binary).  All display text for the
-welcome screen comes from `HOMEBASE.DLL` string tables, and the Favorite
-Places list is populated from `MOSSHELL!MFP_*` (client registry/disk).
+GUIDENAV is reached through client-local HOMEBASE JUMPs and the
+client-local MFP store, so **no DIRSRV node with
+`app_id = APP_GUIDE_SERVICE` is required for it to function**.
+Confirmed by the imports: GUIDENAV does not link `TREENVCL`/`SVCPROP`
+and never reads DIRSRV properties (`e`/`n`/`d`/`y`/`t`/`u`/`h`/`p`/`c`/
+`b`/`a` — none of these token names appear anywhere in the binary).
+All display text for the welcome screen comes from `HOMEBASE.DLL`
+string tables, and the Favorite Places list is populated from
+`MOSSHELL!MFP_*` (client registry/disk).
 
-If we ever wanted to expose the welcome screen as the child of a
-server-sent DIRSRV container, the minimum fixture shape would be:
+If the welcome screen were exposed as the child of a DIRSRV container,
+the minimum wire shape would be:
 
 - `app_id = APP_GUIDE_SERVICE` (3) so the shell routes to GUIDENAV.
 - A valid 8-byte `a` mnid; the content-specific props (`e`, `n`, `d`,
   `y`, `c`, `b`) would be ignored by the plug-in.
 - The shell's in-memory `_MosNodeId` wrapper's upper 8 bytes drive the
-  root vs Favorite Places branch at GUIDENAV `GETPMTN`; we don't
-  influence those from the wire, so the branch choice would depend on
-  how MOSSHELL's routing wraps our mnid.  For the observed navigation
+  root vs Favorite Places branch at GUIDENAV `GETPMTN`; the wire
+  doesn't influence those, so the branch choice would depend on how
+  MOSSHELL's routing wraps the mnid. For the observed navigation
   flows this has not mattered in practice.
 
 ## 7. Comparison to the other NAV plug-ins
@@ -230,8 +231,7 @@ server-sent DIRSRV container, the minimum fixture shape would be:
 GUIDENAV is unique among the three in that it is essentially stateless
 with respect to the wire: its content is hard-wired into resource files
 shipped on the client (HOMEBASE bitmap + RCDATA + string tables + local
-MFP store).  Changes to the server's DIRSRV fixtures do not affect what
-GUIDENAV renders.
+MFP store). DIRSRV wire content does not affect what GUIDENAV renders.
 
 ## 8. Pointers for further work
 

@@ -1,9 +1,9 @@
 # MEDVIEW service
 
 Wire and format reference for the **MEDVIEW** MPC service — the RPC channel
-that ships MedView titles from the server to the `MOSVIEW.EXE` client process.
-This document is the server-side contract: it defines what the server must
-send so `MVTTL14C.DLL` unblocks and hands control to `MVCL14N.DLL`.
+`MOSVIEW.EXE` opens to fetch MedView titles. This document is the wire-format
+contract: it captures the bytes `MVTTL14C.DLL` expects so the title session
+unblocks and hands control to `MVCL14N.DLL`.
 
 Host-side behaviour (process launch, title spec, command dispatch) lives in
 `docs/MOSVIEW.md`. This document is strictly the wire contract.
@@ -102,10 +102,11 @@ in front of the client's IID lookup.
 
 ### 2.2 Discovery block
 
-Standard PROTOCOL.md §5.3 — first server message on the pipe is
-`selector=0x00, opcode=0x00`, payload = 42 consecutive 17-byte records
-`(16-byte IID LE | 1-byte selector)`. `src/server/mpc.py::build_discovery_payload`
-is the canonical emitter.
+Standard PROTOCOL.md §5.3 — first message on the pipe carries
+`selector=0x00, opcode=0x00` and a payload of 42 consecutive 17-byte
+records `(16-byte IID LE | 1-byte selector)`. The client reads the
+block through MPC's discovery parser and caches selector-per-IID into
+its lookup array.
 
 ---
 
@@ -420,9 +421,9 @@ and `hrAttachToService` moves on to the next subscriber.
 **MVP contract**: static-only `0x87` reply. No dynamic section → the
 client's slot-`0x48` sets `*ppvVar1 = NULL`, subscribe declines
 cleanly, and the 5 calls (one per notification type) each complete in
-under a round-trip. Live notification push is out of scope until a
-server-side event source exists; for now MSN Today doesn't depend on
-any of these feeds.
+under a round-trip. Live notification push is out of scope until an
+event-feed emitter is wired; MSN Today doesn't depend on any of these
+feeds at startup.
 
 ---
 
@@ -449,37 +450,44 @@ engine calls with no direct wire traffic at this stage.
 
 ---
 
-## 8. What the server does NOT need to do (MVP)
+## 8. Surfaces MSN Today does NOT exercise at startup
 
-- **Baggage** (`BaggageOpen/Read/GetFile`): if the authored BDF references
-  baggage, the client will issue `MVBaggageAsync*` calls against the
-  baggage selectors. The MVP can stub these as "not found" (empty file)
-  and iterate authoring instead. No known MOSVIEW startup path blocks on
-  baggage.
+- **Baggage** (`BaggageOpen/Read/GetFile`): if an authored BDF references
+  baggage, the client issues `MVBaggageAsync*` calls against the baggage
+  selectors. A "not found" (empty file) reply is enough to let authoring
+  iterate. No known MOSVIEW startup path blocks on baggage.
 - **DownloadPicture / GetDownloadStatus / GetPictureInfo** — picture
   selectors (ordinals `1-5`). Not on the initial-open path.
 - **WordWheel** (`WordWheelOpenTitle / Lookup / Query`) — Find UI only,
   not on the initial-open path.
 
-These can be added later by wiring additional selector handlers to the
-same `MEDVIEWHandler`.
+These selectors can be filled in later when a feature calls for them;
+the MSN Today open path doesn't require any of them.
 
 ---
 
-## 9. Server handler checklist
+## 9. Minimum wire behaviour required by MSN Today
 
-Minimum implementation to make MSN Today stop showing "service temporarily
-unavailable":
+Compiled from the client-side reads elsewhere in this document. Anything
+that emits these bytes in this order will get MSN Today past
+"service temporarily unavailable":
 
-1. Register `"MEDVIEW"` in `src/server/services/__init__.py::SERVICE_HANDLERS`.
-2. On pipe-open: emit discovery block with the 42 IIDs above.
-3. Selector `0x1F` (handshake): static `0x83` = `1`, `0x87`. No dynamic.
-4. Selector `0x1E` (TitlePreNotify): static `0x87`. No dynamic.
-5. Selector `0x17` (SubscribeNotification, §6a): static `0x87`. No dynamic.
-6. Selector `0x01` (TitleOpen): static `0x81 01 0x81 01 0x83 0 0x83 0 0x83 0 0x83 <chk1> 0x83 <chk2> 0x87`, then `0x86` + 9-section title body (§4.4). MVP body carries the title name in section 4 (raw blob, info_kind=1) — makes MSN Today surface a real label instead of `"Unknown Title Name"`.
-7. Selector `0x03` (TitleGetInfo): static `0x83 00000000 0x87 0x86` + empty dynamic.
+1. On pipe-open: a discovery block with the 42 IIDs from §2.1.
+2. Selector `0x1F` (handshake, §3): static `0x83` = `1`, `0x87`. No
+   dynamic.
+3. Selector `0x1E` (TitlePreNotify, §6): static `0x87`. No dynamic.
+4. Selector `0x17` (SubscribeNotification, §6a): static `0x87`. No
+   dynamic.
+5. Selector `0x01` (TitleOpen, §4): static `0x81 01 0x81 01 0x83 0 0x83
+   0 0x83 0 0x83 <chk1> 0x83 <chk2> 0x87`, then `0x86` + 9-section
+   title body (§4.4). Even an empty-but-valid body carries the title
+   name in section 4 (raw blob, info_kind=1) — makes MSN Today surface
+   a real label instead of `"Unknown Title Name"`.
+6. Selector `0x03` (TitleGetInfo, §5): static `0x83 00000000 0x87 0x86`
+   + empty dynamic.
 
-Everything else: log and return empty reply (no crash).
+Everything else can safely be ignored (empty reply, no crash) for the
+MSN Today open path.
 
 ---
 
