@@ -210,13 +210,18 @@ stream**. Ground-truth from the `MVTTL14C!TitleOpenEx @ 0x7E842D4E` and
 
 1. `TitleOpenEx` saves `B` at `title + 0x52` and its length at
    `title + 0x54`.
-2. It reads `b0 = *(u16 LE)B` as the size of a primary DIB segment:
-   - `b0 == 0` → branch `LAB_7e8432c4`: skip DIB entirely, zero
+2. It reads `b0 = *(u16 LE)B` as the size of a **structural header**
+   consumed by `TitleOpenEx` itself (purpose not yet pinned — see §10):
+   - `b0 == 0` → branch `LAB_7e8432c4`: skip the header decode, zero
      `title[4]`/`title[5]`. **This is the safe path.**
-   - `b0 != 0` → `GlobalAlloc(0x40, b0)`, `MOVSD.REP` the `b0` bytes
-     from `B+2`, then read `*(u32 LE)` of the copy as a child-count
-     and zero that many dword slots starting at `psVar7 + psVar7[8]`
-     (word-index 8 = byte offset 0x10).
+   - `b0 != 0` → `GlobalAlloc(GPTR=0x40, b0)`, `MOVSD.REP` the `b0`
+     bytes from `B+2`, then read `*(u32 LE)` of the copy as a
+     **child-count** and zero that many dword slots starting at
+     `psVar7 + psVar7[8]` (word-index 8 = byte offset 0x10). That
+     "count + slot array at +0x10" deserialization pattern argues
+     against this being a bitmap (nobody interprets DIB bytes that
+     way); it looks more like a MedView object descriptor with
+     placeholder child pointers the engine fills in later.
 3. `TitleGetInfo` walks the remaining 8 sections on demand to answer
    field queries. Its `param_2` argument is the **selector kind**, not
    a section index — the dispatch table maps selector → section.
@@ -225,7 +230,7 @@ Section-by-section (`u16` = little-endian 16-bit):
 
 | # | `TitleGetInfo` selector(s) | Header | Payload |
 |--:|---------------------------|--------|---------|
-| 0 | — (consumed by TitleOpenEx) | `[u16 size]` | DIB / BMP bytes (title banner) |
+| 0 | — (consumed by TitleOpenEx) | `[u16 size]` | Structural header (u32 child-count + slot array at +0x10); exact layout unknown — **not a bitmap**, see §10 |
 | 1 | `7` | `[u16 size]` | array of fixed **43-byte** records (10 u32 + u16 + byte) |
 | 2 | `8` | `[u16 size]` | array of fixed **31-byte** records (7 u32 + u16 + byte) |
 | 3 | `6` | `[u16 size]` | array of fixed **152-byte** records (38 u32) |
@@ -249,7 +254,7 @@ authoring-side / Local-target artifact.
 
 **Empty-but-valid body** (18 bytes): `00 00 × 8` (sections 0-7 all
 empty) followed by `00 00` (section 8 count=0). The first `u16 == 0`
-takes `LAB_7e8432c4` (no DIB parse), every `TitleGetInfo` lookup
+takes `LAB_7e8432c4` (no header decode), every `TitleGetInfo` lookup
 returns -1, MOSVIEW's metadata-population loops exit cleanly on the
 first iteration, and the title name falls back to `"Unknown Title Name"`.
 
@@ -269,8 +274,8 @@ does nothing for the caption.
 
 **Do NOT ship a zero-byte body.** With a truly empty wire payload,
 `*(u16 LE)lpBuffer` reads adjacent heap memory; if the two bytes
-happen to be nonzero, the DIB branch is taken with an arbitrary
-section size and the copy loop AVs at `MVTTL14C.DLL:0x7E843253`
+happen to be nonzero, the header-decode branch is taken with an
+arbitrary section size and the copy loop AVs at `MVTTL14C.DLL:0x7E843253`
 (or `0x7E843288` / `+0x35` if the trailing bytes walk off the end of
 the short buffer). MOSVIEW echoes the crash back via `TitlePreNotify`
 opcode `0x08`:
@@ -309,11 +314,12 @@ The display name the authoring tool intends to surface here is
 (`docs/BLACKBIRD.md` §3.1.2). The MedView viewer reads it via
 `TitleGetInfo(info_kind=1)` against section 4 of the 9-section body
 (§4.4) and runs it through `UnquoteCommandArgument` before storing at
-`title+0x58` as the window caption. Rich content — banner DIB
-(section 0) and the fixed-size record arrays (sections 1/2/3/7) — is
-carried in the compound file's per-class `\x03object` streams, which
-are opaque pending RE of `COSCL.DLL!extract_object` and the MS-stock
-compression on larger streams (`docs/BLACKBIRD.md` §3.1.3 and §7).
+`title+0x58` as the window caption. Rich title content — the structural
+header (section 0) and the fixed-size record arrays
+(sections 1/2/3/7) — is carried in the compound file's per-class
+`\x03object` streams, which are opaque pending RE of
+`COSCL.DLL!extract_object` and the MS-stock compression on larger
+streams (`docs/BLACKBIRD.md` §3.1.3 and §7).
 
 ---
 
@@ -502,7 +508,17 @@ MSN Today open path.
   treats them as (a) a content hash, (b) a version stamp, or (c) a
   client-opaque token is not yet nailed down; for the MVP they can be any
   stable non-zero pair.
-- **Primary DIB semantics**. The first section of the body is copied into
-  a separate `GlobalAlloc`'d buffer and the first DWORD of the copy is
-  used as a "child-count" (slots zeroed). Purpose unclear — may be the
-  MedView top-level index. Empty body avoids the question.
+- **Section 0 semantics**. The first section of the body is copied into
+  a separate `GPTR GlobalAlloc`'d buffer and the first DWORD of the copy
+  is read as a **child-count**; that many dword slots at offset `+0x10`
+  are zeroed. The "count + slot array" deserialization rules out a
+  bitmap — this looks more like a MedView top-level object descriptor
+  (a CTitle header with placeholder children the engine fills in later).
+  Exact field layout is not yet RE'd; shipping an empty body (`u16 0`)
+  takes the safe `LAB_7e8432c4` path and sidesteps the decode entirely.
+  (Earlier docs in this repo described section 0 as "the title banner"
+  — that was a guess based on the `MOVSD.REP` superficially resembling
+  bitmap handling; the directory-node banner painted by `CDIBWindow`
+  on DSNAV/BBSNAV nodes is a **different** thing, sourced via the
+  `'mf'` DIRSRV property and MOSSHELL's shabby-fetch path. See
+  `docs/MOSSHELL.md` §6.3 and `docs/DSNAV.md` §11.1.)

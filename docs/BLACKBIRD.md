@@ -221,8 +221,8 @@ The four `MSNSite*` properties are what a published title advertises on MSN's Di
 | Property | Type | Offset | Notes |
 |---|---|---:|---|
 | `MSNSiteNodeID` | 24-byte binary | `+0x08` | DEID-style node identifier assigned by the server on first publish. All-zero = never published. |
-| `MSNSiteName` | `CString` | `+0x20` | Human-readable title name — the string MSN Today surfaces in the viewer's title bar. |
-| `MSNSiteImage` | blob of `MSNSiteImageLength` bytes | `+0x24` | Banner bitmap (DIB). Shipped intact; rendered unchanged by the viewer. |
+| `MSNSiteName` | `CString` | `+0x20` | Human-readable directory-node name. |
+| `MSNSiteImage` | blob of `MSNSiteImageLength` bytes | `+0x24` | Directory-node banner DIB. Painted by MOSSHELL's `CDIBWindow` strip above the listview when the node is opened in the shell — same surface DSNAV's `'mf'` shabby feeds (`docs/MOSSHELL.md` §6.3, `docs/DSNAV.md` §11.1). NOT consumed by the MedView viewer. |
 | `MSNSiteImageLength` | `ULONG` | `+0x28` | Size in bytes of the `MSNSiteImage` blob. |
 
 All four values are written to the `CReleaseData`-local `CPropertyTable` during wizard edit (round-tripped by `CReleaseData_Serialize`) and consumed together by `CPublisher_PublishToMSN` — either as the `0x54`-byte `CTreeEditClient::SetProperties` record (site metadata) or as properties inside the published compound file (content side).
