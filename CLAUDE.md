@@ -16,6 +16,9 @@ match the latest known facts.
 * Avoid narration and verbosity in documents and in-line comments. Keep text information-dense, precise and to the 
 point.
 
+* When writing comments, do not state speculation as fact. Be clear about the source of a statement: empiric observation
+of wire traffic + user reports of client behavior, live debugging, static analysis, etc.
+
 * If there's a mismatch between expected and actual client behavior, do not apply hacks on the server to force a fix
 beyond testing a hypothesis. Take a step back and analyze the problem using decompilation with Ghidra, live debugging
 with SoftIce or a combination of both.
