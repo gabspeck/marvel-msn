@@ -41,6 +41,7 @@ _ICONS_DIR = Path(__file__).resolve().parent.parent / "data" / "icons"
 ICON_REGISTRY = {
     pack_shabby_id(FORMAT_BMP, 1): _ICONS_DIR / "default_16.bmp",
     pack_shabby_id(FORMAT_ICO, 1): _ICONS_DIR / "folder.ico",
+    pack_shabby_id(FORMAT_ICO, 2): _ICONS_DIR / "default.ico",
 }
 
 

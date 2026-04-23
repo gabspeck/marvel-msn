@@ -30,8 +30,9 @@ from server.mpc import (
 from server.services.dirsrv import (
     SUPPORTED_BROWSE_LCIDS,
     DIRSRVHandler,
-    build_dirsrv_reply_payload,
     build_dirsrv_service_map_payload,
+    build_get_children_reply_payload,
+    build_get_properties_reply_payload,
     build_property_record,
 )
 from server.services.ftm import (
@@ -242,7 +243,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="q",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_properties_reply_payload(request)
         # Should start with two 0x83 dwords
         self.assertEqual(payload[0], 0x83)
         status = struct.unpack("<I", payload[1:5])[0]
@@ -262,9 +263,28 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"Categories (US)", payload)
         self.assertIn(b"Worldwide Member Assistance", payload)
+
+    def test_get_properties_with_dword_0_1_delegates_to_children(self):
+        # CMosTreeNode::GetNthChild's post-login breadcrumb walk issues
+        # GetProperties (selector 0x00) with dword_0=1 to ask for children.
+        # The GetProperties handler must recognize this override and
+        # return the same wire bytes the GetChildren handler would for
+        # the same request.
+        request = DirsrvRequest(
+            node_id="0:0",
+            node_id_raw=struct.pack("<II", 0, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        properties_reply = build_get_properties_reply_payload(request)
+        children_reply = build_get_children_reply_payload(request)
+        self.assertEqual(properties_reply, children_reply)
+        self.assertIn(b"Categories (US)", properties_reply)
 
     def test_msn_root_self_properties_return_correct_name(self):
         # Client's MSN root wire = "0:0". Self-query returns "The Microsoft
@@ -277,7 +297,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_properties_reply_payload(request)
         self.assertIn(b"The Microsoft Network", payload)
 
     def test_special_msn_today_node_returns_title(self):
@@ -289,7 +309,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_properties_reply_payload(request)
         self.assertIn(b"MSN Today", payload)
 
     def test_explicit_leaf_children_do_not_fall_back_to_unknown_sentinel(self):
@@ -301,7 +321,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
     def test_special_msn_today_leaf_children_emit_self_nav_record(self):
@@ -313,7 +333,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(struct.pack("<II", 4, 0), payload)
         self.assertIn(b"MSN Today", payload)
         # 4:0 is a leaf: b=0x01 (LEAF), so HOMEBASE click goes through
@@ -346,7 +366,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(struct.pack("<II", 1, 0x10), payload)  # Categories (US) 'a'
         self.assertIn(struct.pack("<II", 1, 0x11), payload)  # Member Assistance (US) 'a'
         self.assertIn(struct.pack("<II", 1, 0x12), payload)  # Worldwide Categories 'a'
@@ -367,7 +387,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(struct.pack("<II", 1, 0x10), payload)
         self.assertIn(b"Categories (US)", payload)
         self.assertNotIn(struct.pack("<II", 4, 0), payload)
@@ -383,7 +403,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(struct.pack("<II", 1, 0x11), payload)
         self.assertIn(b"Member Assistance (US)", payload)
 
@@ -401,7 +421,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 prop_group="a\x00e",
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
-            payload = build_dirsrv_reply_payload(request)
+            payload = build_get_children_reply_payload(request)
             self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
     def test_startup_browse_walk_for_msn_root_omits_menu_aliases(self):
@@ -413,7 +433,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         # MSN Today and Favorite Places are client-side HOMEBASE aliases; they
         # must not appear in the server-enumerated root listing.
         self.assertNotIn(struct.pack("<II", 4, 0), payload)
@@ -434,7 +454,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_properties_reply_payload(request)
         self.assertIn(b"Worldwide Member Assistance", payload)
 
     def test_worldwide_member_assistance_children_return_locale_wrappers(self):
@@ -446,7 +466,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"Member Assistance (US)", payload)
         self.assertIn(b"Member Assistance (BR)", payload)
 
@@ -462,7 +482,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"The MSN Member Lobby", payload)
         self.assertIn(b"MSN Beta Center", payload)
         self.assertIn(b"MSN Today", payload)
@@ -478,7 +498,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e\x00tp",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"Arts and Entertainment", payload)
         self.assertIn(b"The Microsoft Network Beta", payload)
         # "Folder"-tagged entries still surface as distinct listview rows.
@@ -493,7 +513,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"Books and Writing", payload)
         self.assertIn(b"Coming Attractions", payload)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
@@ -511,7 +531,7 @@ class TestDIRSRVReply(unittest.TestCase):
             locale_lcid=0x0416,
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"Member Assistance (BR)", payload)
         self.assertNotIn(b"Member Assistance (US)", payload)
 
@@ -525,7 +545,7 @@ class TestDIRSRVReply(unittest.TestCase):
             locale_raw=b"\x00\x00\x00\x00",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"Member Assistance (US)", payload)
         self.assertIn(b"Member Assistance (BR)", payload)
 
@@ -541,7 +561,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         # Containers emit type_str="Directory" via _container_content default.
         # ASCII string bodies use the shared flag-byte wire body: \x01 + asciiz.
         self.assertIn(b"\x0atp\x00\x01Directory\x00", payload)
@@ -571,7 +591,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"\x03p\x00" + struct.pack("<I", 5 * 1024 * 1024), payload)
         # tp carries the MSN Today fixture's type_str "News & Features".
         self.assertIn(b"\x0atp\x00\x01News & Features\x00", payload)
@@ -596,7 +616,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="e\x00j\x00k\x00ca\x00tp\x00z\x00o\x00g",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_children_reply_payload(request)
         self.assertIn(b"\x0ae\x00\x01MSN Today\x00", payload)
         self.assertIn(b"\x0bj\x00\x01Your daily window to MSN.\x00", payload)
         self.assertIn(b"\x0bk\x00\x01today\x00", payload)
@@ -619,7 +639,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="e\x00tp\x00w\x00j",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_properties_reply_payload(request)
         self.assertIn(b"\x0ae\x00\x01MSN Today\x00", payload)
         self.assertIn(b"\x0btp\x00\x01News & Features\x00", payload)
         self.assertIn(b"\x0bw\x00\x01April 15, 2026\x00", payload)
@@ -640,7 +660,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="q",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_dirsrv_reply_payload(request)
+        payload = build_get_properties_reply_payload(request)
         # Wire: type 0x04, name "q\0", 8-byte qword = [header_u32][lcid_u32].
         self.assertIn(b"\x04q\x00" + struct.pack("<II", 0, 1033), payload)
         # Regression guard: the old 4-byte DWORD emit must be gone.
@@ -662,7 +682,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 prop_group="q",
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
-            payload = build_dirsrv_reply_payload(request)
+            payload = build_get_children_reply_payload(request)
             for lcid in SUPPORTED_BROWSE_LCIDS:
                 self.assertIn(
                     b"\x04q\x00" + struct.pack("<II", 0, lcid),
@@ -679,7 +699,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        addrbar_payload = build_dirsrv_reply_payload(addrbar_request)
+        addrbar_payload = build_get_children_reply_payload(addrbar_request)
         # Regular GetChildren on MSN root returns the localized wrappers
         # (the address-bar entries); the language-list short-circuit is
         # scoped to propList=["q"] only, so this reply carries nav data.
@@ -1235,7 +1255,7 @@ class TestGetShabbyReplyFragmentation(unittest.TestCase):
     def test_default_ico_reply_packets_fit_packet_size(self):
         from server.services import shabby as shabby_mod
 
-        shabby_id = shabby_mod.pack_shabby_id(shabby_mod.FORMAT_ICO, 1)
+        shabby_id = shabby_mod.pack_shabby_id(shabby_mod.FORMAT_ICO, 2)
         blob, _, pkts = self._build_get_shabby_reply_packets(shabby_id)
         self.assertEqual(len(blob), 1078)  # the file we're guarding
         self.assertGreaterEqual(len(pkts), 2)
