@@ -38,13 +38,9 @@ def unpack_shabby_id(shabby_id):
 
 _ICONS_DIR = Path(__file__).resolve().parent.parent / "data" / "icons"
 
-# default.ico is a verbatim copy of Win95 SDK's SIMPLE.ICO (32×32 + 16×16,
-# 4bpp) — a real-world dual-size ICO that ExtractIconEx accepts unmodified.
-# Replaces an earlier hand-assembled BMP→ICO converter whose output caused
-# page faults during the h-icon cache path.
 ICON_REGISTRY = {
     pack_shabby_id(FORMAT_BMP, 1): _ICONS_DIR / "default_16.bmp",
-    pack_shabby_id(FORMAT_ICO, 1): _ICONS_DIR / "default.ico",
+    pack_shabby_id(FORMAT_ICO, 1): _ICONS_DIR / "folder.ico",
 }
 
 
