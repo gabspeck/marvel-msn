@@ -29,6 +29,7 @@ from server.mpc import (
 )
 from server.services.dirsrv import (
     SUPPORTED_BROWSE_LCIDS,
+    DIRSRVHandler,
     build_dirsrv_reply_payload,
     build_dirsrv_service_map_payload,
     build_property_record,
@@ -687,6 +688,34 @@ class TestDIRSRVReply(unittest.TestCase):
             self.assertNotIn(
                 b"\x04q\x00" + struct.pack("<II", 0, lcid), addrbar_payload
             )
+
+
+class TestDIRSRVUnhandledSelector(unittest.TestCase):
+    """DIRSRV must not silently answer unmapped selectors as GetProperties.
+
+    Go-word resolution arrives as selector 0x03 with the word as UTF-16LE in
+    node_id_raw; letting it fall through to the self-record branch would
+    mask the real wire shape. The handler must warn and drop instead.
+    """
+
+    def test_unknown_selector_warns_and_returns_none(self):
+        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
+        # Selector 0x03 with a UTF-16LE "shoes" payload in the node-id slot —
+        # the Go-word resolution shape observed on the wire.
+        payload = b"\x84" + struct.pack("<H", 12) + "shoes\0".encode("utf-16-le")
+        with self.assertLogs("server.services.dirsrv", level="WARNING") as cap:
+            result = handler.handle_request(
+                msg_class=0x01,
+                selector=0x03,
+                request_id=0,
+                payload=payload,
+                server_seq=0,
+                client_ack=0,
+            )
+        self.assertIsNone(result)
+        self.assertTrue(any("unhandled" in m for m in cap.output))
+        # Payload hex must appear so a reader can eyeball the UTF-16 shape.
+        self.assertTrue(any("7300680" in m for m in cap.output))
 
 
 class TestOLREGSRVServiceMap(unittest.TestCase):

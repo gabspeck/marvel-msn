@@ -1,3 +1,4 @@
+from ._dispatch import log_unhandled_selector
 from .dirsrv import DIRSRVHandler
 from .ftm import FTMHandler
 from .logsrv import LOGSRVHandler
@@ -13,3 +14,5 @@ SERVICE_HANDLERS = {
     "OnlStmt": OnlStmtHandler,
     "MEDVIEW": MEDVIEWHandler,
 }
+
+__all__ = ["SERVICE_HANDLERS", "log_unhandled_selector"]

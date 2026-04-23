@@ -29,8 +29,19 @@ from ..mpc import (
     build_tagged_reply_dword,
     parse_request_params,
 )
+from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
+
+# OLREGSRV wire selectors. Only the class=0x01 sel=0x01 commit head gets a
+# reply; sel=0x02 is a pre-check that must be ignored (replying aborts
+# signup with "important part of signup cannot be found").
+OLREGSRV_SELECTOR_COMMIT = 0x01
+OLREGSRV_SELECTOR_PRECHECK = 0x02  # intentionally unhandled (fall through to warn)
+
+# MOSRPC message class for a normal (non-oneway) call head. The oneway
+# continuations ride on 0xe6/0xe7 which trip MPC_CLASS_ONEWAY_MASK (0xE0).
+OLREGSRV_MSG_CLASS_CALL = 0x01
 
 
 class OLREGSRVHandler:
@@ -57,17 +68,9 @@ class OLREGSRVHandler:
                 len(payload),
             )
             return None
-        # Only the sel=0x01 commit head gets a reply.  Replying to the
-        # sel=0x02 pre-check aborts signup with "important part of
-        # signup cannot be found".
-        if msg_class != 0x01 or selector != 0x01:
-            log.warning(
-                "unhandled class=0x%02x selector=0x%02x req_id=%d payload_len=%d",
-                msg_class,
-                selector,
-                request_id,
-                len(payload),
-            )
+        # Only the commit head (class=0x01 sel=0x01) gets a reply.
+        if msg_class != OLREGSRV_MSG_CLASS_CALL or selector != OLREGSRV_SELECTOR_COMMIT:
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
         # HRESULT=0 (not an empty body): the proxy copies this dword
         # into its status word before the switch runs, so the success

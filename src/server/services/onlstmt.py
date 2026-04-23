@@ -61,8 +61,17 @@ from ..mpc import (
     build_tagged_reply_word,
 )
 from ..store import app_store as _default_store
+from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
+
+# OnlStmt wire selectors.  Called by ONLSTMT.EXE worker threads via
+# proxy->m0c(selector, ...) after the IID discovery map lookup.
+ONLSTMT_SELECTOR_SUMMARY = 0x00               # GetStatementSummary (initial call)
+ONLSTMT_SELECTOR_SUBSCRIPTIONS = 0x02         # list subscriptions
+ONLSTMT_SELECTOR_MANAGE_SUBSCRIPTION = 0x03   # load plans for the manage dialog
+ONLSTMT_SELECTOR_CANCEL_SUBSCRIPTION = 0x04   # cancel-subscription ack
+ONLSTMT_SELECTOR_GET_DETAILS = 0x05           # per-period charge details
 
 
 def build_summary_payload():
@@ -457,33 +466,27 @@ class OnlStmtHandler:
             )
             return None
 
-        if selector == 0x00:
+        if selector == ONLSTMT_SELECTOR_SUMMARY:
             log.info("statement_summary")
             reply_payload = build_summary_payload()
-        elif selector == 0x02:
+        elif selector == ONLSTMT_SELECTOR_SUBSCRIPTIONS:
             log.info("subscriptions")
             reply_payload = build_subscriptions_payload()
-        elif selector == 0x03:
+        elif selector == ONLSTMT_SELECTOR_MANAGE_SUBSCRIPTION:
             log.info("manage_subscription")
             reply_payload = build_plans_payload()
-        elif selector == 0x04:
+        elif selector == ONLSTMT_SELECTOR_CANCEL_SUBSCRIPTION:
             log.info("cancel_subscription")
             reply_payload = _CANCEL_ACK_PAYLOAD
             log.info("cancel_subscription_reply status=1")
-        elif selector == 0x05:
+        elif selector == ONLSTMT_SELECTOR_GET_DETAILS:
             # Request payload: `01 NN ...` — first send param is the
             # period index byte.  Fall back to 0 (current) if absent.
             period = payload[1] if len(payload) >= 2 and payload[0] == 0x01 else 0
             log.info("get_details period=%d", period)
             reply_payload = build_details_payload(period)
         else:
-            log.warning(
-                "unhandled class=0x%02x selector=0x%02x req_id=%d payload_len=%d",
-                msg_class,
-                selector,
-                request_id,
-                len(payload),
-            )
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)

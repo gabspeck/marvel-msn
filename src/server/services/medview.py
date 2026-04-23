@@ -44,6 +44,7 @@ from ..mpc import (
     build_tagged_reply_dword,
     parse_request_params,
 )
+from ._dispatch import log_unhandled_selector
 from .ttl import Title, TTLError
 
 log = logging.getLogger(__name__)
@@ -310,10 +311,7 @@ class MEDVIEWHandler:
             # CreateThread for this notification type.  No retries fire.
             reply_payload = bytes([TAG_END_STATIC])
         else:
-            log.warning(
-                "unhandled class=0x%02x selector=0x%02x req_id=%d payload_len=%d",
-                msg_class, selector, request_id, len(payload),
-            )
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)

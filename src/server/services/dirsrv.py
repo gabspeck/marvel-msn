@@ -4,9 +4,9 @@ import logging
 import struct
 
 from ..config import (
-    DIRSRV_INTERFACE_GUIDS,
     DIRSRV_BROWSE_FLAGS_CONTAINER,
     DIRSRV_BROWSE_FLAGS_LEAF,
+    DIRSRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
@@ -24,12 +24,17 @@ from ..mpc import (
 )
 from ..store import app_store as _default_store
 from . import shabby
+from ._dispatch import log_unhandled_selector
 
-# Within the DIRSRV interface table, slot 4 (IID 00028B28) is the GetShabby
-# RPC. CTreeNavClient::GetShabby (TREENVCL.DLL 0x7f631bab) calls
-# `proxy->method_at_offset_0xc(proxy, 4, ...)` — the literal 4 is the slot
-# index that resolves to the GetShabby IID via the discovery table.
-DIRSRV_GETSHABBY_SELECTOR = 0x04
+# DIRSRV wire selectors. Slot indices resolve to IIDs via the discovery table
+# advertised in build_discovery_packet. Names mirror TREENVCL.DLL vtable
+# methods (IID table 0x7F633270..0x7F6332EC).
+DIRSRV_SELECTOR_GET_PROPERTIES = 0x00  # self record (with dword_0=1 override = children)
+DIRSRV_SELECTOR_GET_PARENTS = 0x01     # TODO: unhandled; warn when observed
+DIRSRV_SELECTOR_GET_CHILDREN = 0x02    # GetRelatives dir=0
+# Slot 4 (IID 00028B28) is GetShabby — CTreeNavClient::GetShabby
+# (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
+DIRSRV_SELECTOR_GET_SHABBY = 0x04
 
 # DIRSRV property names. Use PROTOCOL.md semantics for known props; keep
 # unresolved props explicitly UNKNOWN and tentative interpretations as MAYBE.
@@ -90,12 +95,23 @@ class DIRSRVHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        """Handle a DIRSRV request — dispatch by selector."""
-        if selector == DIRSRV_GETSHABBY_SELECTOR:
+        """Handle a DIRSRV request — dispatch by selector.
+
+        Unknown selectors are warned (not silently handled) so the wire log
+        surfaces unmapped client paths — e.g. Go-word navigation, which comes
+        through as selector 0x03 with the word as UTF-16LE in node_id_raw.
+        """
+        if selector == DIRSRV_SELECTOR_GET_SHABBY:
             reply_payload = build_get_shabby_reply_payload(payload)
-        else:
+        elif selector in (
+            DIRSRV_SELECTOR_GET_PROPERTIES,
+            DIRSRV_SELECTOR_GET_CHILDREN,
+        ):
             request = decode_dirsrv_request(payload)
             reply_payload = build_dirsrv_reply_payload(request, selector=selector)
+        else:
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
+            return None
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
@@ -359,11 +375,6 @@ def build_props(requested_props, node, *, is_children):
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
-
-
-DIRSRV_SELECTOR_GET_PROPERTIES = 0x00
-DIRSRV_SELECTOR_GET_PARENTS = 0x01
-DIRSRV_SELECTOR_GET_CHILDREN = 0x02
 
 
 def build_dirsrv_reply_payload(request=None, *, selector=None):

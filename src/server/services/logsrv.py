@@ -19,8 +19,23 @@ from ..mpc import (
     parse_request_params,
 )
 from ..store import app_store as _default_store
+from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
+
+# LOGSRV wire selectors. Names track MOSCP/SIGNUP handler symbols where known.
+LOGSRV_SELECTOR_LOGIN = 0x00                       # initial login bootstrap (7 DWORDs)
+LOGSRV_SELECTOR_PASSWORD_CHANGE = 0x01             # Tools > Password dialog commit
+LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER = 0x02        # SIGNUP step after FTM transfer
+LOGSRV_SELECTOR_SIGNUP_QUERY = 0x07                # SIGNUP progressive queries
+LOGSRV_SELECTOR_BILLING_QUERY = 0x0A               # billing info fetch
+LOGSRV_SELECTOR_PM_COMMIT = 0x0B                   # payment-method commit (0x84 var + status)
+LOGSRV_SELECTOR_BILLING_COMMIT = 0x0C              # billing commit (0x84 var + status)
+LOGSRV_SELECTOR_POST_SIGNUP_QUERY = 0x0D           # post-signup phonebook/server query
+LOGSRV_SELECTOR_EXISTING_MEMBER_PHONEBOOK = 0x0E   # existing-member phonebook fetch
+# OSR2 / MSN 2.5 login: NTLM NEGOTIATE/CHALLENGE/AUTHENTICATE over selector 0x0F.
+# Current stub short-circuits after NEGOTIATE — see project_logsrv_osr2_ntlm.
+LOGSRV_SELECTOR_NTLM_LOGIN = 0x0F
 
 
 class LOGSRVHandler:
@@ -47,35 +62,29 @@ class LOGSRVHandler:
             )
             return None
 
-        if selector == 0x00:
+        if selector == LOGSRV_SELECTOR_LOGIN:
             reply_payload = _BOOTSTRAP_PAYLOAD
             log.info("login_bootstrap_reply status=0 dword_count=7 padding=16B")
-        elif selector == 0x0F:
+        elif selector == LOGSRV_SELECTOR_NTLM_LOGIN:
             reply_payload = _handle_osr2_bootstrap(payload)
-        elif selector == 0x01:
+        elif selector == LOGSRV_SELECTOR_PASSWORD_CHANGE:
             reply_payload = _handle_password_change(payload)
-        elif selector == 0x02:
+        elif selector == LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER:
             reply_payload = _handle_signup_post_transfer(payload)
-        elif selector == 0x07:
+        elif selector == LOGSRV_SELECTOR_SIGNUP_QUERY:
             reply_payload = _handle_signup_query(payload)
-        elif selector == 0x0A:
+        elif selector == LOGSRV_SELECTOR_BILLING_QUERY:
             reply_payload = _handle_billing_query()
-        elif selector == 0x0B:
+        elif selector == LOGSRV_SELECTOR_PM_COMMIT:
             reply_payload = _handle_pm_commit()
-        elif selector == 0x0C:
+        elif selector == LOGSRV_SELECTOR_BILLING_COMMIT:
             reply_payload = _handle_billing_commit()
-        elif selector == 0x0D:
+        elif selector == LOGSRV_SELECTOR_POST_SIGNUP_QUERY:
             reply_payload = _handle_post_signup_query(payload)
-        elif selector == 0x0E:
+        elif selector == LOGSRV_SELECTOR_EXISTING_MEMBER_PHONEBOOK:
             reply_payload = _handle_existing_member_phonebook_query(payload)
         else:
-            log.warning(
-                "unhandled class=0x%02x selector=0x%02x req_id=%d payload_len=%d",
-                msg_class,
-                selector,
-                request_id,
-                len(payload),
-            )
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)

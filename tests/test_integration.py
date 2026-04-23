@@ -438,7 +438,8 @@ class TestFullFeatureSession(unittest.TestCase):
             + _send_param_var(b"q\x00")
             + _send_param_dword(0)  # children=False
         )
-        pkts = self._call_selector(self.PIPE_DIRSRV, 0x01, 0x01, self_req)
+        # Selector 0x00 = GetProperties (TREENVCL IID table entry 0).
+        pkts = self._call_selector(self.PIPE_DIRSRV, 0x01, 0x00, self_req)
         params = parse_tagged_params(self._reply_payload(pkts))
         self.assertEqual(params[0].value, 0)
         self.assertGreaterEqual(params[1].value, 1)
@@ -472,7 +473,8 @@ class TestFullFeatureSession(unittest.TestCase):
             + _send_param_var(prop_group)
             + _send_param_dword(1)  # children=True
         )
-        pkts = self._call_selector(self.PIPE_DIRSRV, 0x01, 0x01, kids_req, req_id=1)
+        # Selector 0x02 = GetChildren (TREENVCL GetRelatives dir=0).
+        pkts = self._call_selector(self.PIPE_DIRSRV, 0x01, 0x02, kids_req, req_id=1)
         self.assertIn(b"Categories (US)", self._reply_payload(pkts))
 
     def _exercise_ftm(self):
