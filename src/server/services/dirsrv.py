@@ -101,14 +101,14 @@ class DIRSRVHandler:
         surfaces unmapped client paths — e.g. Go-word navigation, which comes
         through as selector 0x03 with the word as UTF-16LE in node_id_raw.
         """
-        if selector == DIRSRV_SELECTOR_GET_SHABBY:
-            reply_payload = build_get_shabby_reply_payload(payload)
-        elif selector in (
-            DIRSRV_SELECTOR_GET_PROPERTIES,
-            DIRSRV_SELECTOR_GET_CHILDREN,
-        ):
+        if selector == DIRSRV_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_dirsrv_reply_payload(request, selector=selector)
+            reply_payload = build_get_properties_reply_payload(request)
+        elif selector == DIRSRV_SELECTOR_GET_CHILDREN:
+            request = decode_dirsrv_request(payload)
+            reply_payload = build_get_children_reply_payload(request)
+        elif selector == DIRSRV_SELECTOR_GET_SHABBY:
+            reply_payload = build_get_shabby_reply_payload(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -377,92 +377,122 @@ def build_props(requested_props, node, *, is_children):
     return out
 
 
-def build_dirsrv_reply_payload(request=None, *, selector=None):
-    """Build a DIRSRV GetProperties reply.
+def build_get_properties_reply_payload(request=None):
+    """Build a DIRSRV GetProperties (selector 0x00) reply: one self record.
 
-    Reply: dword(status) + dword(node_count) + end-static + dynamic-complete + property records.
+    Exception: CMosTreeNode::GetNthChild's post-login breadcrumb walk issues
+    GetProperties with dword_0=1 as a "return children" override — delegate
+    to the children builder in that case so the client receives the wrappers
+    it expects for the MSN Central icons.
+    """
+    if request is None:
+        request = DirsrvRequest()
+    if request.dword_0 == 1:
+        return build_get_children_reply_payload(request)
 
-    Selector semantics (TREENVCL IID table 0x7F633270..0x7F6332EC):
-      0x00 GetProperties — return self record
-      0x02 GetChildren   — return children (GetRelatives dir=0)
-    Post-login breadcrumb walks (CMosTreeNode::GetNthChild path) use selector
-    0x00 with dword_0=1 as a "return children" override, so we also treat that
-    as children. GetLocalizedNode calls selector 0x02 with dword_0=0 — without
-    this selector gate, that fell into the properties branch and returned the
-    parent's own record, poisoning the localized-child cache with self.
+    requested_props = _parse_prop_group(request.prop_group)
+    _log_request("get_properties", request, requested_props)
+
+    node = _default_store.content.get_node(request.node_id)
+    records_with_ids = [(node.node_id, build_props(requested_props, node, is_children=False))]
+
+    _log_reply("get_properties_reply", records_with_ids)
+    return _build_reply_wire(records_with_ids)
+
+
+def build_get_children_reply_payload(request=None):
+    """Build a DIRSRV GetChildren (selector 0x02) reply: child records.
+
+    Special cases (order matters):
+      1. node=0:0 + propList=["q"] → MCM browse-language enumerator.
+         MCM!FUN_0410438e drives View > Options > General "Content view"
+         by asking DIRSRV for every available browse LCID in one call,
+         opened on its own pipe (ver_param="U"). The worker reads
+         `*(u32*)(value + 4)` on each `q`, caches the packed-LCID array
+         in HKLM, and feeds it to GetLocaleInfoA for display.
+      2. node=4:0 → self-as-child. DIRECTORY_CHILDREN["4:0"] is empty,
+         so ordinary enumeration returns zero records and stalls the
+         MSN Today startup path.
+      3. Normal: get_children with permissive fallback. Pass locale_raw
+         so filter_on=1 requests scope the reply to the client's
+         BrowseLanguage — GetLocalizedNode relies on this to pick the
+         first localized child when descending into 1:0 / 1:1.
     """
     if request is None:
         request = DirsrvRequest()
 
-    requested_props = [p for p in request.prop_group.split("\x00") if p]
-    is_children = (
-        selector == DIRSRV_SELECTOR_GET_CHILDREN
-        or request.dword_0 == 1
-    )
+    requested_props = _parse_prop_group(request.prop_group)
+    _log_request("get_children", request, requested_props)
 
+    records_with_ids = _collect_children_records(request, requested_props)
+
+    _log_reply("get_children_reply", records_with_ids)
+    return _build_reply_wire(records_with_ids)
+
+
+def _collect_children_records(request, requested_props):
+    """Return [(src_node_id, prop_tuples)] for the GetChildren body."""
+    if request.node_id == "0:0" and requested_props == [PROP_LANGUAGE]:
+        return [
+            (
+                f"lang:0x{lcid:04x}",
+                [(0x04, PROP_LANGUAGE, struct.pack("<II", 0, lcid))],
+            )
+            for lcid in SUPPORTED_BROWSE_LCIDS
+        ]
+
+    content_store = _default_store.content
+    node = content_store.get_node(request.node_id)
+    if node.node_id == "4:0":
+        return [(node.node_id, build_props(requested_props, node, is_children=True))]
+
+    return [
+        (child.node_id, build_props(requested_props, child, is_children=True))
+        for child in content_store.get_children(request.node_id, request.locale_raw)
+    ]
+
+
+def _parse_prop_group(prop_group):
+    return [p for p in prop_group.split("\x00") if p]
+
+
+def _log_request(kind, request, requested_props):
     log.info(
-        "get_properties node=%s raw=%s selector=%s children=%s props=%s locale_lcid=%s locale_raw=%s",
+        "%s node=%s raw=%s props=%s locale_lcid=%s locale_raw=%s",
+        kind,
         request.node_id,
         request.node_id_raw.hex(),
-        f"0x{selector:02x}" if selector is not None else "-",
-        is_children,
         ",".join(requested_props) or "-",
         f"0x{request.locale_lcid:04x}" if request.locale_lcid is not None else "-",
         request.locale_raw.hex() or "-",
     )
 
-    content_store = _default_store.content
-    node = content_store.get_node(request.node_id)
 
-    props_per_record = []  # for logging: list of (source_node_id, prop_tuples)
-    if request.node_id == "0:0" and requested_props == [PROP_LANGUAGE]:
-        # MCM!FUN_0410438e drives the View > Options > General "Content
-        # view" combobox by asking DIRSRV for every available browse
-        # LCID in one call: node=0:0, propList=["q"], 4-byte zero
-        # locale, opened on its own pipe (ver_param="U"). The worker
-        # iterates the reply records and reads `*(u32*)(value + 4)` on
-        # each `q` to build a packed-LCID array, caches it in HKLM, and
-        # feeds it to GetLocaleInfoA for display. The observed wire
-        # dispatches on selector 0x02 (is_children=False) rather than
-        # the selector 0x00 GetChildren that the TREENVCL RE implied,
-        # so gate on (node, propList) — works regardless of dword_0.
-        # Scoped to 0:0 so per-node `q` lookups (e.g. a fixture asking
-        # what language MSN Today is in) keep returning the node's own
-        # language instead of the advertised browse list.
-        for lcid in SUPPORTED_BROWSE_LCIDS:
-            props = [(0x04, PROP_LANGUAGE, struct.pack("<II", 0, lcid))]
-            props_per_record.append((f"lang:0x{lcid:04x}", props))
-    elif not is_children:
-        props = build_props(requested_props, node, is_children=False)
-        props_per_record.append((node.node_id, props))
-    elif node.node_id == "4:0":
-        # Topology special-case: DIRECTORY_CHILDREN["4:0"] is empty, so an
-        # ordinary GetChildren would return zero records. Return 4:0's own
-        # record instead so the client has something to read on the MSN
-        # Today startup path.
-        props = build_props(requested_props, node, is_children=True)
-        props_per_record.append((node.node_id, props))
-    else:
-        # get_children applies a permissive fallback; see InMemoryContentStore.
-        # Pass locale_raw so `filter_on=1` requests scope the reply to the
-        # client's BrowseLanguage — GetLocalizedNode relies on this to pick
-        # the first localized child when descending into 1:0 / 1:1.
-        for child in content_store.get_children(request.node_id, request.locale_raw):
-            props = build_props(requested_props, child, is_children=True)
-            props_per_record.append((child.node_id, props))
-
-    records = [build_property_record(props) for _node_id, props in props_per_record]
-    node_count = len(records)
-    dynamic_data = b"".join(records)
-
-    log.info("get_properties_reply status=0 node_count=%d", node_count)
-    for i, (src_node_id, props) in enumerate(props_per_record):
+def _log_reply(kind, records_with_ids):
+    log.info("%s status=0 node_count=%d", kind, len(records_with_ids))
+    for i, (src_node_id, props) in enumerate(records_with_ids):
         log.info(
-            "get_properties_reply idx=%d node=%s %s",
+            "%s idx=%d node=%s %s",
+            kind,
             i,
             src_node_id,
             _format_props_for_log(props),
         )
+
+
+def _build_reply_wire(records_with_ids):
+    """Build the shared DIRSRV reply framing for GetProperties and GetChildren.
+
+    status(0) + node_count + 0x87 end-static + 0x88 stream-end + records.
+
+    0x88 (stream-end), not 0x86: GetChildren's client reads property records
+    through MPCCL's dynamic iterator, which waits on +0x28/+0x2c. 0x86 would
+    signal the single-shot Wait() but skip the iterator events, yielding an
+    empty listview. GetProperties uses the same framing so the client's MPCCL
+    code path is uniform.
+    """
+    records = [build_property_record(props) for _id, props in records_with_ids]
+    node_count = len(records)
 
     if log.isEnabledFor(TRACE):
         for i, rec in enumerate(records):
@@ -470,14 +500,10 @@ def build_dirsrv_reply_payload(request=None, *, selector=None):
 
     payload = bytearray()
     payload.extend(build_tagged_reply_dword(0))  # status = success
-    payload.extend(build_tagged_reply_dword(node_count))  # node count
+    payload.extend(build_tagged_reply_dword(node_count))
     payload.append(TAG_END_STATIC)
-    # 0x88 (stream-end), not 0x86: GetChildren's client reads property
-    # records through MPCCL's dynamic iterator, which waits on +0x28/+0x2c.
-    # 0x86 would signal the single-shot Wait() but skip the iterator events,
-    # yielding an empty listview.
     payload.append(TAG_DYNAMIC_STREAM_END)
-    payload.extend(dynamic_data)
+    payload.extend(b"".join(records))
     return bytes(payload)
 
 
