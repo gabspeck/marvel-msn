@@ -380,15 +380,15 @@ def build_props(requested_props, node, *, is_children):
 def build_get_properties_reply_payload(request=None):
     """Build a DIRSRV GetProperties (selector 0x00) reply: one self record.
 
-    Exception: CMosTreeNode::GetNthChild's post-login breadcrumb walk issues
-    GetProperties with dword_0=1 as a "return children" override — delegate
-    to the children builder in that case so the client receives the wrappers
-    it expects for the MSN Central icons.
+    The client always wants exactly one record back — the requested node's own
+    properties. CMosTreeNode::GetPropertyGroupRaw → CTreeNavClient::GetProperties
+    expects a single-record stream and feeds it to SetPropertyGroupFromPsp on
+    the receiving CMosTreeNode. Returning multi-record (children) causes the
+    receiver to be populated with its FIRST CHILD's record — observed live as
+    Cats US.e = 'Arts and Entertainment' (mnid (1,0x100), not (1,0x10)).
     """
     if request is None:
         request = DirsrvRequest()
-    if request.dword_0 == 1:
-        return build_get_children_reply_payload(request)
 
     requested_props = _parse_prop_group(request.prop_group)
     _log_request("get_properties", request, requested_props)

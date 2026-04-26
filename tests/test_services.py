@@ -235,6 +235,85 @@ class TestDIRSRVServiceMap(unittest.TestCase):
             self.assertEqual(record[16], selector)
 
 
+def _walk_get_children_records(payload):
+    """Parse a DIRSRV GetChildren reply into a list of {prop_name: parsed_value}.
+
+    Per `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md` §"Per-record on-wire format":
+        +0  u32 total_size
+        +4  u16 prop_count
+        +6  for prop in prop_count: u8 type, asciiz name, value-by-type
+
+    Returns parsed values: 'a' as raw 8-byte mnid blob; 'e' as decoded ASCII.
+    Other props are kept in raw form by their type byte. Used by structural
+    record-vs-identity assertions.
+    """
+    p = 0
+    assert payload[p] == 0x83
+    p += 1
+    p += 4  # status DWORD
+    assert payload[p] == 0x83
+    p += 1
+    node_count = struct.unpack_from("<I", payload, p)[0]
+    p += 4
+    assert payload[p] == 0x87
+    p += 1
+    assert payload[p] == 0x88
+    p += 1
+    records = []
+    for _ in range(node_count):
+        rec_start = p
+        total_size = struct.unpack_from("<I", payload, p)[0]
+        p += 4
+        prop_count = struct.unpack_from("<H", payload, p)[0]
+        p += 2
+        props = {}
+        for _ in range(prop_count):
+            ptype = payload[p]
+            p += 1
+            name_end = payload.index(b"\x00", p)
+            name = payload[p:name_end].decode("ascii")
+            p = name_end + 1
+            if ptype == 0x01:
+                value = payload[p : p + 1]
+                p += 1
+            elif ptype == 0x03:
+                value = payload[p : p + 4]
+                p += 4
+            elif ptype == 0x04 or ptype == 0x0C:
+                value = payload[p : p + 8]
+                p += 8
+            elif ptype == 0x0E:
+                blob_len = struct.unpack_from("<I", payload, p)[0]
+                p += 4
+                value = payload[p : p + blob_len]
+                p += blob_len
+            elif ptype in (0x0A, 0x0B):
+                flag = payload[p]
+                p += 1
+                if flag & 0x02:
+                    value = ""
+                elif flag & 0x01:
+                    end = payload.index(b"\x00", p)
+                    value = payload[p:end].decode("ascii", errors="replace")
+                    p = end + 1
+                else:
+                    end = p
+                    while end + 1 < len(payload) and not (
+                        payload[end] == 0 and payload[end + 1] == 0
+                    ):
+                        end += 2
+                    value = payload[p:end].decode("utf-16le", errors="replace")
+                    p = end + 2
+            else:
+                raise AssertionError(f"unknown ptype 0x{ptype:02x} for prop {name!r}")
+            props[name] = value
+        assert p - rec_start == total_size, (
+            f"record size mismatch: walked {p - rec_start} vs declared {total_size}"
+        )
+        records.append(props)
+    return records
+
+
 class TestDIRSRVReply(unittest.TestCase):
     def test_self_properties(self):
         request = DirsrvRequest(
@@ -267,24 +346,26 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Categories (US)", payload)
         self.assertIn(b"Worldwide Member Assistance", payload)
 
-    def test_get_properties_with_dword_0_1_delegates_to_children(self):
-        # CMosTreeNode::GetNthChild's post-login breadcrumb walk issues
-        # GetProperties (selector 0x00) with dword_0=1 to ask for children.
-        # The GetProperties handler must recognize this override and
-        # return the same wire bytes the GetChildren handler would for
-        # the same request.
+    def test_get_properties_returns_self_record_only(self):
+        # GetProperties (selector 0x00) is always a single-record query for
+        # the requested node's own props. SetPropertyGroupFromPsp on the
+        # client feeds the FIRST received record into the requesting node;
+        # delegating to children corrupts wrappers (Cats US ends up named
+        # "Arts and Entertainment", its first child).
         request = DirsrvRequest(
-            node_id="0:0",
-            node_id_raw=struct.pack("<II", 0, 0),
+            node_id=f"1:{0x10}",
+            node_id_raw=struct.pack("<II", 1, 0x10),
             dword_0=1,
             dword_1=14,
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        properties_reply = build_get_properties_reply_payload(request)
-        children_reply = build_get_children_reply_payload(request)
-        self.assertEqual(properties_reply, children_reply)
-        self.assertIn(b"Categories (US)", properties_reply)
+        payload = build_get_properties_reply_payload(request)
+        self.assertIn(b"Categories (US)", payload)
+        # First child A&E must NOT appear — that was the corruption signal.
+        self.assertNotIn(b"Arts and Entertainment", payload)
+        # Self-mnid must be present.
+        self.assertIn(struct.pack("<II", 1, 0x10), payload)
 
     def test_msn_root_self_properties_return_correct_name(self):
         # Client's MSN root wire = "0:0". Self-query returns "The Microsoft
@@ -548,6 +629,100 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = build_get_children_reply_payload(request)
         self.assertIn(b"Member Assistance (US)", payload)
         self.assertIn(b"Member Assistance (BR)", payload)
+
+    def test_records_match_node_identity(self):
+        # Structural per-record walk: every GetChildren record's `a` (mnid blob)
+        # must match the `e` (display name) at that index. Catches record
+        # mislabel / ordering bugs that substring asserts cannot.
+        cases = [
+            (
+                "0:0",
+                struct.pack("<II", 0, 0),
+                [
+                    ((1, 0x10), "Categories (US)"),
+                    ((1, 0x11), "Member Assistance (US)"),
+                    ((1, 0x12), "Worldwide Categories"),
+                    ((1, 0), "Worldwide Member Assistance"),
+                ],
+            ),
+            (
+                "1:0",
+                struct.pack("<II", 1, 0),
+                [
+                    ((1, 0x11), "Member Assistance (US)"),
+                    ((1, 0x14), "Member Assistance (BR)"),
+                ],
+            ),
+            (
+                f"1:{0x12}",
+                struct.pack("<II", 1, 0x12),
+                [
+                    ((1, 0x10), "Categories (US)"),
+                    ((1, 0x13), "Categories (BR)"),
+                ],
+            ),
+            (
+                f"1:{0x10}",
+                struct.pack("<II", 1, 0x10),
+                [
+                    ((1, 0x100), "Arts and Entertainment"),
+                    ((1, 0x101), "Business and Finance"),
+                    ((1, 0x102), "Computers and Software"),
+                    ((1, 0x103), "Education and Reference"),
+                    ((1, 0x104), "Home and Family"),
+                    ((1, 0x105), "Interest, Leisure and Hobbies"),
+                    ((1, 0x106), "People and Communities"),
+                    ((1, 0x107), "Public Affairs"),
+                    ((1, 0x108), "Science and Technology"),
+                    ((1, 0x109), "Special Events"),
+                    ((1, 0x10A), "Sports, Health and Fitness"),
+                    ((1, 0x10B), "The Internet Center"),
+                    ((1, 0x10C), "The MSN Member Lobby"),
+                    ((1, 0x10D), "The Microsoft Network Beta"),
+                ],
+            ),
+            (
+                f"1:{0x11}",
+                struct.pack("<II", 1, 0x11),
+                [
+                    ((1, 0x300), "The MSN Member Lobby"),
+                    ((1, 0x301), "MSN Beta Center"),
+                    ((4, 0), "MSN Today"),
+                    ((1, 0x303), "Member Assistance Kiosk - July 19"),
+                    ((1, 0x304), "First-Time-User Experience"),
+                    ((1, 0x305), "Member Guidelines"),
+                    ((1, 0x306), "MSN Beta News Flash - July 19"),
+                    ((1, 0x307), "Member Guidelines"),
+                    ((1, 0x308), "Member Agreement"),
+                ],
+            ),
+        ]
+        for node_id, raw, expected in cases:
+            request = DirsrvRequest(
+                node_id=node_id,
+                node_id_raw=raw,
+                dword_0=1,
+                dword_1=14,
+                prop_group="a\x00e",
+                recv_descriptors=[0x83, 0x83, 0x85],
+            )
+            payload = build_get_children_reply_payload(request)
+            records = _walk_get_children_records(payload)
+            self.assertEqual(
+                len(records), len(expected),
+                f"node={node_id} record count {len(records)} != expected {len(expected)}",
+            )
+            for idx, (props, (exp_a, exp_e)) in enumerate(zip(records, expected)):
+                a_blob = props.get("a")
+                self.assertIsNotNone(a_blob, f"node={node_id} idx={idx} missing 'a'")
+                self.assertEqual(
+                    struct.unpack("<II", a_blob), exp_a,
+                    f"node={node_id} idx={idx}: a={struct.unpack('<II', a_blob)} != {exp_a}",
+                )
+                self.assertEqual(
+                    props.get("e"), exp_e,
+                    f"node={node_id} idx={idx}: e={props.get('e')!r} != {exp_e!r}",
+                )
 
     def test_dsnav_details_column_tags_use_documented_type_bytes(self):
         # DSNAV.md §12/§14.2 pins the wire types for the details-view columns:
