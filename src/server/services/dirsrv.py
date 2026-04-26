@@ -12,13 +12,14 @@ from ..config import (
     TAG_END_STATIC,
 )
 from ..log import TRACE
-from ..models import DirsrvRequest, DwordParam
+from ..models import DirsrvRequest, DwordParam, VarParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
     build_tagged_reply_dword,
+    build_tagged_reply_var,
     decode_dirsrv_request,
     parse_request_params,
 )
@@ -32,9 +33,14 @@ from ._dispatch import log_unhandled_selector
 DIRSRV_SELECTOR_GET_PROPERTIES = 0x00  # self record (with dword_0=1 override = children)
 DIRSRV_SELECTOR_GET_PARENTS = 0x01     # TODO: unhandled; warn when observed
 DIRSRV_SELECTOR_GET_CHILDREN = 0x02    # GetRelatives dir=0
+DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWord
 # Slot 4 (IID 00028B28) is GetShabby — CTreeNavClient::GetShabby
 # (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
 DIRSRV_SELECTOR_GET_SHABBY = 0x04
+
+# CTreeNavClient HResultToDsStatus return value for "lookup failed". Any
+# nonzero status overrides the function's local_c return.
+DS_E_GENERIC = 0x100
 
 # DIRSRV property names. Use PROTOCOL.md semantics for known props; keep
 # unresolved props explicitly UNKNOWN and tentative interpretations as MAYBE.
@@ -95,18 +101,15 @@ class DIRSRVHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        """Handle a DIRSRV request — dispatch by selector.
-
-        Unknown selectors are warned (not silently handled) so the wire log
-        surfaces unmapped client paths — e.g. Go-word navigation, which comes
-        through as selector 0x03 with the word as UTF-16LE in node_id_raw.
-        """
+        """Handle a DIRSRV request — dispatch by selector."""
         if selector == DIRSRV_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
             reply_payload = build_get_properties_reply_payload(request)
         elif selector == DIRSRV_SELECTOR_GET_CHILDREN:
             request = decode_dirsrv_request(payload)
             reply_payload = build_get_children_reply_payload(request)
+        elif selector == DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD:
+            reply_payload = build_get_deid_from_go_word_reply_payload(payload)
         elif selector == DIRSRV_SELECTOR_GET_SHABBY:
             reply_payload = build_get_shabby_reply_payload(payload)
         else:
@@ -505,6 +508,45 @@ def _build_reply_wire(records_with_ids):
     payload.append(TAG_DYNAMIC_STREAM_END)
     payload.extend(b"".join(records))
     return bytes(payload)
+
+
+def build_get_deid_from_go_word_reply_payload(payload):
+    """Build the reply for a DIRSRV GetDeidFromGoWord request.
+
+    Request payload (from `CTreeNavClient::GetDeidFromGoWord` @
+    TREENVCL 0x7F63179F):
+      - `0x04 [len] <wide_go_word + wide-NUL>`  PackSendBytes wide string
+      - `0x04 [len] <count:u32 + lcid:u32 * count>`  PackSendBytes locale
+      - `0x83`  PackReceiveDword desc — status
+      - `0x84`  PackReceiveBytes desc — 8-byte deid via post-static buffer
+
+    Reply: `0x83 [status] 0x87 0x84 [len=8] [deid:8]`. The 0x84 buffer
+    after end-static mirrors LOGSRV bootstrap's post-static var: the
+    marshal binds the 0x84 recv-descriptor to the 8-byte block, and the
+    client's `local_10[+0xc] GetBasePtr` returns its base. Status DWORD
+    of 0 = success (deid valid); nonzero = lookup failure (deid ignored).
+    """
+    send_params, _ = parse_request_params(payload)
+    wide = next((p.data for p in send_params if isinstance(p, VarParam)), b"")
+    go_word = wide.decode("utf-16-le", errors="replace").rstrip("\x00")
+
+    node = _default_store.content.find_by_go_word(go_word)
+    if node is not None:
+        deid = node.mnid_a
+        status = 0
+    else:
+        deid = b"\x00" * 8
+        status = DS_E_GENERIC
+    log.info(
+        "get_deid_from_go_word go_word=%r match=%s status=0x%x",
+        go_word, node.node_id if node else "-", status,
+    )
+
+    return (
+        build_tagged_reply_dword(status)
+        + bytes([TAG_END_STATIC])
+        + build_tagged_reply_var(0x84, deid)
+    )
 
 
 def build_get_shabby_reply_payload(payload):

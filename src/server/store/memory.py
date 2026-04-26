@@ -16,6 +16,16 @@ class InMemoryContentStore:
     def get_node(self, node_id):
         return self._nodes.get(node_id, self._fallback)
 
+    def find_by_go_word(self, go_word):
+        if not go_word:
+            return None
+        target = go_word.casefold()
+        for node in self._nodes.values():
+            node_go_word = node.content.go_word
+            if node_go_word and node_go_word.casefold() == target:
+                return node
+        return None
+
     def get_children(self, node_id, locale_raw=None):
         # Permissive fallback: any node without an explicit child list resolves
         # to [fallback]. CMosTreeNode::Exec caches 'z'/'c' from the GetChildren

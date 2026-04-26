@@ -28,10 +28,12 @@ from server.mpc import (
     parse_tagged_params,
 )
 from server.services.dirsrv import (
+    DS_E_GENERIC,
     SUPPORTED_BROWSE_LCIDS,
     DIRSRVHandler,
     build_dirsrv_service_map_payload,
     build_get_children_reply_payload,
+    build_get_deid_from_go_word_reply_payload,
     build_get_properties_reply_payload,
     build_property_record,
 )
@@ -913,22 +915,20 @@ class TestDIRSRVReply(unittest.TestCase):
 
 
 class TestDIRSRVUnhandledSelector(unittest.TestCase):
-    """DIRSRV must not silently answer unmapped selectors as GetProperties.
-
-    Go-word resolution arrives as selector 0x03 with the word as UTF-16LE in
-    node_id_raw; letting it fall through to the self-record branch would
-    mask the real wire shape. The handler must warn and drop instead.
+    """DIRSRV must warn (not silently fall through to GetProperties) on
+    selectors that have no registered handler — keeps unmapped client
+    paths visible in the wire log.
     """
 
     def test_unknown_selector_warns_and_returns_none(self):
         handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
-        # Selector 0x03 with a UTF-16LE "shoes" payload in the node-id slot —
-        # the Go-word resolution shape observed on the wire.
-        payload = b"\x84" + struct.pack("<H", 12) + "shoes\0".encode("utf-16-le")
+        # Selector 0x01 (GetParents) — no handler today, must surface as
+        # an `unhandled` warning, not a self-record reply.
+        payload = b""
         with self.assertLogs("server.services.dirsrv", level="WARNING") as cap:
             result = handler.handle_request(
                 msg_class=0x01,
-                selector=0x03,
+                selector=0x01,
                 request_id=0,
                 payload=payload,
                 server_seq=0,
@@ -936,8 +936,61 @@ class TestDIRSRVUnhandledSelector(unittest.TestCase):
             )
         self.assertIsNone(result)
         self.assertTrue(any("unhandled" in m for m in cap.output))
-        # Payload hex must appear so a reader can eyeball the UTF-16 shape.
-        self.assertTrue(any("7300680" in m for m in cap.output))
+
+
+class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
+    """Selector 0x03 reply mirrors LOGSRV bootstrap's post-static var pattern:
+    `0x83 [status] 0x87 0x84 [len=8] [deid:8]`. Status DWORD 0 = success.
+    """
+
+    @staticmethod
+    def _build_request(go_word):
+        wide = go_word.encode("utf-16-le") + b"\x00\x00"
+        # Length byte uses inline form (bit 7 set, low 7 bits = length).
+        # All fixtures keep go-words short enough for the inline form.
+        assert len(wide) < 0x80
+        return (
+            b"\x04" + bytes([0x80 | len(wide)]) + wide
+            + b"\x04\x84\x00\x00\x00\x00"  # locale: count=0
+            + b"\x83\x84"                    # recv descriptors
+        )
+
+    def test_known_go_word_returns_matching_deid(self):
+        # MSN Today fixture: node_id "4:0", go_word "today" (case fold).
+        payload = build_get_deid_from_go_word_reply_payload(
+            self._build_request("Today")
+        )
+        expected = (
+            b"\x83\x00\x00\x00\x00"               # status=0
+            + bytes([TAG_END_STATIC])             # 0x87
+            + b"\x84\x88"                         # 0x84 var, len=8 inline
+            + struct.pack("<II", 4, 0)            # deid (4, 0)
+        )
+        self.assertEqual(payload, expected)
+
+    def test_unknown_go_word_returns_zero_deid_with_error(self):
+        payload = build_get_deid_from_go_word_reply_payload(
+            self._build_request("nonexistent")
+        )
+        expected = (
+            b"\x83" + struct.pack("<I", DS_E_GENERIC)
+            + bytes([TAG_END_STATIC])
+            + b"\x84\x88"
+            + b"\x00" * 8
+        )
+        self.assertEqual(payload, expected)
+
+    def test_dispatch_via_handler(self):
+        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
+        result = handler.handle_request(
+            msg_class=0x01,
+            selector=0x03,
+            request_id=0,
+            payload=self._build_request("today"),
+            server_seq=0,
+            client_ack=0,
+        )
+        self.assertIsNotNone(result)
 
 
 class TestOLREGSRVServiceMap(unittest.TestCase):
