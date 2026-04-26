@@ -549,7 +549,7 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_get_children_reply_payload(request)
         self.assertIn(b"Member Assistance (US)", payload)
-        self.assertIn(b"Member Assistance (BR)", payload)
+        self.assertIn(b"Assistencia ao Associado (BR)", payload)
 
     def test_member_assistance_us_children_emit_nine_entries_with_msn_today_link(self):
         # 1:17 = Member Assistance (US). Its children include the live 4:0
@@ -613,7 +613,7 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_get_children_reply_payload(request)
-        self.assertIn(b"Member Assistance (BR)", payload)
+        self.assertIn(b"Assistencia ao Associado (BR)", payload)
         self.assertNotIn(b"Member Assistance (US)", payload)
 
         # filter_on=0 — the 4-byte form — keeps everything.
@@ -628,7 +628,32 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_get_children_reply_payload(request)
         self.assertIn(b"Member Assistance (US)", payload)
-        self.assertIn(b"Member Assistance (BR)", payload)
+        self.assertIn(b"Assistencia ao Associado (BR)", payload)
+
+    def test_filter_on_locale_picks_localized_categories_under_msn_root(self):
+        # LJUMP 1:0:0:0 (HOMEBASE Categories) targets MSN root and the client
+        # calls GetLocalizedNode with filter_on=1. The first locale-matching
+        # child must be Categorias (BR) under pt-BR — without the localized
+        # wrapper as a direct child of MSN root the filter would skip past
+        # both Cats(US) and MA(US) and surface Worldwide Categories instead.
+        request = DirsrvRequest(
+            node_id="0:0",
+            node_id_raw=struct.pack("<II", 0, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e",
+            locale_raw=struct.pack("<II", 1, 0x0416),
+            locale_lcid=0x0416,
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_get_children_reply_payload(request)
+        records = _walk_get_children_records(payload)
+        self.assertGreater(len(records), 0)
+        self.assertEqual(records[0].get("e"), "Categorias (BR)")
+        self.assertEqual(struct.unpack("<II", records[0]["a"]), (1, 0x13))
+        names = [r.get("e") for r in records]
+        self.assertNotIn("Categories (US)", names)
+        self.assertNotIn("Member Assistance (US)", names)
 
     def test_records_match_node_identity(self):
         # Structural per-record walk: every GetChildren record's `a` (mnid blob)
@@ -640,7 +665,9 @@ class TestDIRSRVReply(unittest.TestCase):
                 struct.pack("<II", 0, 0),
                 [
                     ((1, 0x10), "Categories (US)"),
+                    ((1, 0x13), "Categorias (BR)"),
                     ((1, 0x11), "Member Assistance (US)"),
+                    ((1, 0x14), "Assistencia ao Associado (BR)"),
                     ((1, 0x12), "Worldwide Categories"),
                     ((1, 0), "Worldwide Member Assistance"),
                 ],
@@ -650,7 +677,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 struct.pack("<II", 1, 0),
                 [
                     ((1, 0x11), "Member Assistance (US)"),
-                    ((1, 0x14), "Member Assistance (BR)"),
+                    ((1, 0x14), "Assistencia ao Associado (BR)"),
                 ],
             ),
             (
@@ -658,7 +685,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 struct.pack("<II", 1, 0x12),
                 [
                     ((1, 0x10), "Categories (US)"),
-                    ((1, 0x13), "Categories (BR)"),
+                    ((1, 0x13), "Categorias (BR)"),
                 ],
             ),
             (

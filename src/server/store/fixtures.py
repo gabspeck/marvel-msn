@@ -128,9 +128,9 @@ CATEGORIES_US_CONTENT = _container_content("Categories (US)", language=_LCID_EN_
 MEMBER_ASSISTANCE_US_CONTENT = _container_content(
     "Member Assistance (US)", language=_LCID_EN_US
 )
-CATEGORIES_BR_CONTENT = _container_content("Categories (BR)", language=_LCID_PT_BR)
+CATEGORIES_BR_CONTENT = _container_content("Categorias (BR)", language=_LCID_PT_BR)
 MEMBER_ASSISTANCE_BR_CONTENT = _container_content(
-    "Member Assistance (BR)", language=_LCID_PT_BR
+    "Assistencia ao Associado (BR)", language=_LCID_PT_BR
 )
 WORLDWIDE_CATEGORIES_CONTENT = _container_content("Worldwide Categories", language=0)
 WORLDWIDE_MEMBER_ASSISTANCE_CONTENT = _container_content(
@@ -193,6 +193,63 @@ MEMBER_ASSISTANCE_LEAF_DEFS = (
 )
 
 
+# Categorias (BR) — Portuguese counterparts to CATEGORY_DEFS. Names are
+# ASCII-only because the SVCPROP string encoder (`_sz` in services/dirsrv.py)
+# narrows to ASCII via `errors="replace"`; CP-1252 accents would land as `?`
+# on the wire. Real Marvel server data isn't documented for pt-BR, so this is
+# a parallel-structure mirror of the US set with localised display strings.
+CATEGORY_BR_DEFS = (
+    (0x180, "Artes e Entretenimento", "Categoria"),
+    (0x181, "Negocios e Financas", "Categoria"),
+    (0x182, "Computadores e Software", "Categoria"),
+    (0x183, "Educacao e Referencia", "Categoria"),
+    (0x184, "Casa e Familia", "Categoria"),
+    (0x185, "Interesses, Lazer e Hobbies", "Pasta"),
+    (0x186, "Pessoas e Comunidades", "Categoria"),
+    (0x187, "Assuntos Publicos", "Categoria"),
+    (0x188, "Ciencia e Tecnologia", "Categoria"),
+    (0x189, "Eventos Especiais", "Categoria"),
+    (0x18A, "Esportes, Saude e Forma Fisica", "Categoria"),
+    (0x18B, "Central da Internet", "Categoria"),
+    (0x18C, "Saguao dos Associados MSN", "Pasta"),
+    (0x18D, "The Microsoft Network Beta", "Categoria"),
+)
+
+
+# Assistencia ao Associado (BR) — Portuguese counterparts. Mirrors the US slate
+# minus the MSN Today reference (4:0 is locale en-US and would be filtered
+# out under filter_on=1 with pt-BR anyway).
+MEMBER_ASSISTANCE_BR_LEAF_DEFS = (
+    (0x380, "Saguao dos Associados MSN"),
+    (0x381, "Centro Beta MSN"),
+    (0x382, "Quiosque de Assistencia ao Associado - 19 de Julho"),
+    (0x383, "Experiencia de Primeiro Acesso"),
+    (0x384, "Diretrizes do Associado"),
+    (0x385, "Boletim Beta MSN - 19 de Julho"),
+    (0x386, "Diretrizes do Associado"),
+    (0x387, "Acordo do Associado"),
+)
+
+
+# Sub-tree for Artes e Entretenimento (1:0x180) — Portuguese counterparts to
+# A_AND_E_CHILD_DEFS. ID range 0x280..0x28C parallels US 0x200..0x20C.
+A_AND_E_BR_CHILD_DEFS = (
+    (0x280, "Livros e Escrita"),
+    (0x281, "Filmes"),
+    (0x282, "Arte e Design"),
+    (0x283, "Televisao e Radio"),
+    (0x284, "Quiosque de Artes e Entretenimento"),
+    (0x285, "Caixa de Sugestoes de Artes"),
+    (0x286, "The Big Chip"),
+    (0x287, "Generos"),
+    (0x288, "Comedia e Humor"),
+    (0x289, "Forum de Musica"),
+    (0x28A, "Teatro e Apresentacoes"),
+    (0x28B, "Outros Lugares Divertidos para Visitar"),
+    (0x28C, "Proximas Atracoes"),
+)
+
+
 def _dirsrv_container(f0, f8, name, *, type_str="Directory", language=_LCID_EN_US):
     key, mnid = _mnid_key(f0, f8)
     return DirectoryNode(
@@ -207,8 +264,9 @@ def _dirsrv_container(f0, f8, name, *, type_str="Directory", language=_LCID_EN_U
 DIRECTORY_NODES = [
     # MSN root (wire "0:0") — client's GetSpecialMnid(idx=0). Listed as the
     # LJUMP 1:0:0:0 target (Categories button). GetLocalizedNode on this node
-    # descends one level and takes the first child; the children list below
-    # puts Cats US first so clicking Categories lands on Categories (US).
+    # descends one level and takes the first locale-matching child; the
+    # children list below interleaves Cats(US)/Cats(BR) ahead of WW Categories
+    # so each locale's filter_on=1 pass surfaces the right Categories wrapper.
     DirectoryNode(
         node_id=_MSN_ROOT_KEY,
         is_container=True,
@@ -241,8 +299,8 @@ DIRECTORY_NODES = [
     # Worldwide Member Assistance hub at server wire "1:0" — which is also
     # client's MSN Central (GetSpecialMnid(idx=1)). HOMEBASE Member Assistance
     # button (LJUMP 1:1:0:0) dispatches here, and GetLocalizedNode takes the
-    # first child. Children are ordered so MA US comes first: clicking the
-    # button lands on Member Assistance (US) with its 9 leaves visible.
+    # first locale-matching child: en-US lands on MA(US), pt-BR drops MA(US)
+    # and lands on MA(BR).
     DirectoryNode(
         node_id=_WORLDWIDE_MEMBER_ASSISTANCE_KEY,
         is_container=True,
@@ -290,20 +348,39 @@ DIRECTORY_NODES = [
     *[_dirsrv_container(1, f8, name, type_str=tp) for f8, name, tp in CATEGORY_DEFS],
     *[_dirsrv_container(1, f8, name) for f8, name in A_AND_E_CHILD_DEFS],
     *[_dirsrv_container(1, f8, name) for f8, name in MEMBER_ASSISTANCE_LEAF_DEFS],
+    *[
+        _dirsrv_container(1, f8, name, type_str=tp, language=_LCID_PT_BR)
+        for f8, name, tp in CATEGORY_BR_DEFS
+    ],
+    *[
+        _dirsrv_container(1, f8, name, type_str="Diretorio", language=_LCID_PT_BR)
+        for f8, name in MEMBER_ASSISTANCE_BR_LEAF_DEFS
+    ],
+    *[
+        _dirsrv_container(1, f8, name, type_str="Diretorio", language=_LCID_PT_BR)
+        for f8, name in A_AND_E_BR_CHILD_DEFS
+    ],
 ]
 
 
 # MSN root's children double as the address-bar combobox under "The Microsoft
-# Network" (per KNOWN-CONTENT.md) and as the LJUMP 1:0:0:0 GetLocalizedNode
-# target list. Cats US is listed first so the Categories button lands on it.
+# Network" (per KNOWN-CONTENT.md — the localized Cats/MA wrappers are direct
+# children of MSN root, not of their worldwide hubs) and as the LJUMP 1:0:0:0
+# GetLocalizedNode target list. The interleaved order keeps each locale's
+# Cats wrapper ahead of WW Categories so that under filter_on=1 the
+# locale-specific entry is the first survivor: pt-BR drops Cats(US)/MA(US)
+# and lands on Cats(BR); en-US drops the BR variants and lands on Cats(US).
 # WW MA is referenced by its server key (`"1:0"`) because it aliases client's
 # MSN Central — same physical node, two roles (address-bar entry + LJUMP
 # 1:1:0:0 target).
 _ARTS_AND_ENTERTAINMENT_KEY = f"1:{0x100}"
+_ARTES_E_ENTRETENIMENTO_KEY = f"1:{0x180}"
 DIRECTORY_CHILDREN = {
     _MSN_ROOT_KEY: [
         _CATEGORIES_US_KEY,
+        _CATEGORIES_BR_KEY,
         _MEMBER_ASSISTANCE_US_KEY,
+        _MEMBER_ASSISTANCE_BR_KEY,
         _WORLDWIDE_CATEGORIES_KEY,
         _WORLDWIDE_MEMBER_ASSISTANCE_KEY,
     ],
@@ -326,9 +403,10 @@ DIRECTORY_CHILDREN = {
         f"1:{0x308}",        # Member Agreement (document?)
     ],
     _WORLDWIDE_CATEGORIES_KEY: [_CATEGORIES_US_KEY, _CATEGORIES_BR_KEY],
-    _CATEGORIES_BR_KEY: [],
-    _MEMBER_ASSISTANCE_BR_KEY: [],
+    _CATEGORIES_BR_KEY: [f"1:{f8}" for f8, _, _ in CATEGORY_BR_DEFS],
+    _MEMBER_ASSISTANCE_BR_KEY: [f"1:{f8}" for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS],
     _ARTS_AND_ENTERTAINMENT_KEY: [f"1:{f8}" for f8, _ in A_AND_E_CHILD_DEFS],
+    _ARTES_E_ENTRETENIMENTO_KEY: [f"1:{f8}" for f8, _ in A_AND_E_BR_CHILD_DEFS],
     # Explicit empty children for the `4:0` startup node — avoids the
     # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
     # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.
@@ -343,6 +421,13 @@ DIRECTORY_CHILDREN = {
     },
     **{f"1:{f8}": [] for f8, _ in A_AND_E_CHILD_DEFS},
     **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_LEAF_DEFS},
+    **{
+        f"1:{f8}": []
+        for f8, _, _ in CATEGORY_BR_DEFS
+        if f8 != 0x180
+    },
+    **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS},
+    **{f"1:{f8}": [] for f8, _ in A_AND_E_BR_CHILD_DEFS},
 }
 
 
