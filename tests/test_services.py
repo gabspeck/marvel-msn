@@ -28,7 +28,7 @@ from server.mpc import (
     parse_tagged_params,
 )
 from server.services.dirsrv import (
-    DS_E_GENERIC,
+    DS_E_NOT_FOUND,
     SUPPORTED_BROWSE_LCIDS,
     DIRSRVHandler,
     build_dirsrv_service_map_payload,
@@ -973,7 +973,7 @@ class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
             self._build_request("nonexistent")
         )
         expected = (
-            b"\x83" + struct.pack("<I", DS_E_GENERIC)
+            b"\x83" + struct.pack("<I", DS_E_NOT_FOUND)
             + bytes([TAG_END_STATIC])
             + b"\x84\x88"
             + b"\x00" * 8

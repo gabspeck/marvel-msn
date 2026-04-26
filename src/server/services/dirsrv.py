@@ -38,9 +38,12 @@ DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWor
 # (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
 DIRSRV_SELECTOR_GET_SHABBY = 0x04
 
-# CTreeNavClient HResultToDsStatus return value for "lookup failed". Any
-# nonzero status overrides the function's local_c return.
-DS_E_GENERIC = 0x100
+# Status returned in GetDeidFromGoWord's reply for an unrecognised go-word.
+# MCM!FGetGoWord (0x0410423f) compares the wire status DWORD against three
+# constants: 0x10002 → "Cannot find Go word." (string 0x57a); 0x103 →
+# "Service not available." (string 0x57c); anything else nonzero →
+# "There was a problem using Go words." (string 0x57b).
+DS_E_NOT_FOUND = 0x10002
 
 # DIRSRV property names. Use PROTOCOL.md semantics for known props; keep
 # unresolved props explicitly UNKNOWN and tentative interpretations as MAYBE.
@@ -536,7 +539,7 @@ def build_get_deid_from_go_word_reply_payload(payload):
         status = 0
     else:
         deid = b"\x00" * 8
-        status = DS_E_GENERIC
+        status = DS_E_NOT_FOUND
     log.info(
         "get_deid_from_go_word go_word=%r match=%s status=0x%x",
         go_word, node.node_id if node else "-", status,
