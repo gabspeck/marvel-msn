@@ -9,11 +9,20 @@ This project includes a working **emulated server** that drives the original
 1995 client through dial-up bootstrap, login, service discovery, and directory
 browsing. The MSN Shell window renders and displays the content tree.
 
-## Demo
+## Protocol implementation status
 
-Currently we can sign in, display the home page and sign out. 
-
-https://github.com/user-attachments/assets/1d8861a0-0a3d-4df9-ba5a-276dedcee68f
+|Feature|Status|
+|-------|------|
+|New account sign-up|✅|
+|Login|✅|
+|Change password|✅|
+|Manage subscriptions|✅|
+|Manage payment method|✅|
+|Directory navigation|✅|
+|"Go to word" navigation|✅|
+|Blackbird content|In progress|
+|BBS|Pending|
+|Chat|Pending|
 
 ## What's been decoded
 
