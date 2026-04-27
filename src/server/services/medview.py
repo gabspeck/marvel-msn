@@ -27,12 +27,17 @@ from pathlib import Path
 from ..config import (
     MEDVIEW_INTERFACE_GUIDS,
     MEDVIEW_SELECTOR_HANDSHAKE,
+    MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
     MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
     MEDVIEW_SELECTOR_TITLE_GET_INFO,
     MEDVIEW_SELECTOR_TITLE_OPEN,
     MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+    MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+    MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
+    MEDVIEW_SELECTOR_VA_RESOLVE,
     MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ..mpc import (
@@ -112,17 +117,37 @@ def _build_title_body(display_name: str) -> bytes:
     viewer's caption.  Including a trailing NUL in the blob keeps
     downstream string walks safe.
 
-    Sections 5-7 stay empty.  Selector `0x02` (copyright) and `0x13` /
-    `0x6A` / etc. fall through to -1; MOSVIEW's second-string query at
+    Section 6 (`info=0x6A` "title string") MUST be non-empty.  Live
+    SoftIce trace 2026-04-27 at `MVCL14N!fMVSetTitle @ 0x7E882910`
+    confirmed the path: `dwBytes = lMVTitleGetInfo(title, 0x6A, 0, 0)`
+    queries section-6 size, then `GlobalAlloc(GMEM_MOVEABLE |
+    GMEM_ZEROINIT, dwBytes)` allocates the buffer.  On Win95
+    `GlobalAlloc` with `cb=0` returns NULL, so fMVSetTitle bails
+    BEFORE its `*(int *)(lp + 0x18) = title_handle` assignment at
+    `0x7E882988`.  The lp's title-handle slot stays NULL, then
+    `fMVSetAddress(lp, va, ...)` calls `FUN_7e885fc0(*(int *)(lp +
+    0xc), ...)` = `FUN_7e885fc0(NULL, ...)` which short-circuits at
+    its `if (param_1 != 0)` guard — `GetProcAddress("HfcNear")` is
+    never attempted.  HfcNear never runs, fMVSetAddress returns 0,
+    `MOSVIEW!FUN_7f3c3670` sets pane FAIL flag at `pane+0x84`, panes
+    don't paint.  Verified by inspecting lp at 0x00406C70 with
+    SoftIce: `lp[0x18] == 0` at the fMVSetAddress entry.
+
+    Sections 5 and 7 stay empty.  Selector `0x02` (copyright) and
+    `0x13` etc. fall through to -1; MOSVIEW's second-string query at
     `0x7F3C6634` drops the result silently.
     """
     name = display_name.rstrip("\x00") or "Untitled"
     name_bytes = name.encode("ascii", errors="replace") + b"\x00"
+    section6 = name_bytes  # reuse caption as the section-6 title-string blob
     return (
         b"\x00\x00" * 4                             # Sections 0-3: empty
         + struct.pack("<H", len(name_bytes))        # Section 4 size
-        + name_bytes                                # Section 4 data (ASCIIZ)
-        + b"\x00\x00" * 3                           # Sections 5-7: empty
+        + name_bytes                                # Section 4 data (ASCIIZ caption)
+        + b"\x00\x00"                               # Section 5: empty
+        + struct.pack("<H", len(section6))          # Section 6 size — MUST be non-zero
+        + section6                                  # Section 6 data (title string)
+        + b"\x00\x00"                               # Section 7: empty
         + b"\x00\x00"                               # Section 8: string count=0
     )
 
@@ -198,10 +223,11 @@ def _build_title_open_reply_payload(title_body):
     PROTOCOL.md §MPC reply tags).  0x88 would route through the
     dynamic-iterator instead and leave Wait() blocked.
 
-    All three server-supplied DWORDs ship as zero today — rendering is
-    blocked on the 9-section body's record formats, not on the scalar
-    values here.  See plan `eager-pondering-flute.md` and
-    `docs/MEDVIEW.md §4.3` for the gate analysis.
+    All three server-supplied DWORDs ship as zero.  Empirically (probe
+    with contents_va ∈ {0x00010000, 0xCAFEBABE} on 2026-04-27),
+    crossing the §4.3 hide-on-failure value gate alone does not unblock
+    paint — the client emits no follow-up wire traffic.  Some prior
+    condition gates entry to the paint path; see docs/MEDVIEW.md §10.
     """
     chk1, chk2 = _derive_checksums(title_body)
     static = b"".join(
@@ -251,18 +277,120 @@ def _build_title_get_info_reply_payload():
     )
 
 
+def _build_va_resolve_reply_payload():
+    """va→content-chunk ack: static end-of-static, no dynamic.
+
+    `MVTTL14C!HfcNear @ 0x7E84589F` retry loop fires this selector when
+    the per-title cache misses.  The reply iface is acquired via
+    `proxy[+0x48]` and immediately released by HfcNear (it never reads
+    a payload).  The real answer is expected via the selector-0x17
+    type-3 async push channel.  Bare `0x87` lets the client's
+    `iVar2 = (proxy +0x48)(...)` return success so the retry loop
+    can poll the cache again, instead of bailing on RPC error
+    (`iVar2 < 0`) and giving up after 6 retries (~6 s wall clock).
+    """
+    return bytes([TAG_END_STATIC])
+
+
+def _extract_cache_miss_args(payload):
+    """Unpack (title_byte, key) from a cache-miss selector request.
+
+    Shared by selectors 0x06 (vaConvertHash), 0x07 (vaConvertTopicNumber),
+    0x10 (HighlightsInTopic), and 0x15 (vaResolve / HfcNear).  Wire
+    shape: `0x01 <title_byte> 0x03 <key:dword>` plus a recv descriptor
+    (`0x85` for vaResolve, omitted for the others).
+
+    Returns (None, None) on malformed input — diagnostic only, the
+    reply is the same either way until the type-3 cache push channel
+    is wired.
+    """
+    send_params, _ = parse_request_params(payload)
+    title_byte = None
+    key = None
+    for p in send_params:
+        tag = getattr(p, "tag", None)
+        if tag == 0x01 and title_byte is None:
+            title_byte = getattr(p, "value", None)
+        elif tag == 0x03 and key is None:
+            key = getattr(p, "value", None)
+    return (title_byte, key)
+
+
+def _build_op4_cache_frame(title_byte, kind, key, va, addr):
+    """Build a selector-0x17 type-3 op-code 4 cache-insert frame.
+
+    Wire shape (project_medview_cache_push_format):
+        +0x00 u16 op_code = 4
+        +0x02 u16 length  = 18 (includes 4-byte header)
+        +0x04 u8  title_byte
+        +0x05 u8  kind   (0 = topic→va+addr, 1 = hash→va, 2 = va→addr)
+        +0x06 u32 key    (topic_no / hash / va lookup-key)
+        +0x0A u32 va
+        +0x0E u32 addr
+    """
+    payload = struct.pack(
+        "<BBIII",
+        title_byte & 0xFF,
+        kind & 0xFF,
+        key & 0xFFFFFFFF,
+        va & 0xFFFFFFFF,
+        addr & 0xFFFFFFFF,
+    )
+    return struct.pack("<HH", 4, 18) + payload
+
+
 class MEDVIEWHandler:
     """Handles MEDVIEW service requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Type-3 cache-pump subscription state.  Captured from the
+        # selector-0x17 subscribe with type=3; reused later to push
+        # op-code 4 cache-fill frames as `0x85` chunks on the
+        # subscription's iterator (project_medview_cache_push_format).
+        self.type3_sub_class = None
+        self.type3_sub_req_id = None
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Emit the IID→selector discovery block (42 entries, 1-based selectors)."""
         payload = build_discovery_payload(MEDVIEW_INTERFACE_GUIDS)
         host_block = build_discovery_host_block(payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+
+    def _build_cache_push_packet(self, title_byte, selector, key, server_seq, client_ack):
+        """Build a packet that pushes one op-code 4 cache frame.
+
+        Selector → kind mapping:
+            0x06 (vaConvertHash) → kind 1 (hash → va)
+            0x07 (vaConvertTopicNumber) → kind 0 (topic → va + addr)
+            0x15 (HfcNear / vaResolve) → kind 2 (va → addr)
+            others (0x10 etc.) → no push
+        """
+        if selector == MEDVIEW_SELECTOR_VA_CONVERT_HASH:
+            kind = 1
+        elif selector == MEDVIEW_SELECTOR_VA_CONVERT_TOPIC:
+            kind = 0
+        elif selector == MEDVIEW_SELECTOR_VA_RESOLVE:
+            kind = 2
+        else:
+            return None
+        # Stub answer: va = addr = key.  Real values would come from
+        # the title's COSCL streams; as a probe we just give the
+        # engine "something" so vaGetContents() returns nonzero and
+        # downstream paint can advance.  If the engine rejects the
+        # synthetic value the next selector firing will tell us.
+        frame = _build_op4_cache_frame(title_byte, kind, key, va=key, addr=key)
+        # 0x85 chunk tag + raw frame bytes; chunk dispatches to
+        # FUN_7e8451ec via the type-3 callback.
+        push_payload = bytes([0x85]) + frame
+        push_host = build_host_block(
+            self.type3_sub_class,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+            self.type3_sub_req_id,
+            push_payload,
+        )
+        return build_service_packet(self.pipe_idx, push_host, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch a MEDVIEW request.  Returns packet list or None."""
@@ -299,17 +427,79 @@ class MEDVIEWHandler:
                 request_id, info_kind, index, bufsize,
             )
             reply_payload = _build_title_get_info_reply_payload()
+        elif selector in (
+            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+            MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
+            MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
+            MEDVIEW_SELECTOR_VA_RESOLVE,
+        ):
+            title_byte, key = _extract_cache_miss_args(payload)
+            log.info(
+                "cache_miss_rpc selector=0x%02x req_id=%d title_byte=%r key=%s payload=%s",
+                selector,
+                request_id,
+                title_byte,
+                f"0x{key:08x}" if key is not None else None,
+                payload.hex(),
+            )
+            reply_payload = _build_va_resolve_reply_payload()
+            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
+            reply_pkts = build_service_packet(
+                self.pipe_idx, host_block, server_seq, client_ack
+            )
+            # If the type-3 cache-pump subscription is registered AND
+            # we have a (title_byte, key) we can answer, append a push
+            # packet on the same pipe carrying op-code 4 frame.  The
+            # client's MPCCL parses 0x85 in the push payload as a
+            # chunk on the original subscribe iterator → fires chunk
+            # signal → pump (FUN_7e844c7c) calls FUN_7e8451ec →
+            # FUN_7e8420f6 inserts into the kind-0/1/2 cache.
+            if (
+                self.type3_sub_req_id is not None
+                and title_byte is not None
+                and key is not None
+            ):
+                next_seq = (server_seq + len(reply_pkts)) & 0x7F
+                push_pkts = self._build_cache_push_packet(
+                    title_byte, selector, key, next_seq, client_ack
+                )
+                if push_pkts is not None:
+                    log.info(
+                        "cache_push selector=0x%02x title_byte=0x%02x key=0x%08x kind=%s",
+                        selector,
+                        title_byte,
+                        key,
+                        {0x06: 1, 0x07: 0, 0x15: 2}[selector],
+                    )
+                    return reply_pkts + push_pkts
+            return reply_pkts
         elif selector == MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION:
             notification_type = payload[1] if len(payload) >= 2 else None
             log.info(
                 "subscribe_notification req_id=%d type=%r payload=%s",
                 request_id, notification_type, payload.hex(),
             )
-            # Static-only decline: no dynamic async-iterator handle, so
-            # slot 0x48 on the client sees *ppvVar1 == NULL, FUN_7e844ee6
-            # returns 0, and the subscriber constructor skips the
-            # CreateThread for this notification type.  No retries fire.
-            reply_payload = bytes([TAG_END_STATIC])
+            if notification_type == 3:
+                # Type 3 is the cache-pump subscriber (FUN_7e8451ec).
+                # Reply with `0x87 0x88` (iterator stream-end) so MPC's
+                # Execute returns an iterator iface — that's what the
+                # pump thread (FUN_7e844c7c) reads chunks from.
+                # Capture (msg_class, request_id) so we can later send
+                # `0x85` chunks on this same iterator carrying op-code
+                # 4 cache-fill frames when 0x06/0x07/0x15 fire.
+                self.type3_sub_class = msg_class
+                self.type3_sub_req_id = request_id
+                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+            else:
+                # Types 0/1/2/4: dynamic-complete with non-empty body
+                # to make MPC's Execute return a non-NULL iface (see
+                # MVTTL14C 0x7E844FA7 `MOV [ESI+0x44], 0x1` gated on
+                # `*[ESI+0x28] != 0` and HRESULT >= 0).  Required for
+                # the master flag DAT_7e84e2fc to set in
+                # hrAttachToService — without it FUN_7e8440ab returns
+                # 0 and every cache-miss retry loop bails before
+                # firing 0x06/0x07/0x10/0x15.
+                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + b"\x00" * 8
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None

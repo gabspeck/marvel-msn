@@ -247,6 +247,34 @@ MEDVIEW_SERVICE_VERSION = 0x1400800A
 # MVTTL14C as integer immediates to slot 0x0C on the service proxy.
 MEDVIEW_SELECTOR_TITLE_OPEN = 0x01
 MEDVIEW_SELECTOR_TITLE_GET_INFO = 0x03
+# Cache-miss fallback selectors (`docs/MEDVIEW.md` §6b).  All three
+# share the same wire shape — `0x01 <title_byte> 0x03 <key:dword>` —
+# and the same reply contract: ack-only via `0x87`, the real answer
+# arrives through the selector-`0x17` type-3 async-push channel.
+# Without ack-only handlers the engine sees `unhandled selector`,
+# treats it as an RPC error, and bails the retry loop on the first
+# iteration.  Empirically (live SoftIce trace 2026-04-27),
+# vaConvertHash fires for the initial-selector navigation in
+# `MOSVIEW!FUN_7f3c6790` once the lp's title-handle slot is wired.
+MEDVIEW_SELECTOR_VA_CONVERT_HASH = 0x06       # MVTTL14C!vaConvertHash @ 0x7E841E9A
+MEDVIEW_SELECTOR_VA_CONVERT_TOPIC = 0x07      # MVTTL14C!vaConvertTopicNumber @ 0x7E841FCF
+MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC = 0x10   # MVTTL14C!HighlightsInTopic @ 0x7E841526
+# va→content-chunk fallback fired by `MVTTL14C!HfcNear @ 0x7E84589F` when
+# the per-title cache (`FUN_7e845efa`, tree at `title+4`, recent at
+# `title+0x10..0x34`) misses.  Wire shape mirrors selector 0x07
+# (`vaConvertTopicNumber`): `0x01 <title_byte> 0x03 <va:dword>`, ack-only
+# reply.  The real answer is expected via selector 0x17 type-3 async push
+# (op-code unknown — likely op-code 5 `FUN_7e8424f5`, marked "secondary
+# cache, unresolved" in project memory).  Without this handler the
+# request would log "unhandled selector=0x15" and the client's RPC
+# returns -1, killing the retry loop.  fMVSetAddress in MVCL14N gates
+# initial paint on this — `FUN_7f3c3670` (MOSVIEW pane.SetAddress)
+# checks fMVSetAddress's return and sets the pane FAIL flag at +0x84
+# on zero, blocking paint of the inner content panes.  Reached from
+# MOSVIEW!FUN_7f3c6790 (CreateMediaViewWindow's pane attach) at
+# initial open, NOT from NavigateViewerSelection (which is the
+# click-handler path the original docs/MEDVIEW.md §6b assumed).
+MEDVIEW_SELECTOR_VA_RESOLVE = 0x15
 # Async-notification subscribe: `hrAttachToService` allocates 5 callback
 # slots via `FUN_7e84485f`, each of which fires `FUN_7e844ee6` to call
 # selector 0x17 with a single byte (the notification-type index, 0-7).

@@ -70,7 +70,7 @@ Positions (selector = index + 1 once the server assigns contiguous selectors):
 | 17 | `8F` | `0x12` | |
 | 18 | `90` | `0x13` | |
 | 19 | `91` | `0x14` | |
-| 20 | `A0` | `0x15` | |
+| 20 | `A0` | `0x15` | **vaResolve** (HfcNear cache-miss fallback) |
 | 21 | `A1` | `0x16` | |
 | 22 | `B0` | `0x17` | **SubscribeNotification** (async event subscribe) |
 | 23 | `B1` | `0x18` | |
@@ -202,11 +202,45 @@ Static section (exactly these tags, in order):
 | `0x87` | 0 | End of static |
 | `0x86` | var | Dynamic "title body" — raw bytes to end of host block (see §4.4). Sent as `TAG_DYNAMIC_COMPLETE_SIGNAL` so the client's `Wait()` on slot `0x48` fires (same pattern as DIRSRV GetShabby). |
 
-All three server-supplied DWORDs are gated on the respective `info_kind`
-returning a nonzero value to MVCL14N. Shipping zeros there is what
-keeps MSN Today at the caption-only state today: `vaGetContents`
-returns 0 → `NavigateViewerSelection` hides the pane, no paint ever
-fires, baggage is never asked for.
+All three server-supplied DWORDs are read from the title struct on
+demand by local `TitleGetInfo` paths and by the engine's paint chain.
+Empirical (2026-04-27): shipping a nonzero `contents_va`
+(`0x00010000` and `0xCAFEBABE` both probed) does NOT unblock paint
+on the **initial-open path** — no follow-up wire traffic, the content
+pane stays blank.
+
+The reason `NavigateViewerSelection` is misleading on this path: it's
+only the **interactive click handler** (sole caller is
+`MOSVIEW!HandleMediaTitleCommand`), not the initial paint chain. The
+actual initial-open flow is:
+
+```
+MOSVIEW!CreateMediaViewWindow  @ 0x7F3C4F26
+  └─ MOSVIEW!OpenMediaTitleSession @ 0x7F3C61CE   (TitleOpen + body cache)
+       └─ MVCL14N!vaMVGetContents @ 0x7E885660    (returns title+0x8c)
+            └─ MVTTL14C!vaGetContents @ 0x7E841D48
+       …stored at session+0x60
+  └─ MOSVIEW!FUN_7f3c6790        @ 0x7F3C6790    (pane attach + nav)
+       └─ MOSVIEW!FUN_7f3c3670   @ 0x7F3C3670    (pane.SetAddress)
+            └─ MVCL14N!fMVSetAddress @ 0x7E883600
+                 └─ MVCL14N!FUN_7e885fc0 @ 0x7E885FC0
+                      └─ GetProcAddress(per_title_module, "HfcNear")
+                           └─ MVTTL14C!HfcNear @ 0x7E84589F   ← gate
+```
+
+`HfcNear` walks a **per-title cache** (binary tree at `title+4`,
+recent-cache array at `title+0x10..0x34`; entries store 60-byte
+content chunks at `entry+0x18`) via `FUN_7e845efa`. On miss, it fires
+selector `0x15` (§6b.1) up to 6 times in a retry loop with ~300 ms
+spacing before returning NULL. If `HfcNear` returns NULL,
+`fMVSetAddress` returns 0, `FUN_7f3c3670` sets the pane FAIL flag at
+`pane+0x84` and skips paint.
+
+`MVCL14N!vaMVGetContents` itself does NOT read memory at the va — it
+calls `MVTTL14C!vaGetContents` via per-title GetProcAddress, which
+just returns `title+0x8c` verbatim. The va is therefore an **opaque
+token** the engine threads through to `HfcNear`'s cache lookup; the
+cache is what knows how to render it.
 
 ### 4.4 Title body layout
 
@@ -437,12 +471,12 @@ invokes selector `0x17` on the service proxy with a single tagged byte
 (the notification-type index, observed `0..4`) and waits on slot `0x48`
 for an async-iterator handle.
 
-Request (3 bytes):
+Request (3 bytes), wire-observed `01 <type> 85`:
 
 | Tag | Bytes | Meaning |
 |-----|-------|---------|
 | `0x01` | 1 | Notification type index |
-| `0x88` | 0 | Recv descriptor: async-iterator handle |
+| `0x85` | 0 | Recv descriptor: dynamic-recv (single-shot blob, NOT iterator) |
 
 Reply semantics: if the server hands back a non-NULL iterator handle,
 the subscriber starts a `CreateThread(FUN_7e844c7c, …)` pump that waits
@@ -451,14 +485,111 @@ flush, etc.). If the handle is NULL or slot-0x48 returns an error, the
 subscriber leaves `param_1[2].LockCount == 0`, never starts a thread,
 and `hrAttachToService` moves on to the next subscriber.
 
-**MVP contract**: static-only `0x87` reply. No dynamic section → the
-client's slot-`0x48` sets `*ppvVar1 = NULL`, subscribe declines
-cleanly, and the 5 calls (one per notification type) each complete in
-under a round-trip. Live notification push is out of scope until an
-event-feed emitter is wired; MSN Today doesn't depend on any of these
-feeds at startup.
+**Wire contract**: reply `0x87 0x86` (end-static + dynamic-complete
+with empty blob). The request descriptor is `0x85` (dynamic-recv,
+not the iterator-recv `0x88` previously assumed). Per OnlStmt
+selector `0x05`'s reference pattern (`services/onlstmt.py:189-201`):
+"`0x85` or `0x88` alone would hang the Retrieving dialog forever".
+The `0x86` reply tag fires `SignalRequestCompletion` at
+`MPCCL.ProcessTaggedServiceReply`, unblocking MPC's Execute on
+slot 0x48 inside `MVTTL14C!FUN_7e844ee6 @ 0x7E844EE6`. Execute
+then writes a non-NULL reply iface to `subscriber+0x28`, the
+success branch sets `subscriber+0x44 = 1`, and the master flag
+`DAT_7e84e2fc` can finally set after all 5 subscribers complete.
+0x88 alone in the reply does NOT fire SignalRequestCompletion
+(only the iterator-end signal at +0x2c), so Execute hangs.
+
+Empty blob (zero bytes after `0x86`) is fine: the subscriber only
+needs `+0x28` non-NULL, not specific blob contents. Server-initiated
+push of cache-update frames (op-code 4 kind-2 va→addr per project
+memory) flows through a separate channel — the subscription's
+notification-pump path (`FUN_7e844c7c`), not the initial reply.
+
+### Master-flag gate (`DAT_7e84e2fc`)
+
+`hrAttachToService @ 0x7E844114` only sets `DAT_7e84e2fc = 1` when
+**all 5** subscribers report a non-NULL handle at `+0x44`:
+
+```c
+if ((DAT_7e84e308 != 0 && *(int *)(DAT_7e84e308 + 0x44) != 0) &&
+    (DAT_7e84e30c != 0 && *(int *)(DAT_7e84e30c + 0x44) != 0) &&
+    (DAT_7e84e310 != 0 && *(int *)(DAT_7e84e310 + 0x44) != 0) &&
+    (DAT_7e84e314 != 0 && *(int *)(DAT_7e84e314 + 0x44) != 0) &&
+    (DAT_7e84e318 != 0 && *(int *)(DAT_7e84e318 + 0x44) != 0)) {
+    DAT_7e84e2fc = 1;
+}
+```
+
+`FUN_7e8440ab @ 0x7E8440AB` (the "service ready" check called from
+every cache-miss retry loop) returns `0` when `DAT_7e84e2fc == 0`.
+That kills `HfcNear`'s retry loop on its first iteration —
+`if (iVar2 == 0) return 0;` — so selectors `0x06` / `0x07` / `0x10`
+/ `0x15` never fire on the wire and `fMVSetAddress` returns 0,
+setting the pane FAIL flag at `pane+0x84`. Empirical observation
+2026-04-27: with the static-only `0x87` reply, MSN Today opens with
+caption only and the inner panes never paint, regardless of what
+`contents_va` value the TitleOpen reply ships.
+
+**Implication**: lighting up the cache-push channel for type 3 only
+is not enough. ALL 5 subscriptions must establish iterator handles
+or the master flag never sets. The cheapest fix is the empty-stream
+reply (`0x87 0x88`) for every subscription type — content for the
+non-3 types can stay un-pushed indefinitely.
 
 ---
+
+## 6b.1. vaResolve (selector `0x15`) — HfcNear cache-miss fallback
+
+`MVTTL14C!HfcNear @ 0x7E84589F` is the per-title cache lookup the
+engine calls via `MVCL14N!fMVSetAddress @ 0x7E883600` →
+`MVCL14N!FUN_7e885fc0 @ 0x7E885FC0` → `GetProcAddress(module,
+"HfcNear")`. On cache miss it fires this selector. Sole caller in
+MVTTL14C; `PUSH 0x15` at `0x7E845973`.
+
+Request:
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x01` | 1 | `title_byte` (= `*(title+0x02)`, echoed across all per-title RPCs) |
+| `0x03` | 4 LE | `va` (the unresolved virtual address; engine wants the matching content chunk) |
+| `0x88` | 0 | Recv: dynamic-iterator handle (immediately released by HfcNear, never read) |
+
+Reply: static `0x87` only, no dynamic. The reply iface is acquired
+via the request iface's `+0x48` execute method and immediately
+released with no payload read. Critically, **`iVar2 < 0` from execute
+kills the retry loop** — without a server-side handler we'd return
+"unhandled selector", the proxy would surface that as a negative
+HRESULT, and HfcNear would bail on the first retry without polling
+the cache again.
+
+Pattern matches selector `0x07` (`vaConvertTopicNumber`) exactly:
+ack-only, with the actual answer expected through the
+selector-`0x17` type-3 async-push channel. The server must populate
+the per-title 60-byte content cache (binary tree at `title+4`)
+before HfcNear's next iteration of `FUN_7e845efa` (~300 ms later).
+
+### Cache structure (per-title, distinct from MVTTL14C global cache)
+
+The cache HfcNear consults is stored **inside the title struct**:
+
+- `title+0x04` — root of a binary tree keyed by va. Each entry has
+  `[next, va, ?, va_max?, ?, ?, payload_ptr, ...]` (offsets in
+  4-byte words). Lookup compares `entry[1] == request_va`.
+- `title+0x10..0x34` — 10-slot recent-access cache (array of pointers
+  into the tree). Hot entries get promoted via memcpy.
+- `title+0x38..0x5c` — secondary lookup cache (parallel structure,
+  semantics partially RE'd).
+- `title+0x60..0x84` — title-byte side-cache (per-title-byte index).
+
+Each cache entry's payload is **60 bytes** (`for iVar2 = 0xf` at
+`HfcNear+0x???`, i.e. `0xf × 4 = 0x3c`). Field layout is unresolved;
+`HfcNear` memcpy's the 60 bytes into the caller-provided buffer
+(`fMVSetAddress`'s `param_1+0x1c`, the pane's content-record slot).
+
+Frame format on the selector-`0x17` type-3 push channel that
+populates this cache is unresolved (likely op-code 5,
+`FUN_7e8424f5`, marked "secondary cache, unresolved" in
+project memory).
 
 ## 6b. Content selectors (va / addr / highlight resolution)
 
@@ -688,8 +819,14 @@ that emits these bytes in this order will get MSN Today past
 2. Selector `0x1F` (handshake, §3): static `0x83` = `1`, `0x87`. No
    dynamic.
 3. Selector `0x1E` (TitlePreNotify, §6): static `0x87`. No dynamic.
-4. Selector `0x17` (SubscribeNotification, §6a): static `0x87`. No
-   dynamic.
+4. Selector `0x17` (SubscribeNotification, §6a): `0x87` end-static
+   + `0x86` dynamic-complete with empty blob. All 5 invocations
+   (types 0..4) need this — the master flag `DAT_7e84e2fc` won't set
+   unless every subscriber's `+0x28` reply-iface slot is non-NULL,
+   and without that flag every cache-miss retry loop in MVTTL14C
+   bails before firing the `0x06`/`0x07`/`0x10`/`0x15` fallback
+   selectors. Wire request descriptor is `0x85` (dynamic-recv);
+   `0x86` is what fires `SignalRequestCompletion`.
 5. Selector `0x01` (TitleOpen, §4): static `0x81 01 0x81 01 0x83 0 0x83
    0 0x83 0 0x83 <chk1> 0x83 <chk2> 0x87`, then `0x86` + 9-section
    title body (§4.4). Even an empty-but-valid body carries the title
@@ -729,6 +866,13 @@ MSN Today open path.
   `PTR_DAT_7e84e130` via the subscription iterators is not yet RE'd —
   trace `FUN_7e844a3b @ 0x7E841A75` (third reference to the cache
   head) to recover it. Until then, va conversions fall through.
+- **Per-title content cache** (`title+4` tree). 60-byte payload field
+  layout unresolved. The push frame that populates these entries is
+  presumably a selector-`0x17` type-3 op-code (likely op-code 5 →
+  `FUN_7e8424f5`, marked "secondary cache, unresolved" in project
+  memory). Without this, `HfcNear` always misses → `fMVSetAddress`
+  always returns 0 → MOSVIEW pane FAIL flag → no paint. This is the
+  current MSN Today blocker.
 - **Checksum semantics**. The new checksums returned in the TitleOpen
   reply are written back into `MVCache\<title>.tmp`. Whether the server
   treats them as (a) a content hash, (b) a version stamp, or (c) a

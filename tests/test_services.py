@@ -12,11 +12,16 @@ from server.config import (
     MEDVIEW_SELECTOR_TITLE_GET_INFO,
     MEDVIEW_SELECTOR_TITLE_OPEN,
     MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+    MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
+    MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+    MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
+    MEDVIEW_SELECTOR_VA_RESOLVE,
     OLREGSRV_INTERFACE_GUIDS,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_LAST_DATA,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from server.models import DirsrvRequest, DwordParam, EndMarker, VarParam
@@ -1647,9 +1652,12 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(body[:8], b"\x00\x00" * 4)      # Sections 0-3 empty
         self.assertEqual(body[8:10], b"\x0a\x00")        # Section 4 size=10
         self.assertEqual(body[10:20], b"MSN Today\x00")  # Section 4 data
-        self.assertEqual(body[20:26], b"\x00\x00" * 3)   # Sections 5-7 empty
-        self.assertEqual(body[26:28], b"\x00\x00")       # Section 8 count=0
-        self.assertEqual(len(body), 28)
+        self.assertEqual(body[20:22], b"\x00\x00")       # Section 5 empty
+        self.assertEqual(body[22:24], b"\x0a\x00")       # Section 6 size=10
+        self.assertEqual(body[24:34], b"MSN Today\x00")  # Section 6 data
+        self.assertEqual(body[34:36], b"\x00\x00")       # Section 7 empty
+        self.assertEqual(body[36:38], b"\x00\x00")       # Section 8 count=0
+        self.assertEqual(len(body), 38)
 
     def test_title_open_body_falls_back_to_deid_for_unknown(self):
         # deid "42" isn't in _TITLE_NAMES — the handler synthesizes
@@ -1664,10 +1672,13 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         reply = self._decode_reply(req)
         body = reply[31:]
         self.assertEqual(body[:8], b"\x00\x00" * 4)
-        self.assertEqual(body[8:10], b"\x09\x00")        # "Title 42\0" = 9 bytes
+        self.assertEqual(body[8:10], b"\x09\x00")        # Section 4 size=9
         self.assertEqual(body[10:19], b"Title 42\x00")
-        self.assertEqual(body[19:25], b"\x00\x00" * 3)
-        self.assertEqual(body[25:27], b"\x00\x00")
+        self.assertEqual(body[19:21], b"\x00\x00")       # Section 5 empty
+        self.assertEqual(body[21:23], b"\x09\x00")       # Section 6 size=9
+        self.assertEqual(body[23:32], b"Title 42\x00")
+        self.assertEqual(body[32:34], b"\x00\x00")       # Section 7 empty
+        self.assertEqual(body[34:36], b"\x00\x00")       # Section 8 count=0
 
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
@@ -1697,6 +1708,29 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
         self.assertEqual(reply[6], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
 
+class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
+    def test_cache_miss_selectors_reply_with_end_static_only(self):
+        # Selectors 0x06/0x07/0x10/0x15 share the same wire shape and
+        # the same ack-only reply contract — `0x87` end-static.  The
+        # retry loop in the caller treats non-negative HRESULT as
+        # "ack, retry cache".  Real cache fill flows through selector
+        # 0x17 type-3 async pushes (out of scope here).
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 01 03 be ba fe ca")
+        for selector in (
+            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+            MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
+            MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
+            MEDVIEW_SELECTOR_VA_RESOLVE,
+        ):
+            pkts = handler.handle_request(0x01, selector, 9, req_payload, 5, 5)
+            self.assertIsNotNone(pkts, f"selector 0x{selector:02x} returned None")
+            parsed = parse_packet(pkts[0][:-1])
+            self.assertTrue(parsed.crc_ok)
+            reply = parsed.payload[8:]
+            self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+
 class TestMEDVIEWTitlePreNotify(unittest.TestCase):
     def test_pre_notify_reply_is_end_static_only(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
@@ -1713,15 +1747,17 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
 
 class TestMEDVIEWSubscribeNotification(unittest.TestCase):
-    def test_subscribe_reply_is_end_static_only(self):
-        # Each of the 5 subscribers hrAttachToService allocates calls
-        # selector 0x17 with `01 <type> 88`: tagged byte (the
-        # notification-type index) + one recv descriptor for the async
-        # handle.  Server declines with static-only so slot 0x48 on the
-        # client reads *ppvVar1 == NULL and the subscribe is skipped.
+    def test_subscribe_reply_per_notification_type(self):
+        # Wire-observed request: `01 <type> 85` (0x85 = dynamic-recv).
+        # Type 3 (cache-pump) gets an iterator: `0x87 0x88`.  Other
+        # types get a single-shot completion: `0x87 0x86 + zeros` so
+        # MPC's Execute returns a non-NULL iface for each subscriber
+        # (MVTTL14C 0x7E844FA7 `MOV [ESI+0x44], 0x1` gates on `*[ESI
+        # +0x28] != 0` AND HRESULT >= 0); all 5 +0x44 slots must be
+        # non-zero for hrAttachToService to set DAT_7e84e2fc = 1.
         handler = MEDVIEWHandler(5, "MEDVIEW")
         for notification_type in range(5):
-            req_payload = bytes([0x01, notification_type, 0x88])
+            req_payload = bytes([0x01, notification_type, 0x85])
             pkts = handler.handle_request(
                 0x01,
                 MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
@@ -1734,7 +1770,13 @@ class TestMEDVIEWSubscribeNotification(unittest.TestCase):
             parsed = parse_packet(pkts[0][:-1])
             self.assertTrue(parsed.crc_ok)
             reply = parsed.payload[8:]
-            self.assertEqual(reply, bytes([TAG_END_STATIC]))
+            if notification_type == 3:
+                self.assertEqual(reply, bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]))
+            else:
+                self.assertEqual(
+                    reply,
+                    bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + b"\x00" * 8,
+                )
 
 
 class TestMEDVIEWOneway(unittest.TestCase):
