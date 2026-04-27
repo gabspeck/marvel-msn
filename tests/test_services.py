@@ -1770,7 +1770,12 @@ class TestMEDVIEWSubscribeNotification(unittest.TestCase):
             parsed = parse_packet(pkts[0][:-1])
             self.assertTrue(parsed.crc_ok)
             reply = parsed.payload[8:]
-            if notification_type == 3:
+            if notification_type in (0, 3):
+                # Types 0 (topic metadata) and 3 (va/addr cache pump)
+                # both get iterator replies — the server pushes
+                # opcode-0xBF chunks on type-0 (HfcNear's per-title
+                # cache via FUN_7e8460df) and opcode-4 frames on
+                # type-3 (global kind-0/1/2 cache via FUN_7e8420f6).
                 self.assertEqual(reply, bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]))
             else:
                 self.assertEqual(

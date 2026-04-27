@@ -626,10 +626,10 @@ notification type index sent on selector `0x17`:
 
 | Type | Callback | Purpose (inferred) |
 |-----:|----------|--------------------|
-| 0 | `FUN_7e8452d3` | Topic metadata / string attachments (opcodes `0xBF`, `0xA5`, `0x37`) |
+| 0 | `FUN_7e8452d3` | Topic metadata / string attachments (opcodes `0xBF`, `0xA5`, `0x37`) — **opcode 0xBF inserts into HfcNear's per-title cache** at `title+4` via `FUN_7e8460df`. Driven by HfcNear's own retry loop (`FUN_7e845875` → `FUN_7e8451bf(idx=0, …)` → `FUN_7e8450d5` → `FUN_7e844a3b` → `FUN_7e8452d3`), no pump thread required (`param_3 = 0` to `FUN_7e84485f`). |
 | 1 | `LAB_7e849251` | Picture / download status |
 | 2 | `FUN_7e841109` | Context-string / global-state updates (writes `DAT_7e84d02c`-family tables) |
-| 3 | `FUN_7e8451ec` | **va / addr cache pushes** (populates `PTR_DAT_7e84e130`) |
+| 3 | `FUN_7e8451ec` | **va / addr cache pushes** (populates `PTR_DAT_7e84e130` global kind-0/1/2 cache via op-code 4 → `FUN_7e8420f6`). **Different cache from HfcNear's `title+4` tree.** |
 | 4 | `FUN_7e8468d5` | WordWheel / key-index refresh |
 
 ### Type-3 frame format (cache push)
@@ -672,26 +672,60 @@ parallel lists at `PTR_DAT_7e84e130[0..2]`. Lookups:
 - Kind 2: `FUN_7e841b21(list=2)` matches `(title_byte, va@+4)` →
   returns `addr` from `+8`.
 
+### HfcNear's per-title cache (`title+4` tree)
+
+`MVTTL14C!HfcNear @ 0x7E84589F` is the gate `fMVSetAddress` calls
+during initial pane attach (via `FUN_7e885fc0` →
+`GetProcAddress("HfcNear")`). It walks `*(int **)(title + 4)` (binary
+tree of cache entries, 32-byte node + name buffer) via
+`FUN_7e845efa`. On miss, it fires selector `0x15` and waits for the
+cache to fill. **The only function that inserts into this tree is
+`FUN_7e8460df`** (sole caller: type-0 callback `FUN_7e8452d3` when
+parsing opcode `0xBF`). Op-code 4 on type-3 writes to
+`PTR_DAT_7e84e130` (global kind-0/1/2 cache for `vaConvertHash` /
+`vaConvertTopicNumber`) — **not the same cache** as HfcNear walks.
+
+Wire layout for opcode 0xBF push (size=8 form, 72 bytes):
+
+```
++0x00  u8   opcode = 0xBF
++0x01  u8   title_byte (matched in FUN_7e845eb7's title list)
++0x02  u16  name_size (must be > 0; FUN_7e845cd4 returns NULL when
+                       entry+0x14 = name_len = 0, killing HfcNear's
+                       success path)
++0x04..0x0B  8-byte name buffer (memcpy'd into entry+0x20)
++0x0C  u32  key (the va HfcNear looks up; stored at entry+4 and
+                 matched at `entry[1] == key` in FUN_7e845efa)
++0x10..0x47  56 bytes of 60-byte content block (key field at +0xC
+              doubles as content[0..3] for size=8 because
+              FUN_7e8452d3 reads key at fixed offset 0xC and copies
+              60 bytes starting at offset (size + 4) = 0xC).
+```
+
+**Open: 60-byte content block field layout.** The block carries
+pointer fields the engine dereferences in the render path. Zeros
+trigger an AV at `MVCL14N!FUN_7e894c50 + 0xfc` reading
+`*(int *)(param_1 + 0xf6)` (where param_1 walks 71-byte layout
+records and the array base lives at +0xf6 of some encompassing
+struct). The engine's exception handler catches the AV and surfaces
+"This service is not available at this time" via `TitlePreNotify
+opcode 8` echo. Once the field layout is mapped, this push completes
+the paint chain.
+
 ### Server implications
 
-- Selectors `0x06` / `0x07` can ack with static-only `0x87`. The actual
-  delivery must be pushed as **selector `0x17` type-3 op-code 4**
-  frames on the subscription iterator so the client's cache pump
-  populates the `(title_byte, topic_no) → va` (or `hash → va`) entry.
-- To open the type-3 channel the server must reply to the subscribe
-  call (selector `0x17` with `type=3`) with a **non-empty dynamic
-  section** — the dynamic iterator's handle is what gets stored at
-  `subscriber+0x28` and drives the pump. Ack-only today means
-  `this+0x28 == NULL` → pump exits immediately (`FUN_7e844a3b` guard
-  at entry) → no pushes flow.
-- Until the notification pump is lit up, `vaConvertTopicNumber` times
-  out after 30 s and returns `0xFFFFFFFF` → no navigation.
-- Shortcut: ship a nonzero **`vaGetContents`** value in TitleOpen reply
-  DWORD 1 (title struct `+0x8c`). If the engine accepts the va
-  directly without demanding a companion addr, `NavigateViewerSelection`
-  enters the paint path. But `FUN_7e841c32 (va→addr)` consults only
-  the cache, so first paint still needs a matching kind-2 push unless
-  the engine has a direct-va-without-addr code path (unverified).
+- Selector `0x15` (HfcNear) — push opcode `0xBF` chunk on the type-0
+  subscription. HfcNear's retry loop drives consumption synchronously
+  via `FUN_7e845875`; no pump thread needed for type 0 even though
+  `param_3 = 0` to `FUN_7e84485f` skips the threaded pump.
+- Selectors `0x06` / `0x07` — push op-code 4 frame on the type-3
+  subscription. Type 3 has a real pump thread (`FUN_7e844c7c`) that
+  reads chunks asynchronously and dispatches via `FUN_7e8451ec`.
+- All five subscribe calls need their `+0x44` slot non-zero for the
+  master flag (§6a).
+- Type-0 reply must be `0x87 0x88` (iterator) so MPC's Execute hands
+  back a readable iface that chunk-pushes can attach to. Same for
+  type-3.
 
 ## 6c. Baggage (HFS file access, selectors `0x1A` / `0x1B` / `0x1C`)
 

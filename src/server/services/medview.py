@@ -316,15 +316,20 @@ def _extract_cache_miss_args(payload):
     return (title_byte, key)
 
 
-def _build_op4_cache_frame(title_byte, kind, key, va, addr):
+def _build_type3_op4_frame(title_byte, kind, key, va, addr):
     """Build a selector-0x17 type-3 op-code 4 cache-insert frame.
 
-    Wire shape (project_medview_cache_push_format):
+    Inserts into the global kind-0/1/2 cache at PTR_DAT_7e84e130
+    (FUN_7e8420f6 → FUN_7e841be4 / FUN_7e841bff / FUN_7e841c1a /
+    FUN_7e841a50).  This is what `vaConvertHash` /
+    `vaConvertTopicNumber` consult — NOT what HfcNear uses.
+
+    Frame (18 bytes):
         +0x00 u16 op_code = 4
-        +0x02 u16 length  = 18 (includes 4-byte header)
+        +0x02 u16 length  = 18
         +0x04 u8  title_byte
         +0x05 u8  kind   (0 = topic→va+addr, 1 = hash→va, 2 = va→addr)
-        +0x06 u32 key    (topic_no / hash / va lookup-key)
+        +0x06 u32 key    (topic_no / hash / va)
         +0x0A u32 va
         +0x0E u32 addr
     """
@@ -339,16 +344,71 @@ def _build_op4_cache_frame(title_byte, kind, key, va, addr):
     return struct.pack("<HH", 4, 18) + payload
 
 
+def _build_type0_bf_chunk(title_byte, key):
+    """Build a selector-0x17 type-0 opcode-`0xBF` cache-insert chunk.
+
+    HfcNear's per-title cache lives in the title struct's `title+4`
+    tree (walked by `MVTTL14C!FUN_7e845efa`).  The only function that
+    inserts into this tree is `MVTTL14C!FUN_7e8460df` (sole caller is
+    the type-0 callback `FUN_7e8452d3` when it parses opcode `0xBF`).
+
+    Dispatch path (kicked off from HfcNear's own retry loop):
+        HfcNear → FUN_7e845875 → FUN_7e8451bf(idx=0, …)
+        → FUN_7e8450d5(subscriber_0, …) → FUN_7e844a3b
+        → FUN_7e8452d3(chunk) → FUN_7e8460df(title, key, name_buf,
+                                              name_len, content_blob)
+        → entry[+0x14] = name_len, entry[+0x10] = name_buf,
+          entry[+0x18] = content_blob → linked into `title+4` tree.
+
+    HfcNear's return: `FUN_7e845cd4(entry, status_out)` requires
+    `entry+0x14 != 0` (name_len > 0) — if zero, returns NULL and
+    HfcNear → FUN_7e885fc0 → fMVSetAddress all return 0.  So the
+    push MUST carry a non-zero name length.
+
+    Wire layout (size=8 form, 72 bytes total — minimum the 0xBF
+    branch accepts at FUN_7e8452d3's `if (param_2 < size + 0x40)`):
+        +0x00 u8  opcode = 0xBF
+        +0x01 u8  title_byte (matched in FUN_7e845eb7's title list)
+        +0x02 u16 name_size = 8
+        +0x04 .. 0x0B  8-byte name buffer (memcpy'd into entry+0x20)
+        +0x0C u32 key  (the va HfcNear looks up; also doubles as
+                        first 4 bytes of the 60-byte content because
+                        FUN_7e8452d3's `local_1c = *(uint *)(param_1
+                        + 0xc)` is at fixed offset 0xC and the
+                        content read `pcVar3 = param_1 + (size + 4)`
+                        starts at the same byte 0xC for size=8).
+        +0x10 .. 0x47  56 zero bytes (rest of 60-byte content).
+    """
+    name_size = 8
+    chunk = bytearray(4 + 8 + 60)  # 72 bytes
+    chunk[0] = 0xBF
+    chunk[1] = title_byte & 0xFF
+    chunk[2:4] = struct.pack("<H", name_size)
+    # Name buffer at bytes 4..11 — use title_byte ASCII repeat as a
+    # recognisable placeholder.  Real content would be the title's
+    # path or topic name.
+    chunk[4:12] = bytes([title_byte & 0xFF] * 8)
+    # Key at byte 0xC — same position as content[0..3] for size=8.
+    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
+    # bytes 16..71 = 56 zero bytes (rest of content block)
+    return bytes(chunk)
+
+
 class MEDVIEWHandler:
     """Handles MEDVIEW service requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
-        # Type-3 cache-pump subscription state.  Captured from the
-        # selector-0x17 subscribe with type=3; reused later to push
-        # op-code 4 cache-fill frames as `0x85` chunks on the
-        # subscription's iterator (project_medview_cache_push_format).
+        # Type-0 cache-pump subscription state.  Captured from the
+        # selector-0x17 subscribe with type=0; reused to push opcode
+        # 0xBF chunks via FUN_7e8452d3 → FUN_7e8460df, which is the
+        # ONLY path that inserts into the title+4 tree HfcNear walks.
+        self.type0_sub_class = None
+        self.type0_sub_req_id = None
+        # Type-3 cache-pump subscription state (op-code 4 → global
+        # kind-0/1/2 cache).  Useful for vaConvertHash / Topic; does
+        # NOT reach HfcNear's per-title cache.
         self.type3_sub_class = None
         self.type3_sub_req_id = None
 
@@ -359,35 +419,45 @@ class MEDVIEWHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def _build_cache_push_packet(self, title_byte, selector, key, server_seq, client_ack):
-        """Build a packet that pushes one op-code 4 cache frame.
+        """Build a packet that pushes a cache-fill chunk on the right channel.
 
-        Selector → kind mapping:
-            0x06 (vaConvertHash) → kind 1 (hash → va)
-            0x07 (vaConvertTopicNumber) → kind 0 (topic → va + addr)
-            0x15 (HfcNear / vaResolve) → kind 2 (va → addr)
-            others (0x10 etc.) → no push
+        Selector → push channel + frame:
+            0x15 (HfcNear / vaResolve) → type-0, opcode 0xBF (target
+                title+4 tree via FUN_7e8460df).
+            0x06 (vaConvertHash) → type-3, op-code 4 kind 1 (hash→va,
+                global cache via FUN_7e841bff).
+            0x07 (vaConvertTopicNumber) → type-3, op-code 4 kind 0
+                (topic→va+addr, global cache via FUN_7e841be4).
+            0x10 (HighlightsInTopic) → not pushed.
         """
-        if selector == MEDVIEW_SELECTOR_VA_CONVERT_HASH:
-            kind = 1
-        elif selector == MEDVIEW_SELECTOR_VA_CONVERT_TOPIC:
-            kind = 0
-        elif selector == MEDVIEW_SELECTOR_VA_RESOLVE:
-            kind = 2
+        if selector == MEDVIEW_SELECTOR_VA_RESOLVE:
+            if self.type0_sub_req_id is None:
+                return None
+            chunk = _build_type0_bf_chunk(title_byte, key)
+            sub_class = self.type0_sub_class
+            sub_req_id = self.type0_sub_req_id
+        elif selector in (MEDVIEW_SELECTOR_VA_CONVERT_HASH, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC):
+            if self.type3_sub_req_id is None:
+                return None
+            kind = 1 if selector == MEDVIEW_SELECTOR_VA_CONVERT_HASH else 0
+            # Stub answer: va = addr = key.  Real values come from
+            # the title's authored content; without that we just
+            # echo the key so vaConvertHash returns *something* and
+            # the engine can drive forward to HfcNear.
+            chunk = _build_type3_op4_frame(title_byte, kind, key, va=key, addr=key)
+            sub_class = self.type3_sub_class
+            sub_req_id = self.type3_sub_req_id
         else:
             return None
-        # Stub answer: va = addr = key.  Real values would come from
-        # the title's COSCL streams; as a probe we just give the
-        # engine "something" so vaGetContents() returns nonzero and
-        # downstream paint can advance.  If the engine rejects the
-        # synthetic value the next selector firing will tell us.
-        frame = _build_op4_cache_frame(title_byte, kind, key, va=key, addr=key)
-        # 0x85 chunk tag + raw frame bytes; chunk dispatches to
-        # FUN_7e8451ec via the type-3 callback.
-        push_payload = bytes([0x85]) + frame
+        # 0x85 chunk tag + raw chunk bytes.  MPCCL parses 0x85 as a
+        # dynamic-recv chunk on the matching subscription iterator
+        # (key = req_id), fires chunk signal at +0x28's event, and
+        # the type-N callback consumes the chunk.
+        push_payload = bytes([0x85]) + chunk
         push_host = build_host_block(
-            self.type3_sub_class,
+            sub_class,
             MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
-            self.type3_sub_req_id,
+            sub_req_id,
             push_payload,
         )
         return build_service_packet(self.pipe_idx, push_host, server_seq, client_ack)
@@ -447,29 +517,25 @@ class MEDVIEWHandler:
             reply_pkts = build_service_packet(
                 self.pipe_idx, host_block, server_seq, client_ack
             )
-            # If the type-3 cache-pump subscription is registered AND
-            # we have a (title_byte, key) we can answer, append a push
-            # packet on the same pipe carrying op-code 4 frame.  The
-            # client's MPCCL parses 0x85 in the push payload as a
-            # chunk on the original subscribe iterator → fires chunk
-            # signal → pump (FUN_7e844c7c) calls FUN_7e8451ec →
-            # FUN_7e8420f6 inserts into the kind-0/1/2 cache.
-            if (
-                self.type3_sub_req_id is not None
-                and title_byte is not None
-                and key is not None
-            ):
+            # On selector 0x15 (HfcNear) with type-0 subscription
+            # registered, push a `0xBF` chunk on the type-0 iterator.
+            # The chunk gets consumed by HfcNear's own retry loop via
+            # FUN_7e845875 → FUN_7e8451bf(idx=0, …) → FUN_7e8450d5 →
+            # FUN_7e844a3b → FUN_7e8452d3 → FUN_7e8460df, which
+            # inserts (key → 60-byte content) into the title+4 tree.
+            # On the next iteration FUN_7e845efa finds the entry and
+            # HfcNear returns success → fMVSetAddress returns 1.
+            if title_byte is not None and key is not None:
                 next_seq = (server_seq + len(reply_pkts)) & 0x7F
                 push_pkts = self._build_cache_push_packet(
                     title_byte, selector, key, next_seq, client_ack
                 )
                 if push_pkts is not None:
                     log.info(
-                        "cache_push selector=0x%02x title_byte=0x%02x key=0x%08x kind=%s",
+                        "cache_push selector=0x%02x title_byte=0x%02x key=0x%08x channel=type0_bf",
                         selector,
                         title_byte,
                         key,
-                        {0x06: 1, 0x07: 0, 0x15: 2}[selector],
                     )
                     return reply_pkts + push_pkts
             return reply_pkts
@@ -479,19 +545,31 @@ class MEDVIEWHandler:
                 "subscribe_notification req_id=%d type=%r payload=%s",
                 request_id, notification_type, payload.hex(),
             )
-            if notification_type == 3:
-                # Type 3 is the cache-pump subscriber (FUN_7e8451ec).
-                # Reply with `0x87 0x88` (iterator stream-end) so MPC's
-                # Execute returns an iterator iface — that's what the
-                # pump thread (FUN_7e844c7c) reads chunks from.
-                # Capture (msg_class, request_id) so we can later send
-                # `0x85` chunks on this same iterator carrying op-code
-                # 4 cache-fill frames when 0x06/0x07/0x15 fire.
+            if notification_type == 0:
+                # Type 0 is the topic-metadata subscriber
+                # (FUN_7e8452d3).  Its callback inserts opcode-0xBF
+                # chunks into the title+4 tree (HfcNear's per-title
+                # cache) via FUN_7e8460df.  HfcNear's retry loop
+                # itself drives the dispatch via FUN_7e845875 →
+                # FUN_7e8451bf → FUN_7e8450d5 → FUN_7e844a3b →
+                # FUN_7e8452d3, so no pump thread is required.
+                # Reply `0x87 0x88` (iterator stream-end) so the
+                # subscription iface is readable for chunk
+                # consumption when we later push 0x85 chunks on this
+                # same req_id.
+                self.type0_sub_class = msg_class
+                self.type0_sub_req_id = request_id
+                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+            elif notification_type == 3:
+                # Type 3 is the va/addr cache-pump subscriber
+                # (FUN_7e8451ec, op-code 4 frames into the global
+                # kind-0/1/2 cache at PTR_DAT_7e84e130).  Iterator
+                # reply for the pump thread (FUN_7e844c7c).
                 self.type3_sub_class = msg_class
                 self.type3_sub_req_id = request_id
                 reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
             else:
-                # Types 0/1/2/4: dynamic-complete with non-empty body
+                # Types 1/2/4: dynamic-complete with non-empty body
                 # to make MPC's Execute return a non-NULL iface (see
                 # MVTTL14C 0x7E844FA7 `MOV [ESI+0x44], 0x1` gated on
                 # `*[ESI+0x28] != 0` and HRESULT >= 0).  Required for
