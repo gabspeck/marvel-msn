@@ -10,7 +10,7 @@ Blackbird.lock
 Blackbird.lock~
 
 # Original MSN95 binaries (see README for how to obtain)
-binaries/
+binaries*/
 
 # Session captures (run server/server.py to generate your own)
 session_capture*.log
