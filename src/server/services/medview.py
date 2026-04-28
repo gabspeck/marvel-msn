@@ -27,6 +27,10 @@ from pathlib import Path
 from ..config import (
     MEDVIEW_INTERFACE_GUIDS,
     MEDVIEW_SELECTOR_HANDSHAKE,
+    MEDVIEW_SELECTOR_HFC_NEXT_PREV,
+    MEDVIEW_SELECTOR_HFS_CLOSE,
+    MEDVIEW_SELECTOR_HFS_OPEN,
+    MEDVIEW_SELECTOR_HFS_READ,
     MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
     MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
     MEDVIEW_SELECTOR_TITLE_GET_INFO,
@@ -66,39 +70,80 @@ def _titles_root() -> Path:
     return Path(__file__).resolve().parents[3] / "resources" / "titles"
 
 
-def _resolve_display_name(deid: str) -> str:
-    """Map a DIRSRV deid to the title caption shown in MSN Today.
+def _resolve_title(deid: str) -> tuple[str, Title | None]:
+    """Map a DIRSRV deid to (caption, Title-or-None).
 
-    Parses `<_titles_root()>/<deid>.ttl` when present and returns the
-    authored `CTitle.name`; otherwise falls back to `"Title <deid>"`
-    so unknown deids still show something informative instead of the
-    client's `"Unknown Title Name"` default.
+    Parses `<_titles_root()>/<deid>.ttl` when present.  Returns the
+    authored `CTitle.name` plus the parsed Title object (so callers
+    can inspect class objects); on missing / invalid `.ttl`, returns
+    a `"Title <deid>"` fallback caption and `None`.
     """
     if not deid:
-        return "Untitled"
+        return ("Untitled", None)
     path = _titles_root() / f"{deid}.ttl"
     if not path.is_file():
         log.info("ttl_missing deid=%r path=%s — using deid fallback", deid, path)
-        return f"Title {deid}"
+        return (f"Title {deid}", None)
     try:
         title = Title.from_path(str(path))
     except TTLError as exc:
         log.warning("ttl_parse_failed deid=%r path=%s: %s", deid, path, exc)
-        return f"Title {deid}"
+        return (f"Title {deid}", None)
     name = title.display_name
     if not name:
         log.warning("ttl_no_display_name deid=%r path=%s types=%r", deid, path, title.types)
-        return f"Title {deid}"
+        return (f"Title {deid}", title)
     log.info("ttl_loaded deid=%r path=%s display_name=%r", deid, path, name)
+    return (name, title)
+
+
+def _resolve_display_name(deid: str) -> str:
+    """Backwards-compat wrapper used by tests and callers that only
+    need the caption string.  See `_resolve_title` for the full form."""
+    name, _ = _resolve_title(deid)
     return name
 
 
-def _build_title_body(display_name: str) -> bytes:
-    """Synthesize a minimum-viable MedView 9-section body.
+def _section1_records_from_csections(title: Title | None) -> bytes:
+    """Concatenate every CSection's ver=0x03 body into wire body
+    section 1 (43-byte topic records, see docs/MEDVIEW.md §4.4).
+
+    Hypothesis (single-sample, see ttl.py): BBDESIGN release path
+    flattens authored CSection instances to wire-ready records and
+    tags them ver=0x03 so the 1996 Marvel server could memcpy each
+    body straight into wire section 1.  Each CSection sub-storage
+    contributes one 43-byte record; multiple sub-storages
+    concatenate in sub-id order.
+
+    Records that aren't exactly 43 bytes are skipped with a warning
+    rather than poisoning the wire body — better blank than corrupt.
+    """
+    if title is None:
+        return b""
+    records: list[bytes] = []
+    for sid, class_name in sorted(title.types.items()):
+        if class_name != "CSection":
+            continue
+        for sub, body in sorted(title.objects.get(sid, {}).items()):
+            if len(body) != 43:
+                log.warning(
+                    "csection_skip sid=%d sub=%d len=%d — not 43-byte wire record",
+                    sid, sub, len(body),
+                )
+                continue
+            records.append(body)
+    return b"".join(records)
+
+
+def _build_title_body(display_name: str, title: Title | None = None) -> bytes:
+    """Synthesize a MedView 9-section body from authored title state.
 
     Layout (little-endian; see docs/MEDVIEW.md §4.4):
 
-        sections 0-3:  4 × [u16 size=0]          # DIB + 3 record arrays, all empty
+        section 0:     [u16 size=0]              # font table — empty
+        section 1:     [u16 size=N][N bytes]     # 43-byte topic records,
+                                                 #   one per CSection (ver=0x03 hypothesis)
+        sections 2-3:  2 × [u16 size=0]          # link / layout — empty
         section 4:     [u16 size=N][N ASCII bytes]  # title name (raw blob)
         sections 5-7:  3 × [u16 size=0]          # copyright + 2 raw blobs, empty
         section 8:     [u16 count=0]             # string table, empty
@@ -140,8 +185,12 @@ def _build_title_body(display_name: str) -> bytes:
     name = display_name.rstrip("\x00") or "Untitled"
     name_bytes = name.encode("ascii", errors="replace") + b"\x00"
     section6 = name_bytes  # reuse caption as the section-6 title-string blob
+    section1 = _section1_records_from_csections(title)
     return (
-        b"\x00\x00" * 4                             # Sections 0-3: empty
+        b"\x00\x00"                                 # Section 0: empty (font table)
+        + struct.pack("<H", len(section1)) + section1  # Section 1: CSection records
+        + b"\x00\x00"                               # Section 2: empty
+        + b"\x00\x00"                               # Section 3: empty
         + struct.pack("<H", len(name_bytes))        # Section 4 size
         + name_bytes                                # Section 4 data (ASCIIZ caption)
         + b"\x00\x00"                               # Section 5: empty
@@ -155,11 +204,19 @@ def _build_title_body(display_name: str) -> bytes:
 def _load_title_body(title_spec: str) -> bytes:
     """Resolve a TitleOpen spec to a synthesized 9-section title body."""
     deid = _title_name_from_spec(title_spec).strip()
-    display = _resolve_display_name(deid)
-    body = _build_title_body(display)
+    display, title = _resolve_title(deid)
+    body = _build_title_body(display, title)
+    section1_len = 0
+    if title is not None:
+        section1_len = sum(
+            len(b)
+            for sid, cls in title.types.items() if cls == "CSection"
+            for b in title.objects.get(sid, {}).values()
+            if len(b) == 43
+        )
     log.info(
-        "synthesized_title_body spec=%r deid=%r display=%r body_len=%d",
-        title_spec, deid, display, len(body),
+        "synthesized_title_body spec=%r deid=%r display=%r body_len=%d section1_len=%d",
+        title_spec, deid, display, len(body), section1_len,
     )
     return body
 
@@ -344,12 +401,90 @@ def _build_type3_op4_frame(title_byte, kind, key, va, addr):
     return struct.pack("<HH", 4, 18) + payload
 
 
+def _build_type0_bf_chunk(title_byte, key):
+    """Build a selector-0x17 type-0 opcode-0xBF cache-insert chunk.
+
+    HfcNear's per-title cache lives in the title struct's `title+4`
+    tree (walked by `MVTTL14C!FUN_7e845efa`).  The only function that
+    inserts into this tree is `MVTTL14C!FUN_7e8460df` (sole caller is
+    the type-0 callback `FUN_7e8452d3` when it parses opcode 0xBF).
+
+    Wire layout (size=0x40 form, 132 bytes total).  After HfcNear
+    returns the cache entry, MVCL14N!fMVSetAddress walks the
+    name_buf via FUN_7e890fd0 → FUN_7e894c50.  The walker reads
+    `name_buf[0x26]` and dispatches a switch on it (cases
+    1/3/4/5/0x20/0x22/0x23/0x24).  With a zero-fill or 8-byte
+    buffer the dispatch lands on default, the post-switch loop
+    iterates with `param_6[1]` uninitialised (FUN_7e890fd0 leaves
+    `local_2e` unset on its stack frame), and the iteration walks
+    off the end of `lp+0xf6`'s table → AV at `0x7E894D4C`.
+
+    To steer into case 1 (`FUN_7e8915d0`), inject `0x01` at offset
+    0x26 of the name_buf.  FUN_7e897ed0 then sets local_c[0] = 1,
+    FUN_7e894c50 enters case 1, FUN_7e8915d0 zeros local_120,
+    calls FUN_7e897ad0 with a zero u32 → presence bitmap = 0,
+    only the length field gets a non-zero value (-0x4000 for the
+    "compact" branch).  Then FUN_7e8915d0 enters its do-while
+    loop calling FUN_7e891810.
+
+    FUN_7e891810's early-exit at entry tests two conditions:
+        cond1: *(byte *)(local_68 + local_30) == 0
+               where local_68 = chunk content pointer (the param_4
+               cascade), local_30 = local_120[0] = -0x4000.
+        cond2: *(byte *)local_2a == -1
+               where local_2a = pointer to chunk content past the
+               header section.
+    Both fail with zero-fill content → fall through into the main
+    loop body.  Whether the main loop survives is unverified —
+    empirically test by observing the AV address (or success).
+
+        +0x00  u8   opcode = 0xBF
+        +0x01  u8   title_byte
+        +0x02  u16  name_size = 0x40
+        +0x04..0x43  64-byte name buffer (memcpy'd into entry+0x20).
+                     name_buf[0x26] = 0x01 (case 1 dispatch).
+                     Other bytes zero.
+        +0x0C  u32  key — at offset 0xC of the chunk, INSIDE the
+                     name buffer; FUN_7e8452d3 reads the lookup key
+                     from this fixed offset regardless of name_size.
+        +0x44..0x83  60-byte content block (zeroed; bytes 0x2C and
+                     0x34 of the content block are pinned HGLOBAL
+                     fields per HfcNear's FUN_7e84a1d0 calls — zeros
+                     yield NULL handles, treated as "absent").
+    """
+    name_size = 0x40
+    chunk = bytearray(4 + name_size + 60)  # 132 bytes
+    chunk[0] = 0xBF
+    chunk[1] = title_byte & 0xFF
+    chunk[2:4] = struct.pack("<H", name_size)
+    # Place 0x03 at offset 0x26 of the name_buf to dispatch
+    # FUN_7e894c50's case 3 (FUN_7e894560).  Hypothesis (from VIEWDLL
+    # RE 2026-04-28): MVCL14N's chunk parser is the same code as
+    # VIEWDLL's CArchive deserialiser, and 0x03 is the CSection
+    # version byte its CSection::Serialize writes.  If correct, the
+    # bytes following 0x26 are CSection state (6 typed-pointer lists +
+    # CSectionProp); if wrong, expect a different AV address than
+    # case-1's known sites.
+    chunk[4 + 0x26] = 0x03
+    # Key at chunk offset 0xC — inside the name_buf.  FUN_7e8452d3
+    # reads it at this fixed offset regardless of name_size.
+    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
+    # bytes 0x44..0x83 stay zero (60-byte content block)
+    return bytes(chunk)
+
+
 class MEDVIEWHandler:
     """Handles MEDVIEW service requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Type-0 cache-pump subscription state (per-title `title+4`
+        # tree; opcode 0xBF via FUN_7e8460df).  Captured from
+        # selector-0x17 type=0 subscribe; reused for vaResolve /
+        # HfcNear cache pushes.
+        self.type0_sub_class = None
+        self.type0_sub_req_id = None
         # Type-3 cache-pump subscription state (op-code 4 → global
         # kind-0/1/2 cache).  Captured from selector-0x17 type=3
         # subscribe; reused for vaConvertHash / Topic cache pushes.
@@ -366,25 +501,16 @@ class MEDVIEWHandler:
         """Build a packet that pushes a cache-fill chunk on the right channel.
 
         Selector → push channel + frame:
-            0x15 (HfcNear / vaResolve) → DISABLED.  Pushing a type-0
-                opcode 0xBF chunk does insert into the title+4 tree
-                and unblocks HfcNear (returns the 0x40-byte name
-                buffer to FUN_7e885fc0 → FUN_7e88e440 → FUN_7e890fd0),
-                but the engine then walks the buffer as a layout
-                section, reading at offset 0x26 to dispatch a record.
-                Default-case (opcode 0) leaves FUN_7e890fd0's
-                `local_2e` (record count) uninit, causing
-                FUN_7e894c50's post-switch loop to iterate over
-                garbage records → AV at MVCL14N!FUN_7e894c50+0xfc
-                (`MOVSX EAX,word ptr [ECX + 0xb]`, `Code=xc0000005,
-                Address=x7e894d4c`), surfaced via TitlePreNotify
-                opcode 8 as "service is not available" dialog.
-                Crafting a valid case-1/3/4/5 record at offset 0x26
-                requires lp state (lp+0x102, lp+0xf6 backing tables)
-                that's only set up by a real authored title body.
-                Until that path is RE'd, leave 0x15 as ack-only 0x87
-                — engine retries ~6× (~6 s) then fMVSetAddress
-                returns 0, pane stays blank, no dialog.
+            0x15 (HfcNear / vaResolve) → type-0, opcode 0xBF.  Inserts
+                into the per-title `title+4` tree via
+                FUN_7e8452d3 → FUN_7e8460df.  Required to unblock
+                HfcNear; downstream the engine walks the buffer
+                through `FUN_7e890fd0 → FUN_7e894c50` and currently
+                AVs at 0x7E894D4C with zero-filled content.  The
+                engine's SEH catches that, surfaces "service is not
+                available", and MOSVIEW stays alive — strictly
+                better signal than the silent no-paint state we get
+                with ack-only.
             0x06 (vaConvertHash) → type-3, op-code 4 kind 1 (hash→va,
                 global cache via FUN_7e841bff).
             0x07 (vaConvertTopicNumber) → type-3, op-code 4 kind 0
@@ -392,19 +518,26 @@ class MEDVIEWHandler:
             0x10 (HighlightsInTopic) → not pushed.
         """
         if selector == MEDVIEW_SELECTOR_VA_RESOLVE:
+            if self.type0_sub_req_id is None:
+                return None
+            chunk = _build_type0_bf_chunk(title_byte, key)
+            sub_class = self.type0_sub_class
+            sub_req_id = self.type0_sub_req_id
+            channel = "type0_bf"
+        elif selector in (MEDVIEW_SELECTOR_VA_CONVERT_HASH, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC):
+            if self.type3_sub_req_id is None:
+                return None
+            kind = 1 if selector == MEDVIEW_SELECTOR_VA_CONVERT_HASH else 0
+            # Stub answer: va = addr = key.  Real values come from
+            # the title's authored content; without that we just
+            # echo the key so vaConvertHash returns *something* and
+            # the engine can drive forward to HfcNear.
+            chunk = _build_type3_op4_frame(title_byte, kind, key, va=key, addr=key)
+            sub_class = self.type3_sub_class
+            sub_req_id = self.type3_sub_req_id
+            channel = "type3_op4"
+        else:
             return None
-        if selector not in (MEDVIEW_SELECTOR_VA_CONVERT_HASH, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC):
-            return None
-        if self.type3_sub_req_id is None:
-            return None
-        kind = 1 if selector == MEDVIEW_SELECTOR_VA_CONVERT_HASH else 0
-        # Stub answer: va = addr = key.  Real values come from
-        # the title's authored content; without that we just
-        # echo the key so vaConvertHash returns *something* and
-        # the engine can drive forward to HfcNear.
-        chunk = _build_type3_op4_frame(title_byte, kind, key, va=key, addr=key)
-        sub_class = self.type3_sub_class
-        sub_req_id = self.type3_sub_req_id
         # 0x85 chunk tag + raw chunk bytes.  MPCCL parses 0x85 as a
         # dynamic-recv chunk on the matching subscription iterator
         # (key = req_id), fires chunk signal at +0x28's event, and
@@ -415,6 +548,10 @@ class MEDVIEWHandler:
             MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
             sub_req_id,
             push_payload,
+        )
+        log.info(
+            "cache_push selector=0x%02x title_byte=0x%02x key=0x%08x channel=%s chunk_len=%d",
+            selector, title_byte, key, channel, len(chunk),
         )
         return build_service_packet(self.pipe_idx, push_host, server_seq, client_ack)
 
@@ -487,12 +624,6 @@ class MEDVIEWHandler:
                     title_byte, selector, key, next_seq, client_ack
                 )
                 if push_pkts is not None:
-                    log.info(
-                        "cache_push selector=0x%02x title_byte=0x%02x key=0x%08x channel=type0_bf",
-                        selector,
-                        title_byte,
-                        key,
-                    )
                     return reply_pkts + push_pkts
             return reply_pkts
         elif selector == MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION:
@@ -503,10 +634,14 @@ class MEDVIEWHandler:
             )
             if notification_type == 0:
                 # Type 0 is the topic-metadata subscriber
-                # (FUN_7e8452d3).  Reply `0x87 0x88` (iterator
-                # stream-end) so the subscribe iface advances; the
-                # cache-push itself is gated by the FUN_7e890fd0
-                # layout-walker AV (see _build_cache_push_packet).
+                # (FUN_7e8452d3).  Capture the iface coordinates so
+                # later vaResolve cache pushes (selector 0x15) can
+                # ride the same iterator and trigger
+                # FUN_7e8460df → title+4 tree insert.  Reply
+                # `0x87 0x88` (iterator stream-end) so the subscribe
+                # iface advances cleanly.
+                self.type0_sub_class = msg_class
+                self.type0_sub_req_id = request_id
                 reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
             elif notification_type == 3:
                 # Type 3 is the va/addr cache-pump subscriber
@@ -526,6 +661,49 @@ class MEDVIEWHandler:
                 # 0 and every cache-miss retry loop bails before
                 # firing 0x06/0x07/0x10/0x15.
                 reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + b"\x00" * 8
+        elif selector == MEDVIEW_SELECTOR_HFC_NEXT_PREV:
+            # 0x16 HfcNextPrevHfc — same wire shape as vaResolve (0x15)
+            # plus a direction byte.  Reply ack-only; engine retries
+            # ~6× internally then falls back to its in-cache entries.
+            log.info(
+                "hfc_next_prev req_id=%d payload_len=%d payload=%s",
+                request_id, len(payload), payload.hex(),
+            )
+            reply_payload = bytes([TAG_END_STATIC])
+        elif selector == MEDVIEW_SELECTOR_HFS_OPEN:
+            # 0x1A HfOpenHfs — baggage open.  Per docs/MEDVIEW.md §6c.
+            # Request: title_byte (0x01) + ASCII filename (0x04) + open
+            # mode (0x01) + recv descriptors (0x81 byte handle + 0x83
+            # u32 size).  Reply: ack + tagged byte (0 declines) +
+            # tagged DWORD size.  No baggage hosted server-side yet,
+            # so decline every open — the client treats byte=0 as
+            # "file unavailable" and falls back to its in-memory
+            # default render path instead of waiting indefinitely.
+            log.info(
+                "hfs_open req_id=%d payload_len=%d payload=%s",
+                request_id, len(payload), payload.hex(),
+            )
+            reply_payload = (
+                bytes([TAG_END_STATIC])
+                + build_tagged_reply_byte(0)
+                + build_tagged_reply_dword(0)
+            )
+        elif selector == MEDVIEW_SELECTOR_HFS_READ:
+            # 0x1B LcbReadHf — only fires on accepted open handles.
+            # We decline all opens above, so this should never reach
+            # us; if it does, ack-only with status=error.
+            log.info(
+                "hfs_read req_id=%d payload_len=%d payload=%s",
+                request_id, len(payload), payload.hex(),
+            )
+            reply_payload = bytes([TAG_END_STATIC])
+        elif selector == MEDVIEW_SELECTOR_HFS_CLOSE:
+            # 0x1C HfCloseHf — same comment as 0x1B.
+            log.info(
+                "hfs_close req_id=%d payload_len=%d payload=%s",
+                request_id, len(payload), payload.hex(),
+            )
+            reply_payload = bytes([TAG_END_STATIC])
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None

@@ -1641,23 +1641,36 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
     def test_title_open_body_is_nine_section_with_msn_today_label(self):
-        # After 2×0x81 + 5×0x83 static + 0x87 + 0x86 the dynamic body runs
-        # to end-of-frame.  For MSN Today (deid="4") the synthesized body
-        # places "MSN Today\0" in section 4 (the raw-blob the title-name
-        # query at MOSVIEW!0x7F3C6575 actually reads via info_kind=1).
+        # MSN Today's authored .ttl carries one CSection (9/1, ver=0x03,
+        # 43-byte body) → wire body section 1 = 1 record = 45 B
+        # (2 header + 43 data).  Section 0 stays empty, sections 2-3
+        # stay empty, section 4 = caption blob, section 6 = title
+        # string, section 8 = empty count.
         reply = self._decode_reply(self._MSN_TODAY_REQ)
         # Static prefix: 2×2 (tagged bytes) + 5×5 (tagged dwords) + 1 (0x87)
         # + 1 (0x86) = 31 bytes before the dynamic payload.
         body = reply[31:]
-        self.assertEqual(body[:8], b"\x00\x00" * 4)      # Sections 0-3 empty
-        self.assertEqual(body[8:10], b"\x0a\x00")        # Section 4 size=10
-        self.assertEqual(body[10:20], b"MSN Today\x00")  # Section 4 data
-        self.assertEqual(body[20:22], b"\x00\x00")       # Section 5 empty
-        self.assertEqual(body[22:24], b"\x0a\x00")       # Section 6 size=10
-        self.assertEqual(body[24:34], b"MSN Today\x00")  # Section 6 data
-        self.assertEqual(body[34:36], b"\x00\x00")       # Section 7 empty
-        self.assertEqual(body[36:38], b"\x00\x00")       # Section 8 count=0
-        self.assertEqual(len(body), 38)
+        # Section 0: empty header
+        self.assertEqual(body[0:2], b"\x00\x00")
+        # Section 1: size=43 (0x2B), then 43 bytes of CSection body
+        self.assertEqual(body[2:4], b"\x2b\x00")
+        section1_data = body[4:47]
+        self.assertEqual(len(section1_data), 43)
+        # Sections 2 + 3 empty
+        self.assertEqual(body[47:51], b"\x00\x00\x00\x00")
+        # Section 4: caption
+        self.assertEqual(body[51:53], b"\x0a\x00")
+        self.assertEqual(body[53:63], b"MSN Today\x00")
+        # Section 5 empty
+        self.assertEqual(body[63:65], b"\x00\x00")
+        # Section 6: title string
+        self.assertEqual(body[65:67], b"\x0a\x00")
+        self.assertEqual(body[67:77], b"MSN Today\x00")
+        # Section 7 empty
+        self.assertEqual(body[77:79], b"\x00\x00")
+        # Section 8: count=0
+        self.assertEqual(body[79:81], b"\x00\x00")
+        self.assertEqual(len(body), 81)
 
     def test_title_open_body_falls_back_to_deid_for_unknown(self):
         # deid "42" isn't in _TITLE_NAMES — the handler synthesizes

@@ -275,6 +275,13 @@ MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC = 0x10   # MVTTL14C!HighlightsInTopic @ 0x7
 # initial open, NOT from NavigateViewerSelection (which is the
 # click-handler path the original docs/MEDVIEW.md §6b assumed).
 MEDVIEW_SELECTOR_VA_RESOLVE = 0x15
+# `MVTTL14C!HfcNextPrevHfc @ 0x7E845ABB` — next/prev navigation on the
+# per-title cache (`title+4` tree).  Same wire shape as 0x15 plus a
+# direction byte (0=prev, 1=next).  Fires on cache miss when MVCL14N
+# walks adjacent content during render scrollback / pagination.  Reply
+# ack-only — engine retries internally; with the va=1 entry already
+# cached from our 0x15 push, it falls back to local cache.
+MEDVIEW_SELECTOR_HFC_NEXT_PREV = 0x16
 # Async-notification subscribe: `hrAttachToService` allocates 5 callback
 # slots via `FUN_7e84485f`, each of which fires `FUN_7e844ee6` to call
 # selector 0x17 with a single byte (the notification-type index, 0-7).
@@ -282,6 +289,15 @@ MEDVIEW_SELECTOR_VA_RESOLVE = 0x15
 # static-only reply tells the client "subscribe declined" so it stops
 # retrying this slot.  No live notification feed exists server-side yet.
 MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION = 0x17
+# Baggage / HFS file access (docs/MEDVIEW.md §6c).  HFS = a Marvel-
+# specific bundle of supporting media (icons, sounds, helper files)
+# referenced by authored content.  Fires once render starts and the
+# content graph references a baggage filename.  Three-call protocol:
+# OpenHfs → LcbReadHf (variable bytes) → HfCloseHf.  Decline opens
+# (reply byte=0) when no baggage is hosted server-side.
+MEDVIEW_SELECTOR_HFS_OPEN = 0x1A
+MEDVIEW_SELECTOR_HFS_READ = 0x1B
+MEDVIEW_SELECTOR_HFS_CLOSE = 0x1C
 MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY = 0x1E
 MEDVIEW_SELECTOR_HANDSHAKE = 0x1F
 
