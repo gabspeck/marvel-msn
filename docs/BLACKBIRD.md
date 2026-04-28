@@ -229,7 +229,56 @@ All four values are written to the `CReleaseData`-local `CPropertyTable` during 
 
 ---
 
-## 7. Constraints and unknowns
+## 7. Authored fixture inventory — `resources/titles/4.ttl` (MSN Today)
+
+Decoded by `server.services.ttl.Title.from_path` via `_extract_object_stream`:
+
+| Storage | Class | Body | Notes |
+|---|---|---|---|
+| 1/0 | `CTitle` | 37 B | Title metadata; CTitle's serialized state. |
+| 2/0 | `CResourceFolder` | 24 B | Resource container; aggregates the project's resources. |
+| 3/0 | `CBFrame` | 44 B | "MSN Today\\0" caption + `0x0280 × 0x01E0` (640×480). The frame the engine renders. |
+| 4/0 | `CStyleSheet` | 880 B | Font table — multiple "Courier New" entries indexed by style id `0x03..0x06`. |
+| 5/0 | `CBForm` | 44 B | Form-level page bounds: 640×480 at 96 DPI (`0x60`). |
+| 6/0 | `CVForm` | 816 B | **MS Word 95 OLE-embedded document** — UTF-16 `"CompObj"` trailer is the OLE compound-doc marker. The actual page content (formatted runs + embedded refs) lives in this Word DOC. |
+| 7/0 | `CProxyTable` | 17 B | Cross-reference table 0. |
+| 7/1 | `CProxyTable` | 17 B | Cross-reference table 1. |
+| 8/0 | `CContent` | 319 B | Structured records embedding "MSN Today" + "Hello, all folks." text. |
+| 8/1 | `CContent` | 119 B | Body text: "RThis is an example of content authored using MS Word 95 with Blackbird Extensions! ... supported as well:" |
+| 8/2 | `CContent` | 84 B | Structured records embedding "Calendar of Events" + "what's been happenin'". |
+| 8/3 | `CContent` | 0 B | Empty placeholder. |
+| 8/5 | `CContent` | 3446 B | **Raw `BM`-prefixed bitmap** (`bitmap.bmp`); custom 310-B DIB header + `TLWC`-compressed pixel data. The `bitmap.bmp` resource. |
+| 8/6 | `CContent` | 544 B | MSZIP-compressed `ver=0x01` body — second page content. |
+| 8/7 | `CContent` | 122 B | Raw `ver=0x02` body, "SThis is an exa..." — additional text fragment. |
+| 9/1 | `CSection` | 43 B | Section-record matching MEDVIEW wire-section-1 stride exactly. The "Section 1" container. |
+
+The `CVForm` (6/0) is decisive — it carries an entire Word 95 binary
+document with the rendered page. Faithful page rendering on the
+client requires either:
+
+1. **Implementing the release-time conversion**: parse the Word 95 DOC
+   to extract text runs / list items / image refs / styles, emit a
+   tree of MEDVIEW wire-format chunks (one 0xBF push per layout node,
+   with the case-3 bitmap trailer carrying child records that link to
+   text vas via further pushes). This is the path Blackbird's
+   `PUBLISH.DLL` takes — see §4.4 — but its converter implementation
+   is not documented here.
+2. **Synthesising minimal content directly**: skip the Word doc and
+   compose a hand-built CSection trailer with one or two text
+   children pointing at synthetic vas. The case-3 → trailer →
+   CElementData child path is documented in `docs/MEDVIEW.md` §7.2;
+   this is the recommended next-step proof-of-concept before tackling
+   path 1.
+
+`_parse_property_stream` currently fails on `CProxyTable` and
+`CContent` `\x03properties` streams (their property layouts differ
+from `CTitle/CSection/CBForm`-shaped streams the parser handles).
+This is logged-and-skipped; resolving it requires extending the
+parser to the additional class-specific property formats.
+
+---
+
+## 8. Constraints and unknowns
 
 - The COSCL compound-file object layout (the per-stream format produced by `extract_object`) is documented only through its PE implementation. Full structural reversing is scoped out here; `extract_object` at `COSCL.DLL` ordinal ≈ `0x236` is the authoritative reference.
 - The `CMPCFileWriteParamAdder` frame — the wrapper `PUBLISH.DLL` prepends to the compound-file byte stream when shipping through `CMPCFileWrite` (service "Bbird_OB" method 5) — is not documented here. `stream_copy_to_mpc_filewrite` at `0x40f051a5` is the entry point; the param block at `local_278` carries the title name, length, publish GUID, and a vtable pointer that provides the chunk reader.
