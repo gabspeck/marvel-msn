@@ -387,6 +387,46 @@ header (section 0) and the fixed-size record arrays
 `COSCL.DLL!extract_object` and the MS-stock compression on larger
 streams (`docs/BLACKBIRD.md` §3.1.3 and §7).
 
+### 4.6 Layout walker dispatch byte is engine-internal, not on-disk
+
+`MVCL14N!FUN_7e890fd0 @ 0x7E890FFE` reads `name_buf[0x26]` from a
+type-0 cache buffer and dispatches `FUN_7e894c50 @ 0x7E894C50` on
+that byte. The byte at `+0x26` looks like a class-version tag —
+`VIEWDLL!CSection::Serialize @ 0x4070E6AF` writes `bVar3 = 3` as its
+on-disk version — but the resemblance is coincidental. Evidence:
+
+1. `FUN_7e894560 @ 0x7E894560` (the case-3 handler) writes the
+   layout-row tag itself: `*puVar10 = 3` at `+0xfd`, `*puVar9 = 7`
+   at `+0x1d4`, `*puVar9 = 4` at `+0x21f`, into freshly-`GlobalAlloc`'d
+   0x47-byte slots. The walker dispatches on bytes the engine
+   wrote — not bytes that came over the wire. Cases 1/3/4/5/0x20/
+   0x22/0x23/0x24 are layout-table-row tags (CSection, link,
+   typed-element child, …), not on-disk class versions.
+2. `VIEWDLL!CContent::Serialize @ 0x4073A185` writes no class-version
+   byte at all. It chunked-reads `0x1000`-byte blocks from a
+   `CFile *` stored at `this+0x14` (set by
+   `CContent::CContent(CFile*) @ 0x4073A07F`) and copies them
+   verbatim into the CArchive. CContent on disk is opaque blob —
+   raw HTML/GIF/text — not a layout descriptor.
+3. `MVCL14N!FUN_7e886310 @ 0x7E886310`, called by case 3 with the
+   u16 key `*(short *)(param_3 + (short)pbVar4)` at `name_buf+0x26+3`,
+   is a font/bitmap/HMETAFILE resource loader. It calls
+   `GetDeviceCaps`, `GlobalAlloc(0x40, …)`, builds an HBITMAP. A
+   CContent record fed through this code path would AV.
+4. Fixture confirms: `Title.objects[8][1]` (CContent sub=1) starts
+   with ASCII `R` then `This is an exa…` — raw stream payload, not
+   a layout descriptor. CContent's `\x03properties` stream also
+   fails the CTitle/CSection-shape parser (`_parse_property_stream`
+   in `src/server/services/ttl.py`, "value 1 wants 140865657B").
+   The CContent property-tag layout differs.
+
+Implication: the type-0 cache (`title+4` tree, fed by `0xBF` pushes)
+holds layout-section descriptors keyed by va. Pushing a CContent
+record into it will be parsed as a malformed layout descriptor and
+either AV or be silently discarded. **CContent on the wire flows
+through the baggage path** (selectors `0x1A` / `0x1B` / `0x1C`) —
+see §6c.
+
 ---
 
 ## 5. TitleGetInfo (selector `0x03`)
@@ -1051,30 +1091,27 @@ MSN Today open path.
   `PTR_DAT_7e84e130` via the subscription iterators is not yet RE'd —
   trace `FUN_7e844a3b @ 0x7E841A75` (third reference to the cache
   head) to recover it. Until then, va conversions fall through.
-- **Per-title content cache** (`title+4` tree). The push channel is
-  type-0 opcode `0xBF` via `FUN_7e8452d3 → FUN_7e8460df`; pushing
-  succeeds (HfcNear returns the buffer to `fMVSetAddress`), but the
-  buffer flows into the layout walker `FUN_7e890fd0 → FUN_7e894c50`,
-  which AVs at `0x7E894D4C` because (a) `FUN_7e890fd0` leaves
-  `local_2e` (record count) uninitialised on its stack, and (b) the
-  default-case branch of `FUN_7e894c50`'s opcode-switch doesn't write
-  `param_6[1]`, so the post-switch loop walks garbage records.
-  Synthetic zero-filled chunks AV in EVERY case handler too —
-  case 1's early exit at `FUN_7e891810` derefs `local_120[2] +
-  local_120[0x10]` (both NULL after zero-content `FUN_7e897ad0`
-  populate), cases 3/4/5 hit similar zero-deref / table-realloc
-  paths. **The engine demands real layout/font/paragraph state
-  produced by unpacking an authored OLE2 title.** The 1996 Marvel
-  server extracted this from `.ttl` OLE2 compound files (see
-  `project_blackbird_release_wire` — same compound-file format used
-  for Blackbird release plumbing) and shipped the unpacked sections
-  directly on the wire. COSCL stream extraction now exists server
-  side (`server.services.ttl.Title.objects` exposes the decoded
-  per-class plaintext, MSZIP-decompressed when needed); next is
-  mapping each class's plaintext to the MEDVIEW wire body sections
-  0/1/2/3 (font table, 43-byte topic records, 31-byte link records,
-  152-byte layout records).  Ack-only on `0x15` stays the safe
-  fallback until that mapping lands.
+- **Per-title content cache** (`title+4` tree). Push channel is
+  type-0 opcode `0xBF` via `FUN_7e8452d3 → FUN_7e8460df`. Current
+  state (post-`33a0746`): `name_buf[0x26]=0x03` steers the layout
+  walker `FUN_7e890fd0 → FUN_7e894c50` into case 3, which exits
+  cleanly through the empty-children short-circuit at
+  `FUN_7e894560 + 0x88` (`param_4[1] = *param_4`). Two empty pane
+  rectangles paint top-left. The 0x03 dispatch is a layout-table-row
+  tag the engine writes itself (§4.6), not the on-disk CSection
+  version byte; the case-3 selection works because case 3 is the
+  least-AV path for empty layout state. Two real forward steps from
+  here, each requires its own scoped plan:
+  1. **CSection CElementData children**. To populate the empty
+     rectangles, the cached CSection must carry a non-empty
+     children list. Requires pinning `VIEWDLL!CElementData::Serialize
+     @ 0x40702E4C` and the case-4 / case-7 walker handlers.
+  2. **Baggage delivery for CContent**. The actual content payload
+     (HTML / image bytes from `Title.objects[8][sub]`) flows through
+     selectors `0x1A` / `0x1B` / `0x1C`, which `medview.py` currently
+     declines (ack-only / status=0). Requires a name → bytes resolver
+     against `Title.objects` and a fragmenting reader honouring the
+     1024-B client recv buffer.
 - **Checksum semantics**. The new checksums returned in the TitleOpen
   reply are written back into `MVCache\<title>.tmp`. Whether the server
   treats them as (a) a content hash, (b) a version stamp, or (c) a
