@@ -702,15 +702,73 @@ Wire layout for opcode 0xBF push (size=8 form, 72 bytes):
               60 bytes starting at offset (size + 4) = 0xC).
 ```
 
-**Open: 60-byte content block field layout.** The block carries
-pointer fields the engine dereferences in the render path. Zeros
-trigger an AV at `MVCL14N!FUN_7e894c50 + 0xfc` reading
-`*(int *)(param_1 + 0xf6)` (where param_1 walks 71-byte layout
-records and the array base lives at +0xf6 of some encompassing
-struct). The engine's exception handler catches the AV and surfaces
-"This service is not available at this time" via `TitlePreNotify
-opcode 8` echo. Once the field layout is mapped, this push completes
-the paint chain.
+**Open: 60-byte content block field layout.** Two of the 60 bytes
+ARE pinned: bytes `0x2C` and `0x34` are HGLOBAL handles (HfcNear's
+success path passes them to `FUN_7e84a1d0` and stores results at
+`lp+0x64` / `lp+0x6C`). The remaining 56 bytes are unmapped.
+
+Zero-fill triggers an AV at `MVCL14N!FUN_7e894c50 + 0xfc` (asm at
+`0x7E894D4C`):
+
+```
+0x7E894D39  MOVSX ECX, DX                ; sVar3 (signed)
+0x7E894D3C  MOV EAX, ECX
+0x7E894D3E  SHL ECX, 3                   ; ECX *= 8
+0x7E894D41  LEA ECX, [ECX + ECX*8]       ; ECX *= 9 → ECX = 72*sVar3
+0x7E894D44  SUB ECX, EAX                 ; ECX = 71*sVar3 = 0x47*sVar3
+0x7E894D46  ADD ECX, [EDI + 0xf6]        ; ECX += lp[+0xf6] (locked ptr)
+0x7E894D4C  MOVSX EAX, [ECX + 0xb]       ; AV when lp[+0xf6] = NULL
+```
+
+`lp+0xf6` is the LOCKED pointer for table 2 (71-byte layout records).
+`FUN_7e890fd0` populates it via `GlobalLock(*(HGLOBAL *)(lp + 0xf2))`
+just before calling `FUN_7e894c50`. lp+0xf2 is initialized in
+`lpMVNew` → `FUN_7e889990` → `FUN_7e890b80(lp+0xee, 0x47)` to a
+`GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 0x11C)` handle. Why it
+ends up NULL after our cache push (or our zero-content corrupts it)
+is unresolved. Possibilities:
+
+1. The 60-byte block carries indices into the lp's other tables and
+   our zero indices cause a sub-function (`FUN_7e8915d0` /
+   `FUN_7e894560` / `FUN_7e8938c0` / `FUN_7e893600` — selected by
+   `local_c[0]` via `FUN_7e897ed0` opcode decode) to add a record at
+   index N causing a reallocation that invalidates the previously-
+   locked `lp+0xf6` pointer.
+2. `param_6[1]` (the loop's record count, written by the sub-function)
+   becomes huge if zero content trips signed-int overflow — `sVar3 *
+   0x47` walks far past the 4-record initial capacity into invalid
+   memory.
+
+The engine's exception handler catches the AV and surfaces "This
+service is not available at this time" via `TitlePreNotify opcode 8`
+echo with full diagnostic string (`Code=xc0000005 Address=x7e894d4c`).
+This is graceful degradation, not a crash — MOSVIEW stays alive.
+
+### lp table descriptors
+
+`lpMVNew` allocates four record tables for the lp via
+`FUN_7e889990 @ 0x7E889990` (called from `0x7E882512`):
+
+| Offset | Record size | Purpose | Init function |
+|-------:|-----------:|---------|---------------|
+| `lp+0xd8` | 0x26 (38 B) | Topic display records (referenced by `FUN_7e890fd0`'s `param_2 = HGLOBAL` argument) | `FUN_7e890cb0` (with free-list) |
+| `lp+0xee` | 0x47 (71 B) | Layout records (the `FUN_7e894c50` walk target) | `FUN_7e890b80` |
+| `lp+0xfe` | 0x1e (30 B) | Unknown — third table | `FUN_7e890b80` |
+| `lp+0x10e` | 0x14 (20 B) | Unknown — fourth table | `FUN_7e890b80` |
+
+Each descriptor is 0x16 bytes:
+- `+0x00` to `+0x03`: ?
+- `+0x04`: HGLOBAL handle (`*(HGLOBAL *)(table + 4)`)
+- `+0x08`: locked pointer (`*(LPVOID *)(table + 8)`)
+- `+0x0c`: u16 count
+- `+0x0e`: u16 capacity
+- `+0x10`: u16 free-list head (-1 if empty; `FUN_7e890d60`'s entry point)
+- `+0x12`: u16 list link
+- `+0x14`: u16 list link
+
+`FUN_7e890b80(table, record_size)` sets `table+4 = GlobalAlloc(GMEM_MOVEABLE
+| GMEM_ZEROINIT, record_size * 4)` and `table+0xc = 0`, `table+0xe = 4`.
+`FUN_7e890c20` is the GlobalReAlloc-based expander.
 
 ### Server implications
 
