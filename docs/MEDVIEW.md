@@ -1084,24 +1084,70 @@ those callers, which is why a caption-only body never received
 
 ## 7. Post-TitleOpen calls made by MOSVIEW
 
-`MOSVIEW!OpenMediaTitleSession` enumerates the cached body via
-`lMVTitleGetInfo` (MVCL14N wrapper around `TitleGetInfo`):
+`MOSVIEW!OpenMediaTitleSession @ 0x7F3C61CE` enumerates the cached body
+via `lMVTitleGetInfo` (MVCL14N wrapper around `TitleGetInfo`) and
+caches the records in the per-session state struct:
 
-1. `0x2B`-byte records — indexed loop, one per 43-byte "topic/TOC" slot.
-2. `0x1F`-byte records — indexed loop, one per 31-byte slot.
-3. `0x98`-byte records — indexed loop, one per 152-byte slot (the large
-   per-title metadata block).
-4. String-list loop — pulls ASCIIZ items until exhausted.
-5. Title name — single ASCIIZ.
-6. Optional second string — single ASCIIZ.
+| info_kind | Section | Stride | Cached at | Count at |
+|-----------|---------|--------|-----------|----------|
+| **7** | 1 | 0x2B (43) | state+0x3c | state+0x38 |
+| **8** | 2 | 0x1F (31) | state+0x44 | state+0x40 |
+| **6** | 3 | 0x98 (152) | state+0x4c | state+0x48 |
+| **4** | 8 | varlen × N | state+0x54 | state+0x50 |
+| **1** | 4 | varlen | state+0x58 (UnquoteCommandArgument) | — |
+| **66** (0x42) | — | varlen | state+0x5c | — |
 
-All of these resolve from the body bytes locally (§5.1). If the body is
-empty they all return quickly with no records and the viewer still opens
-(title name becomes `"Unknown Title Name"`).
+The 152-byte section-3 records are the **page-layout descriptors**
+that the TOC / navigation views resolve. Field layout unknown without
+RE'ing the consumer, but every authored page in the project tree (per
+the user's Blackbird hierarchy: `Project → Title → Section → Pages`)
+contributes one 152-byte record here.
 
 Before the first TitleGetInfo it also calls `MVSetKerningBoundary`,
 `hMVSetFontTable`, `MVSetFileSystem`, `vaMVGetContents` — all MVCL14N
 engine calls with no direct wire traffic at this stage.
+
+### 7.1 Render-trigger chain
+
+After `OpenMediaTitleSession`, MOSVIEW navigates to the requested
+selector via the chain:
+
+```
+NavigateViewerSelection @ 0x7F3C4528
+  vaMVGetContents() / vaMVConvertHash()  → iVar6 = va
+  if iVar6 == -1 AND hideOnFailure: ShowWindow(0); return
+  Allocate 0x40-byte selector descriptor: [va, session_id, ...]
+  → FUN_7f3c3670(pane_state, descriptor)
+    Copies descriptor into per-pane state (offsets 0..0x40)
+    MVCL14N!fMVSetAddress(title_ctx, va, ...)
+      ↓ triggers HfcNear cache lookup → wire 0x06/0x15 cache pushes
+      ↓ engine receives 0xBF chunk for va → FUN_7e890fd0 walker
+    Performs SetWindowPos / InvalidateRect / UpdateWindow
+```
+
+The render is gated on `vaMVGetContents()` (which reads `title+0x8c` —
+our TitleOpen reply DWORD 1) returning anything other than `-1`. We
+currently ship `0`, which passes the gate; the engine then fires
+`fMVSetAddress(title, 0, ...)` and runs the layout walker against the
+0xBF chunk we push for va=0.
+
+### 7.2 What populates a visible pane
+
+The case-3 walker (`MVCL14N!FUN_7e894560`) creates a CSection cell from
+the 0xBF chunk's bitmap reference. **The cell only renders content if
+its bitmap has a non-empty trailer** — the trailer carries `N × 15-byte`
+records describing the section's children (heading, body text, lists,
+embedded sub-bitmaps). Each child becomes a child cell with tag 4
+(CElementData) or 7 (text/link), and case-4 / case-7 / FUN_7e887180
+paint the actual visible content.
+
+With our current `_BM0_CONTAINER` (kind=5, 1×1 mono, **trailer_size=0**),
+the case-3 cell has zero children → blank pane. Populating the trailer
+with real CElementData/text records is the next forward step toward
+visible page content.
+
+See `project_medview_page_render_chain.md` (memory) for the full
+call-graph trace and the 15-byte child-record field layout.
 
 ---
 
