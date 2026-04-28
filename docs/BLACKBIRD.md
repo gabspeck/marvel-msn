@@ -253,22 +253,61 @@ Decoded by `server.services.ttl.Title.from_path` via `_extract_object_stream`:
 | 9/1 | `CSection` | 43 B | Section-record matching MEDVIEW wire-section-1 stride exactly. The "Section 1" container. |
 
 The `CVForm` (6/0) is decisive — it carries an entire Word 95 binary
-document with the rendered page. Faithful page rendering on the
-client requires either:
+document with the rendered page. The original 1996 MSN MedView
+*server* converted this published-blob into wire-ready chunks
+(9-section title body + 0xBF cache pushes + baggage payloads) before
+shipping to the MOSVIEW client. We don't have that server binary, so
+faithful conversion has to be re-implemented server-side here.
 
-1. **Implementing the release-time conversion**: parse the Word 95 DOC
-   to extract text runs / list items / image refs / styles, emit a
-   tree of MEDVIEW wire-format chunks (one 0xBF push per layout node,
-   with the case-3 bitmap trailer carrying child records that link to
-   text vas via further pushes). This is the path Blackbird's
-   `PUBLISH.DLL` takes — see §4.4 — but its converter implementation
-   is not documented here.
-2. **Synthesising minimal content directly**: skip the Word doc and
-   compose a hand-built CSection trailer with one or two text
-   children pointing at synthetic vas. The case-3 → trailer →
-   CElementData child path is documented in `docs/MEDVIEW.md` §7.2;
-   this is the recommended next-step proof-of-concept before tackling
-   path 1.
+The conversion logic, however, is fully recoverable from the
+binaries we DO have:
+
+- **`extract_object` @ COSCL.DLL `0x40216AB4`** writes the
+  PUBLISH.DLL output blob: `[u32 kind][u32 status_flags]
+  [optional u128 GUID][u32 typename_len + name][u32 obj_len + obj
+  bytes][optional prop stream][optional swizzle table + recursive
+  embedded objects]`. This is what the server receives via
+  `Bbird_OB` method 5.
+- **Per-class `Serialize` in VIEWDLL.DLL** defines the on-disk byte
+  layout for every authored class. Sample (CSection, ~50 lines):
+  writes byte `3`, then calls the typed-pointer-list `Serialize` at
+  this+8/+2c/+50/+74/+bc/+98 (six member lists), then
+  `CSectionProp::Serialize` on this+0xe0. CTitle, CBFrame, CBForm,
+  CContent, CElementData, CStyleSheet, CResourceFolder, CProxyTable,
+  CVForm all follow the same pattern at corresponding offsets in
+  VIEWDLL.
+- **MEDVIEW wire format** (the destination) is documented in
+  `docs/MEDVIEW.md` and continuously refined by RE of MVCL14N and
+  MOSVIEW.
+
+So the path from `.ttl` → on-screen pixels is:
+
+```
+.ttl (compound file)
+  → server reads each \x03object stream
+  → server applies each class's Serialize-deserialize logic to
+    recover the in-memory object tree (CTitle → CBFrame → CSection →
+    children)
+  → server walks the tree and emits the MEDVIEW wire chunks the
+    engine expects (TitleOpen body sections 1/2/3, 0xBF cache pushes
+    with case-3 dispatch + populated trailers, baggage HFS
+    responses)
+  → MOSVIEW + MVCL14N consume the wire chunks and BitBlt the
+    result
+```
+
+The first two arrows are bounded RE work — every byte is in
+VIEWDLL's Serialize methods. The third arrow is what we've been
+incrementally building in `src/server/services/medview.py`. The
+gap is the middle layer (object-tree-aware emitter), not a
+mysterious unknown converter.
+
+The smaller proof-of-concept path skips the .ttl entirely:
+hand-build a CSection cache push with a non-empty trailer carrying
+one text child (tag 0x8A) pointing at a synthetic va that resolves
+to a buffer of glyph data. This validates the
+case-3 → trailer → CElementData chain documented in
+`docs/MEDVIEW.md §7.2` without needing the full deserializer.
 
 `_parse_property_stream` currently fails on `CProxyTable` and
 `CContent` `\x03properties` streams (their property layouts differ
