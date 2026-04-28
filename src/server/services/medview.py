@@ -237,6 +237,12 @@ def _title_name_from_spec(spec: str) -> str:
 _TITLE_ID_PRIMARY = 0x01
 _TITLE_ID_SERVICE_BYTE = 0x01
 
+# Synthetic non-zero handle returned for the only baggage open we
+# currently accept (`bm0`).  MVTTL14C!HfOpenHfs @ 0x7E84771E gates
+# allocation of its 12-byte tracking struct on `(char)local_5 != 0`,
+# so any nonzero byte advances the engine; 0x42 is just memorable.
+_BAGGAGE_HANDLE_BM0 = 0x42
+
 
 def _build_handshake_reply_payload():
     """Static-only reply: one dword = 1 (validation_result), end-static.
@@ -371,6 +377,21 @@ def _extract_cache_miss_args(payload):
         elif tag == 0x03 and key is None:
             key = getattr(p, "value", None)
     return (title_byte, key)
+
+
+def _extract_baggage_name(payload):
+    """Pull the baggage filename from a 0x1A/0x1B/0x1C request payload.
+
+    Wire shape per docs/MEDVIEW.md §6c: `0x01 <hfs_byte> 0x04 <name>
+    0x01 <mode> 0x81 0x83`.  Returns the decoded ASCII name with any
+    trailing NUL stripped, or empty string if absent.
+    """
+    send_params, _ = parse_request_params(payload)
+    for p in send_params:
+        if getattr(p, "tag", None) == 0x04:
+            data = getattr(p, "data", b"") or b""
+            return data.rstrip(b"\x00").decode("ascii", errors="replace")
+    return ""
 
 
 def _build_type3_op4_frame(title_byte, kind, key, va, addr):
@@ -672,22 +693,32 @@ class MEDVIEWHandler:
             reply_payload = bytes([TAG_END_STATIC])
         elif selector == MEDVIEW_SELECTOR_HFS_OPEN:
             # 0x1A HfOpenHfs — baggage open.  Per docs/MEDVIEW.md §6c.
-            # Request: title_byte (0x01) + ASCII filename (0x04) + open
-            # mode (0x01) + recv descriptors (0x81 byte handle + 0x83
-            # u32 size).  Reply: ack + tagged byte (0 declines) +
-            # tagged DWORD size.  No baggage hosted server-side yet,
-            # so decline every open — the client treats byte=0 as
-            # "file unavailable" and falls back to its in-memory
-            # default render path instead of waiting indefinitely.
+            # `bm<N>` filenames come from MVCL14N!FUN_7e886980 @
+            # 0x7E886980 via wsprintfA("|bm%d", index) with index from
+            # the layout descriptor; on 0x3EC the same call retries
+            # without the leading `|`.  Accept the canonical `bm<N>`
+            # form with a synthetic handle to expose the next gate
+            # (whether 0x1B HFS_READ fires, or the engine short-
+            # circuits via the size DWORD).  Decline anything else
+            # with byte=0 — engine treats that as 0x3EC.
+            name = _extract_baggage_name(payload)
+            canonical = name.lstrip("|")
             log.info(
-                "hfs_open req_id=%d payload_len=%d payload=%s",
-                request_id, len(payload), payload.hex(),
+                "hfs_open req_id=%d name=%r canonical=%r payload=%s",
+                request_id, name, canonical, payload.hex(),
             )
-            reply_payload = (
-                bytes([TAG_END_STATIC])
-                + build_tagged_reply_byte(0)
-                + build_tagged_reply_dword(0)
-            )
+            if canonical == "bm0":
+                reply_payload = (
+                    bytes([TAG_END_STATIC])
+                    + build_tagged_reply_byte(_BAGGAGE_HANDLE_BM0)
+                    + build_tagged_reply_dword(1)
+                )
+            else:
+                reply_payload = (
+                    bytes([TAG_END_STATIC])
+                    + build_tagged_reply_byte(0)
+                    + build_tagged_reply_dword(0)
+                )
         elif selector == MEDVIEW_SELECTOR_HFS_READ:
             # 0x1B LcbReadHf — only fires on accepted open handles.
             # We decline all opens above, so this should never reach

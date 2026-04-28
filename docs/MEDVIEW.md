@@ -981,19 +981,40 @@ Request:
 
 Reply: static ack. Client immediately frees the local tracking struct.
 
+### Bitmap baggage names: engine-synthesised `|bm%d`
+
+Filenames the case-3 layout walker requests are not on disk — they
+are synthesised at `MVCL14N!FUN_7e886980 @ 0x7E886980` via
+`wsprintfA(&local_1c, "|bm%d", index)` (format string at
+`0x7E8997E0`). The bitmap index comes from the engine's layout
+descriptor (zero-fills out of our synthetic `0xBF` chunk content,
+giving index `0`).
+
+Each request fires twice from the same call:
+
+1. First attempt: `&local_1c` = `"|bm0\0"` (5-byte var, tag length
+   `0x85`).
+2. On reply byte = 0 the client sets `local_6 = 0x3EC` and the retry
+   path at `0x7E886A22` calls `hMVBaggageOpen(..., local_1b, ...)`
+   where `local_1b = &local_1c + 1` — so the second wire request
+   ships `"bm0\0"` (4-byte var, tag length `0x84`) from the same
+   stack buffer.
+
+Treat the leading `|` as disambiguation noise; the canonical name
+the engine wants is `bm<N>`. Accepting either form advances the
+state machine.
+
 ### When does the client call these?
 
-**Not on the MSN Today initial-open path.** Empirically, the current
-server log with a caption-only body never receives `0x1A/0x1B/0x1C`.
-The baggage callers in MVCL14N are `MVGroupLoad` (ordinal 15) and
-the internal functions `FUN_7e883c50 / 7e886980 / 7e886b80` —
-triggered by authored content referencing baggage by filename during
-render, not by title open.
-
-Baggage fires the first time the MedView engine's `MVFileIOProc` hits
-a file the content graph references. So exercising this code path
-requires MSN Today to actually enter its render path first (which
-depends on `vaGetContents` returning non-zero; see §6b).
+Empirically, post-`33a0746` (case-3 cache push lands and the layout
+walker survives) MSN Today fires `hfs_open` for `bm0` immediately
+after the `0x06` / `0x15` cache pushes complete — see the bitmap
+provenance subsection above. The two earlier callers `MVGroupLoad`
+(ordinal 15) and `FUN_7e883c50 / 7e886980 / 7e886b80` in MVCL14N
+trigger from authored content referencing baggage by filename during
+render. Until the engine has a non-empty layout cache it never reaches
+those callers, which is why a caption-only body never received
+`0x1A/0x1B/0x1C`.
 
 ## 7. Post-TitleOpen calls made by MOSVIEW
 
