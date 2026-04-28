@@ -303,6 +303,21 @@ MVTTL14C never touches `ole32`'s `IStorage` APIs — the section stream
 is the MSN wire format; the OLE2 compound file is purely the
 authoring-side / Local-target artifact.
 
+**ver=0x03 object stream → wire-ready record (single-sample
+hypothesis).** A second authored MSN Today fixture emits CSection
+storages (e.g. `9/1/object`) with a new version byte `0x03` whose
+44-byte raw stream strips to a **43-byte body** — exactly the section-1
+record stride. Decomposes as `10 u32 + u16 + u8` per the documented
+record shape, with no compression header and no class-specific
+serialisation prefix. Strong inference: the 1996 BBDESIGN release path
+flattens CSection instances to wire-ready records and tags them
+`ver=0x03` so the server can `memcpy` the body straight into wire
+section 1 (concatenating across multiple CSections in DPORef-handle
+order). If this holds, populating section 1 needs no engine RE — just
+walk `Title.objects[csection_sid][sub]` and concatenate. Pending
+empirical verification (need a fixture with multiple CSections to
+confirm ordering and lookup semantics).
+
 **Empty-but-valid body** (18 bytes): `00 00 × 8` (sections 0-7 all
 empty) followed by `00 00` (section 8 count=0). The first `u16 == 0`
 takes `LAB_7e8432c4` (no header decode), every `TitleGetInfo` lookup
@@ -747,22 +762,80 @@ Parameters=2`). Graceful degradation — MOSVIEW stays alive.
 
 **Avoidance requires byte 0x26 of name_buf to land on a switch case
 (1/3/4/5/0x20/0x22/0x23/0x24) AND the case handler must complete
-without itself AV'ing.** Each handler depends on lp state:
+without itself AV'ing.** Each handler depends on chunk content
+populating internal state via `FUN_7e897ad0`'s schema decoder:
 
-- Case 1 (`FUN_7e8915d0`): do-while loop `while (FUN_7e891810 < 5)`
-  reads `lp+0x102` (HGLOBAL), `lp+0xf6` (table base), `lp+0x80` (flag
-  byte), `lp+0x10a` (counter). Without an authored title body driving
-  these, behaviour is undefined.
+- Case 1 (`FUN_7e8915d0`): do-while loop `while (FUN_7e891810 < 5)`.
+  Early-exit at `FUN_7e891810` entry checks
+  `*(char *)(local_120[2] + local_120[0x10]) == 0` — both fields are
+  populated by `FUN_7e897ad0` from the chunk's 32-bit "presence
+  bitmap" header.  Zero-fill chunk → `local_120[2] = 0`,
+  `local_120[0x10] = 0` (uninitialised local stack), deref vaddr 0
+  AVs immediately.  To pass cleanly: encode chunk with bitmap bits
+  17 + bit 0 of high u16 set so `local_120[2]` gets a non-zero base,
+  AND `local_120[+0x27] >= 6` so the trailing records loop writes
+  past byte 0x40 (= int index 0x10) with values that sum back to a
+  readable NUL byte.  Plus several `lp+0x102 / 0xf6 / 0x80 / 0x10a`
+  state fields that have to be primed.
 - Case 3 (`FUN_7e894560`): calls `FUN_7e886310(lp, fontspec)` which
   always returns a non-NULL HGLOBAL (alloc'd inside) → no early exit
-  → continues into `lp+0xee/+0xf6` table reallocations.
-- Cases 4/5 (`FUN_7e8938c0`, `FUN_7e893600`): similar lp dependencies.
+  → continues into `lp+0xee/+0xf6` table reallocations with
+  case-3-specific schema fields.
+- Cases 4/5 (`FUN_7e8938c0`, `FUN_7e893600`): similar lp dependencies
+  plus their own chunk-content schemas.
 
-Until the lp-state setup is RE'd (likely a real title body with
-section 0/2/3 layout records that prime the tables), pushing 0xBF
-chunks creates more harm than good. The server currently leaves
-selector `0x15` as ack-only `0x87` — HfcNear retries ~6× (~6 s) then
-`fMVSetAddress` returns 0, the pane stays blank, no error dialog.
+### `FUN_7e897ad0` schema decoder (chunk → local_120)
+
+`FUN_7e8915d0` parses chunk content right after `FUN_7e897ed0`
+consumed the opcode byte.  Entry chunk pointer = `chunk + 0x26 +
+opcode_consumed_bytes` (3 for compact opcodes).  First u32
+(`*chunk_content`) is the **presence bitmap**:
+
+```
+byte 0           bit 0:           length encoding (0 = compact
+                                  u8 → param_2[0] = (u16>>1)-0x4000;
+                                  1 = extended u32 → param_2[0] =
+                                  (u32>>1)+0xC0000000)
+high u16 of *uVar1:
+    bit 16 (uVar1 & 0x10000)      gates +0x12 (extended u32)
+    bit 17 (uVar1 & 0x20000)      gates +0x16 (length-encoded u16)
+    bit 18 (uVar1 & 0x40000)      gates +0x18 (length-encoded u16)
+    bit 19 (uVar1 & 0x80000)      gates +0x1a
+    bit 20 (uVar1 & 0x100000)     gates +0x1c
+    bit 21 (uVar1 & 0x200000)     gates +0x1e
+    bit 22 (uVar1 & 0x400000)     gates +0x20
+    bit 23 (uVar1 & 0x800000)     gates +0x22 (special init from +0x12 bit)
+    bit 24 (uVar1 & 0x1000000)    gates +0x24 (3-byte read)
+    bit 25 (uVar1 & 0x2000000)    gates +0x27 (record count for trailing loop)
+```
+
+Bits in the LOW u16 of the presence bitmap fan out to `param_2[1]`,
+`param_2[2]`, `+10`, `param_2[3]`, `+0xe` (single-bit / 2-bit / 4-bit
+extracts).  These ARE always written, regardless of upper bits.
+
+The trailing records loop (`if (0 < *(short *)(param_2 + 0x27))`)
+writes to bytes `0x29 + 4*N` in 4-byte strides; with N=6, the 6th
+write hits byte 0x40 (= int index 0x10).  Each entry is a length-
+encoded u16 + optional second u16.
+
+**Until either a known-good chunk capture or RE of all 50+ derived
+fields lands**, pushing 0xBF chunks creates more harm than good.
+The server currently leaves selector `0x15` as ack-only `0x87` —
+HfcNear retries ~6× (~6 s) then `fMVSetAddress` returns 0, the pane
+stays blank, no error dialog.
+
+**Next-step RE targets** (when work resumes):
+
+1. Map `FUN_7e8915d0`'s prep block (lines after `FUN_7e892b90` call):
+   what does each `local_38..local_2a` capture from chunk content?
+   These directly drive the do-while loop's exit conditions.
+2. Trace `FUN_7e891810`'s state machine — the loop body sets
+   `local_4c` to 1..5 based on lp + chunk state.  Find the path that
+   returns 5 from chunk content alone (without lp state from a real
+   prior title body).
+3. Locate `local_120[0x10]`'s real provenance — if the trailing
+   records loop is the only writer and the records are themselves
+   encoded structures with sub-fields, decode their schema too.
 
 ### lp table descriptors
 
@@ -995,10 +1068,13 @@ MSN Today open path.
   server extracted this from `.ttl` OLE2 compound files (see
   `project_blackbird_release_wire` — same compound-file format used
   for Blackbird release plumbing) and shipped the unpacked sections
-  directly on the wire. Until COSCL stream extraction from
-  `resources/titles/4.ttl` is implemented server-side, no synthetic
-  chunk will get past the walker. Ack-only on `0x15` is the safe
-  fallback while that workstream is built out.
+  directly on the wire. COSCL stream extraction now exists server
+  side (`server.services.ttl.Title.objects` exposes the decoded
+  per-class plaintext, MSZIP-decompressed when needed); next is
+  mapping each class's plaintext to the MEDVIEW wire body sections
+  0/1/2/3 (font table, 43-byte topic records, 31-byte link records,
+  152-byte layout records).  Ack-only on `0x15` stays the safe
+  fallback until that mapping lands.
 - **Checksum semantics**. The new checksums returned in the TitleOpen
   reply are written back into `MVCache\<title>.tmp`. Whether the server
   treats them as (a) a content hash, (b) a version stamp, or (c) a

@@ -5,27 +5,45 @@ Reads the COSCL / Blackbird OLE2 compound file emitted by
 `PUBLISH.DLL!CPublisher_PublishToMSN` (MSN target).  Format is
 documented in `docs/BLACKBIRD.md` §3-§4 and §4.5.
 
-Scope — what this module DOES parse (well-understood, static):
+What this module parses:
 
 - Root stream `\\x03type_names_map` — a compact `{storage_id → class_name}`
   mapping (CTitle / CBForm / CVForm / CStyleSheet / CResourceFolder /
-  CBFrame on `resources/titles/4.ttl`).
+  CBFrame / CSection / CContent / CProxyTable on
+  `resources/titles/4.ttl`).
 - Per-storage `\\x03properties` streams — COSCL `CPropertyTable` single-
   property format; exposes the `name` ASCIIZ every class carries.  The
   CTitle `name` is the authored title display name and drives the
   MSN Today caption.
+- Per-storage `\\x03object` streams — the C++ instance data each class
+  serialises through `COSCL.DLL!extract_object`.  Three encodings:
+
+    ver=0x01 + "CK" at offset 9 → MSZIP-compressed.  Header is
+        `01 [u32 unc] [u32 cmp_with_CK]` followed by the `CK`
+        signature and a raw-deflate stream of `cmp - 2` bytes.
+    ver=0x01 (no CK at +9)        → small uncompressed v1; body
+        is `data[1:]` (the leading 0x01 is just the serialisation tag).
+    ver=0x02                      → uncompressed v2; body is
+        `data[1:]`.  Class-specific schema.
+    ver=0x03                      → uncompressed v3; body is
+        `data[1:]`.  Empirically the body matches wire body section
+        record sizes byte-for-byte (CSection at 9/1: 43-byte body =
+        wire section-1 record stride), suggesting the 1996 server
+        passed these bytes through verbatim.  Single-sample
+        hypothesis pending more authored fixtures.
+    ver=0x00                      → empty / sentinel.  Body is `b""`.
+
+  Plaintext is exposed via `Title.objects[storage_id][substorage_id]`.
+  The C++ class-member layout per blob is left for downstream consumers
+  to interpret (CTitle's plaintext on 4.ttl starts with what looks like
+  a font table — `09 07 00 06 00 0b "Courier New" ...`; full schema RE
+  is class-by-class).
 
 Scope — what this module does NOT parse:
 
-- Per-storage `\\x03object` streams.  CTitle / CBForm / CVForm instance
-  data and the CVForm's 534 B widget layout on `4.ttl` are serialized
-  by `COSCL.DLL!extract_object` and the larger streams are MS-stock
-  compressed (9-byte header: `01 [u32 uncompressed_size] [u32
-  compressed_size]`, then opaque compressed body — algorithm not yet
-  reversed).  Decoding these requires RE of `extract_object` and the
-  matching decompression routine.  Left opaque here.
 - `\\x03handles` / `\\x03ref_N` streams (CDPORef monikers, cross-object
-  references).  Structural only; not needed for the MSN Today caption.
+  references).  Structural only; not needed for the MSN Today caption
+  or for downstream wire-body synthesis.
 
 Callers (`medview.py`) treat this as best-effort: if the `.ttl` is
 missing, olefile isn't installed, or a stream fails to parse, we fall
@@ -37,6 +55,7 @@ from __future__ import annotations
 import io
 import logging
 import struct
+import zlib
 from dataclasses import dataclass, field
 
 try:
@@ -51,8 +70,16 @@ log = logging.getLogger(__name__)
 
 _TYPE_NAMES_MAP_STREAM = "\x03type_names_map"
 _PROPERTIES_STREAM = "\x03properties"
+_OBJECT_STREAM = "\x03object"
 _PROP_TYPE_STRING = 0x08
 _CTITLE_CLASS = "CTitle"
+
+_OBJ_VER_EMPTY = 0x00
+_OBJ_VER_V1 = 0x01
+_OBJ_VER_V2 = 0x02
+_OBJ_VER_V3 = 0x03
+_MSZIP_SIGNATURE = b"CK"
+_OBJ_COMPRESSED_HEADER_LEN = 11  # ver(1) + unc(4) + cmp(4) + CK(2)
 
 
 class TTLError(Exception):
@@ -63,12 +90,15 @@ class TTLError(Exception):
 class Title:
     """Parsed view of a Blackbird `.ttl` compound file.
 
-    Only the well-understood surfaces are populated; opaque streams
-    (compressed `object` blobs, CDPORef monikers) are skipped.
+    `types` / `properties` are pinned to documented formats.  `objects`
+    holds decoded `\\x03object` plaintext keyed by `(storage_id,
+    substorage_id)`; per-class member layouts inside the plaintext are
+    left to downstream consumers.
     """
 
     types: dict[int, str] = field(default_factory=dict)
     properties: dict[int, dict[str, str]] = field(default_factory=dict)
+    objects: dict[int, dict[int, bytes]] = field(default_factory=dict)
 
     @property
     def display_name(self) -> str | None:
@@ -109,21 +139,42 @@ class Title:
             ole.openstream([_TYPE_NAMES_MAP_STREAM]).read()
         )
         properties: dict[int, dict[str, str]] = {}
-        for storage_id in types:
-            path = [str(storage_id), "0", _PROPERTIES_STREAM]
-            if not ole.exists(path):
+        objects: dict[int, dict[int, bytes]] = {}
+        for entry in ole.listdir(streams=True):
+            if len(entry) != 3:
                 continue
             try:
-                properties[storage_id] = _parse_property_stream(
-                    ole.openstream(path).read()
-                )
-            except TTLError as exc:
-                log.warning(
-                    "properties parse sid=%d class=%r: %s",
-                    storage_id, types[storage_id], exc,
-                )
-                properties[storage_id] = {}
-        return cls(types=types, properties=properties)
+                sid = int(entry[0])
+                sub = int(entry[1])
+            except ValueError:
+                continue
+            if sid not in types:
+                continue
+            stream_name = entry[2]
+            if stream_name == _PROPERTIES_STREAM and sub == 0:
+                try:
+                    properties[sid] = _parse_property_stream(
+                        ole.openstream(entry).read()
+                    )
+                except TTLError as exc:
+                    log.warning(
+                        "properties parse sid=%d class=%r: %s",
+                        sid, types[sid], exc,
+                    )
+                    properties[sid] = {}
+            elif stream_name == _OBJECT_STREAM:
+                try:
+                    plain = _extract_object_stream(
+                        ole.openstream(entry).read()
+                    )
+                except TTLError as exc:
+                    log.warning(
+                        "object extract sid=%d sub=%d class=%r: %s",
+                        sid, sub, types[sid], exc,
+                    )
+                    continue
+                objects.setdefault(sid, {})[sub] = plain
+        return cls(types=types, properties=properties, objects=objects)
 
 
 def _parse_type_names_map(data: bytes) -> dict[int, str]:
@@ -158,6 +209,76 @@ def _parse_type_names_map(data: bytes) -> dict[int, str]:
         pos += 4
         out[storage_id] = name
     return out
+
+
+def _extract_object_stream(data: bytes) -> bytes:
+    """Decode a `\\x03object` stream to its plaintext member blob.
+
+    Four encodings observed across authored `.ttl` fixtures:
+
+    - `ver=0x02` (most small streams): uncompressed v2.  Body is
+      everything after the version byte.  Class-specific schema —
+      reflects the C++ instance state as the COSCL serialiser flushed
+      it.  Downstream consumers must know the class to interpret.
+    - `ver=0x01` with the `CK` MSZIP signature at offset 9: compressed.
+      Header layout is `01 [u32 unc][u32 cmp_with_CK]`, then `CK`,
+      then a raw-deflate (RFC 1951, no zlib wrapper) stream of
+      `cmp - 2` bytes.  The compressed-size field includes the `CK`
+      signature itself.
+    - `ver=0x01` with no `CK` at offset 9 (small streams that happen to
+      start with 0x01): uncompressed v1.  Body is `data[1:]`.  Same
+      shape as v2; the leading byte is just the COSCL serialisation tag
+      `extract_object` writes per class.
+    - `ver=0x00`: empty / sentinel.  Body is empty.
+    - `ver=0x03`: uncompressed wire-ready record (single sample so far,
+      CSection 9/1 on the in-flight authored fixture; 43-byte body
+      decomposes cleanly as `10 u32 + u16 + u8`, exactly matching the
+      wire body section-1 record stride).  Hypothesis: ver=0x03 marks
+      objects whose body is the byte-exact wire payload, so the 1996
+      Marvel server memcpy'd them straight into the corresponding
+      MEDVIEW body section.  Treated here identically to ver=0x02
+      (body = `data[1:]`); the wire-ready interpretation is a
+      consumer-side observation, not a parser-side decoding step.
+
+    Multi-block MSZIP payloads (the algorithm allows up to 32 KB per
+    deflate block, prepended with another `CK`) iterate by checking
+    `unused_data` from the decompressor.  4.ttl's largest blob (CVForm
+    at 6/0, 816 B uncompressed) fits in a single block so this path is
+    untested on the fixture but kept for future titles.
+    """
+    if not data:
+        return b""
+    ver = data[0]
+    if ver == _OBJ_VER_EMPTY:
+        return b""
+    if ver in (_OBJ_VER_V2, _OBJ_VER_V3):
+        return bytes(data[1:])
+    if ver != _OBJ_VER_V1:
+        raise TTLError(f"object stream unknown version 0x{ver:02x}")
+    # ver == 0x01: distinguish small-uncompressed from MSZIP
+    if (
+        len(data) < _OBJ_COMPRESSED_HEADER_LEN
+        or data[9:11] != _MSZIP_SIGNATURE
+    ):
+        return bytes(data[1:])
+    unc, _cmp = struct.unpack_from("<II", data, 1)
+    out = bytearray()
+    pos = 9  # start of first CK block
+    while pos < len(data):
+        if data[pos : pos + 2] != _MSZIP_SIGNATURE:
+            raise TTLError(f"object stream block @{pos} missing CK signature")
+        decomp = zlib.decompressobj(-zlib.MAX_WBITS)
+        out += decomp.decompress(data[pos + 2 :])
+        out += decomp.flush()
+        unused = decomp.unused_data
+        if not unused:
+            break
+        pos = len(data) - len(unused)
+    if len(out) != unc:
+        raise TTLError(
+            f"object stream length: header said {unc}, decompressed {len(out)}"
+        )
+    return bytes(out)
 
 
 def _parse_property_stream(data: bytes) -> dict[str, str]:
