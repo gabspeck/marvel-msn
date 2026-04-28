@@ -8,6 +8,8 @@ from server.config import (
     LOGSRV_INTERFACE_GUIDS,
     MEDVIEW_INTERFACE_GUIDS,
     MEDVIEW_SELECTOR_HANDSHAKE,
+    MEDVIEW_SELECTOR_HFS_OPEN,
+    MEDVIEW_SELECTOR_HFS_READ,
     MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
     MEDVIEW_SELECTOR_TITLE_GET_INFO,
     MEDVIEW_SELECTOR_TITLE_OPEN,
@@ -1803,6 +1805,75 @@ class TestMEDVIEWOneway(unittest.TestCase):
         # class=0xE6 → one-way continuation, no reply expected.
         pkt = handler.handle_request(0xE6, 0x01, 0, b"\x00" * 16, 5, 5)
         self.assertIsNone(pkt)
+
+
+class TestMEDVIEWBaggageBm0(unittest.TestCase):
+    """bm0 baggage delivery — synthetic kind=5 1×1 monochrome.
+
+    See docs/MEDVIEW.md §6c "Synthetic kind=5 minimum-viable bm0
+    container" for the byte-table.  The 32-byte container is a fixed
+    constant (`_BM0_CONTAINER` in medview.py); these tests pin its
+    open-size declaration and read-side wire shape so an accidental
+    revert is caught.
+    """
+
+    _BM0_CONTAINER_LEN = 38
+    _OPEN_REQ = bytes.fromhex("01 01 04 84 62 6d 30 00 01 02 81 83")  # bm0 retry form
+
+    def _decode_reply(self, selector, req_id, payload):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        pkts = handler.handle_request(0x01, selector, req_id, payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        # header(1) + size(2) + routing(2) + class(1) + selector(1) + vli(1) = 8
+        return parsed.payload[8:]
+
+    def test_hfs_open_bm0_declares_container_size(self):
+        # 0x87 end-static, 0x81 <handle=0x42>, 0x83 <size=38>
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_OPEN, 11, self._OPEN_REQ)
+        self.assertEqual(reply[0], TAG_END_STATIC)
+        self.assertEqual(reply[1], 0x81)
+        self.assertEqual(reply[2], 0x42)
+        self.assertEqual(reply[3], 0x83)
+        size = struct.unpack("<I", reply[4:8])[0]
+        self.assertEqual(size, self._BM0_CONTAINER_LEN)
+
+    def test_hfs_read_bm0_kind_byte_passes_parser_gate(self):
+        # Read full 38-byte container at offset=0; bitmap header starts at +8
+        # and its first byte must be 5 to clear FUN_7e887a40's `kind < 5` gate.
+        read_req = bytes.fromhex("01 42 03 26 00 00 00 03 00 00 00 00 81 85")
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
+        # 0x81 <status=0> 0x87 0x86 <38 bytes>
+        self.assertEqual(reply[0], 0x81)
+        self.assertEqual(reply[1], 0x00)
+        self.assertEqual(reply[2], TAG_END_STATIC)
+        self.assertEqual(reply[3], TAG_DYNAMIC_COMPLETE_SIGNAL)
+        chunk = reply[4 : 4 + self._BM0_CONTAINER_LEN]
+        self.assertEqual(len(chunk), self._BM0_CONTAINER_LEN)
+        self.assertEqual(chunk[8], 0x05)  # kind byte at bitmap-header offset 0
+
+    def test_hfs_read_bm0_full_container_byte_sequence(self):
+        # Pin every byte of the synthesised payload — any drift in the helper
+        # caught immediately. Format documented in docs/MEDVIEW.md §6c.
+        read_req = bytes.fromhex("01 42 03 26 00 00 00 03 00 00 00 00 81 85")
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
+        chunk = reply[4 : 4 + self._BM0_CONTAINER_LEN]
+        expected = bytes.fromhex(
+            "00 00"                  # container reserved
+            "01 00"                  # bitmap count = 1
+            "08 00 00 00"            # offset to bitmap[0]
+            "05 00"                  # kind=5, compression=raw
+            "00 00 00 00"            # 2x skip-int (narrow form)
+            "02 02"                  # byte-narrow varints: planes=1, bpp=1
+            "02 00 02 00"            # ushort-narrow: width=1, height=1
+            "00 00 00 00"            # palette=0, _=0
+            "04 00 00 00"            # pixel_byte_count=2, trailer=0
+            "1c 00 00 00"            # pixel offset
+            "1c 00 00 00"            # trailer offset
+            "00 00"                  # 1x1 mono pixel + WORD pad
+        )
+        self.assertEqual(chunk, expected)
 
 
 if __name__ == "__main__":

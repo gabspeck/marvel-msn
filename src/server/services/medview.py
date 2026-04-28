@@ -394,6 +394,62 @@ def _extract_baggage_name(payload):
     return ""
 
 
+def _build_bm0_container():
+    """Build a 38-byte kind=5 minimum-viable bitmap container.
+
+    Layout verified against MVCL14N!FUN_7e887a40 @ 0x7E887A40 (parser),
+    FUN_7e886d40 @ 0x7E886D40 (container preamble), FUN_7e886fb0 @
+    0x7E886FB0 (post-parse CreateBitmap consumer).  See docs/MEDVIEW.md
+    §6c for the byte table.
+
+    Container preamble (8 bytes):
+        +0x00 u16 = 0     reserved
+        +0x02 u16 = 1     bitmap count (single-bitmap path)
+        +0x04 u32 = 8     offset to bitmap[0] header
+
+    Kind=5 bitmap header (28 bytes, offsets relative to bitmap start):
+        +0x00 u8  = 5     kind (>=5 clears the parser gate)
+        +0x01 u8  = 0     compression = raw (no RLE / FUN_7e8970b0)
+        +0x02 u16 = 0     skip-int #1 (low-bit-clear narrow form)
+        +0x04 u16 = 0     skip-int #2 (low-bit-clear narrow form)
+        +0x06 u8  = 0x02      byte-narrow varint  planes = 1
+        +0x07 u8  = 0x02      byte-narrow varint  bpp    = 1
+        +0x08 u16 = 0x0002    ushort-narrow varint width  = 1
+        +0x0a u16 = 0x0002    ushort-narrow varint height = 1
+        +0x0c u16 = 0         ushort-narrow varint palette_count = 0
+        +0x0e u16 = 0         ushort-narrow varint _ = 0
+        +0x10 u16 = 0x0004    ushort-narrow varint pixel_byte_count = 2
+        +0x12 u16 = 0         ushort-narrow varint trailer_size = 0
+        +0x14 u32 = 0x1c      pixel-data offset (rel. to bitmap start)
+        +0x18 u32 = 0x1c      trailer offset (irrelevant; trailer=0)
+        +0x1c..+0x1d          2 pixel bytes (1x1 monochrome, all-black,
+                              WORD-aligned)
+
+    The first two varints (planes, bpp) read as bytes via
+    `(byte)*puVar >> 1`; the remaining six read as ushorts via
+    `(ushort)*puVar >> 1`.  Narrow form is `(value << 1) | 0`:
+    `0x02` (byte) or `0x0002` (ushort) encodes value 1; zero stays 0.
+    pixel_byte_count=2 because 1x1 monochrome rounds up to a WORD.
+    Resolves through CreateBitmap(1, 1, 1, 1, &output[0x3a]).
+    """
+    bitmap = struct.pack(
+        "<BB HH BB HHHHHH II",
+        0x05, 0x00,                  # kind=5, compression=raw
+        0x0000, 0x0000,              # 2 narrow ushort skip-ints
+        0x02, 0x02,                  # byte-narrow varints planes=1, bpp=1
+        0x0002, 0x0002,              # ushort-narrow width=1, height=1
+        0x0000, 0x0000,              # palette_count=0, _=0
+        0x0004, 0x0000,              # pixel_byte_count=2, trailer_size=0
+        0x0000001C, 0x0000001C,      # pixel_data_offset, trailer_offset
+    ) + b"\x00\x00"                  # 1x1 monochrome pixel bytes
+    container = struct.pack("<HHI", 0, 1, 8) + bitmap
+    assert len(container) == 38, len(container)
+    return container
+
+
+_BM0_CONTAINER = _build_bm0_container()
+
+
 def _build_type3_op4_frame(title_byte, kind, key, va, addr):
     """Build a selector-0x17 type-3 op-code 4 cache-insert frame.
 
@@ -711,7 +767,7 @@ class MEDVIEWHandler:
                 reply_payload = (
                     bytes([TAG_END_STATIC])
                     + build_tagged_reply_byte(_BAGGAGE_HANDLE_BM0)
-                    + build_tagged_reply_dword(1)
+                    + build_tagged_reply_dword(len(_BM0_CONTAINER))
                 )
             else:
                 reply_payload = (
@@ -720,14 +776,41 @@ class MEDVIEWHandler:
                     + build_tagged_reply_dword(0)
                 )
         elif selector == MEDVIEW_SELECTOR_HFS_READ:
-            # 0x1B LcbReadHf — only fires on accepted open handles.
-            # We decline all opens above, so this should never reach
-            # us; if it does, ack-only with status=error.
-            log.info(
-                "hfs_read req_id=%d payload_len=%d payload=%s",
-                request_id, len(payload), payload.hex(),
+            # 0x1B LcbReadHf.  See docs/MEDVIEW.md §6c.
+            # Wire request: 0x81 (status byte) + 0x85 (dynamic-recv,
+            # single-shot blob — NOT 0x88 iterator).  Reply pattern
+            # is the GetShabby shape with byte-status: 0x81 <status=0>
+            # 0x87 0x86 <bytes>.  LcbReadHf @ 0x7E847C45 waits, then
+            # reply_iface->m0x1c(&iter) → iter->m0x10()=length →
+            # iter->m0xC()=ptr (MPCCL chunk-walker over the 0x86
+            # blob).  Probe with 1 zero byte: FUN_7e887a40 @
+            # 0x7E887A40 sees kind=0 < 5 → returns -2 → caller
+            # zeroes slot → bitmap NULL but no AV.
+            send_params, _ = parse_request_params(payload)
+            handle_byte = next(
+                (p.value for p in send_params if getattr(p, "tag", None) == 0x01),
+                None,
             )
-            reply_payload = bytes([TAG_END_STATIC])
+            dwords = [p.value for p in send_params if getattr(p, "tag", None) == 0x03]
+            count = dwords[0] if len(dwords) >= 1 else 0
+            offset = dwords[1] if len(dwords) >= 2 else 0
+            log.info(
+                "hfs_read req_id=%d handle=%r count=%d offset=%d payload=%s",
+                request_id, handle_byte, count, offset, payload.hex(),
+            )
+            if handle_byte == _BAGGAGE_HANDLE_BM0 and count > 0:
+                end = min(offset + count, len(_BM0_CONTAINER))
+                chunk = _BM0_CONTAINER[offset:end]
+                reply_payload = (
+                    build_tagged_reply_byte(0)
+                    + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+                    + chunk
+                )
+            else:
+                reply_payload = (
+                    build_tagged_reply_byte(0xFF)
+                    + bytes([TAG_END_STATIC])
+                )
         elif selector == MEDVIEW_SELECTOR_HFS_CLOSE:
             # 0x1C HfCloseHf — same comment as 0x1B.
             log.info(

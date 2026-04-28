@@ -965,11 +965,16 @@ Request:
 | `0x03` | current read position (maintained client-side) |
 | `0x81` | Recv: byte — status (0 on success) |
 
-Reply: static ack + dynamic-iterator. Client calls `iter->m0x10(iter)`
-to get chunk length and `iter->m0xC(iter)` to get the bytes. Position
-advances by the returned length. Standard DIRSRV-`GetShabby`-style
-fragmentation applies (>1024 B requires chunking through
-`build_service_packet`).
+Reply: `0x81 <status> 0x87 0x86 <bytes>` — bit-identical to DIRSRV
+`GetShabby` (`build_get_shabby_reply_payload` in
+`services/dirsrv.py`) except for the status width (`0x81` byte here,
+`0x83` dword there). The `0x86` (`TAG_DYNAMIC_COMPLETE_SIGNAL`) wakes
+`LcbReadHf @ 0x7E847C45`'s `Wait` on slot 0x24, then
+`reply_iface->m0x1c(&iter)` → `iter->m0x10()=length` →
+`iter->m0xC()=ptr` is MPCCL's chunk-walker over the single-shot
+blob — NOT a `0x88` stream-end iterator. Position advances by the
+returned length. Standard fragmentation applies (>1024 B requires
+chunking through `build_service_packet`).
 
 ### `0x1C` HfCloseHf — request / reply
 
@@ -1003,6 +1008,67 @@ Each request fires twice from the same call:
 Treat the leading `|` as disambiguation noise; the canonical name
 the engine wants is `bm<N>`. Accepting either form advances the
 state machine.
+
+### Synthetic kind=5 minimum-viable bm0 container
+
+A 1-byte `kind=0` read reply fails graceful (parser returns -2,
+NULL slot) but `FUN_7e887180 @ 0x7E887180` re-fires `FUN_7e886980`
+on the next windows-repaint heartbeat — the engine retries `bm0`
+every ~2 minutes until the bitmap slot is non-NULL. To break the
+loop without authored bitmap bytes, ship a minimum-viable kind=5
+container that survives `FUN_7e887a40 @ 0x7E887A40`'s parser and
+`FUN_7e886fb0 @ 0x7E886FB0`'s `CreateBitmap(1, 1, 1, 1, ...)` call.
+
+38-byte payload (open-size = 38, single read at offset 0):
+
+| Offset | Bytes | Field |
+|--------|-------|-------|
+| 0x00 | `00 00` | container reserved (unread by `FUN_7e886d40`) |
+| 0x02 | `01 00` | bitmap count = 1 (single-bitmap path; skips DPI scoring `FUN_7e886c60`) |
+| 0x04 | `08 00 00 00` | offset to bitmap[0] header = 8 |
+| 0x08 | `05` | kind = 5 (clears `local_50 < 5` gate) |
+| 0x09 | `00` | compression = raw (no `FUN_7e887ff0` RLE / `FUN_7e8970b0`) |
+| 0x0a | `00 00` | skip-int #1 (low-bit-clear narrow form) |
+| 0x0c | `00 00` | skip-int #2 (low-bit-clear narrow form) |
+| 0x0e | `02` | byte-narrow varint: planes = 1 |
+| 0x0f | `02` | byte-narrow varint: bpp = 1 |
+| 0x10 | `02 00` | ushort-narrow varint: width = 1 |
+| 0x12 | `02 00` | ushort-narrow varint: height = 1 |
+| 0x14 | `00 00` | ushort-narrow varint: palette_count = 0 |
+| 0x16 | `00 00` | ushort-narrow varint: _ = 0 |
+| 0x18 | `04 00` | ushort-narrow varint: pixel_byte_count = 2 |
+| 0x1a | `00 00` | ushort-narrow varint: trailer_size = 0 |
+| 0x1c | `1c 00 00 00` | u32 pixel-data offset = 0x1c (rel. to bitmap start) |
+| 0x20 | `1c 00 00 00` | u32 trailer offset (irrelevant; trailer_size=0) |
+| 0x24 | `00 00` | 1x1 monochrome pixel + WORD-alignment pad |
+
+The varint encoding has two widths inside the kind=5 branch:
+
+- Varints 1-2 (planes, bpp) read as **bytes** via
+  `(byte)*puVar >> 1`. Narrow form is `(v << 1) | 0` in 1 byte.
+- Varints 3-8 (width, height, palette_count, _, pixel_byte_count,
+  trailer_size) read as **ushorts** via `(ushort)*puVar >> 1`.
+  Narrow form is `(v << 1) | 0` in 2 bytes (ushort little-endian).
+- Wide form (low bit set) consumes one extra byte/word and shifts
+  the full value right 1 — not used here since all values fit narrow.
+
+`FUN_7e887a40` allocates `palette_count*4 + trailer_size + 0x3a +
+pixel_byte_count = 0 + 0 + 58 + 2 = 60 bytes` for its parsed output
+struct, copies a 0x3a-byte snapshot of stack locals (width at +0x16,
+height at +0x1a, planes at +0x1e, bpp at +0x20), memcpys palette
+(0 bytes when palette_count=0), then memcpys 2 pixel bytes at
++0x3a. `FUN_7e886fb0` then resolves to `CreateBitmap(1, 1, 1, 1,
+&output[0x3a])`. With a valid HBITMAP, `FUN_7e887180`'s paint
+stops re-firing `FUN_7e886980` and the 2-minute retry pattern
+breaks.
+
+Authored bitmaps would override this — Blackbird's import dialog
+runs the `FUN_7e887ff0` / `FUN_7e8970b0` compressor at ingestion
+time to emit kind=5/6 wire-ready bytes inline in the .ttl
+storage, but the on-disk form retains a `BM`-prefixed file header
+that the release-time PUBLISH.DLL strips before shipping. Until
+that release pipeline is implemented, the synthetic container is
+the only path to a non-NULL bitmap slot.
 
 ### When does the client call these?
 
