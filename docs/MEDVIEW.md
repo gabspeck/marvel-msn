@@ -985,12 +985,20 @@ MSN Today open path.
   which AVs at `0x7E894D4C` because (a) `FUN_7e890fd0` leaves
   `local_2e` (record count) uninitialised on its stack, and (b) the
   default-case branch of `FUN_7e894c50`'s opcode-switch doesn't write
-  `param_6[1]`, so the post-switch loop walks garbage records. To
-  push a valid chunk, byte 0x26 of the name buffer must hit a switch
-  case (1, 3, 4, 5, 0x20, 0x22, 0x23, 0x24) AND the case handler
-  must drive cleanly through `lp+0x102` / `lp+0xf6` table state that
-  is itself populated only by a real authored title body. Currently
-  blocking MSN Today paint; ack-only on `0x15` is the safe fallback.
+  `param_6[1]`, so the post-switch loop walks garbage records.
+  Synthetic zero-filled chunks AV in EVERY case handler too —
+  case 1's early exit at `FUN_7e891810` derefs `local_120[2] +
+  local_120[0x10]` (both NULL after zero-content `FUN_7e897ad0`
+  populate), cases 3/4/5 hit similar zero-deref / table-realloc
+  paths. **The engine demands real layout/font/paragraph state
+  produced by unpacking an authored OLE2 title.** The 1996 Marvel
+  server extracted this from `.ttl` OLE2 compound files (see
+  `project_blackbird_release_wire` — same compound-file format used
+  for Blackbird release plumbing) and shipped the unpacked sections
+  directly on the wire. Until COSCL stream extraction from
+  `resources/titles/4.ttl` is implemented server-side, no synthetic
+  chunk will get past the walker. Ack-only on `0x15` is the safe
+  fallback while that workstream is built out.
 - **Checksum semantics**. The new checksums returned in the TitleOpen
   reply are written back into `MVCache\<title>.tmp`. Whether the server
   treats them as (a) a content hash, (b) a version stamp, or (c) a
