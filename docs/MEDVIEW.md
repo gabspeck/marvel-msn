@@ -707,42 +707,62 @@ ARE pinned: bytes `0x2C` and `0x34` are HGLOBAL handles (HfcNear's
 success path passes them to `FUN_7e84a1d0` and stores results at
 `lp+0x64` / `lp+0x6C`). The remaining 56 bytes are unmapped.
 
-Zero-fill triggers an AV at `MVCL14N!FUN_7e894c50 + 0xfc` (asm at
-`0x7E894D4C`):
+**Layout-walker AV (root cause for "service is not available" dialog).**
+Pushing a 0xBF chunk with zero name buffer (any size 0x08..0x40 tested)
+unblocks HfcNear successfully, but the buffer flows downstream into
+`MVCL14N!FUN_7e890fd0 → FUN_7e894c50` (called from `FUN_7e88e440`'s
+section walker) and trips an AV at `0x7E894D4C`:
 
 ```
-0x7E894D39  MOVSX ECX, DX                ; sVar3 (signed)
-0x7E894D3C  MOV EAX, ECX
-0x7E894D3E  SHL ECX, 3                   ; ECX *= 8
-0x7E894D41  LEA ECX, [ECX + ECX*8]       ; ECX *= 9 → ECX = 72*sVar3
-0x7E894D44  SUB ECX, EAX                 ; ECX = 71*sVar3 = 0x47*sVar3
-0x7E894D46  ADD ECX, [EDI + 0xf6]        ; ECX += lp[+0xf6] (locked ptr)
-0x7E894D4C  MOVSX EAX, [ECX + 0xb]       ; AV when lp[+0xf6] = NULL
+0x7E894D41  LEA ECX, [ECX + ECX*8]       ; ECX = sVar3*9
+0x7E894D44  SUB ECX, EAX                 ; ECX = 0x47*sVar3
+0x7E894D46  ADD ECX, [EDI + 0xf6]        ; ECX += lp[+0xf6] (table base)
+0x7E894D4C  MOVSX EAX, word ptr [ECX + 0xb]   ; AV — sVar3 walks past valid records
 ```
 
-`lp+0xf6` is the LOCKED pointer for table 2 (71-byte layout records).
-`FUN_7e890fd0` populates it via `GlobalLock(*(HGLOBAL *)(lp + 0xf2))`
-just before calling `FUN_7e894c50`. lp+0xf2 is initialized in
-`lpMVNew` → `FUN_7e889990` → `FUN_7e890b80(lp+0xee, 0x47)` to a
-`GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 0x11C)` handle. Why it
-ends up NULL after our cache push (or our zero-content corrupts it)
-is unresolved. Possibilities:
+Mechanism (Ghidra-traced 2026-04-28):
 
-1. The 60-byte block carries indices into the lp's other tables and
-   our zero indices cause a sub-function (`FUN_7e8915d0` /
-   `FUN_7e894560` / `FUN_7e8938c0` / `FUN_7e893600` — selected by
-   `local_c[0]` via `FUN_7e897ed0` opcode decode) to add a record at
-   index N causing a reallocation that invalidates the previously-
-   locked `lp+0xf6` pointer.
-2. `param_6[1]` (the loop's record count, written by the sub-function)
-   becomes huge if zero content trips signed-int overflow — `sVar3 *
-   0x47` walks far past the 4-record initial capacity into invalid
-   memory.
+1. `FUN_7e890fd0` declares `local_30..local_24` and explicitly inits
+   `local_30 = 0`, `local_2c = 0`, `local_2a = 0`, `local_24 = 0` —
+   but **leaves `local_2e` uninitialized** (stack frame `SUB ESP,
+   0x2c` allocates the space, no MOV zeroes it).
+2. `FUN_7e890fd0` calls `FUN_7e894c50(lp, &puVar2[6], name_buf+0x26,
+   ..., &local_30)`. `param_6 = &local_30`, so `param_6[0] = 0` and
+   `param_6[1] = local_2e = garbage`.
+3. `FUN_7e894c50` calls `FUN_7e897ed0(local_c, name_buf+0x26)` to
+   decode the first record. With our zero-filled name buffer, byte
+   `0x26` = 0 → `local_c[0] = 0`.
+4. `switch(local_c[0])` matches no case (cases are 1, 3, 4, 5, 0x20,
+   0x22, 0x23, 0x24) → default → break, **no record added, no
+   `param_6[1]` update**.
+5. Post-switch loop `if (param_6[4] == 0 && param_6[5] == 0 && *param_6
+   < param_6[1])` — guards on 4/5 forced to 0 by FUN_7e894c50 itself.
+   `*param_6 = 0`, `param_6[1] = local_2e = garbage`. Loop walks
+   garbage records → AV.
 
 The engine's exception handler catches the AV and surfaces "This
 service is not available at this time" via `TitlePreNotify opcode 8`
-echo with full diagnostic string (`Code=xc0000005 Address=x7e894d4c`).
-This is graceful degradation, not a crash — MOSVIEW stays alive.
+echo with full diagnostic string (`Code=xc0000005 Address=x7e894d4c
+Parameters=2`). Graceful degradation — MOSVIEW stays alive.
+
+**Avoidance requires byte 0x26 of name_buf to land on a switch case
+(1/3/4/5/0x20/0x22/0x23/0x24) AND the case handler must complete
+without itself AV'ing.** Each handler depends on lp state:
+
+- Case 1 (`FUN_7e8915d0`): do-while loop `while (FUN_7e891810 < 5)`
+  reads `lp+0x102` (HGLOBAL), `lp+0xf6` (table base), `lp+0x80` (flag
+  byte), `lp+0x10a` (counter). Without an authored title body driving
+  these, behaviour is undefined.
+- Case 3 (`FUN_7e894560`): calls `FUN_7e886310(lp, fontspec)` which
+  always returns a non-NULL HGLOBAL (alloc'd inside) → no early exit
+  → continues into `lp+0xee/+0xf6` table reallocations.
+- Cases 4/5 (`FUN_7e8938c0`, `FUN_7e893600`): similar lp dependencies.
+
+Until the lp-state setup is RE'd (likely a real title body with
+section 0/2/3 layout records that prime the tables), pushing 0xBF
+chunks creates more harm than good. The server currently leaves
+selector `0x15` as ack-only `0x87` — HfcNear retries ~6× (~6 s) then
+`fMVSetAddress` returns 0, the pane stays blank, no error dialog.
 
 ### lp table descriptors
 
@@ -958,13 +978,19 @@ MSN Today open path.
   `PTR_DAT_7e84e130` via the subscription iterators is not yet RE'd —
   trace `FUN_7e844a3b @ 0x7E841A75` (third reference to the cache
   head) to recover it. Until then, va conversions fall through.
-- **Per-title content cache** (`title+4` tree). 60-byte payload field
-  layout unresolved. The push frame that populates these entries is
-  presumably a selector-`0x17` type-3 op-code (likely op-code 5 →
-  `FUN_7e8424f5`, marked "secondary cache, unresolved" in project
-  memory). Without this, `HfcNear` always misses → `fMVSetAddress`
-  always returns 0 → MOSVIEW pane FAIL flag → no paint. This is the
-  current MSN Today blocker.
+- **Per-title content cache** (`title+4` tree). The push channel is
+  type-0 opcode `0xBF` via `FUN_7e8452d3 → FUN_7e8460df`; pushing
+  succeeds (HfcNear returns the buffer to `fMVSetAddress`), but the
+  buffer flows into the layout walker `FUN_7e890fd0 → FUN_7e894c50`,
+  which AVs at `0x7E894D4C` because (a) `FUN_7e890fd0` leaves
+  `local_2e` (record count) uninitialised on its stack, and (b) the
+  default-case branch of `FUN_7e894c50`'s opcode-switch doesn't write
+  `param_6[1]`, so the post-switch loop walks garbage records. To
+  push a valid chunk, byte 0x26 of the name buffer must hit a switch
+  case (1, 3, 4, 5, 0x20, 0x22, 0x23, 0x24) AND the case handler
+  must drive cleanly through `lp+0x102` / `lp+0xf6` table state that
+  is itself populated only by a real authored title body. Currently
+  blocking MSN Today paint; ack-only on `0x15` is the safe fallback.
 - **Checksum semantics**. The new checksums returned in the TitleOpen
   reply are written back into `MVCache\<title>.tmp`. Whether the server
   treats them as (a) a content hash, (b) a version stamp, or (c) a
