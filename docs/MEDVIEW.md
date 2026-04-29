@@ -1203,7 +1203,229 @@ MSN Today open path.
 
 ---
 
-## 10. Open questions
+## 10. Paint-loop / layout-walker call graph
+
+End-to-end trace from page address change to BitBlt, recovered from
+static decompilation of `MVCL14N.DLL` 2026-04-29.
+
+```
+fMVSetAddress(title, va, ...)         (sets title+0xc2 = va, drives HfcNear)
+  └─> HfcNear (FUN_7e84589F)          (per-title cache lookup; type-0 0xBF
+                                       cache-fill via FUN_7e8460df → title+4 tree)
+fMVRealize(title, rect, perr)         (page layout entry; @0x7E883890)
+  ├─ guard: title+0xc2 != -1          (va must be set)
+  ├─ guard: InterlockedExchange(title+0xce, 1) == 0  (re-entry)
+  ├─ FUN_7e88e440(title, hdc, 0, perr)
+  │   ├─ FUN_7e885fc0(hdc, va, ...)   (cache lookup → BF chunk HGLOBAL)
+  │   ├─ FUN_7e890fd0(title, BF_chunk, 0, 1, 0)
+  │   │   ├─ FUN_7e890d60(...)        (allocates row index in title+0xd8 table)
+  │   │   ├─ row record at title+0xe0[+4 + row_idx*0x2a]:
+  │   │   │     +0x00 HGLOBAL slot table (set later)
+  │   │   │     +0x06 HGLOBAL name buffer (= BF chunk)
+  │   │   │     +0x0a u32 va_key (FUN_7e890f10)
+  │   │   │     +0x0e u16 y-offset
+  │   │   │     +0x12 / +0x14 layout extents (set after FUN_7e894c50 returns)
+  │   │   │     +0x16 u16 slot count
+  │   │   │     +0x1e u32 ascender
+  │   │   │     +0x22 u32 descender
+  │   │   ├─ varint at name_buf[+0x26] decoded as chunk_tag (FUN_7e897ed0)
+  │   │   ├─ FUN_7e894c50(title, row_record, name_buf+0x26, ...)
+  │   │   │     switch chunk_tag:
+  │   │   │       case 1, 0x20 → FUN_7e8915d0 (text-row chunk; produces slot tag 1)
+  │   │   │       case 3, 0x22 → FUN_7e894560 (cell+children; bm0 baggage)
+  │   │   │       case 4, 0x23 → FUN_7e8938c0
+  │   │   │       case 5, 0x24 → FUN_7e893600
+  │   │   ├─ allocates HGLOBAL of (slot_count*0x47+1) bytes
+  │   │   ├─ memcpy slot scratch (title+0xf6) → row's HGLOBAL
+  │   │   └─ returns row_idx
+  │   └─ FUN_7e88eb10(title, hdc, ...)  recursively fetch prev/next chunks
+  │                                      via FUN_7e886010 → fill page rows
+  └─ MVTitleNotifyLayout(...)         (notify host; window invalidates)
+
+WM_PAINT:
+fMVPaint → FUN_7e889b70(title, hdc)   (paint walker; @0x7E889B70)
+  ├─ guard: title+0x48 < title+0x58   (viewport y range valid)
+  ├─ guard: title+0xea != -1          (head row idx; -1 means no rows)
+  ├─ row chain: title+0xea → row[+2 ushort next_idx] → ... → -1 sentinel
+  └─ for each row:
+       FUN_7e891220(title, row_idx, x_origin, y_top, …)
+         (per-row dispatch; @0x7E891220)
+         pcVar5 = row_slots + slot_idx*0x47
+         switch (slot[0]):
+           1 → FUN_7e893010(title, name_buf+0x26+after_varint, slot, x, y, …)
+                 text drawer; reads BF chunk content past varint
+           3 → FUN_7e894910(title, slot, x+slot[5], y+slot[7])
+                 cell-with-bitmap+children; sole reader of slot+0x13 va
+                 (used for highlight, NOT a paint gate);
+                 → FUN_7e887180(slot+0x39 HGLOBAL, title, x, y, hilight)
+                       BitBlt/StretchBlt of parsed kind-5/6 bitmap, or
+                       PlayMetaFile for kind=8 (mapmode 7/8 vector)
+           4 → FUN_7e8949f0(title, slot, x, y, …)
+                 rectangle drawer; only paints when slot[+0x39]&0xd4 == 0xc0
+           5 → FUN_7e893d60
+           6 → FUN_7e893860 (HWND-hosted child window)
+           7 → FUN_7e889340(title, slot, x, y)
+                 reads slot+0x1b HGLOBAL (run array), iterates 0x14-byte
+                 entries from slot[+0x29]..slot[+0x2b] to FUN_7e8892f0
+```
+
+### 10.1. Slot layout (0x47 bytes)
+
+| Offset | Size | Purpose |
+|-------:|-----:|---------|
+| 0x00 | u8 | slot tag (1/3/4/5/6/7) — paint dispatch key |
+| 0x01 | u32 | flags / state (low bits via FUN_7e894560) |
+| 0x05 | i16 | delta_x (cell-relative) |
+| 0x07 | i16 | delta_y (cell-relative) |
+| 0x09 | i16 | (parent-cell only) inherited y_top from trailer header |
+| 0x0b | i16 | extent_x |
+| 0x0d | i16 | extent_y |
+| 0x0f | u32 | per-cell highlight key (`title+0x130` increments) |
+| 0x13 | u32 | va — `0xFFFFFFFF` sentinel for tag-0x8A children; for non-0x8A children copied from trailer record bytes 11..14. **Used only by FUN_7e894910 to compute highlight flag.** Not a wire-cache key. |
+| 0x1b | HGLOBAL | (tag-7 only) run-array HGLOBAL for FUN_7e889340 |
+| 0x29..0x2b | i16,i16 | (tag-7) run-array start/end indices |
+| 0x2d | u32 | x_left (mapped to col / page coord) |
+| 0x31 | u32 | y_top |
+| 0x35 | u32 | x_right |
+| 0x39 | HGLOBAL or u32 | parent (tag 3): HGLOBAL of FUN_7e886310's bitmap render record (slot+0x39 = `pvVar5`); child (tag 4): bytes 0..1 = trailer record's tag word; child (tag 6): HWND |
+| 0x3b | HGLOBAL | (tag-4 child) shared trailer-tail HGLOBAL allocated in FUN_7e894560: `[u16 nonbar_count][tail_size bytes]` |
+| 0x3d | byte* | (tag 3) name_buf offset for caption / case 1 child rendering |
+| 0x41 | i16 | parent cell-id passed to FUN_7e896760 |
+| 0x43 | i16 | first child slot idx |
+| 0x45 | i16 | last child slot idx (exclusive) |
+
+### 10.2. Bitmap container trailer (parsed by FUN_7e886820 → FUN_7e886de0)
+
+The kind=5/6/8 raster's trailer bytes (the `trailer_size` block at the end
+of the kind-5 header) decode as:
+
+| Offset | Size | Field |
+|-------:|-----:|-------|
+| 0x00 | u8 | reserved (zero) |
+| 0x01 | u16 | child_count |
+| 0x03 | u32 | tail_size |
+| 0x07 + 15*N | 15 bytes | child records (count = child_count) |
+| 0x07 + 15*N | tail_size | tail bytes (referenced by non-0x8A children) |
+
+### 10.3. Child record (15 bytes, in trailer)
+
+| Offset | Size | Field |
+|-------:|-----:|-------|
+| 0x00 | u8 | tag (`0x8A` text/link, `0x01` CElementData, `0x07` other) |
+| 0x01 | u8 | tag2 (used as second byte of slot+0x39 for tag-4 children) |
+| 0x02 | u8 | flags |
+| 0x03 | i16 | x_offset (DPI-scaled from src→dest in FUN_7e886de0) |
+| 0x05 | i16 | y_offset |
+| 0x07 | i16 | x_extent |
+| 0x09 | i16 | y_extent |
+| 0x0b | u32 | va — copied to slot+0x13 for non-0x8A children |
+
+### 10.4. Why MSN Today paints blank
+
+Two root causes, independent of any wire-cache key gate. Both must be
+fixed for visible output:
+
+1. **bm0 container is 1×1 monochrome.** `_build_bm0_container` produces a
+   38-byte kind=5 raster with `width=1 height=1 trailer_size=0`. At paint
+   time `FUN_7e887180` calls `BitBlt(hdc, x, y, 1, 1, …)` — one pixel.
+   Invisible.
+2. **trailer_size=0 → child records have no tail content.** Even with a
+   real-sized bitmap and a child trailer, each non-0x8A child looks up its
+   payload bytes at `tail_HGLOBAL[2 + offset_indexed_by_slot+0x39]`. With
+   tail_size=0 there are no bytes to draw.
+
+Fix: ship a kind=5 raster sized to the authored CBFrame (e.g. 640×480)
+with a trailer carrying `child_count > 0` and `tail_size > 0`, plus a
+populated tail block carrying CElementData strings / link offsets keyed by
+each child's `[tag, tag2]` pair.
+
+### 10.5. Rendering text via slot tag 1 (alternate path)
+
+For chunks whose `name_buf[0x26]` decodes to chunk_tag = 1 / 0x20,
+`FUN_7e8915d0` (case 1) creates slot tag 1 entries that paint via
+`FUN_7e893010` reading text bytes **directly from the BF chunk content**
+past the varint at offset 0x26. This is the path for plain text rows
+that don't need a backdrop bitmap. `4.ttl` content can be partially
+rendered through case-1 chunks for text and case-3 chunks for the
+banner/page bitmap together.
+
+## 11. End-to-end wire trace (MSN Today open → bm0 paint)
+
+Recorded 2026-04-29 after the bm0 sizing fix (`_BM0_CONTAINER` now
+38445 B, kind=5 raster 640×480 1bpp `0xFF` pixels, empty trailer):
+
+```
+17:13:49 handshake req=0                        validation_result=1
+17:13:50 title_pre_notify req=1                 opcode-10 ack
+17:13:50 subscribe_notification req=2 type=0    type-0 sub captured
+17:13:50 subscribe_notification req=3 type=1    iter end ack
+17:13:50 subscribe_notification req=4 type=2    iter end ack
+17:13:50 subscribe_notification req=5 type=3    type-3 sub captured
+17:13:50 subscribe_notification req=6 type=4    iter end ack
+17:13:50 title_pre_notify req=7                 opcode-7 ack
+17:13:50 title_open req=8 spec='[4]0'           deid=4 → display='MSN Today'
+17:13:50 synthesized_title_body body_len=81 section1_len=43
+17:13:50 title_open_reply title_id=0x01 body_len=81
+
+17:13:51 cache_miss_rpc selector=0x06 key=0x01  vaConvertHash; ack + push
+17:13:51 cache_push selector=0x06 type3_op4 chunk_len=18
+17:13:51 cache_miss_rpc selector=0x15 key=0x01  HfcNear; ack + push
+17:13:51 cache_push selector=0x15 type0_bf chunk_len=128
+                                                BF chunk inserted into
+                                                title+4 tree; case-3
+                                                dispatch via name_buf[0x26]
+17:13:52 hfs_open name='|bm0' canonical='bm0'   handle=0x42 size=38445
+17:13:52 hfs_read handle=66 count=38445 offset=0
+                                                full container in one read,
+                                                fragmented to 38 wire pkts
+                                                ≤1024 B by build_service_packet
+17:14:58 hfs_close handle=66                    clean ack (engine took ~66s
+                                                to parse + paint on 86Box)
+
+(steady state: title_pre_notify heartbeat every ~10s,
+ hfc_next_prev poll every ~30s — ack-only response makes engine
+ fall back to in-cache entries.)
+
+17:17:27 hfs_open canonical='bm0'               periodic ~2.5min refresh
+17:17:27 hfs_read count=38445 offset=0          (same as initial)
+17:18:38 hfs_close
+```
+
+### Visual
+
+`reference/screenshots/msn_today_authored.png` captured at the
+post-paint steady state. The MSN Today window paints a 640×480
+inner pane in window-grey (`0xC0C0C0`, the 1bpp DDB's `bkColor` —
+all-`0xFF` pixels render as set bits = background colour) with a
+right-edge scrollbar. Scrolling triggers `hfc_next_prev` polls and
+modem activity in the VM as the engine probes for adjacent pages.
+
+### Call graph (from chunk arrival to BitBlt)
+
+```
+fMVSetAddress(va)
+  → HfcNear retry (FUN_7e84589F) consults title+4 tree
+fMVRealize (@0x7E883890)
+  → FUN_7e88e440 → FUN_7e885fc0(va) → FUN_7e890fd0
+       → row at title+0xe0[+4 + idx*0x2a] populated
+       → FUN_7e894c50 case-3 (name_buf[0x26]=0x03)
+       → FUN_7e894560
+            → FUN_7e886310 opens bm0 baggage
+                → FUN_7e886820 extracts trailer HGLOBAL
+                → FUN_7e887a40 parses kind=5 raster
+                → FUN_7e886fb0 → CreateBitmap(640, 480, 1, 1, ...)
+            → parent slot+0x39 = HGLOBAL of bitmap render record
+WM_PAINT
+  → FUN_7e889b70 walks row chain title+0xea
+  → FUN_7e891220 dispatches slot[0]=3 → FUN_7e894910
+  → FUN_7e887180 BitBlt(hdc, x, y, 640, 480, src_dc, 0, 0, SRCCOPY)
+```
+
+Empty trailer means no overlaid text/glyph children. Next-step RE
+target: slot-tag-1 / FUN_7e893010 text drawer + case-1 BF chunk
+schema (see §10.5).
+
+## 12. Open questions
 
 - **Info_kind dialect on the wire path**. `TitleGetInfo`'s wire
   dispatch serves constants the local path doesn't

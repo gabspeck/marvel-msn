@@ -317,7 +317,100 @@ parser to the additional class-specific property formats.
 
 ---
 
-## 8. Constraints and unknowns
+## 8. VIEWDLL Serialize methods — on-disk schemas
+
+Each authored class in `4.ttl` ships through `extract_object` driven by
+its `Serialize(CArchive&)` virtual. RE'd from VIEWDLL.DLL @ `0x40700000`
+(read-mode dispatch under `param_1[0x14]&1 != 0` branch; write-mode
+under `==0`). The `CArchive` write cursor is `param_1+0x24`, buffer end
+at `param_1+0x28`.
+
+### 8.1 CSection (`?Serialize@CSection@@UAEXAAVCArchive@@@Z` @ 0x4070E6AF)
+
+```
+write byte 0x03                       # version tag
+this+0x08 → list.Serialize             # children list 1
+this+0x2c → list.Serialize             # children list 2
+this+0x50 → list.Serialize             # children list 3
+this+0x74 → list.Serialize             # children list 4
+this+0xbc → list.Serialize             # children list 5
+this+0x98 → list.Serialize             # children list 6
+this+0xe0 → CSectionProp::Serialize
+```
+
+Read mode: byte at cursor is the version byte `bVar3`; six lists
+deserialised in same order; `if (bVar3 < 3) Ordinal_781(this+4)` reads
+an additional pre-v3 field. CSectionProp::Serialize is invoked with the
+version byte as third arg.
+
+The 43-byte `9/1` body in `4.ttl` is exactly this serialised form with
+six empty lists + a small CSectionProp tail. Wire body section 1 ships
+the raw 43 bytes through unchanged (`_section1_records_from_csections`
+in `medview.py`).
+
+### 8.2 CElementData (`?Serialize@CElementData@@UAEXAAVCArchive@@@Z` @ 0x40702E4C)
+
+```
+let n = this+0x04   # data length
+if n < 0xFF        : write u8 n
+elif n < 0xFFFE    : write u8 0xFF + u16 n
+else               : write u8 0xFF + u16 0xFFFF + u32 n
+write n bytes from this+0x08            # raw data buffer
+```
+
+Read mode is symmetric: `ReadDataLength` recovers `n` then `Ordinal_4817`
+mempys `n` bytes into a freshly allocated buffer (sentinel-NUL-terminated).
+
+This is the simplest format — used for variable-length glyph runs and
+text strings inside CSection's children lists.
+
+### 8.3 CContent (`?Serialize@CContent@@UAEXAAVCArchive@@@Z` @ 0x4073A185)
+
+```
+if read mode            : (read path; not analysed here — uses IStream
+                          chunked transfer through this+0x14's IStream
+                          vtable at +0x28/+0x3c/+0x54)
+else (write mode):
+    if this+0x14 != NULL:                 # has source IStream
+        if  *(this+8)-8  != 0:             # has target storage
+            CreateStream(...)
+        loop:
+            buf = malloc(0x1000)
+            n = this->vtable[0x14]->Read(buf, 0x1000)
+            if n == 0: break
+            archive->vtable[0x40]->Write(buf, n)
+            if n < 0x1000: break
+        free(buf)
+        commit_stream()
+```
+
+CContent is **opaque IStream chunks** — there is no class-version prefix
+or header. The body bytes are whatever the source stream provides
+(text, structured records, BM-prefixed bitmap, MSZIP-compressed page
+content, etc.). This matches `project_medview_ccontent_not_via_bf.md`:
+CContent ships through baggage selectors `0x1A`/`0x1B`/`0x1C` verbatim,
+NOT through type-0 BF cache pushes.
+
+### 8.4 Other classes (CTitle, CBFrame, CBForm, CVForm, CStyleSheet,
+CResourceFolder, CProxyTable)
+
+Same pattern as CSection: write a version byte (0x00..0x09 depending on
+class), then `this+offset → ChildClass::Serialize` calls in fixed order,
+optionally followed by inline fields. The `4.ttl` body bytes for each
+storage are byte-exact what `Serialize` emitted in write mode against
+the wizard-edited in-memory tree.
+
+For the MEDVIEW wire path we don't need to re-parse most class bodies —
+the 1996 server consumed these via virtual `Serialize(read)` calls,
+walked the recovered C++ tree, and emitted MEDVIEW chunks. Today's
+shortcut: ship CContent bytes verbatim (they're the actual content
+bytes), CSection's 43-byte wire-ready body verbatim into wire section 1,
+and synthesise BF chunks + bm0 baggage from a small subset of the
+authored data needed by the MVCL14N layout walker (Phase 1/2 RE).
+
+---
+
+## 9. Constraints and unknowns
 
 - The COSCL compound-file object layout (the per-stream format produced by `extract_object`) is documented only through its PE implementation. Full structural reversing is scoped out here; `extract_object` at `COSCL.DLL` ordinal ≈ `0x236` is the authoritative reference.
 - The `CMPCFileWriteParamAdder` frame — the wrapper `PUBLISH.DLL` prepends to the compound-file byte stream when shipping through `CMPCFileWrite` (service "Bbird_OB" method 5) — is not documented here. `stream_copy_to_mpc_filewrite` at `0x40f051a5` is the entry point; the param block at `local_278` carries the title name, length, publish GUID, and a vtable pointer that provides the chunk reader.
@@ -331,4 +424,6 @@ parser to the additional class-specific property formats.
 - `docs/TREENVCL.md` — the DirSrv navigation client shared with the MSN 1.0 MOSSHELL path.
 - `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md` — per-record `[u32 size][u16 prop_count]{[u8 type][asciiz][value]}*` wire format used by `CServiceProperties::FSet`/`FGet` in step 8 above.
 - `docs/MEDVIEW.md` — the MedView service the MSN Today viewer reads from.
+
+[//]: # (Section 8 was renumbered; "Constraints and unknowns" is now §9.)
 - `resources/titles/4.ttl` — reference Local-target compound file (same `extract_object` output format the MSN branch ships, minus the MPC framing).

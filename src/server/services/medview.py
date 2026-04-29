@@ -44,6 +44,11 @@ from ..config import (
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
+from ..blackbird.wire import (
+    build_baggage_container,
+    build_kind5_raster,
+    build_trailer,
+)
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -394,57 +399,55 @@ def _extract_baggage_name(payload):
     return ""
 
 
+_BM0_WIDTH = 640
+_BM0_HEIGHT = 480
+_BM0_BPP = 1
+# 1bpp packed: 1 byte per 8 pixels, no row padding inferred from the
+# parser (`FUN_7e887a40` raw branch memcpy's `pixel_byte_count` bytes
+# verbatim from input to output without alignment fixup).
+_BM0_PIXEL_BYTES = (_BM0_WIDTH // 8) * _BM0_HEIGHT  # 38400 B for 640×480 1bpp
+
+
 def _build_bm0_container():
-    """Build a 38-byte kind=5 minimum-viable bitmap container.
+    """Build the bm0 baggage container — the parent cell's backdrop bitmap.
 
-    Layout verified against MVCL14N!FUN_7e887a40 @ 0x7E887A40 (parser),
-    FUN_7e886d40 @ 0x7E886D40 (container preamble), FUN_7e886fb0 @
-    0x7E886FB0 (post-parse CreateBitmap consumer).  See docs/MEDVIEW.md
-    §6c for the byte table.
+    `MVCL14N!FUN_7e886310` opens the bm0 baggage HFS file, hands the
+    bytes to `FUN_7e886820` (which extracts the trailer) and
+    `FUN_7e887a40` (which parses the kind=5 raster). The resulting
+    HBITMAP is `BitBlt`'d at paint time by `FUN_7e887180`.
 
-    Container preamble (8 bytes):
-        +0x00 u16 = 0     reserved
-        +0x02 u16 = 1     bitmap count (single-bitmap path)
-        +0x04 u32 = 8     offset to bitmap[0] header
+    Layout breakdown:
 
-    Kind=5 bitmap header (28 bytes, offsets relative to bitmap start):
-        +0x00 u8  = 5     kind (>=5 clears the parser gate)
-        +0x01 u8  = 0     compression = raw (no RLE / FUN_7e8970b0)
-        +0x02 u16 = 0     skip-int #1 (low-bit-clear narrow form)
-        +0x04 u16 = 0     skip-int #2 (low-bit-clear narrow form)
-        +0x06 u8  = 0x02      byte-narrow varint  planes = 1
-        +0x07 u8  = 0x02      byte-narrow varint  bpp    = 1
-        +0x08 u16 = 0x0002    ushort-narrow varint width  = 1
-        +0x0a u16 = 0x0002    ushort-narrow varint height = 1
-        +0x0c u16 = 0         ushort-narrow varint palette_count = 0
-        +0x0e u16 = 0         ushort-narrow varint _ = 0
-        +0x10 u16 = 0x0004    ushort-narrow varint pixel_byte_count = 2
-        +0x12 u16 = 0         ushort-narrow varint trailer_size = 0
-        +0x14 u32 = 0x1c      pixel-data offset (rel. to bitmap start)
-        +0x18 u32 = 0x1c      trailer offset (irrelevant; trailer=0)
-        +0x1c..+0x1d          2 pixel bytes (1x1 monochrome, all-black,
-                              WORD-aligned)
+    - 8-byte container preamble (`FUN_7e886310` reads `+0x04` u32 to
+      find bitmap[0] offset).
+    - 30-byte kind=5 raster header — wide-form `pixel_byte_count`
+      (38400 doesn't fit narrow ushort/2). Layout per `FUN_7e887a40`:
+      kind/compression bytes, 2 narrow skip-ints, planes (byte-narrow),
+      bpp (byte-narrow), width/height/palette_count/reserved
+      (ushort-narrow), pixel_byte_count (u32-wide), trailer_size
+      (ushort-narrow), pixel_data_offset (u32), trailer_offset (u32).
+    - 38400 bytes of all-`0xFF` pixel data — for a 1bpp DDB this
+      renders as the destination DC's background colour (typically
+      white) on a colour display.
+    - Empty trailer — a 1-byte reserved field + 2 zero count + 4 zero
+      tail_size = 7 bytes that `FUN_7e886de0` reads as "no children, no
+      tail". The parent cell paints the bitmap; no overlaid text.
 
-    The first two varints (planes, bpp) read as bytes via
-    `(byte)*puVar >> 1`; the remaining six read as ushorts via
-    `(ushort)*puVar >> 1`.  Narrow form is `(value << 1) | 0`:
-    `0x02` (byte) or `0x0002` (ushort) encodes value 1; zero stays 0.
-    pixel_byte_count=2 because 1x1 monochrome rounds up to a WORD.
-    Resolves through CreateBitmap(1, 1, 1, 1, &output[0x3a]).
+    The empty trailer is intentional: tag-`0x07` and `0x01` children
+    require additional RE (FUN_7e893010 text drawer + tail-byte
+    layout) before they can be synthesised correctly. The visible
+    white pane at this stage is the verification milestone for the
+    Phase 1/2 RE — paint-loop reaches the cell, BitBlt fires with a
+    real-sized bitmap, screen no longer renders blank.
     """
-    bitmap = struct.pack(
-        "<BB HH BB HHHHHH II",
-        0x05, 0x00,                  # kind=5, compression=raw
-        0x0000, 0x0000,              # 2 narrow ushort skip-ints
-        0x02, 0x02,                  # byte-narrow varints planes=1, bpp=1
-        0x0002, 0x0002,              # ushort-narrow width=1, height=1
-        0x0000, 0x0000,              # palette_count=0, _=0
-        0x0004, 0x0000,              # pixel_byte_count=2, trailer_size=0
-        0x0000001C, 0x0000001C,      # pixel_data_offset, trailer_offset
-    ) + b"\x00\x00"                  # 1x1 monochrome pixel bytes
-    container = struct.pack("<HHI", 0, 1, 8) + bitmap
-    assert len(container) == 38, len(container)
-    return container
+    bitmap = build_kind5_raster(
+        width=_BM0_WIDTH,
+        height=_BM0_HEIGHT,
+        bpp=_BM0_BPP,
+        pixel_data=b"\xFF" * _BM0_PIXEL_BYTES,
+        trailer=build_trailer([], b""),
+    )
+    return build_baggage_container(bitmap)
 
 
 _BM0_CONTAINER = _build_bm0_container()

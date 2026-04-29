@@ -1799,16 +1799,25 @@ class TestMEDVIEWOneway(unittest.TestCase):
 
 
 class TestMEDVIEWBaggageBm0(unittest.TestCase):
-    """bm0 baggage delivery — synthetic kind=5 1×1 monochrome.
+    """bm0 baggage delivery — kind=5 raster sized to CBFrame 3/0.
 
-    See docs/MEDVIEW.md §6c "Synthetic kind=5 minimum-viable bm0
-    container" for the byte-table.  The 32-byte container is a fixed
-    constant (`_BM0_CONTAINER` in medview.py); these tests pin its
-    open-size declaration and read-side wire shape so an accidental
-    revert is caught.
+    See `docs/MEDVIEW.md` §10 for the paint-loop trace and §6c for the
+    baggage selector wire layout. The container is now a 640×480 1bpp
+    raster (38445 B total) with an empty trailer — produced by
+    `src.server.blackbird.wire.build_baggage_container` over a
+    `build_kind5_raster` body. These tests pin the open-size
+    declaration and the structural shape (preamble, kind byte, pixel
+    data dimensions) without freezing the entire 38KB byte sequence.
     """
 
-    _BM0_CONTAINER_LEN = 38
+    _BM0_PREAMBLE_LEN = 8        # container header
+    _BM0_KIND5_HEADER_LEN = 30   # bitmap header (wide pixel_byte_count)
+    _BM0_PIXEL_BYTES = 38400     # 640×480 1bpp packed
+    _BM0_TRAILER_LEN = 7         # empty trailer = 1B reserved + 2B count + 4B size
+    _BM0_CONTAINER_LEN = (
+        _BM0_PREAMBLE_LEN + _BM0_KIND5_HEADER_LEN
+        + _BM0_PIXEL_BYTES + _BM0_TRAILER_LEN
+    )
     _OPEN_REQ = bytes.fromhex("01 01 04 84 62 6d 30 00 01 02 81 83")  # bm0 retry form
 
     def _decode_reply(self, selector, req_id, payload):
@@ -1821,7 +1830,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         return parsed.payload[8:]
 
     def test_hfs_open_bm0_declares_container_size(self):
-        # 0x87 end-static, 0x81 <handle=0x42>, 0x83 <size=38>
+        # 0x87 end-static, 0x81 <handle=0x42>, 0x83 <size=38445>
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_OPEN, 11, self._OPEN_REQ)
         self.assertEqual(reply[0], TAG_END_STATIC)
         self.assertEqual(reply[1], 0x81)
@@ -1831,40 +1840,59 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertEqual(size, self._BM0_CONTAINER_LEN)
 
     def test_hfs_read_bm0_kind_byte_passes_parser_gate(self):
-        # Read full 38-byte container at offset=0; bitmap header starts at +8
-        # and its first byte must be 5 to clear FUN_7e887a40's `kind < 5` gate.
-        read_req = bytes.fromhex("01 42 03 26 00 00 00 03 00 00 00 00 81 85")
+        # Read first 64 bytes — covers preamble + kind5 header. Bitmap
+        # starts at offset 8; first byte must be 5 to clear
+        # FUN_7e887a40's `kind < 5` gate.
+        read_req = bytes.fromhex("01 42 03 40 00 00 00 03 00 00 00 00 81 85")
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
-        # 0x81 <status=0> 0x87 0x86 <38 bytes>
+        # 0x81 <status=0> 0x87 0x86 <chunk>
         self.assertEqual(reply[0], 0x81)
         self.assertEqual(reply[1], 0x00)
         self.assertEqual(reply[2], TAG_END_STATIC)
         self.assertEqual(reply[3], TAG_DYNAMIC_COMPLETE_SIGNAL)
-        chunk = reply[4 : 4 + self._BM0_CONTAINER_LEN]
-        self.assertEqual(len(chunk), self._BM0_CONTAINER_LEN)
+        chunk = reply[4 : 4 + 64]
         self.assertEqual(chunk[8], 0x05)  # kind byte at bitmap-header offset 0
 
-    def test_hfs_read_bm0_full_container_byte_sequence(self):
-        # Pin every byte of the synthesised payload — any drift in the helper
-        # caught immediately. Format documented in docs/MEDVIEW.md §6c.
+    def test_hfs_read_bm0_preamble_and_header_byte_sequence(self):
+        # Pin the preamble + 30-byte kind=5 header so the layout encoder
+        # in `blackbird.wire` can't drift unchecked. Pixel content (38KB)
+        # not byte-pinned — covered structurally by the kind5_raster
+        # tests in `test_blackbird_wire.TestKind5Raster`.
         read_req = bytes.fromhex("01 42 03 26 00 00 00 03 00 00 00 00 81 85")
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
-        chunk = reply[4 : 4 + self._BM0_CONTAINER_LEN]
-        expected = bytes.fromhex(
+        chunk = reply[4 : 4 + 38]
+        expected_header = bytes.fromhex(
             "00 00"                  # container reserved
             "01 00"                  # bitmap count = 1
             "08 00 00 00"            # offset to bitmap[0]
             "05 00"                  # kind=5, compression=raw
             "00 00 00 00"            # 2x skip-int (narrow form)
             "02 02"                  # byte-narrow varints: planes=1, bpp=1
-            "02 00 02 00"            # ushort-narrow: width=1, height=1
-            "00 00 00 00"            # palette=0, _=0
-            "04 00 00 00"            # pixel_byte_count=2, trailer=0
-            "1c 00 00 00"            # pixel offset
-            "1c 00 00 00"            # trailer offset
-            "00 00"                  # 1x1 mono pixel + WORD pad
+            "00 05 c0 03"            # ushort-narrow: width=640, height=480
+            "00 00 00 00"            # palette_count=0, reserved=0
+            "01 2c 01 00"            # u32-wide pixel_byte_count = 38400
+            "0e 00"                  # ushort-narrow trailer_size = 7
+            "1e 00 00 00"            # pixel_data_offset = 30
+            "1e 96 00 00"            # trailer_offset = 30 + 38400 = 38430
         )
-        self.assertEqual(chunk, expected)
+        self.assertEqual(chunk, expected_header)
+
+    def test_hfs_read_bm0_pixel_data_is_white(self):
+        # Read 16 bytes from offset 38 (start of pixel data per
+        # pixel_data_offset = 30 + container preamble 8) — must be all
+        # 0xFF (white when destination DC has white background colour).
+        read_req = bytes.fromhex("01 42 03 10 00 00 00 03 26 00 00 00 81 85")
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 13, read_req)
+        chunk = reply[4 : 4 + 16]
+        self.assertEqual(chunk, b"\xFF" * 16)
+
+    def test_hfs_read_bm0_trailer_is_empty(self):
+        # Trailer at container offset 8 + 30 + 38400 = 38438. Read 7 B.
+        # Layout: 1B reserved=0, 2B count=0, 4B tail_size=0.
+        read_req = bytes.fromhex("01 42 03 07 00 00 00 03 26 96 00 00 81 85")
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 14, read_req)
+        chunk = reply[4 : 4 + 7]
+        self.assertEqual(chunk, b"\x00" * 7)
 
 
 if __name__ == "__main__":
