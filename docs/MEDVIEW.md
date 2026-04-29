@@ -540,25 +540,30 @@ flush, etc.). If the handle is NULL or slot-0x48 returns an error, the
 subscriber leaves `param_1[2].LockCount == 0`, never starts a thread,
 and `hrAttachToService` moves on to the next subscriber.
 
-**Wire contract**: reply `0x87 0x86` (end-static + dynamic-complete
-with empty blob). The request descriptor is `0x85` (dynamic-recv,
-not the iterator-recv `0x88` previously assumed). Per OnlStmt
-selector `0x05`'s reference pattern (`services/onlstmt.py:189-201`):
-"`0x85` or `0x88` alone would hang the Retrieving dialog forever".
-The `0x86` reply tag fires `SignalRequestCompletion` at
-`MPCCL.ProcessTaggedServiceReply`, unblocking MPC's Execute on
-slot 0x48 inside `MVTTL14C!FUN_7e844ee6 @ 0x7E844EE6`. Execute
-then writes a non-NULL reply iface to `subscriber+0x28`, the
-success branch sets `subscriber+0x44 = 1`, and the master flag
-`DAT_7e84e2fc` can finally set after all 5 subscribers complete.
-0x88 alone in the reply does NOT fire SignalRequestCompletion
-(only the iterator-end signal at +0x2c), so Execute hangs.
+**Wire contract**: reply `0x87 0x88` (end-static + iterator
+stream-end) for every notification type. `MPCCL!ProcessTaggedServiceReply
+@ 0x04604F26` allocates a `dynamicReplyState` in the
+`LAB_04605187` path on the `0x88` tag, leaves
+`subscriber+0x28` (m_pMoreDatRef) non-NULL, and signals
+`m_heventMoreDat` + `m_heventDynMsg`. The success branch in
+MPC's Execute then sets `subscriber+0x44 = 1`, and once all 5
+subscribers report `+0x44 != 0` the master flag `DAT_7e84e2fc`
+sets in `hrAttachToService`.
 
-Empty blob (zero bytes after `0x86`) is fine: the subscriber only
-needs `+0x28` non-NULL, not specific blob contents. Server-initiated
-push of cache-update frames (op-code 4 kind-2 va→addr per project
-memory) flows through a separate channel — the subscription's
-notification-pump path (`FUN_7e844c7c`), not the initial reply.
+The alternative `0x87 0x86 + 8 zeros` reply also leaves
+`+0x28` non-NULL, but `0x86` fires `MPCCL!SignalRequestCompletion
+@ 0x04604DDC` which writes `*(req+0x18) = 1`. That flag suppresses
+the `ResetEvent` call in `MPCCL!WaitForMessage @ 0x04604BA4` and
+`MPCCL!FUN_046049BC @ 0x046049BC`, leaving the manual-reset events
+permanently signaled. The waiter then spins on
+`MsgWaitForSingleObject` returning `WAIT_OBJECT_0` instantly and
+the caller loops on `0xb0b000b/c` returns — observed as ~30 % CPU
+per spinning request × 3 (types 1/2/4) ⇒ ~90 % MOSVIEW.EXE CPU.
+
+Server-initiated push of cache-update frames (op-code 4 kind-2
+va→addr per project memory) flows through the type-3 subscription's
+notification-pump thread `FUN_7e844c7c`, not the initial reply —
+which is why an empty-body iterator reply is sufficient.
 
 ### Master-flag gate (`DAT_7e84e2fc`)
 

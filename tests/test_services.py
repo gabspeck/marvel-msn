@@ -1764,12 +1764,14 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 class TestMEDVIEWSubscribeNotification(unittest.TestCase):
     def test_subscribe_reply_per_notification_type(self):
         # Wire-observed request: `01 <type> 85` (0x85 = dynamic-recv).
-        # Type 3 (cache-pump) gets an iterator: `0x87 0x88`.  Other
-        # types get a single-shot completion: `0x87 0x86 + zeros` so
-        # MPC's Execute returns a non-NULL iface for each subscriber
-        # (MVTTL14C 0x7E844FA7 `MOV [ESI+0x44], 0x1` gates on `*[ESI
-        # +0x28] != 0` AND HRESULT >= 0); all 5 +0x44 slots must be
-        # non-zero for hrAttachToService to set DAT_7e84e2fc = 1.
+        # All 5 types reply `0x87 0x88` (iterator stream-end).  0x88
+        # creates the dynamicReplyState in MPCCL!ProcessTaggedServiceReply,
+        # making m_pMoreDatRef non-NULL — the master-flag check at
+        # MVTTL14C 0x7E844FA7 (`MOV [ESI+0x44], 0x1` gated on
+        # `*[ESI+0x28] != 0` AND HRESULT >= 0) passes for every slot.
+        # Using 0x86 instead would fire SignalRequestCompletion which
+        # sets request +0x18=1, suppressing ResetEvent in WaitForMessage
+        # and causing a ~30%-CPU MsgWaitForSingleObject spin per request.
         handler = MEDVIEWHandler(5, "MEDVIEW")
         for notification_type in range(5):
             req_payload = bytes([0x01, notification_type, 0x85])
@@ -1785,18 +1787,7 @@ class TestMEDVIEWSubscribeNotification(unittest.TestCase):
             parsed = parse_packet(pkts[0][:-1])
             self.assertTrue(parsed.crc_ok)
             reply = parsed.payload[8:]
-            if notification_type in (0, 3):
-                # Types 0 (topic metadata) and 3 (va/addr cache pump)
-                # both get iterator replies — the server pushes
-                # opcode-0xBF chunks on type-0 (HfcNear's per-title
-                # cache via FUN_7e8460df) and opcode-4 frames on
-                # type-3 (global kind-0/1/2 cache via FUN_7e8420f6).
-                self.assertEqual(reply, bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]))
-            else:
-                self.assertEqual(
-                    reply,
-                    bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + b"\x00" * 8,
-                )
+            self.assertEqual(reply, bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]))
 
 
 class TestMEDVIEWOneway(unittest.TestCase):

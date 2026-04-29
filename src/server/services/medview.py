@@ -729,15 +729,15 @@ class MEDVIEWHandler:
                 self.type3_sub_req_id = request_id
                 reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
             else:
-                # Types 1/2/4: dynamic-complete with non-empty body
-                # to make MPC's Execute return a non-NULL iface (see
-                # MVTTL14C 0x7E844FA7 `MOV [ESI+0x44], 0x1` gated on
-                # `*[ESI+0x28] != 0` and HRESULT >= 0).  Required for
-                # the master flag DAT_7e84e2fc to set in
-                # hrAttachToService — without it FUN_7e8440ab returns
-                # 0 and every cache-miss retry loop bails before
-                # firing 0x06/0x07/0x10/0x15.
-                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + b"\x00" * 8
+                # Types 1/2/4: same iterator-stream-end reply as 0/3.
+                # 0x88 alone makes m_pMoreDatRef non-NULL (passes the
+                # master-flag check at MVTTL14C 0x7E844FA7) without
+                # firing SignalRequestCompletion.  0x86 sets request
+                # +0x18=1 in MPCCL!ProcessTaggedServiceReply, which in
+                # turn skips ResetEvent in WaitForMessage/PollDynMsg
+                # and produces a tight MsgWaitForSingleObject spin
+                # (~30% CPU per request × 3 ⇒ 90% total).
+                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
         elif selector == MEDVIEW_SELECTOR_HFC_NEXT_PREV:
             # 0x16 HfcNextPrevHfc — same wire shape as vaResolve (0x15)
             # plus a direction byte.  Reply ack-only; engine retries
