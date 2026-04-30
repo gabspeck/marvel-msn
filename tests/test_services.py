@@ -59,6 +59,7 @@ from server.services.logsrv import (
     build_logsrv_service_map_payload,
 )
 from server.blackbird.m14_parse import parse_payload
+from server.blackbird.m14_payload import build_m14_payload_for_deid
 from server.services.medview import MEDVIEWHandler
 from server.services.olregsrv import (
     OLREGSRVHandler,
@@ -1652,18 +1653,39 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
     def test_title_open_body_carries_synthesized_m14_payload(self):
         # `resources/titles/4.ttl` is the reference Blackbird `msn today.ttl`
         # (sha256 4a6e884f…). Synthesizer lowers it to: 3 visible content
-        # entries (2 text + 1 image) → 3 records each in sec07/08/06; the
+        # entries (2 text + 1 image) → 3 sec06 records (sec07/sec08 are
+        # zeroed at the wire boundary — see _clear_synthesizer_fixed_records);
         # CStringTable (sec04) carries 9 strings (title/section/form/frame/
         # stylesheet/resource_folder + 3 proxy names).
-        reply = self._decode_reply(self._MSN_TODAY_REQ)
-        body = self._split_body(reply)
-        parsed = parse_payload(bytes(body))
-        # Wire-mode strip: font_blob section is empty (`m14_payload._strip_font_blob`
-        # replaces the synthesizer's FNTB-magic blob with `b"\x00\x00"` so
-        # MVTTL14C steers into the safe LAB_7e8432c4 branch).
-        self.assertEqual(parsed.font_blob.length, 0)
-        self.assertEqual(parsed.sec07.record_count, 3)
-        self.assertEqual(parsed.sec08.record_count, 3)
+        # Asserting against the body-builder output directly (the wire
+        # path fragments at the 1024-byte boundary; framing is exercised
+        # by `test_title_open_reply_has_static_plus_dynamic`).
+        result = build_m14_payload_for_deid("4")
+        self.assertEqual(result.caption, "MSN Today")
+        parsed = parse_payload(result.payload)
+        # font_blob is the real section-0 minimal recipe (96 bytes) —
+        # `m14_payload._install_section0_font_table` swaps the synthesizer's
+        # FNTB placeholder for a wire-faithful section-0 per
+        # `docs/mosview-authored-text-and-font-re.md` "Minimal Valid Recipe".
+        self.assertEqual(parsed.font_blob.length, 0x60)
+        # Header: descriptor_count=1, face_off=0x12, descriptor_off=0x32,
+        # override_count=0, override_off=0x5c, header_word_0c=0
+        self.assertEqual(
+            struct.unpack_from("<HHHHHH", parsed.font_blob.data, 0x02),
+            (1, 0x12, 0x32, 0, 0x5C, 0),
+        )
+        # Face[0] = "Times New Roman"
+        self.assertEqual(
+            parsed.font_blob.data[0x12:0x21].rstrip(b"\x00"),
+            b"Times New Roman",
+        )
+        # sec07/sec08 records are dropped at wire boundary (BB-magic +
+        # synth garbage) — engine synthesises a default popup and doesn't
+        # need extra child views for first paint.
+        self.assertEqual(parsed.sec07.record_count, 0)
+        self.assertEqual(parsed.sec08.record_count, 0)
+        # sec06 records are kept — only sec06[0] is consumed for window
+        # scaffolding, and is patched with valid rect/colorrefs.
         self.assertEqual(parsed.sec06.record_count, 3)
         self.assertEqual(parsed.sec04.count, 9)
         self.assertEqual(parsed.sec13.count, 2)
@@ -1674,21 +1696,33 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # Windows path — see `m14_payload` module docstring).
         self.assertEqual(parsed.sec6a.data, b"4\x00")
         self.assertEqual(parsed.trailing, b"")
+        # Real metadata threaded through: 3 visible entries → topic_count=3,
+        # va_get_contents=0x1000 (synthesizer's first_address), CRC32 cache
+        # headers non-zero.
+        self.assertEqual(result.metadata.topic_count, 3)
+        self.assertEqual(result.metadata.va_get_contents, 0x1000)
+        self.assertEqual(result.metadata.addr_get_contents, 0x1000)
+        self.assertNotEqual(result.metadata.cache_header0, 0)
+        self.assertNotEqual(result.metadata.cache_header1, 0)
+        # TextRuns lowering: only the Homepage.bdf entry has non-empty
+        # ANSI text (Calendar of Events.bdf TextRuns is `00 00`); image
+        # entries don't contribute. Topic numbers are 1-based per
+        # `m14_synth.build_visible_entry_metadata`.
+        self.assertIn(1, result.topic_texts)
+        self.assertTrue(result.topic_texts[1].startswith(b"This is an example"))
+        self.assertNotIn(2, result.topic_texts)  # Calendar entry has no text
 
     def test_title_open_body_falls_back_to_deid_for_unknown(self):
         # deid "42" has no .ttl fixture — the handler emits an empty
         # payload with caption "Title 42\0" in sec01/sec6a so the viewer
         # still shows something informative.
-        req = (
-            b"\x04\x88:2[42]0\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x81\x81\x83\x83\x83\x83\x83"
-        )
-        reply = self._decode_reply(req)
-        body = self._split_body(reply)
-        parsed = parse_payload(bytes(body))
-        self.assertEqual(parsed.font_blob.length, 0)
+        result = build_m14_payload_for_deid("42")
+        self.assertEqual(result.caption, "Title 42")
+        parsed = parse_payload(result.payload)
+        # Empty fallback ships the same minimal section-0 (96 B) as the
+        # real-content path — keeps the engine on a fully-validated branch
+        # even when no text items reference a style.
+        self.assertEqual(parsed.font_blob.length, 0x60)
         self.assertEqual(parsed.sec07.record_count, 0)
         self.assertEqual(parsed.sec08.record_count, 0)
         self.assertEqual(parsed.sec06.record_count, 0)
@@ -1698,6 +1732,14 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(parsed.sec13.count, 0)
         self.assertEqual(parsed.sec04.count, 0)
         self.assertEqual(parsed.trailing, b"")
+        # Empty fallback metadata: zero dwords + only header0 non-zero
+        # (CRC32 of the empty payload). topic_texts is empty.
+        self.assertEqual(result.metadata.topic_count, 0)
+        self.assertEqual(result.metadata.va_get_contents, 0)
+        self.assertEqual(result.metadata.addr_get_contents, 0)
+        self.assertNotEqual(result.metadata.cache_header0, 0)
+        self.assertEqual(result.metadata.cache_header1, 0)
+        self.assertEqual(dict(result.topic_texts), {})
 
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):

@@ -19,7 +19,6 @@ or unsynthesizable titles.
 """
 
 import logging
-import os
 import struct
 
 from ..config import (
@@ -42,8 +41,13 @@ from ..config import (
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
-from ..blackbird.m14_payload import build_m14_payload_for_deid
+from ..blackbird.m14_payload import (
+    M14PayloadResult,
+    TitleOpenMetadata,
+    build_m14_payload_for_deid,
+)
 from ..blackbird.wire import (
+    _CASE1_NAME_BUF_TEXT_BUDGET,
     build_baggage_container,
     build_case1_bf_chunk,
     build_kind5_raster,
@@ -63,20 +67,25 @@ from ._dispatch import log_unhandled_selector
 log = logging.getLogger(__name__)
 
 
-def _load_title_body(title_spec: str) -> bytes:
+def _load_title_body(title_spec: str) -> M14PayloadResult:
     """Resolve a TitleOpen spec to a wire-ready MediaView 1.4 payload.
 
     Delegates to `blackbird.m14_payload.build_m14_payload_for_deid`,
     which synthesizes the 9-section body from `<deid>.ttl` (or returns
     an empty caption-only fallback on missing / unsynthesizable .ttl).
+    The returned `M14PayloadResult` carries the wire bytes plus the
+    static-section metadata dwords and per-topic ANSI text buffers
+    consumed by the case-1 cache push.
     """
     deid = _title_name_from_spec(title_spec).strip()
-    body, caption = build_m14_payload_for_deid(deid)
+    result = build_m14_payload_for_deid(deid)
     log.info(
-        "synthesized_title_body spec=%r deid=%r caption=%r body_len=%d",
-        title_spec, deid, caption, len(body),
+        "synthesized_title_body spec=%r deid=%r caption=%r body_len=%d "
+        "topics=%d topic_texts=%d",
+        title_spec, deid, result.caption, len(result.payload),
+        result.metadata.topic_count, len(result.topic_texts),
     )
-    return body
+    return result
 
 
 def _title_name_from_spec(spec: str) -> str:
@@ -124,73 +133,76 @@ def _build_title_pre_notify_reply_payload():
     return bytes([TAG_END_STATIC])
 
 
-def _build_title_open_reply_payload(title_body):
+def _build_title_open_reply_payload(title_body: bytes, metadata: TitleOpenMetadata) -> bytes:
     """TitleOpen reply: static section + dynamic-complete blob.
 
-    Static shape (7 tagged primitives, exact order required by MVTTL14C
-    TitleOpenEx recv loop):
-        0x81 <byte=title_id>      → title struct +0x02 (primary tid, must be nonzero)
-        0x81 <byte=hfs_volume>    → title struct +0x88 (HFS vol byte for baggage)
-        0x83 <dword=contents_va>  → title struct +0x8c (`vaGetContents`)
-        0x83 <dword=???>          → title struct +0x90 (unresolved)
-        0x83 <dword=topic_count>  → title struct +0x94 (`TitleGetInfo(0x0B)`)
-        0x83 <dword=chk1>         → persisted to MVCache\\<title>.tmp
-        0x83 <dword=chk2>         → persisted to MVCache\\<title>.tmp
-        0x87                      end-static
-        0x86 <title_body>         dynamic-complete (raw to end of host block)
+    Static shape (7 tagged primitives, exact order required by
+    `MVTTL14C!TitleOpenEx @ 0x7E842D4E` recv loop, per
+    `docs/mosview-mediaview-format.md` "Materialized Title Object Fields"):
 
-    The 0x86 tag (TAG_DYNAMIC_COMPLETE_SIGNAL) is what wakes MVTTL14C's
-    Wait() on slot 0x24 (same pattern as DIRSRV GetShabby — see
-    PROTOCOL.md §MPC reply tags).  0x88 would route through the
-    dynamic-iterator instead and leave Wait() blocked.
+        0x81 <byte=title_id>            → title +0x02 (primary tid, nonzero)
+        0x81 <byte=fs_mode>             → title +0x88 (HFS volume mode byte)
+        0x83 <dword=va_get_contents>    → title +0x8c (vaGetContents)
+        0x83 <dword=addr_get_contents>  → title +0x90 (addrGetContents)
+        0x83 <dword=topic_count>        → title +0x94 (TitleGetInfo 0x0b cap)
+        0x83 <dword=cache_header0>      → 8-byte validation tuple, half 1
+        0x83 <dword=cache_header1>      → 8-byte validation tuple, half 2
+        0x87                            end-static
+        0x86 <title_body>               dynamic-complete (raw to end of host block)
 
-    All three server-supplied DWORDs ship as zero.  Empirically (probe
-    with contents_va ∈ {0x00010000, 0xCAFEBABE} on 2026-04-27),
-    crossing the §4.3 hide-on-failure value gate alone does not unblock
-    paint — the client emits no follow-up wire traffic.  Some prior
-    condition gates entry to the paint path; see docs/MEDVIEW.md §10.
+    The 0x86 tag (TAG_DYNAMIC_COMPLETE_SIGNAL) wakes MVTTL14C's
+    `Wait()` on slot 0x24 (same pattern as DIRSRV GetShabby). Cache
+    headers are CRC32 of the wire payload (header0) and the synthesizer's
+    parser_title_path (header1) — both compared against `MVCache_*.tmp`
+    on the next open.
     """
-    chk1, chk2 = _derive_checksums(title_body)
     static = b"".join(
         [
             build_tagged_reply_byte(_TITLE_ID_PRIMARY),
             build_tagged_reply_byte(_TITLE_ID_SERVICE_BYTE),
-            build_tagged_reply_dword(0),
-            build_tagged_reply_dword(0),
-            build_tagged_reply_dword(0),
-            build_tagged_reply_dword(chk1),
-            build_tagged_reply_dword(chk2),
+            build_tagged_reply_dword(metadata.va_get_contents),
+            build_tagged_reply_dword(metadata.addr_get_contents),
+            build_tagged_reply_dword(metadata.topic_count),
+            build_tagged_reply_dword(metadata.cache_header0),
+            build_tagged_reply_dword(metadata.cache_header1),
         ]
     )
     return static + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + title_body
 
 
-def _derive_checksums(body):
-    """Produce a stable (chk1, chk2) pair from the body bytes.
+# info_kinds the MVTTL14C client serves locally from the cached body
+# (these never reach the wire selector 0x03). Per
+# `docs/mosview-mediaview-format.md` "Useful implementation constraints":
+#   0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0B, 0x13, 0x69, 0x6A, 0x6E, 0x6F
+#
+# Selector 0x03 fires for the OTHER info_kinds:
+#   0x03, 0x05, 0x0A, 0x0C..0x10, 0x66..0x68, 0x6B..0x6D
+# The doc does not pin semantics for these; first-paint clients in
+# practice hit only 0x03 (per the RE notes), and even then the empty
+# size=0 reply is enough to let lMVTitleGetInfo return without
+# crashing MVCL14N. Document this here rather than guess at fields.
+_TITLE_GET_INFO_LOCAL_KINDS = frozenset(
+    {0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0B, 0x13, 0x69, 0x6A, 0x6E, 0x6F}
+)
+_TITLE_GET_INFO_REMOTE_KINDS = frozenset(
+    {0x03, 0x05, 0x0A, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x66, 0x67, 0x68, 0x6B, 0x6C, 0x6D}
+)
 
-    The checksum semantics aren't fully RE'd (see docs/MEDVIEW.md §10);
-    they're opaque to the client except for cache-hit decisions on
-    subsequent opens.  Use the body length as chk1 and a 16-bit rolling
-    XOR as chk2 — stable per body content, both nonzero for nonempty
-    bodies, both zero for the empty MVP body.
-    """
-    chk1 = len(body)
-    chk2 = 0
-    for i in range(0, len(body), 2):
-        word = body[i] | (body[i + 1] << 8 if i + 1 < len(body) else 0)
-        chk2 ^= word
-    return chk1, chk2
 
+def _build_title_get_info_reply_payload(info_kind: int) -> bytes:
+    """TitleGetInfo wire reply.
 
-def _build_title_get_info_reply_payload():
-    """TitleGetInfo reply: size dword = 0, end-static, empty dynamic.
+    Wire selector 0x03 carries info_kinds the client cannot serve from
+    its local cache — the doc lists `_TITLE_GET_INFO_REMOTE_KINDS` as
+    the eligible set. Without RE on each kind's expected payload, we
+    answer with size dword = 0 + dynamic-complete + empty body. The
+    dynamic-complete signal (0x86) wakes Wait() exactly like TitleOpen.
 
-    Reached only when the info_kind is one TitleGetInfo doesn't serve
-    locally from the cached body (see docs/MEDVIEW.md §5.1).  With an
-    empty body every lookup falls through to the wire, so answering
-    size=0 lets `lMVTitleGetInfo` return 0 without crashing MVCL14N.
-    The 0x86 dynamic-complete signal wakes Wait() the same way as
-    TitleOpen.
+    Defensive note: a `lMVTitleGetInfo(client, kind, 0, 0)` call with
+    a "size probe" pattern (`pBuf == 0`) is satisfied by the size dword
+    alone — caller knows there's nothing to copy. For real `pBuf != 0`
+    calls the empty 0x86 payload still terminates the recv loop
+    cleanly.
     """
     return (
         build_tagged_reply_dword(0)
@@ -269,6 +281,23 @@ def _build_bm0_container():
     `FUN_7e887a40` (which parses the kind=5 raster). The resulting
     HBITMAP is `BitBlt`'d at paint time by `FUN_7e887180`.
 
+    Architecture note (`docs/mosview-authored-text-and-font-re.md`
+    §"Bitmap Child Trailer Boundary"):
+
+    - bm0 is an ENGINE-SYNTHESIZED parent-cell backdrop, NOT authored
+      title content. `wsprintfA("|bm%d", index)` inside MVCL14N spans
+      the whole baggage namespace; bm0 specifically is the default
+      backdrop for the topic's rendering surface.
+    - Authored images (e.g. the `bitmap.bmp` WaveletImage in the
+      reference .ttl) ship as `bm1+` baggage and are referenced by
+      image-tag (`0x03`/`0x22`) topic items. Until those items
+      appear in the topic body, the engine never asks for `bm1+`.
+    - The doc explicitly defers full image-child fidelity for the
+      first authored text milestone: "the first authored text
+      milestone does not need this trailer at all… or emit only the
+      parent image record with `child_count = 0`, `raw_tail_blob_len
+      = 0`". Our trailer matches this recipe exactly.
+
     Layout breakdown:
 
     - 8-byte container preamble (`FUN_7e886310` reads `+0x04` u32 to
@@ -284,14 +313,9 @@ def _build_bm0_container():
       white) on a colour display.
     - Empty trailer — a 1-byte reserved field + 2 zero count + 4 zero
       tail_size = 7 bytes that `FUN_7e886de0` reads as "no children, no
-      tail". The parent cell paints the bitmap; no overlaid text.
-
-    The empty trailer is intentional: tag-`0x07` and `0x01` children
-    require additional RE (FUN_7e893010 text drawer + tail-byte
-    layout) before they can be synthesised correctly. The visible
-    white pane at this stage is the verification milestone for the
-    Phase 1/2 RE — paint-loop reaches the cell, BitBlt fires with a
-    real-sized bitmap, screen no longer renders blank.
+      tail". The parent cell paints the bitmap; no overlaid text. Per
+      doc, this is the documented "first authored text milestone"
+      shape and not a regression.
     """
     bitmap = build_kind5_raster(
         width=_BM0_WIDTH,
@@ -334,78 +358,6 @@ def _build_type3_op4_frame(title_byte, kind, key, va, addr):
     return struct.pack("<HH", 4, 18) + payload
 
 
-def _build_type0_bf_chunk(title_byte, key):
-    """Build a selector-0x17 type-0 opcode-0xBF cache-insert chunk.
-
-    HfcNear's per-title cache lives in the title struct's `title+4`
-    tree (walked by `MVTTL14C!FUN_7e845efa`).  The only function that
-    inserts into this tree is `MVTTL14C!FUN_7e8460df` (sole caller is
-    the type-0 callback `FUN_7e8452d3` when it parses opcode 0xBF).
-
-    Wire layout (size=0x40 form, 132 bytes total).  After HfcNear
-    returns the cache entry, MVCL14N!fMVSetAddress walks the
-    name_buf via FUN_7e890fd0 → FUN_7e894c50.  The walker reads
-    `name_buf[0x26]` and dispatches a switch on it (cases
-    1/3/4/5/0x20/0x22/0x23/0x24).  With a zero-fill or 8-byte
-    buffer the dispatch lands on default, the post-switch loop
-    iterates with `param_6[1]` uninitialised (FUN_7e890fd0 leaves
-    `local_2e` unset on its stack frame), and the iteration walks
-    off the end of `lp+0xf6`'s table → AV at `0x7E894D4C`.
-
-    To steer into case 1 (`FUN_7e8915d0`), inject `0x01` at offset
-    0x26 of the name_buf.  FUN_7e897ed0 then sets local_c[0] = 1,
-    FUN_7e894c50 enters case 1, FUN_7e8915d0 zeros local_120,
-    calls FUN_7e897ad0 with a zero u32 → presence bitmap = 0,
-    only the length field gets a non-zero value (-0x4000 for the
-    "compact" branch).  Then FUN_7e8915d0 enters its do-while
-    loop calling FUN_7e891810.
-
-    FUN_7e891810's early-exit at entry tests two conditions:
-        cond1: *(byte *)(local_68 + local_30) == 0
-               where local_68 = chunk content pointer (the param_4
-               cascade), local_30 = local_120[0] = -0x4000.
-        cond2: *(byte *)local_2a == -1
-               where local_2a = pointer to chunk content past the
-               header section.
-    Both fail with zero-fill content → fall through into the main
-    loop body.  Whether the main loop survives is unverified —
-    empirically test by observing the AV address (or success).
-
-        +0x00  u8   opcode = 0xBF
-        +0x01  u8   title_byte
-        +0x02  u16  name_size = 0x40
-        +0x04..0x43  64-byte name buffer (memcpy'd into entry+0x20).
-                     name_buf[0x26] = 0x01 (case 1 dispatch).
-                     Other bytes zero.
-        +0x0C  u32  key — at offset 0xC of the chunk, INSIDE the
-                     name buffer; FUN_7e8452d3 reads the lookup key
-                     from this fixed offset regardless of name_size.
-        +0x44..0x83  60-byte content block (zeroed; bytes 0x2C and
-                     0x34 of the content block are pinned HGLOBAL
-                     fields per HfcNear's FUN_7e84a1d0 calls — zeros
-                     yield NULL handles, treated as "absent").
-    """
-    name_size = 0x40
-    chunk = bytearray(4 + name_size + 60)  # 132 bytes
-    chunk[0] = 0xBF
-    chunk[1] = title_byte & 0xFF
-    chunk[2:4] = struct.pack("<H", name_size)
-    # Place 0x03 at offset 0x26 of the name_buf to dispatch
-    # FUN_7e894c50's case 3 (FUN_7e894560).  Hypothesis (from VIEWDLL
-    # RE 2026-04-28): MVCL14N's chunk parser is the same code as
-    # VIEWDLL's CArchive deserialiser, and 0x03 is the CSection
-    # version byte its CSection::Serialize writes.  If correct, the
-    # bytes following 0x26 are CSection state (6 typed-pointer lists +
-    # CSectionProp); if wrong, expect a different AV address than
-    # case-1's known sites.
-    chunk[4 + 0x26] = 0x03
-    # Key at chunk offset 0xC — inside the name_buf.  FUN_7e8452d3
-    # reads it at this fixed offset regardless of name_size.
-    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
-    # bytes 0x44..0x83 stay zero (60-byte content block)
-    return bytes(chunk)
-
-
 class MEDVIEWHandler:
     """Handles MEDVIEW service requests on a logical pipe."""
 
@@ -423,6 +375,13 @@ class MEDVIEWHandler:
         # subscribe; reused for vaConvertHash / Topic cache pushes.
         self.type3_sub_class = None
         self.type3_sub_req_id = None
+        # Per-topic ANSI story buffer extracted from each TextProxy's
+        # TextRuns CContent at TitleOpen-time.  Indexed by topic_number
+        # (= the synthesizer's vaConvertTopicNumber key, which is also
+        # what selector 0x15 / 0x07 cache-miss requests carry).  Empty
+        # until TitleOpen runs; falls back to caption on miss.
+        self.topic_texts: dict[int, bytes] = {}
+        self.title_caption: str = ""
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Emit the IID→selector discovery block (42 entries, 1-based selectors)."""
@@ -430,38 +389,54 @@ class MEDVIEWHandler:
         host_block = build_discovery_host_block(payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
+    def _case1_text_for_key(self, key: int) -> str:
+        """Resolve the ANSI text shipped in a case-1 0xBF chunk for `key`.
+
+        Selector 0x15 cache-miss requests use `vaConvertTopicNumber`-style
+        keys, which the synthesizer assigns as `topic_number = entry_index + 1`
+        (`m14_synth.build_visible_entry_metadata`). Look up the matching
+        TextRuns body in `self.topic_texts`; truncate to fit the case-1
+        chunk's in-name_buf text budget. Falls back to the title caption
+        (or `Untitled`) when the key doesn't map to a TextProxy entry.
+        """
+        text_bytes = self.topic_texts.get(key)
+        if text_bytes is None:
+            text_bytes = (self.title_caption or "Untitled").encode("latin-1", errors="replace")
+        # +1 for the trailing NUL `build_case1_bf_chunk` appends.
+        budget = _CASE1_NAME_BUF_TEXT_BUDGET - 1
+        if len(text_bytes) > budget:
+            text_bytes = text_bytes[:budget]
+        # build_case1_bf_chunk takes a str — decode latin-1 (round-trip
+        # safe for any byte sequence).
+        return text_bytes.decode("latin-1", errors="replace")
+
     def _build_cache_push_packet(self, title_byte, selector, key, server_seq, client_ack):
         """Build a packet that pushes a cache-fill chunk on the right channel.
 
         Selector → push channel + frame:
-            0x15 (HfcNear / vaResolve) → type-0, opcode 0xBF.  Inserts
-                into the per-title `title+4` tree via
-                FUN_7e8452d3 → FUN_7e8460df.  When the env var
-                `MSN_MEDVIEW_CASE1_TEXT` is set, ships a case-1 (text)
-                chunk that drives FUN_7e890fd0 → FUN_7e894c50 case 1 →
-                slot tag 1 → ExtTextOutA at paint time.  Otherwise
-                ships the case-3 (bm0 parent-cell backdrop) chunk
-                that's the current default.
+            0x15 (HfcNear / vaResolve) → type-0, opcode 0xBF case-1.
+                Inserts into the per-title `title+4` tree via
+                FUN_7e8452d3 → FUN_7e8460df, then drives
+                FUN_7e890fd0 → FUN_7e894c50 case 1 → slot tag 1 →
+                ExtTextOutA. Section-0 (`m14_payload._SECTION0_FONT_BLOB`)
+                resolves the slot+0x3F font id to a real HFONT via
+                descriptor 0 (Times New Roman).
             0x06 (vaConvertHash) → type-3, op-code 4 kind 1 (hash→va,
                 global cache via FUN_7e841bff).
             0x07 (vaConvertTopicNumber) → type-3, op-code 4 kind 0
                 (topic→va+addr, global cache via FUN_7e841be4).
             0x10 (HighlightsInTopic) → not pushed.
+
+        TODO: derive the case-1 text from the title's authored
+        TextTree/TextRuns rather than the hardcoded caption — placeholder
+        until VIEWDLL.DLL CContent serializers are RE'd.
         """
         if selector == MEDVIEW_SELECTOR_VA_RESOLVE:
             if self.type0_sub_req_id is None:
                 return None
-            case1_flag = os.environ.get("MSN_MEDVIEW_CASE1_TEXT", "")
-            if case1_flag:
-                # `=1` (or any truthy non-numeric like "MSN Today") ships
-                # the case-1 text chunk. Custom strings other than "1"
-                # become the literal text bytes; "1" maps to "MSN Today".
-                text = "MSN Today" if case1_flag == "1" else case1_flag
-                chunk = build_case1_bf_chunk(text, title_byte, key)
-                channel = "type0_bf_case1"
-            else:
-                chunk = _build_type0_bf_chunk(title_byte, key)
-                channel = "type0_bf"
+            text = self._case1_text_for_key(key)
+            chunk = build_case1_bf_chunk(text, title_byte, key)
+            channel = "type0_bf_case1"
             sub_class = self.type0_sub_class
             sub_req_id = self.type0_sub_req_id
         elif selector in (MEDVIEW_SELECTOR_VA_CONVERT_HASH, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC):
@@ -517,19 +492,34 @@ class MEDVIEWHandler:
         elif selector == MEDVIEW_SELECTOR_TITLE_OPEN:
             title_spec = _extract_title_spec(payload)
             log.info("title_open req_id=%d spec=%r", request_id, title_spec)
-            title_body = _load_title_body(title_spec)
-            reply_payload = _build_title_open_reply_payload(title_body)
+            result = _load_title_body(title_spec)
+            # Stash per-topic text + caption on the handler so subsequent
+            # selector 0x15 cache pushes can ship authored TextRuns content
+            # instead of the title caption (`_case1_text_for_key`).
+            self.topic_texts = dict(result.topic_texts)
+            self.title_caption = result.caption
+            reply_payload = _build_title_open_reply_payload(result.payload, result.metadata)
             log.info(
-                "title_open_reply title_id=0x%02x body_len=%d",
-                _TITLE_ID_PRIMARY, len(title_body),
+                "title_open_reply title_id=0x%02x body_len=%d "
+                "va=0x%08x addr=0x%08x topics=%d cache_header0=0x%08x",
+                _TITLE_ID_PRIMARY, len(result.payload),
+                result.metadata.va_get_contents,
+                result.metadata.addr_get_contents,
+                result.metadata.topic_count,
+                result.metadata.cache_header0,
             )
         elif selector == MEDVIEW_SELECTOR_TITLE_GET_INFO:
             info_kind, index, bufsize = _extract_get_info_args(payload)
-            log.info(
-                "title_get_info req_id=%d info_kind=0x%x index=%d bufsize=%d",
-                request_id, info_kind, index, bufsize,
+            kind_class = (
+                "local_should_not_hit_wire" if info_kind in _TITLE_GET_INFO_LOCAL_KINDS
+                else "remote_documented" if info_kind in _TITLE_GET_INFO_REMOTE_KINDS
+                else "remote_unknown"
             )
-            reply_payload = _build_title_get_info_reply_payload()
+            log.info(
+                "title_get_info req_id=%d info_kind=0x%x index=%d bufsize=%d class=%s",
+                request_id, info_kind, index, bufsize, kind_class,
+            )
+            reply_payload = _build_title_get_info_reply_payload(info_kind)
         elif selector in (
             MEDVIEW_SELECTOR_VA_CONVERT_HASH,
             MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
