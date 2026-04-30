@@ -276,6 +276,15 @@ def build_tagged_reply_var(tag, data):
     return bytes([tag]) + encode_reply_var_length(len(data)) + data
 
 
+def build_static_reply(*tagged_fields):
+    """Concatenate tagged primitive fields and append `0x87` end-static.
+
+    Used by selectors whose spec return is a static section with no
+    dynamic body — e.g. `0x83 <dword> 0x87`, `0x81 <byte> 0x83 <dword> 0x87`.
+    """
+    return b"".join(tagged_fields) + b"\x87"
+
+
 # --- Service Packet Assembly ---
 
 

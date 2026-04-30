@@ -37,6 +37,7 @@ from ..blackbird.wire import (
     build_kind5_raster,
     build_trailer,
     build_type0_status_record,
+    build_type3_op4_frame,
     case1_text_budget,
 )
 from ..config import (
@@ -81,6 +82,7 @@ from ..mpc import (
     build_discovery_payload,
     build_host_block,
     build_service_packet,
+    build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
     build_tagged_reply_var,
@@ -322,35 +324,45 @@ def _build_get_title_info_remote_reply(info_kind: int) -> bytes:
 
 
 # --------------------------------------------------------------------------
-# AddressHighlightService: type-3 op-4 frame (va conversion)
+# Cache-push dispatch
 # --------------------------------------------------------------------------
 
+# Maps async-cache selector → (notification subscription type, chunk builder).
+# Each builder takes (handler, title_slot, key) and returns
+# (chunk_bytes, channel_label_for_log).
+_PUSH_DISPATCH: dict[int, tuple[int, "callable"]] = {}
 
-def _build_type3_op4_frame(title_slot, kind, key, va, addr):
-    """Build a selector-0x17 type-3 op-code 4 cache-insert frame.
 
-    Spec §"Type 3 MixedAsyncStream / subtype 4 AddressConversionResult":
-        title_slot:u8, vaResult:u32, secondaryToken:u32, inputKey:u32
+def _push_case1_text(handler, title_slot, key):
+    text = handler._case1_text_for_key(key)
+    return build_case1_bf_chunk(text, title_slot, key), "type0_bf_case1"
 
-    Wire layout for the frame (consumed by MVTTL14C's
-    `NotificationType3_DispatchRecords` → `AddressConversionCache_Insert`):
-        +0x00 u16 op_code = 4
-        +0x02 u16 length  = 18
-        +0x04 u8  title_slot
-        +0x05 u8  kind     (0=topic→va+addr, 1=hash→va, 2=va→addr)
-        +0x06 u32 key      (input key being converted)
-        +0x0A u32 va       (va result)
-        +0x0E u32 addr     (secondary token / addr result)
-    """
-    payload = struct.pack(
-        "<BBIII",
-        title_slot & 0xFF,
-        kind & 0xFF,
-        key & 0xFFFFFFFF,
-        va & 0xFFFFFFFF,
-        addr & 0xFFFFFFFF,
+
+def _push_a5_status(handler, title_slot, key):
+    return (
+        build_type0_status_record(title_byte=title_slot, status=0, contents_token=key),
+        "type0_a5_status",
     )
-    return struct.pack("<HH", 4, 18) + payload
+
+
+def _push_type3_op4(kind: int):
+    def build(handler, title_slot, key):
+        topic = handler._topic_for_wire_key(key)
+        va = topic.address if topic else key
+        addr = topic.address if topic else key
+        log.info(
+            "type3_op4_resolve kind=%d key=0x%08x → va=0x%08x addr=0x%08x topic=%s",
+            kind, key, va, addr, topic.proxy_name if topic else "<unmatched>",
+        )
+        return build_type3_op4_frame(title_slot, kind, key, va=va, addr=addr), "type3_op4"
+    return build
+
+
+_PUSH_DISPATCH[MEDVIEW_FETCH_NEARBY_TOPIC] = (0, _push_case1_text)
+_PUSH_DISPATCH[MEDVIEW_FETCH_ADJACENT_TOPIC] = (0, _push_a5_status)
+_PUSH_DISPATCH[MEDVIEW_CONVERT_TOPIC_TO_VA] = (3, _push_type3_op4(0))
+_PUSH_DISPATCH[MEDVIEW_CONVERT_HASH_TO_VA] = (3, _push_type3_op4(1))
+_PUSH_DISPATCH[MEDVIEW_CONVERT_ADDRESS_TO_VA] = (3, _push_type3_op4(2))
 
 
 # --------------------------------------------------------------------------
@@ -373,8 +385,7 @@ class MEDVIEWHandler:
         # Notification subscription `(class, request_id)` keyed by type
         # 0–4 — captured at `SubscribeNotifications` and reused for
         # async pushes (type-0 0xBF chunks, type-3 op-4 frames).
-        self._sub_class: dict[int, int] = {}
-        self._sub_req_id: dict[int, int] = {}
+        self._subscriptions: dict[int, tuple[int, int]] = {}
         # Per-title mapping from `M14PayloadResult.topics` — populated
         # at OpenTitle, used by 0x05/0x06/0x07/0x15 cache pushes to ship
         # real va/addr/text instead of echo-key placeholders.
@@ -431,63 +442,20 @@ class MEDVIEWHandler:
     # --- Async cache push (selectors 0x05 / 0x06 / 0x07 / 0x15) ----
 
     def _build_cache_push_packet(self, title_slot, selector, key, server_seq, client_ack):
-        """Build a packet that pushes a cache-fill chunk on the right channel.
+        """Build the async cache-push packet for a cache-miss selector.
 
-        Selector → push channel + frame:
-          0x15 FetchNearbyTopic     → type-0, opcode 0xBF case-1 (text row)
-          0x05 ConvertAddressToVa   → type-3, op-code 4, kind 2 (va→addr)
-          0x06 ConvertHashToVa      → type-3, op-code 4, kind 1 (hash→va)
-          0x07 ConvertTopicToVa     → type-3, op-code 4, kind 0 (topic→va+addr)
-
-        Returns `None` when the matching subscription isn't open yet.
+        Per-selector subscription type and chunk shape live in
+        `_PUSH_DISPATCH`. Returns `None` when the matching subscription
+        isn't open yet or `selector` has no push handler.
         """
-        if selector == MEDVIEW_FETCH_NEARBY_TOPIC:
-            sub_class = self._sub_class.get(0)
-            sub_req_id = self._sub_req_id.get(0)
-            if sub_req_id is None:
-                return None
-            text = self._case1_text_for_key(key)
-            chunk = build_case1_bf_chunk(text, title_slot, key)
-            channel = "type0_bf_case1"
-        elif selector == MEDVIEW_FETCH_ADJACENT_TOPIC:
-            sub_class = self._sub_class.get(0)
-            sub_req_id = self._sub_req_id.get(0)
-            if sub_req_id is None:
-                return None
-            # No adjacent-topic lowering yet — push a 0xA5 status-only
-            # record keyed by (title_slot, key) so the 30 s wait loop
-            # in `HfcNextPrevHfc` short-circuits via cache match instead
-            # of timing out.
-            chunk = build_type0_status_record(
-                title_byte=title_slot, status=0, contents_token=key,
-            )
-            channel = "type0_a5_status"
-        elif selector in (
-            MEDVIEW_CONVERT_ADDRESS_TO_VA,
-            MEDVIEW_CONVERT_HASH_TO_VA,
-            MEDVIEW_CONVERT_TOPIC_TO_VA,
-        ):
-            sub_class = self._sub_class.get(3)
-            sub_req_id = self._sub_req_id.get(3)
-            if sub_req_id is None:
-                return None
-            kind = {
-                MEDVIEW_CONVERT_TOPIC_TO_VA: 0,
-                MEDVIEW_CONVERT_HASH_TO_VA: 1,
-                MEDVIEW_CONVERT_ADDRESS_TO_VA: 2,
-            }[selector]
-            topic = self._topic_for_wire_key(key)
-            va = topic.address if topic else key
-            addr = topic.address if topic else key
-            chunk = _build_type3_op4_frame(title_slot, kind, key, va=va, addr=addr)
-            channel = "type3_op4"
-            log.info(
-                "type3_op4_resolve selector=0x%02x key=0x%08x → va=0x%08x addr=0x%08x topic=%s",
-                selector, key, va, addr,
-                topic.proxy_name if topic else "<unmatched>",
-            )
-        else:
+        sub_type, builder = _PUSH_DISPATCH.get(selector, (None, None))
+        if builder is None:
             return None
+        sub = self._subscriptions.get(sub_type)
+        if sub is None:
+            return None
+        sub_class, sub_req_id = sub
+        chunk, channel = builder(self, title_slot, key)
         # 0x85 chunk tag + raw chunk bytes — MPCCL parses 0x85 as a
         # dynamic-recv chunk on the matching subscription iterator.
         push_payload = bytes([0x85]) + chunk
@@ -514,20 +482,10 @@ class MEDVIEWHandler:
             )
             return None
 
-        # Cache-miss group — these run an ack reply followed by an
-        # async cache push on the matching subscription channel. The
-        # client's recv loop completes on the synchronous ack; the push
-        # arrives later as a dynamic-recv chunk.
-        #   - 0x05/0x06/0x07 → type-3 op-4 frame (va conversion)
-        #   - 0x15           → type-0 0xBF case-1 chunk (topic body)
-        #   - 0x16           → type-0 0xA5 status record (no adjacent)
-        if selector in (
-            MEDVIEW_CONVERT_ADDRESS_TO_VA,
-            MEDVIEW_CONVERT_HASH_TO_VA,
-            MEDVIEW_CONVERT_TOPIC_TO_VA,
-            MEDVIEW_FETCH_NEARBY_TOPIC,
-            MEDVIEW_FETCH_ADJACENT_TOPIC,
-        ):
+        # Cache-miss group: ack synchronously, push async on the
+        # matching subscription. Per-selector chunk shape lives in
+        # `_PUSH_DISPATCH`.
+        if selector in _PUSH_DISPATCH:
             return self._handle_cache_miss(
                 msg_class, selector, request_id, payload, server_seq, client_ack,
             )
@@ -616,7 +574,7 @@ class MEDVIEWHandler:
         zero triggers "Handshake validation failed" MessageBox + detach.
         Static-only reply, no dynamic section."""
         log.info("attach_session req_id=%d payload=%s", request_id, payload.hex())
-        return build_tagged_reply_dword(1) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_dword(1))
 
     def _handle_subscribe_notifications(self, msg_class, request_id, payload) -> bytes:
         """`SubscribeNotifications.notificationStream` — long-lived
@@ -630,8 +588,7 @@ class MEDVIEWHandler:
             request_id, notification_type, payload.hex(),
         )
         if notification_type is not None:
-            self._sub_class[notification_type] = msg_class
-            self._sub_req_id[notification_type] = request_id
+            self._subscriptions[notification_type] = (msg_class, request_id)
         return _stream_end()
 
     def _handle_unsubscribe_notifications(self, request_id, payload) -> bytes:
@@ -642,8 +599,7 @@ class MEDVIEWHandler:
             request_id, notification_type, payload.hex(),
         )
         if notification_type is not None:
-            self._sub_class.pop(notification_type, None)
-            self._sub_req_id.pop(notification_type, None)
+            self._subscriptions.pop(notification_type, None)
         return _ack()
 
     # --- TitleService ----------------------------------------------
@@ -660,7 +616,7 @@ class MEDVIEWHandler:
             "validate_title req_id=%d slot=%r is_valid=%d",
             request_id, slot, is_valid,
         )
-        return build_tagged_reply_byte(is_valid) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_byte(is_valid))
 
     def _handle_open_title(self, request_id, payload) -> bytes:
         """`OpenTitle` static section + `payloadBlob` dynbytes.
@@ -743,18 +699,10 @@ class MEDVIEWHandler:
         return _dynamic_complete(static, b"")
 
     def _handle_pre_notify_title(self, request_id, payload) -> bytes:
-        """`PreNotifyTitle.status : i32`. Spec §0x1E: `0` = queued and
-        transport-acked, `0xFFFFFFFF` = setup or send failure. We reply
-        `0` for every wire-bound opcode — local-only opcodes (0x09,
-        0x0B, 0x0C, 0x0F) are absorbed by the client wrapper and never
-        reach the wire.
-
-        Heartbeat note: opcode `0x08` SendClientStatus (spec §0x08) is
-        the keepalive pulse the engine fires every >5 s while async
-        wait loops are active — `MVTTL14C!FUN_7e8440ab` sends one byte
-        from the current tick-count dword. We just ack with status=0;
-        the wrapper expects no recv-side fields beyond the dword.
-        """
+        """`PreNotifyTitle.status : i32`. `0` = queued+acked,
+        `0xFFFFFFFF` = setup/send failure. Local-only opcodes
+        (0x09/0x0B/0x0C/0x0F) are absorbed by the client wrapper and
+        never reach the wire."""
         send_params, _ = parse_request_params(payload)
         opcode = next(
             (p.value for p in send_params if getattr(p, "tag", None) == 0x02),
@@ -764,7 +712,7 @@ class MEDVIEWHandler:
             "pre_notify_title req_id=%d opcode=%r payload_len=%d payload=%s",
             request_id, opcode, len(payload), payload.hex(),
         )
-        return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_dword(0))
 
     # --- WordWheelService ------------------------------------------
 
@@ -772,26 +720,25 @@ class MEDVIEWHandler:
         """`OpenWordWheel.wordWheelId:u8, itemCount:u32`. Empty wheel
         (no word-wheel index synthesized today)."""
         log.info("open_word_wheel req_id=%d payload=%s", request_id, payload.hex())
-        return (
-            build_tagged_reply_byte(0)        # wordWheelId = 0 (no wheel)
-            + build_tagged_reply_dword(0)     # itemCount  = 0
-            + bytes([TAG_END_STATIC])
+        return build_static_reply(
+            build_tagged_reply_byte(0),       # wordWheelId
+            build_tagged_reply_dword(0),      # itemCount
         )
 
     def _handle_query_word_wheel(self, request_id, payload) -> bytes:
         """`QueryWordWheel.status : u16`."""
         log.info("query_word_wheel req_id=%d payload=%s", request_id, payload.hex())
-        return build_tagged_reply_word(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_word(0))
 
     def _handle_resolve_word_wheel_prefix(self, request_id, payload) -> bytes:
         """`ResolveWordWheelPrefix.prefixResult : u32`."""
         log.info("resolve_word_wheel_prefix req_id=%d payload=%s", request_id, payload.hex())
-        return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_dword(0))
 
     def _handle_count_key_matches(self, request_id, payload) -> bytes:
         """`CountKeyMatches.matchCount : u16`."""
         log.info("count_key_matches req_id=%d payload=%s", request_id, payload.hex())
-        return build_tagged_reply_word(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_word(0))
 
     def _handle_read_key_addresses(self, request_id, payload) -> bytes:
         """`ReadKeyAddresses.addressList : dynbytes`. Empty result."""
@@ -801,7 +748,7 @@ class MEDVIEWHandler:
     def _handle_set_key_count_hint(self, request_id, payload) -> bytes:
         """`SetKeyCountHint.success : u8`. Zero = no-op."""
         log.info("set_key_count_hint req_id=%d payload=%s", request_id, payload.hex())
-        return build_tagged_reply_byte(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_byte(0))
 
     # --- AddressHighlightService -----------------------------------
 
@@ -820,7 +767,7 @@ class MEDVIEWHandler:
         """`FindHighlightAddress.addressToken : u32`. No highlight
         session — return zero."""
         log.info("find_highlight_address req_id=%d payload=%s", request_id, payload.hex())
-        return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_dword(0))
 
     # --- RemoteFileService -----------------------------------------
 
@@ -871,14 +818,14 @@ class MEDVIEWHandler:
             end = min(offset + count, len(_BM0_CONTAINER))
             chunk = _BM0_CONTAINER[offset:end]
             return _dynamic_complete(build_tagged_reply_byte(0), chunk)
-        return build_tagged_reply_byte(0xFF) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_byte(0xFF))
 
     def _handle_get_remote_fs_error(self, request_id, payload) -> bytes:
         """`GetRemoteFsError.fsError : u16`. Spec: wrapper initialises
         to `8` before request and keeps that on setup failure. Returning
         `0` means "no error" — the wrapper overwrites its initial 8."""
         log.info("get_remote_fs_error req_id=%d", request_id)
-        return build_tagged_reply_word(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_word(0))
 
     # --- Shared cache-miss handler (selectors 0x05 / 0x06 / 0x07 / 0x15) ---
 
@@ -891,10 +838,9 @@ class MEDVIEWHandler:
         """
         title_slot, key = _extract_cache_miss_args(payload)
         log.info(
-            "cache_miss_rpc selector=0x%02x req_id=%d title_slot=%r key=%s payload=%s",
+            "cache_miss_rpc selector=0x%02x req_id=%d title_slot=%r key=%s",
             selector, request_id, title_slot,
             f"0x{key:08x}" if key is not None else None,
-            payload.hex(),
         )
         host_block = build_host_block(msg_class, selector, request_id, _ack())
         reply_pkts = build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)

@@ -2116,14 +2116,14 @@ class TestMEDVIEWSessionService(unittest.TestCase):
         # First subscribe to type 0 so there's state to drop.
         sub_payload = bytes.fromhex("01 00 85")
         handler.handle_request(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 1, sub_payload, 5, 5)
-        self.assertIn(0, handler._sub_req_id)
+        self.assertIn(0, handler._subscriptions)
         # Then unsubscribe.
         unsub_payload = bytes.fromhex("01 00")
         pkts = handler.handle_request(0x01, MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS, 2, unsub_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
-        self.assertNotIn(0, handler._sub_req_id)
+        self.assertNotIn(0, handler._subscriptions)
 
 
 class TestMEDVIEWRemoteFsError(unittest.TestCase):

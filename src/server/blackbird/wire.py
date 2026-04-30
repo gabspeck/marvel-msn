@@ -309,6 +309,34 @@ def build_type0_status_record(title_byte: int, status: int, contents_token: int)
     return struct.pack("<BBHI", 0xA5, title_byte & 0xFF, status & 0xFFFF, contents_token & 0xFFFFFFFF)
 
 
+def build_type3_op4_frame(title_byte: int, kind: int, key: int, va: int, addr: int) -> bytes:
+    """Build a type-3 op-code 4 cache-insert frame (18 bytes).
+
+    Pushed on the type-3 notification subscription in response to
+    selectors 0x05 (`vaConvertAddr`) / 0x06 (`vaConvertHash`) /
+    0x07 (`vaConvertTopicNumber`). Layout per
+    `docs/medview-service-contract.md` §"Type 3 MixedAsyncStream /
+    subtype 4 AddressConversionResult":
+
+        +0x00 u16 op_code = 4
+        +0x02 u16 length  = 18
+        +0x04 u8  title_byte
+        +0x05 u8  kind     (0=topic→va+addr, 1=hash→va, 2=va→addr)
+        +0x06 u32 key      (input key being converted)
+        +0x0A u32 va       (va result)
+        +0x0E u32 addr     (secondary token / addr result)
+    """
+    return struct.pack(
+        "<HHBBIII",
+        4, 18,
+        title_byte & 0xFF,
+        kind & 0xFF,
+        key & 0xFFFFFFFF,
+        va & 0xFFFFFFFF,
+        addr & 0xFFFFFFFF,
+    )
+
+
 def encode_null_tlv() -> bytes:
     """Encode the minimum-viable TLV: length=0, presence bitmap=0.
 
