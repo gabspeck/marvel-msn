@@ -1807,6 +1807,42 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             self.assertEqual(reply, bytes([TAG_END_STATIC]),
                              f"selector 0x{selector:02x} ack mismatch")
 
+    def test_fetch_adjacent_topic_acks_then_pushes_a5_status(self):
+        # Spec §0x16 (post-update): selector 0x16 is async-refresh —
+        # synchronous reply is just an ack, the actual content arrives
+        # via notification type 0. We push a 0xA5 HfcStatusRecord
+        # keyed by (title_slot, current_token) so the engine's 30 s
+        # wait loop short-circuits via cache match.
+        from server.config import (
+            MEDVIEW_FETCH_ADJACENT_TOPIC,
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+        )
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # Open a type-0 subscription so the push has a destination.
+        handler.handle_request(
+            0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 1, bytes.fromhex("01 00 85"), 5, 5,
+        )
+        # FetchAdjacentTopic request: title_slot=1, current_token=0,
+        # direction=0.
+        req_payload = bytes.fromhex("01 01 03 00 00 00 00 01 00")
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_FETCH_ADJACENT_TOPIC, 11, req_payload, 5, 5,
+        )
+        self.assertIsNotNone(pkts)
+        # Two packets: ack reply + async push frame.
+        self.assertGreaterEqual(len(pkts), 2)
+        # First packet: bare ack.
+        sync_reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(sync_reply, bytes([TAG_END_STATIC]))
+        # Second packet: type-0 push carrying 0x85 + 0xA5 record.
+        push_payload = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push_payload[0], 0x85)  # MPCCL chunk tag
+        # 0xA5 HfcStatusRecord layout: u8 0xA5, u8 title_byte, u16 status, u32 contents_token
+        self.assertEqual(push_payload[1], 0xA5)
+        self.assertEqual(push_payload[2], 0x01)  # title_byte = title_slot
+        self.assertEqual(struct.unpack("<H", push_payload[3:5])[0], 0)         # status
+        self.assertEqual(struct.unpack("<I", push_payload[5:9])[0], 0)         # contents_token
+
     def test_load_topic_highlights_returns_empty_dynbytes(self):
         # Selector 0x10 (LoadTopicHighlights) returns synchronous
         # `dynbytes` per spec — NOT ack-only like the async-cache trio
@@ -1830,7 +1866,10 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
 
 
 class TestMEDVIEWTitlePreNotify(unittest.TestCase):
-    def test_pre_notify_reply_is_end_static_only(self):
+    def test_pre_notify_reply_ships_status_dword(self):
+        # Spec §0x1E (post-update): `PreNotifyTitle` returns
+        # `status:i32` = 0 for queued+acked. Wire bytes:
+        # 0x83 <dword=0> 0x87.
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Request: 0x01 0x00, 0x02 0x0a 0x00 (opcode=10), 0x04 with 6 bytes.
         req_payload = bytes.fromhex("01 00 02 0a 00 04 86 00 00 00 00 00 00")
@@ -1838,10 +1877,26 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
-        body = parsed.payload
-        reply = body[8:]
-        # Single 0x87 end-static, nothing else.
-        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+        reply = parsed.payload[8:]
+        self.assertEqual(reply[0], 0x83)
+        self.assertEqual(struct.unpack("<I", reply[1:5])[0], 0)
+        self.assertEqual(reply[5], TAG_END_STATIC)
+
+    def test_opcode_8_heartbeat_returns_status_zero(self):
+        # Opcode 0x08 SendClientStatus per spec is the keepalive pulse
+        # MVTTL14C fires every >5s while async wait loops are active.
+        # Same i32 status reply as any other wire-bound opcode.
+        # (Use a small req_id so the VLI-encoded request_id fits in 1
+        # byte — the `[8:]` slice assumes that.)
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # Request: 0x01 0x01, 0x02 0x08 0x00 (opcode=8), 0x04 0x81 0x91 (1-byte heartbeat).
+        req_payload = bytes.fromhex("01 01 02 08 00 04 81 91")
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY, 7, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply[0], 0x83)
+        self.assertEqual(struct.unpack("<I", reply[1:5])[0], 0)
+        self.assertEqual(reply[5], TAG_END_STATIC)
 
 
 class TestMEDVIEWSubscribeNotification(unittest.TestCase):

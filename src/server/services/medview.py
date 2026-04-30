@@ -36,6 +36,7 @@ from ..blackbird.wire import (
     build_case1_bf_chunk,
     build_kind5_raster,
     build_trailer,
+    build_type0_status_record,
     case1_text_budget,
 )
 from ..config import (
@@ -448,6 +449,19 @@ class MEDVIEWHandler:
             text = self._case1_text_for_key(key)
             chunk = build_case1_bf_chunk(text, title_slot, key)
             channel = "type0_bf_case1"
+        elif selector == MEDVIEW_FETCH_ADJACENT_TOPIC:
+            sub_class = self._sub_class.get(0)
+            sub_req_id = self._sub_req_id.get(0)
+            if sub_req_id is None:
+                return None
+            # No adjacent-topic lowering yet — push a 0xA5 status-only
+            # record keyed by (title_slot, key) so the 30 s wait loop
+            # in `HfcNextPrevHfc` short-circuits via cache match instead
+            # of timing out.
+            chunk = build_type0_status_record(
+                title_byte=title_slot, status=0, contents_token=key,
+            )
+            channel = "type0_a5_status"
         elif selector in (
             MEDVIEW_CONVERT_ADDRESS_TO_VA,
             MEDVIEW_CONVERT_HASH_TO_VA,
@@ -504,11 +518,15 @@ class MEDVIEWHandler:
         # async cache push on the matching subscription channel. The
         # client's recv loop completes on the synchronous ack; the push
         # arrives later as a dynamic-recv chunk.
+        #   - 0x05/0x06/0x07 → type-3 op-4 frame (va conversion)
+        #   - 0x15           → type-0 0xBF case-1 chunk (topic body)
+        #   - 0x16           → type-0 0xA5 status record (no adjacent)
         if selector in (
             MEDVIEW_CONVERT_ADDRESS_TO_VA,
             MEDVIEW_CONVERT_HASH_TO_VA,
             MEDVIEW_CONVERT_TOPIC_TO_VA,
             MEDVIEW_FETCH_NEARBY_TOPIC,
+            MEDVIEW_FETCH_ADJACENT_TOPIC,
         ):
             return self._handle_cache_miss(
                 msg_class, selector, request_id, payload, server_seq, client_ack,
@@ -576,9 +594,8 @@ class MEDVIEWHandler:
         if selector == MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS:
             return _ack()  # actual result would push via type-2 — we don't push
 
-        # TopicCacheService synchronous (0x15 is async via cache-miss)
-        if selector == MEDVIEW_FETCH_ADJACENT_TOPIC:
-            return self._handle_fetch_adjacent_topic(request_id, payload)
+        # TopicCacheService — both 0x15 and 0x16 are routed through
+        # the cache-miss group above (ack + async push); no sync handler.
 
         # RemoteFileService
         if selector == MEDVIEW_OPEN_REMOTE_HFS_FILE:
@@ -726,10 +743,18 @@ class MEDVIEWHandler:
         return _dynamic_complete(static, b"")
 
     def _handle_pre_notify_title(self, request_id, payload) -> bytes:
-        """`PreNotifyTitle.ack`. Local-only opcodes (0x09, 0x0B, 0x0C,
-        0x0F per spec §`PreNotifyTitleOpcode`) are absorbed by the
-        client wrapper and never reach the wire — anything we receive
-        here is a remote-bound opcode and gets a bare ack."""
+        """`PreNotifyTitle.status : i32`. Spec §0x1E: `0` = queued and
+        transport-acked, `0xFFFFFFFF` = setup or send failure. We reply
+        `0` for every wire-bound opcode — local-only opcodes (0x09,
+        0x0B, 0x0C, 0x0F) are absorbed by the client wrapper and never
+        reach the wire.
+
+        Heartbeat note: opcode `0x08` SendClientStatus (spec §0x08) is
+        the keepalive pulse the engine fires every >5 s while async
+        wait loops are active — `MVTTL14C!FUN_7e8440ab` sends one byte
+        from the current tick-count dword. We just ack with status=0;
+        the wrapper expects no recv-side fields beyond the dword.
+        """
         send_params, _ = parse_request_params(payload)
         opcode = next(
             (p.value for p in send_params if getattr(p, "tag", None) == 0x02),
@@ -739,7 +764,7 @@ class MEDVIEWHandler:
             "pre_notify_title req_id=%d opcode=%r payload_len=%d payload=%s",
             request_id, opcode, len(payload), payload.hex(),
         )
-        return _ack()
+        return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
 
     # --- WordWheelService ------------------------------------------
 
@@ -796,18 +821,6 @@ class MEDVIEWHandler:
         session — return zero."""
         log.info("find_highlight_address req_id=%d payload=%s", request_id, payload.hex())
         return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
-
-    # --- TopicCacheService synchronous -----------------------------
-
-    def _handle_fetch_adjacent_topic(self, request_id, payload) -> bytes:
-        """`FetchAdjacentTopic.ack` (real result via type-0 push, which
-        we don't push for adjacency yet — the engine retries internally
-        ~6× and falls back to its in-cache entries)."""
-        log.info(
-            "fetch_adjacent_topic req_id=%d payload_len=%d payload=%s",
-            request_id, len(payload), payload.hex(),
-        )
-        return _ack()
 
     # --- RemoteFileService -----------------------------------------
 

@@ -22,6 +22,7 @@ from src.server.blackbird.wire import (
     decode_case1_tlv,
     encode_byte_or_ushort_varint,
     encode_case1_preamble,
+    build_type0_status_record,
     encode_null_tlv,
     encode_text_item_tlv,
     encode_signed_int_varint,
@@ -405,6 +406,33 @@ class TestTextItemTlvEncoder(unittest.TestCase):
     def test_inline_run_count_nonzero_not_implemented(self):
         with self.assertRaises(NotImplementedError):
             encode_text_item_tlv({0x27: 1})
+
+
+class TestType0StatusRecord(unittest.TestCase):
+    """`0xA5` HfcStatusRecord on the type-0 subscription channel.
+
+    Layout per `docs/mosview-mediaview-format.md` "Type 0
+    TopicCacheStream": `u8 0xa5, u8 title_byte, u16 status, u32 contents_token`.
+    """
+
+    def test_record_is_eight_bytes(self):
+        rec = build_type0_status_record(title_byte=1, status=0, contents_token=0)
+        self.assertEqual(len(rec), 8)
+
+    def test_layout_matches_spec(self):
+        rec = build_type0_status_record(
+            title_byte=0x42, status=0xCAFE, contents_token=0xDEADBEEF,
+        )
+        self.assertEqual(rec[0], 0xA5)                   # opcode
+        self.assertEqual(rec[1], 0x42)                   # title_byte
+        self.assertEqual(rec[2:4], bytes.fromhex("feca"))    # status u16 LE
+        self.assertEqual(rec[4:8], bytes.fromhex("efbeadde"))  # contents_token u32 LE
+
+    def test_zero_status_for_empty_no_data(self):
+        # Used by `MEDVIEW.FetchAdjacentTopic` to short-circuit the
+        # 30 s wait loop when no adjacent body is available.
+        rec = build_type0_status_record(title_byte=1, status=0, contents_token=0x1000)
+        self.assertEqual(rec, bytes.fromhex("a501000000100000"))
 
 
 class TestCase1BfChunkLegacy0x40(unittest.TestCase):

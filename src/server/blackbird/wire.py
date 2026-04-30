@@ -286,6 +286,29 @@ def encode_case1_preamble(length_value: int, type_tag: int = 0x01) -> bytes:
     return bytes([type_tag]) + encode_signed_int_varint(length_value)
 
 
+def build_type0_status_record(title_byte: int, status: int, contents_token: int) -> bytes:
+    """Build a type-0 `0xa5` HfcStatusRecord (8 bytes, no payload).
+
+    Pushed on the type-0 notification subscription as a status-only
+    response to selector 0x16 (`HfcNextPrevHfc`) when no adjacent topic
+    body is available. Layout per `docs/mosview-mediaview-format.md`
+    "Type 0 TopicCacheStream":
+
+        +0x00 u8  0xa5                  record opcode
+        +0x01 u8  title_byte            cache key (title slot)
+        +0x02 u16 status                opaque status word
+        +0x04 u32 contents_token        cache key (request's current_token)
+
+    Status semantics aren't pinned in the doc — `0` is treated as
+    success-but-empty by the recovered code path; `0xffff` would be
+    interpreted as "no data" by the wrappers' fail-on-zero patterns.
+    The cache entry is keyed by `(title_byte, contents_token)` so the
+    client's `HfcNextPrevHfc` retry loop can match the request and
+    short-circuit instead of polling the full 30 s timeout.
+    """
+    return struct.pack("<BBHI", 0xA5, title_byte & 0xFF, status & 0xFFFF, contents_token & 0xFFFFFFFF)
+
+
 def encode_null_tlv() -> bytes:
     """Encode the minimum-viable TLV: length=0, presence bitmap=0.
 

@@ -184,7 +184,8 @@ Parameters:
 - `notifyPayload: dynbytes`. Opcode-specific payload.
 
 Returns:
-- `ack`. For wire-reaching opcodes.
+- `status: i32`. For wire-reaching opcodes, `0` means the request was queued
+  and transport-acked; `0xffffffff` means setup or send failure.
 - local result. For local-only opcodes such as `PictureControl` and
   `GetLayoutCookie`.
 
@@ -691,6 +692,28 @@ Parameters:
 Returns:
 - rewritten local path. The stock wrapper repacks the surviving entries into
   opcode `0x04`.
+
+### Opcode `0x08` `SendClientStatus`
+
+Purpose: send an opaque client-status / keepalive blob through
+`PreNotifyTitle`.
+
+Parameters:
+- `notifyPayload: dynbytes`.
+
+Observed stock payload forms:
+- `heartbeatByte: u8`. `MVTTL14C!FUN_7e8440ab` sends one byte every
+  `>5s` while async wait loops are active. The byte is copied from the current
+  tick-count dword and acts as a changing keepalive pulse.
+- `statusCode: u8`, `diagnosticText: cstring`. `MOSVIEW.EXE` uses this shape on
+  the title-start failure path. The recovered stock value is `statusCode=1`
+  with text of the form
+  `"The title Appid=%d, deid %X%8X, info='%s' would not start."`
+
+Returns:
+- `status: i32`. `0` on queued/acked send, `0xffffffff` on setup failure.
+- no dynamic reply payload. `MVTTL14C!TitlePreNotify` binds no recv-side fields
+  for this opcode.
 
 ### Opcode `0x09` `SetLayoutCookie`
 
