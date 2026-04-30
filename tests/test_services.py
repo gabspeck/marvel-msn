@@ -1783,18 +1783,20 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
 
 
 class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
-    def test_cache_miss_selectors_reply_with_end_static_only(self):
-        # Selectors 0x06/0x07/0x10/0x15 share the same wire shape and
-        # the same ack-only reply contract — `0x87` end-static.  The
-        # retry loop in the caller treats non-negative HRESULT as
-        # "ack, retry cache".  Real cache fill flows through selector
-        # 0x17 type-3 async pushes (out of scope here).
+    def test_async_cache_miss_selectors_ack_then_push(self):
+        # Selectors 0x06 (ConvertHashToVa) / 0x07 (ConvertTopicToVa) /
+        # 0x15 (FetchNearbyTopic) share the ack-only synchronous reply
+        # contract per `docs/medview-service-contract.md`. The real
+        # answer arrives later through the matching subscription's
+        # async push (type-3 op-4 frame for 0x06/0x07; type-0 0xBF
+        # chunk for 0x15) — but only when a subscription has been
+        # opened. With no subscription state on a fresh handler, the
+        # synchronous reply is bare `0x87`.
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         for selector in (
             MEDVIEW_SELECTOR_VA_CONVERT_HASH,
             MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
-            MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
             MEDVIEW_SELECTOR_VA_RESOLVE,
         ):
             pkts = handler.handle_request(0x01, selector, 9, req_payload, 5, 5)
@@ -1802,7 +1804,29 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             parsed = parse_packet(pkts[0][:-1])
             self.assertTrue(parsed.crc_ok)
             reply = parsed.payload[8:]
-            self.assertEqual(reply, bytes([TAG_END_STATIC]))
+            self.assertEqual(reply, bytes([TAG_END_STATIC]),
+                             f"selector 0x{selector:02x} ack mismatch")
+
+    def test_load_topic_highlights_returns_empty_dynbytes(self):
+        # Selector 0x10 (LoadTopicHighlights) returns synchronous
+        # `dynbytes` per spec — NOT ack-only like the async-cache trio
+        # above. Empty result = 8-byte opaque header + zero highlight
+        # count = 12 bytes total. Static section: bare `0x87 0x86`
+        # (no leading scalar) so the recv loop knows the dynamic body
+        # follows.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 01 03 be ba fe ca")
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC, 9, req_payload, 5, 5,
+        )
+        self.assertIsNotNone(pkts)
+        parsed = parse_packet(pkts[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        reply = parsed.payload[8:]
+        # `0x87 0x86 <12 zero bytes>`
+        self.assertEqual(reply[0], TAG_END_STATIC)
+        self.assertEqual(reply[1], TAG_DYNAMIC_COMPLETE_SIGNAL)
+        self.assertEqual(reply[2:14], b"\x00" * 12)
 
 
 class TestMEDVIEWTitlePreNotify(unittest.TestCase):
@@ -1855,6 +1879,210 @@ class TestMEDVIEWOneway(unittest.TestCase):
         # class=0xE6 → one-way continuation, no reply expected.
         pkt = handler.handle_request(0xE6, 0x01, 0, b"\x00" * 16, 5, 5)
         self.assertIsNone(pkt)
+
+
+class TestMEDVIEWTitleService(unittest.TestCase):
+    """Spec class TitleService — selectors 0x00, 0x02, 0x04 (excludes
+    0x01 OpenTitle and 0x03 GetTitleInfoRemote, which have dedicated
+    test classes above)."""
+
+    def _open_title(self, handler):
+        # Drives the handler through a successful OpenTitle so the slot
+        # is registered for ValidateTitle / CloseTitle assertions.
+        req = (
+            b"\x04\x87:2[4]0\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x81\x81\x83\x83\x83\x83\x83"
+        )
+        from server.config import MEDVIEW_OPEN_TITLE
+        handler.handle_request(0x01, MEDVIEW_OPEN_TITLE, 1, req, 5, 5)
+
+    def test_validate_title_returns_zero_when_no_title_open(self):
+        from server.config import MEDVIEW_VALIDATE_TITLE
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 01 81")
+        pkts = handler.handle_request(0x01, MEDVIEW_VALIDATE_TITLE, 1, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        # 0x81 <byte=0> 0x87
+        self.assertEqual(reply, bytes([0x81, 0x00, TAG_END_STATIC]))
+
+    def test_validate_title_returns_nonzero_after_open(self):
+        from server.config import MEDVIEW_VALIDATE_TITLE
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._open_title(handler)
+        req_payload = bytes.fromhex("01 01 81")
+        pkts = handler.handle_request(0x01, MEDVIEW_VALIDATE_TITLE, 2, req_payload, 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply[0], 0x81)
+        self.assertEqual(reply[1], 0x01)  # is_valid != 0
+        self.assertEqual(reply[2], TAG_END_STATIC)
+
+    def test_close_title_acks(self):
+        from server.config import MEDVIEW_CLOSE_TITLE
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._open_title(handler)
+        req_payload = bytes.fromhex("01 01")
+        pkts = handler.handle_request(0x01, MEDVIEW_CLOSE_TITLE, 3, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+    def test_close_title_drops_per_title_state(self):
+        from server.config import MEDVIEW_CLOSE_TITLE
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._open_title(handler)
+        self.assertGreater(len(handler.topics), 0)
+        req_payload = bytes.fromhex("01 01")
+        handler.handle_request(0x01, MEDVIEW_CLOSE_TITLE, 3, req_payload, 5, 5)
+        self.assertEqual(handler.topics, ())
+        self.assertEqual(handler.title_caption, "")
+
+    def test_query_topics_returns_empty_session(self):
+        from server.config import MEDVIEW_QUERY_TOPICS
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # Minimal request: titleSlot, queryClass, primaryText, queryFlags=0,
+        # queryMode. We only care that the handler survives and emits the
+        # documented static fields.
+        req_payload = bytes.fromhex("01 01") + bytes.fromhex("02 00 00") + b"\x04\x82query\x00" + bytes.fromhex("01 00") + bytes.fromhex("02 00 00")
+        pkts = handler.handle_request(0x01, MEDVIEW_QUERY_TOPICS, 4, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        # 0x81 <highlightContext=0> 0x83 <logicalCount=0> 0x83 <secondary=0> 0x87 0x86
+        self.assertEqual(reply[0], 0x81)
+        self.assertEqual(reply[1], 0x00)
+        self.assertEqual(reply[2], 0x83)
+        self.assertEqual(struct.unpack("<I", reply[3:7])[0], 0)
+        self.assertEqual(reply[7], 0x83)
+        self.assertEqual(struct.unpack("<I", reply[8:12])[0], 0)
+        self.assertEqual(reply[12], TAG_END_STATIC)
+        self.assertEqual(reply[13], TAG_DYNAMIC_COMPLETE_SIGNAL)
+
+
+class TestMEDVIEWWordWheelService(unittest.TestCase):
+    """Spec class WordWheelService — selectors 0x08–0x0F. No word wheel
+    is synthesized today; replies are empty/zero-result shapes that
+    let the wrapper's recv loop decode cleanly."""
+
+    def test_open_word_wheel_empty_session(self):
+        from server.config import MEDVIEW_OPEN_WORD_WHEEL
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 01") + b"\x04\x82wheel\x00" + bytes.fromhex("81 83")
+        pkts = handler.handle_request(0x01, MEDVIEW_OPEN_WORD_WHEEL, 1, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        # 0x81 <wheel_id=0> 0x83 <count=0> 0x87
+        self.assertEqual(reply[0], 0x81)
+        self.assertEqual(reply[1], 0x00)
+        self.assertEqual(reply[2], 0x83)
+        self.assertEqual(struct.unpack("<I", reply[3:7])[0], 0)
+        self.assertEqual(reply[7], TAG_END_STATIC)
+
+    def test_query_word_wheel_zero_status(self):
+        from server.config import MEDVIEW_QUERY_WORD_WHEEL
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 01 02 00 00") + b"\x04\x81q\x00" + bytes.fromhex("82")
+        pkts = handler.handle_request(0x01, MEDVIEW_QUERY_WORD_WHEEL, 1, req_payload, 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        # 0x82 <word=0> 0x87
+        self.assertEqual(reply[0], 0x82)
+        self.assertEqual(struct.unpack("<H", reply[1:3])[0], 0)
+        self.assertEqual(reply[3], TAG_END_STATIC)
+
+    def test_close_word_wheel_acks(self):
+        from server.config import MEDVIEW_CLOSE_WORD_WHEEL
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        pkts = handler.handle_request(0x01, MEDVIEW_CLOSE_WORD_WHEEL, 1, bytes.fromhex("01 00"), 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+    def test_count_key_matches_zero(self):
+        from server.config import MEDVIEW_COUNT_KEY_MATCHES
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 00") + b"\x04\x81k\x00" + bytes.fromhex("82")
+        pkts = handler.handle_request(0x01, MEDVIEW_COUNT_KEY_MATCHES, 1, req_payload, 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply[0], 0x82)
+        self.assertEqual(struct.unpack("<H", reply[1:3])[0], 0)
+
+
+class TestMEDVIEWAddressHighlightService(unittest.TestCase):
+    """Spec class AddressHighlightService — selectors 0x05, 0x11, 0x12,
+    0x13 (excludes 0x06/0x07 cache-miss async + 0x10 highlight blob,
+    covered above)."""
+
+    def test_convert_address_to_va_acks_then_pushes(self):
+        from server.config import MEDVIEW_CONVERT_ADDRESS_TO_VA
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 01 03 be ba fe ca")
+        pkts = handler.handle_request(0x01, MEDVIEW_CONVERT_ADDRESS_TO_VA, 1, req_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+    def test_find_highlight_address_zero(self):
+        from server.config import MEDVIEW_FIND_HIGHLIGHT_ADDRESS
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 00 03 11 11 11 11 03 22 22 22 22")
+        pkts = handler.handle_request(0x01, MEDVIEW_FIND_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply[0], 0x83)
+        self.assertEqual(struct.unpack("<I", reply[1:5])[0], 0)
+        self.assertEqual(reply[5], TAG_END_STATIC)
+
+    def test_release_highlight_context_acks(self):
+        from server.config import MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        pkts = handler.handle_request(0x01, MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT, 1, bytes.fromhex("01 01"), 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+    def test_refresh_highlight_address_acks(self):
+        from server.config import MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        req_payload = bytes.fromhex("01 01 03 01 00 00 00")
+        pkts = handler.handle_request(0x01, MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+
+
+class TestMEDVIEWSessionService(unittest.TestCase):
+    """Spec class SessionService — selectors 0x17, 0x18, 0x1F. The
+    existing TestMEDVIEWHandshake / TestMEDVIEWSubscribeNotification
+    cover 0x1F and 0x17; this class covers the new 0x18."""
+
+    def test_unsubscribe_acks_and_drops_state(self):
+        from server.config import (
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS,
+        )
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # First subscribe to type 0 so there's state to drop.
+        sub_payload = bytes.fromhex("01 00 85")
+        handler.handle_request(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 1, sub_payload, 5, 5)
+        self.assertIn(0, handler._sub_req_id)
+        # Then unsubscribe.
+        unsub_payload = bytes.fromhex("01 00")
+        pkts = handler.handle_request(0x01, MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS, 2, unsub_payload, 5, 5)
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
+        self.assertNotIn(0, handler._sub_req_id)
+
+
+class TestMEDVIEWRemoteFsError(unittest.TestCase):
+    """Spec selector 0x1D GetRemoteFsError — synchronous u16."""
+
+    def test_get_remote_fs_error_returns_zero(self):
+        from server.config import MEDVIEW_GET_REMOTE_FS_ERROR
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        pkts = handler.handle_request(0x01, MEDVIEW_GET_REMOTE_FS_ERROR, 1, bytes.fromhex("82"), 5, 5)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        # 0x82 <word=0> 0x87
+        self.assertEqual(reply[0], 0x82)
+        self.assertEqual(struct.unpack("<H", reply[1:3])[0], 0)
+        self.assertEqual(reply[3], TAG_END_STATIC)
 
 
 class TestMEDVIEWBaggageBm0(unittest.TestCase):

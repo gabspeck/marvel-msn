@@ -1,46 +1,30 @@
-"""MEDVIEW service handler: MediaView 1.4 title loader for MOSVIEW.EXE.
+"""MEDVIEW service handler.
 
-Bound to svc_name="MEDVIEW", version 0x1400800A. MSN Today (wire node
-`4:0`, App #6) is the first surface that opens a pipe here via
-`HRMOSExec(c=6)` → `MOSVIEW.EXE -MOS:6:<spec>` → `MVTTL14C!TitleConnection`.
+Wire contract pinned in `docs/medview-service-contract.md` (lifted from
+`~/projetos/blackbird-re/docs/`). The contract groups selectors into
+logical service classes; this module mirrors that grouping. Spec-aligned
+identifiers (`titleSlot`, `fileSystemMode`, `contentsVa`, …) are used
+on call sites so the wire reply layout reads like the spec table.
 
-Wire contract: `docs/MEDVIEW.md` (project-internal RE notes) and
-`docs/mosview-mediaview-format.md` (code-proven payload grammar lifted
-from blackbird-re). The TitleOpen reply's 0x86 dynamic section is the
-flat MediaView 1.4 payload consumed by `MVTTL14C!TitleOpenEx @ 0x7E842D4E`
-and `TitleGetInfo @ 0x7E842558` — NOT Blackbird's authoring-side OLE2
-compound file (`docs/BLACKBIRD.md`).
+Service classes:
+  - BootstrapDiscovery (class=0x00 / selector=0x00) — `build_discovery_packet`
+  - SessionService                (0x17, 0x18, 0x1F)
+  - TitleService                  (0x00, 0x01, 0x02, 0x03, 0x04, 0x1E)
+  - WordWheelService              (0x08–0x0F)
+  - AddressHighlightService       (0x05, 0x06, 0x07, 0x10–0x13)
+  - TopicCacheService             (0x15, 0x16)
+  - RemoteFileService             (0x1A–0x1D)
 
-The payload is synthesized at query-time from the authored `.ttl`
-fixture at `resources/titles/<deid>.ttl` via
-`src/server/blackbird/m14_synth.py`. The `m14_payload` adapter handles
-the wire-mode font_blob strip and the empty-fallback path for missing
-or unsynthesizable titles.
+Async data paths:
+  - Type-0 cache push (selector 0x15 case-1 0xBF chunk) — authored topic body
+  - Type-3 op-code 4 frame (selectors 0x05/0x06/0x07) — va/addr conversion
 """
+
+from __future__ import annotations
 
 import logging
 import struct
 
-from ..config import (
-    MEDVIEW_INTERFACE_GUIDS,
-    MEDVIEW_SELECTOR_HANDSHAKE,
-    MEDVIEW_SELECTOR_HFC_NEXT_PREV,
-    MEDVIEW_SELECTOR_HFS_CLOSE,
-    MEDVIEW_SELECTOR_HFS_OPEN,
-    MEDVIEW_SELECTOR_HFS_READ,
-    MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
-    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
-    MEDVIEW_SELECTOR_TITLE_GET_INFO,
-    MEDVIEW_SELECTOR_TITLE_OPEN,
-    MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
-    MEDVIEW_SELECTOR_VA_CONVERT_HASH,
-    MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
-    MEDVIEW_SELECTOR_VA_RESOLVE,
-    MPC_CLASS_ONEWAY_MASK,
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
-    TAG_DYNAMIC_STREAM_END,
-    TAG_END_STATIC,
-)
 from ..blackbird.m14_payload import (
     M14PayloadResult,
     TitleOpenMetadata,
@@ -54,6 +38,43 @@ from ..blackbird.wire import (
     build_trailer,
     case1_text_budget,
 )
+from ..config import (
+    MEDVIEW_ATTACH_SESSION,
+    MEDVIEW_CLOSE_REMOTE_HFS_FILE,
+    MEDVIEW_CLOSE_TITLE,
+    MEDVIEW_CLOSE_WORD_WHEEL,
+    MEDVIEW_CONVERT_ADDRESS_TO_VA,
+    MEDVIEW_CONVERT_HASH_TO_VA,
+    MEDVIEW_CONVERT_TOPIC_TO_VA,
+    MEDVIEW_COUNT_KEY_MATCHES,
+    MEDVIEW_FETCH_ADJACENT_TOPIC,
+    MEDVIEW_FETCH_NEARBY_TOPIC,
+    MEDVIEW_FIND_HIGHLIGHT_ADDRESS,
+    MEDVIEW_GET_REMOTE_FS_ERROR,
+    MEDVIEW_GET_TITLE_INFO_REMOTE,
+    MEDVIEW_INTERFACE_GUIDS,
+    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS,
+    MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY,
+    MEDVIEW_OPEN_REMOTE_HFS_FILE,
+    MEDVIEW_OPEN_TITLE,
+    MEDVIEW_OPEN_WORD_WHEEL,
+    MEDVIEW_PRE_NOTIFY_TITLE,
+    MEDVIEW_QUERY_TOPICS,
+    MEDVIEW_QUERY_WORD_WHEEL,
+    MEDVIEW_READ_KEY_ADDRESSES,
+    MEDVIEW_READ_REMOTE_HFS_FILE,
+    MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS,
+    MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT,
+    MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX,
+    MEDVIEW_SET_KEY_COUNT_HINT,
+    MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+    MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS,
+    MEDVIEW_VALIDATE_TITLE,
+    MPC_CLASS_ONEWAY_MASK,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_STREAM_END,
+    TAG_END_STATIC,
+)
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -61,6 +82,8 @@ from ..mpc import (
     build_service_packet,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
+    build_tagged_reply_var,
+    build_tagged_reply_word,
     parse_request_params,
 )
 from ._dispatch import log_unhandled_selector
@@ -68,209 +91,33 @@ from ._dispatch import log_unhandled_selector
 log = logging.getLogger(__name__)
 
 
-def _load_title_body(title_spec: str) -> M14PayloadResult:
-    """Resolve a TitleOpen spec to a wire-ready MediaView 1.4 payload.
+# --------------------------------------------------------------------------
+# Constants
+# --------------------------------------------------------------------------
 
-    Delegates to `blackbird.m14_payload.build_m14_payload_for_deid`,
-    which synthesizes the 9-section body from `<deid>.ttl` (or returns
-    an empty caption-only fallback on missing / unsynthesizable .ttl).
-    The returned `M14PayloadResult` carries the wire bytes plus the
-    static-section metadata dwords and per-topic ANSI text buffers
-    consumed by the case-1 cache push.
-    """
-    deid = _title_name_from_spec(title_spec).strip()
-    result = build_m14_payload_for_deid(deid)
-    log.info(
-        "synthesized_title_body spec=%r deid=%r caption=%r body_len=%d "
-        "topic_count=%d topics=%d",
-        title_spec, deid, result.caption, len(result.payload),
-        result.metadata.topic_count, len(result.topics),
-    )
-    return result
+# Title slot returned by `OpenTitle.titleSlot`. MUST be nonzero — a zero
+# here short-circuits MVTTL14C `TitleOpenEx` to LAB_7E8432D4 and the
+# viewer shows "service temporarily unavailable".
+_TITLE_SLOT_PRIMARY = 0x01
 
-
-def _title_name_from_spec(spec: str) -> str:
-    """Extract <name> from a `:<svcid>[<name>]<serial>` title spec."""
-    lb = spec.find("[")
-    rb = spec.rfind("]")
-    if lb >= 0 and rb > lb:
-        return spec[lb + 1 : rb]
-    return ""
-
-# Placeholder title_id byte stored in the title struct at +0x02 and
-# echoed back on every subsequent per-title RPC (TitleGetInfo,
-# TitlePreNotify).  MUST be nonzero — a zero here short-circuits
-# TitleOpenEx to LAB_7E8432D4 and the viewer shows "service
-# temporarily unavailable".
-_TITLE_ID_PRIMARY = 0x01
-_TITLE_ID_SERVICE_BYTE = 0x01
-
-# Synthetic non-zero handle returned for the only baggage open we
-# currently accept (`bm0`).  MVTTL14C!HfOpenHfs @ 0x7E84771E gates
-# allocation of its 12-byte tracking struct on `(char)local_5 != 0`,
-# so any nonzero byte advances the engine; 0x42 is just memorable.
+# Synthetic non-zero handle returned by `OpenRemoteHfsFile` for the only
+# baggage open we currently service (`bm0`). MVTTL14C `HfOpenHfs @
+# 0x7E84771E` gates allocation of its tracking struct on `(char) != 0`.
 _BAGGAGE_HANDLE_BM0 = 0x42
 
-
-def _build_handshake_reply_payload():
-    """Static-only reply: one dword = 1 (validation_result), end-static.
-
-    MVTTL14C!hrAttachToService reads the dword and gates on `!= 0`.  Zero
-    triggers a MessageBox ("Handshake validation failed — Ver ...") and
-    detach.  Any nonzero value is accepted; use 1 as the canonical ack.
-    """
-    return build_tagged_reply_dword(1) + bytes([TAG_END_STATIC])
+# Highlight context byte returned synchronously by `QueryTopics` (zero =
+# no highlight session). The spec says nonzero opens a highlight-aware
+# query session, which we don't implement.
+_NO_HIGHLIGHT_CONTEXT = 0x00
 
 
-def _build_title_pre_notify_reply_payload():
-    """TitlePreNotify ack: static end-of-static, no content.
-
-    The client dispatches this on opcode 10 after a successful attach to
-    flush a cache hint (6 zero bytes sourced from DAT_7E84E2EC).  It
-    waits on slot 0x48 for the async reply handle then immediately
-    releases it — a bare end-of-static is enough for the Wait() to
-    unblock cleanly.
-    """
-    return bytes([TAG_END_STATIC])
-
-
-def _build_title_open_reply_payload(title_body: bytes, metadata: TitleOpenMetadata) -> bytes:
-    """TitleOpen reply: static section + dynamic-complete blob.
-
-    Static shape (7 tagged primitives, exact order required by
-    `MVTTL14C!TitleOpenEx @ 0x7E842D4E` recv loop, per
-    `docs/mosview-mediaview-format.md` "Materialized Title Object Fields"):
-
-        0x81 <byte=title_id>            → title +0x02 (primary tid, nonzero)
-        0x81 <byte=fs_mode>             → title +0x88 (HFS volume mode byte)
-        0x83 <dword=va_get_contents>    → title +0x8c (vaGetContents)
-        0x83 <dword=addr_get_contents>  → title +0x90 (addrGetContents)
-        0x83 <dword=topic_count>        → title +0x94 (TitleGetInfo 0x0b cap)
-        0x83 <dword=cache_header0>      → 8-byte validation tuple, half 1
-        0x83 <dword=cache_header1>      → 8-byte validation tuple, half 2
-        0x87                            end-static
-        0x86 <title_body>               dynamic-complete (raw to end of host block)
-
-    The 0x86 tag (TAG_DYNAMIC_COMPLETE_SIGNAL) wakes MVTTL14C's
-    `Wait()` on slot 0x24 (same pattern as DIRSRV GetShabby). Cache
-    headers are CRC32 of the wire payload (header0) and the synthesizer's
-    parser_title_path (header1) — both compared against `MVCache_*.tmp`
-    on the next open.
-    """
-    static = b"".join(
-        [
-            build_tagged_reply_byte(_TITLE_ID_PRIMARY),
-            build_tagged_reply_byte(_TITLE_ID_SERVICE_BYTE),
-            build_tagged_reply_dword(metadata.va_get_contents),
-            build_tagged_reply_dword(metadata.addr_get_contents),
-            build_tagged_reply_dword(metadata.topic_count),
-            build_tagged_reply_dword(metadata.cache_header0),
-            build_tagged_reply_dword(metadata.cache_header1),
-        ]
-    )
-    return static + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + title_body
-
-
-# info_kinds the MVTTL14C client serves locally from the cached body
-# (these never reach the wire selector 0x03). Per
-# `docs/mosview-mediaview-format.md` "Useful implementation constraints":
-#   0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0B, 0x13, 0x69, 0x6A, 0x6E, 0x6F
-#
-# Selector 0x03 fires for the OTHER info_kinds:
-#   0x03, 0x05, 0x0A, 0x0C..0x10, 0x66..0x68, 0x6B..0x6D
-# The doc does not pin semantics for these; first-paint clients in
-# practice hit only 0x03 (per the RE notes), and even then the empty
-# size=0 reply is enough to let lMVTitleGetInfo return without
-# crashing MVCL14N. Document this here rather than guess at fields.
-_TITLE_GET_INFO_LOCAL_KINDS = frozenset(
-    {0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0B, 0x13, 0x69, 0x6A, 0x6E, 0x6F}
-)
-_TITLE_GET_INFO_REMOTE_KINDS = frozenset(
-    {0x03, 0x05, 0x0A, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x66, 0x67, 0x68, 0x6B, 0x6C, 0x6D}
-)
-
-
-def _build_title_get_info_reply_payload(info_kind: int) -> bytes:
-    """TitleGetInfo wire reply.
-
-    Wire selector 0x03 carries info_kinds the client cannot serve from
-    its local cache — the doc lists `_TITLE_GET_INFO_REMOTE_KINDS` as
-    the eligible set. Without RE on each kind's expected payload, we
-    answer with size dword = 0 + dynamic-complete + empty body. The
-    dynamic-complete signal (0x86) wakes Wait() exactly like TitleOpen.
-
-    Defensive note: a `lMVTitleGetInfo(client, kind, 0, 0)` call with
-    a "size probe" pattern (`pBuf == 0`) is satisfied by the size dword
-    alone — caller knows there's nothing to copy. For real `pBuf != 0`
-    calls the empty 0x86 payload still terminates the recv loop
-    cleanly.
-    """
-    return (
-        build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-    )
-
-
-def _build_va_resolve_reply_payload():
-    """va→content-chunk ack: static end-of-static, no dynamic.
-
-    `MVTTL14C!HfcNear @ 0x7E84589F` retry loop fires this selector when
-    the per-title cache misses.  The reply iface is acquired via
-    `proxy[+0x48]` and immediately released by HfcNear (it never reads
-    a payload).  The real answer is expected via the selector-0x17
-    type-3 async push channel.  Bare `0x87` lets the client's
-    `iVar2 = (proxy +0x48)(...)` return success so the retry loop
-    can poll the cache again, instead of bailing on RPC error
-    (`iVar2 < 0`) and giving up after 6 retries (~6 s wall clock).
-    """
-    return bytes([TAG_END_STATIC])
-
-
-def _extract_cache_miss_args(payload):
-    """Unpack (title_byte, key) from a cache-miss selector request.
-
-    Shared by selectors 0x06 (vaConvertHash), 0x07 (vaConvertTopicNumber),
-    0x10 (HighlightsInTopic), and 0x15 (vaResolve / HfcNear).  Wire
-    shape: `0x01 <title_byte> 0x03 <key:dword>` plus a recv descriptor
-    (`0x85` for vaResolve, omitted for the others).
-
-    Returns (None, None) on malformed input — diagnostic only, the
-    reply is the same either way until the type-3 cache push channel
-    is wired.
-    """
-    send_params, _ = parse_request_params(payload)
-    title_byte = None
-    key = None
-    for p in send_params:
-        tag = getattr(p, "tag", None)
-        if tag == 0x01 and title_byte is None:
-            title_byte = getattr(p, "value", None)
-        elif tag == 0x03 and key is None:
-            key = getattr(p, "value", None)
-    return (title_byte, key)
-
-
-def _extract_baggage_name(payload):
-    """Pull the baggage filename from a 0x1A/0x1B/0x1C request payload.
-
-    Wire shape per docs/MEDVIEW.md §6c: `0x01 <hfs_byte> 0x04 <name>
-    0x01 <mode> 0x81 0x83`.  Returns the decoded ASCII name with any
-    trailing NUL stripped, or empty string if absent.
-    """
-    send_params, _ = parse_request_params(payload)
-    for p in send_params:
-        if getattr(p, "tag", None) == 0x04:
-            data = getattr(p, "data", b"") or b""
-            return data.rstrip(b"\x00").decode("ascii", errors="replace")
-    return ""
-
+# --------------------------------------------------------------------------
+# bm0 baggage backdrop
+# --------------------------------------------------------------------------
 
 _BM0_WIDTH = 640
 _BM0_HEIGHT = 480
 _BM0_BPP = 1
-# 1bpp packed: 1 byte per 8 pixels, no row padding inferred from the
-# parser (`FUN_7e887a40` raw branch memcpy's `pixel_byte_count` bytes
-# verbatim from input to output without alignment fixup).
 _BM0_PIXEL_BYTES = (_BM0_WIDTH // 8) * _BM0_HEIGHT  # 38400 B for 640×480 1bpp
 
 
@@ -283,40 +130,12 @@ def _build_bm0_container():
     HBITMAP is `BitBlt`'d at paint time by `FUN_7e887180`.
 
     Architecture note (`docs/mosview-authored-text-and-font-re.md`
-    §"Bitmap Child Trailer Boundary"):
-
-    - bm0 is an ENGINE-SYNTHESIZED parent-cell backdrop, NOT authored
-      title content. `wsprintfA("|bm%d", index)` inside MVCL14N spans
-      the whole baggage namespace; bm0 specifically is the default
-      backdrop for the topic's rendering surface.
-    - Authored images (e.g. the `bitmap.bmp` WaveletImage in the
-      reference .ttl) ship as `bm1+` baggage and are referenced by
-      image-tag (`0x03`/`0x22`) topic items. Until those items
-      appear in the topic body, the engine never asks for `bm1+`.
-    - The doc explicitly defers full image-child fidelity for the
-      first authored text milestone: "the first authored text
-      milestone does not need this trailer at all… or emit only the
-      parent image record with `child_count = 0`, `raw_tail_blob_len
-      = 0`". Our trailer matches this recipe exactly.
-
-    Layout breakdown:
-
-    - 8-byte container preamble (`FUN_7e886310` reads `+0x04` u32 to
-      find bitmap[0] offset).
-    - 30-byte kind=5 raster header — wide-form `pixel_byte_count`
-      (38400 doesn't fit narrow ushort/2). Layout per `FUN_7e887a40`:
-      kind/compression bytes, 2 narrow skip-ints, planes (byte-narrow),
-      bpp (byte-narrow), width/height/palette_count/reserved
-      (ushort-narrow), pixel_byte_count (u32-wide), trailer_size
-      (ushort-narrow), pixel_data_offset (u32), trailer_offset (u32).
-    - 38400 bytes of all-`0xFF` pixel data — for a 1bpp DDB this
-      renders as the destination DC's background colour (typically
-      white) on a colour display.
-    - Empty trailer — a 1-byte reserved field + 2 zero count + 4 zero
-      tail_size = 7 bytes that `FUN_7e886de0` reads as "no children, no
-      tail". The parent cell paints the bitmap; no overlaid text. Per
-      doc, this is the documented "first authored text milestone"
-      shape and not a regression.
+    §"Bitmap Child Trailer Boundary"): bm0 is engine-synthesized
+    parent-cell backdrop, NOT authored title content. Authored images
+    (e.g. the `bitmap.bmp` WaveletImage in the reference .ttl) ship as
+    `bm1+` baggage and are referenced by image-tag (`0x03`/`0x22`)
+    topic items. The empty-trailer recipe matches the doc's "first
+    authored text milestone does not need this trailer" deferment.
     """
     bitmap = build_kind5_raster(
         width=_BM0_WIDTH,
@@ -331,26 +150,200 @@ def _build_bm0_container():
 _BM0_CONTAINER = _build_bm0_container()
 
 
-def _build_type3_op4_frame(title_byte, kind, key, va, addr):
+# --------------------------------------------------------------------------
+# Reply primitives — match each selector's spec return shape
+# --------------------------------------------------------------------------
+
+
+def _ack() -> bytes:
+    """Bare static-end ack reply. Used for selectors whose spec return
+    is `ack` with no meaningful payload."""
+    return bytes([TAG_END_STATIC])
+
+
+def _dynamic_complete(static_fields: bytes, dynbytes: bytes = b"") -> bytes:
+    """Static-section + 0x86 dynamic-complete + raw bytes.
+
+    `TAG_DYNAMIC_COMPLETE_SIGNAL` (0x86) wakes MVTTL14C's `Wait()` on
+    slot 0x24 once. Used for selectors that return a dynbytes payload
+    synchronously (`OpenTitle`, `GetTitleInfoRemote`, `LoadTopicHighlights`,
+    `ReadKeyAddresses`, `QueryTopics`, `ReadRemoteHfsFile`)."""
+    return static_fields + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + dynbytes
+
+
+def _stream_end(static_fields: bytes = b"") -> bytes:
+    """Static-end + 0x88 dynamic-stream-end. Used for `SubscribeNotifications`
+    iterator replies. `0x88` keeps `m_pMoreDatRef` non-NULL (passes the
+    master-flag check at MVTTL14C 0x7E844FA7) without firing
+    `SignalRequestCompletion`. `0x86` here would set request +0x18=1 in
+    MPCCL `ProcessTaggedServiceReply`, skipping `ResetEvent` and
+    producing a tight `MsgWaitForSingleObject` spin (~30 % CPU per
+    request × 3 ⇒ 90 % total)."""
+    return static_fields + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+
+
+def _empty_highlight_blob() -> bytes:
+    """`LoadTopicHighlights` return — empty highlight blob.
+
+    Per spec runtime layout: `8-byte opaque header, highlightCount:u32,
+    then repeated entries`. Empty result = 8 zero bytes + zero count =
+    12 bytes total. Lets the highlight-load path complete without
+    crashing the viewer."""
+    return b"\x00" * 12
+
+
+# --------------------------------------------------------------------------
+# Cache-miss arg extractors and per-topic resolution
+# --------------------------------------------------------------------------
+
+
+def _extract_cache_miss_args(payload):
+    """Unpack `(titleSlot, key)` from a cache-miss request payload.
+
+    Wire shape: `0x01 <title_slot> 0x03 <key:u32>` (+ recv descriptor
+    on 0x15). Shared by selectors 0x05 / 0x06 / 0x07 / 0x10 / 0x15.
+    """
+    send_params, _ = parse_request_params(payload)
+    title_slot = None
+    key = None
+    for p in send_params:
+        tag = getattr(p, "tag", None)
+        if tag == 0x01 and title_slot is None:
+            title_slot = getattr(p, "value", None)
+        elif tag == 0x03 and key is None:
+            key = getattr(p, "value", None)
+    return (title_slot, key)
+
+
+def _extract_baggage_name(payload):
+    """Pull the baggage filename from an `OpenRemoteHfsFile` payload.
+
+    Wire shape: `0x01 <hfs_mode> 0x04 <name> 0x01 <open_mode>` plus the
+    recv descriptor pair `0x81 0x83`."""
+    send_params, _ = parse_request_params(payload)
+    for p in send_params:
+        if getattr(p, "tag", None) == 0x04:
+            data = getattr(p, "data", b"") or b""
+            return data.rstrip(b"\x00").decode("ascii", errors="replace")
+    return ""
+
+
+def _extract_title_token(payload):
+    """Pull the ASCIIZ `titleToken` out of an `OpenTitle` request.
+
+    Wire shape: `0x04 <token> 0x03 <cacheHint0> 0x03 <cacheHint1>`."""
+    send_params, _ = parse_request_params(payload)
+    for p in send_params:
+        if getattr(p, "tag", None) == 0x04:
+            data = p.data.rstrip(b"\x00")
+            try:
+                return data.decode("ascii")
+            except UnicodeDecodeError:
+                return data.hex()
+    return ""
+
+
+def _deid_from_title_token(token: str) -> str:
+    """Extract `<name>` from a `:<svcid>[<name>]<serial>` title token."""
+    lb = token.find("[")
+    rb = token.rfind("]")
+    if lb >= 0 and rb > lb:
+        return token[lb + 1 : rb]
+    return ""
+
+
+def _extract_get_info_args(payload):
+    """Unpack `(infoKind, infoArg, callerCookie)` from a
+    `GetTitleInfoRemote` request.
+
+    Wire shape (spec §0x03): `0x01 titleSlot, 0x03 infoKind, 0x03
+    infoArg, 0x03 callerCookie`."""
+    send_params, _ = parse_request_params(payload)
+    dwords = [p.value for p in send_params if getattr(p, "tag", None) == 0x03]
+    info_kind = dwords[0] if len(dwords) >= 1 else 0
+    info_arg = dwords[1] if len(dwords) >= 2 else 0
+    caller_cookie = dwords[2] if len(dwords) >= 3 else 0
+    return (info_kind, info_arg, caller_cookie)
+
+
+# --------------------------------------------------------------------------
+# TitleService: GetTitleInfoRemote per-kind classification
+# --------------------------------------------------------------------------
+
+# Spec §"Remote `GetTitleInfoRemote` Kinds": each kind has a specific
+# return shape. We don't have authored data behind any of these on the
+# first-paint path, so each classification ships an empty payload that
+# matches the kind's wire shape so the recv loop decodes cleanly.
+_REMOTE_INFO_KIND_CLASS: dict[int, str] = {
+    0x03: "cstring",   # RemoteCString03
+    0x05: "cstring",   # RemoteCString05
+    0x0A: "cstring",   # RemoteCString0A
+    0x0C: "cstring",   # RemoteCString0C
+    0x0D: "cstring",   # RemoteCString0D
+    0x0E: "bytes_cap",  # RemoteBytes0E (infoArg low u16 = byte cap)
+    0x0F: "cstring",   # RemoteCString0F
+    0x10: "cstring",   # RemoteCString10
+    0x66: "cstring",   # RemoteCString66
+    0x67: "exact",     # RemoteExactBytes67
+    0x68: "exact",     # RemoteExactBytes68
+    0x6B: "scalar",    # RemoteScalar6B
+    0x6D: "scalar",    # RemoteScalar6D
+    0x6E: "cached",    # CachedRemoteCString
+}
+
+# Local-only kinds the spec says are served from the cached title body
+# without hitting the wire — receiving them on selector 0x03 means the
+# client failed to find them locally, which would be unexpected.
+_LOCAL_INFO_KINDS = frozenset(
+    {0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x0B, 0x13, 0x69, 0x6A, 0x6E, 0x6F}
+)
+
+
+def _build_get_title_info_remote_reply(info_kind: int) -> bytes:
+    """`GetTitleInfoRemote.lengthOrScalar : u32, payload : dynbytes`.
+
+    Spec §`Remote GetTitleInfoRemote Kinds` shape per kind:
+      cstring: lengthOrScalar = strlen+1, payload = cstring (we ship `\\0`)
+      bytes_cap: lengthOrScalar = byte_count, payload = bytes (we ship 0/empty)
+      exact: lengthOrScalar = byte_count, payload = bytes (we ship 0/empty)
+      scalar: lengthOrScalar = scalar value, no payload (we ship 0)
+      cached: lengthOrScalar = strlen+1, payload = cstring (we ship `\\0`)
+    """
+    classification = _REMOTE_INFO_KIND_CLASS.get(info_kind)
+    if classification == "cstring" or classification == "cached":
+        return _dynamic_complete(build_tagged_reply_dword(1), b"\x00")
+    if classification == "bytes_cap" or classification == "exact":
+        return _dynamic_complete(build_tagged_reply_dword(0), b"")
+    if classification == "scalar":
+        return _dynamic_complete(build_tagged_reply_dword(0), b"")
+    # Unknown kind — treat as scalar=0 (safe default).
+    return _dynamic_complete(build_tagged_reply_dword(0), b"")
+
+
+# --------------------------------------------------------------------------
+# AddressHighlightService: type-3 op-4 frame (va conversion)
+# --------------------------------------------------------------------------
+
+
+def _build_type3_op4_frame(title_slot, kind, key, va, addr):
     """Build a selector-0x17 type-3 op-code 4 cache-insert frame.
 
-    Inserts into the global kind-0/1/2 cache at PTR_DAT_7e84e130
-    (FUN_7e8420f6 → FUN_7e841be4 / FUN_7e841bff / FUN_7e841c1a /
-    FUN_7e841a50).  This is what `vaConvertHash` /
-    `vaConvertTopicNumber` consult — NOT what HfcNear uses.
+    Spec §"Type 3 MixedAsyncStream / subtype 4 AddressConversionResult":
+        title_slot:u8, vaResult:u32, secondaryToken:u32, inputKey:u32
 
-    Frame (18 bytes):
+    Wire layout for the frame (consumed by MVTTL14C's
+    `NotificationType3_DispatchRecords` → `AddressConversionCache_Insert`):
         +0x00 u16 op_code = 4
         +0x02 u16 length  = 18
-        +0x04 u8  title_byte
-        +0x05 u8  kind   (0 = topic→va+addr, 1 = hash→va, 2 = va→addr)
-        +0x06 u32 key    (topic_no / hash / va)
-        +0x0A u32 va
-        +0x0E u32 addr
+        +0x04 u8  title_slot
+        +0x05 u8  kind     (0=topic→va+addr, 1=hash→va, 2=va→addr)
+        +0x06 u32 key      (input key being converted)
+        +0x0A u32 va       (va result)
+        +0x0E u32 addr     (secondary token / addr result)
     """
     payload = struct.pack(
         "<BBIII",
-        title_byte & 0xFF,
+        title_slot & 0xFF,
         kind & 0xFF,
         key & 0xFFFFFFFF,
         va & 0xFFFFFFFF,
@@ -359,45 +352,56 @@ def _build_type3_op4_frame(title_byte, kind, key, va, addr):
     return struct.pack("<HH", 4, 18) + payload
 
 
+# --------------------------------------------------------------------------
+# Handler
+# --------------------------------------------------------------------------
+
+
 class MEDVIEWHandler:
-    """Handles MEDVIEW service requests on a logical pipe."""
+    """Handles MEDVIEW service requests on a logical pipe.
+
+    State retained across the session:
+      - Notification subscription handles (per spec class StreamFamily)
+      - Per-topic mapping from the active title (drives cache pushes)
+      - Title caption for fallbacks
+    """
 
     def __init__(self, pipe_idx, svc_name):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
-        # Type-0 cache-pump subscription state (per-title `title+4`
-        # tree; opcode 0xBF via FUN_7e8460df).  Captured from
-        # selector-0x17 type=0 subscribe; reused for vaResolve /
-        # HfcNear cache pushes.
-        self.type0_sub_class = None
-        self.type0_sub_req_id = None
-        # Type-3 cache-pump subscription state (op-code 4 → global
-        # kind-0/1/2 cache).  Captured from selector-0x17 type=3
-        # subscribe; reused for vaConvertHash / Topic cache pushes.
-        self.type3_sub_class = None
-        self.type3_sub_req_id = None
-        # Per-topic mapping from `M14PayloadResult.topics` — assigned at
-        # TitleOpen time so subsequent selector 0x06 / 0x07 / 0x15 cache
-        # pushes can ship real authored values (va, addr, context_hash,
-        # ANSI text) instead of echo-key placeholders.
+        # Notification subscription `(class, request_id)` keyed by type
+        # 0–4 — captured at `SubscribeNotifications` and reused for
+        # async pushes (type-0 0xBF chunks, type-3 op-4 frames).
+        self._sub_class: dict[int, int] = {}
+        self._sub_req_id: dict[int, int] = {}
+        # Per-title mapping from `M14PayloadResult.topics` — populated
+        # at OpenTitle, used by 0x05/0x06/0x07/0x15 cache pushes to ship
+        # real va/addr/text instead of echo-key placeholders.
         self.topics: tuple[TopicEntry, ...] = ()
         self.title_caption: str = ""
+        # Title slot is owned by the server — we hand out
+        # `_TITLE_SLOT_PRIMARY` on OpenTitle and accept `CloseTitle`
+        # against it. Multi-title sessions aren't exercised today.
+        self._open_title_slots: set[int] = set()
+
+    # --- BootstrapDiscovery -----------------------------------------
 
     def build_discovery_packet(self, server_seq, client_ack):
-        """Emit the IID→selector discovery block (42 entries, 1-based selectors)."""
+        """Emit the IID→selector discovery block (42 entries).
+
+        Class=0x00, selector=0x00, request_id=0 per spec §`BootstrapDiscovery`.
+        """
         payload = build_discovery_payload(MEDVIEW_INTERFACE_GUIDS)
         host_block = build_discovery_host_block(payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
-    def _topic_for_wire_key(self, key: int) -> TopicEntry | None:
-        """Resolve a cache-miss key to the matching `TopicEntry`.
+    # --- Topic resolution helper -----------------------------------
 
-        Selectors 0x06 / 0x07 / 0x15 each carry a different key kind
-        (hash / topic_number / va) but the engine sometimes uses one
-        when the doc says another (the empirical traffic we've observed
-        sends `key=topic_number=1` even on selector 0x06). Match across
-        all three projections; first hit wins.
-        """
+    def _topic_for_wire_key(self, key: int) -> TopicEntry | None:
+        """Resolve a cache-miss key to its `TopicEntry`. Selectors
+        0x05/0x06/0x07/0x15 each carry a different key class (addr /
+        hash / topic / va) but the engine sometimes uses one when the
+        doc says another — match across all three projections."""
         for topic in self.topics:
             if (
                 topic.address == key
@@ -410,73 +414,58 @@ class MEDVIEWHandler:
     def _case1_text_for_key(self, key: int) -> str:
         """Resolve the ANSI text shipped in a case-1 0xBF chunk for `key`.
 
-        Walks `self.topics` to find a matching entry by va / topic_no /
-        hash. Truncates to fit the case-1 chunk's in-name_buf text
-        budget. Falls back to the title caption when the key doesn't
-        map to a TextProxy entry (or the matched entry is image-kind).
-        """
+        Falls back to the title caption when no topic matches the key
+        or the matched entry is image-kind. Truncates to fit the case-1
+        chunk's in-name_buf budget."""
         topic = self._topic_for_wire_key(key)
         if topic is not None and topic.text:
             text_bytes = topic.text
         else:
             text_bytes = (self.title_caption or "Untitled").encode("latin-1", errors="replace")
-        # `build_case1_bf_chunk` appends a NUL terminator before checking
-        # against `case1_text_budget(name_size)` — leave headroom for it.
-        budget = case1_text_budget() - 1
+        budget = case1_text_budget() - 1  # -1 for NUL appended by builder
         if len(text_bytes) > budget:
             text_bytes = text_bytes[:budget]
-        # build_case1_bf_chunk takes a str — decode latin-1 (round-trip
-        # safe for any byte sequence).
         return text_bytes.decode("latin-1", errors="replace")
 
-    def _build_cache_push_packet(self, title_byte, selector, key, server_seq, client_ack):
+    # --- Async cache push (selectors 0x05 / 0x06 / 0x07 / 0x15) ----
+
+    def _build_cache_push_packet(self, title_slot, selector, key, server_seq, client_ack):
         """Build a packet that pushes a cache-fill chunk on the right channel.
 
         Selector → push channel + frame:
-            0x15 (HfcNear / vaResolve) → type-0, opcode 0xBF case-1.
-                Inserts into the per-title `title+4` tree via
-                FUN_7e8452d3 → FUN_7e8460df, then drives
-                FUN_7e890fd0 → FUN_7e894c50 case 1 → slot tag 1 →
-                ExtTextOutA. Section-0 (`m14_payload._SECTION0_FONT_BLOB`)
-                resolves the slot+0x3F font id to a real HFONT via
-                descriptor 0 (Times New Roman).
-            0x06 (vaConvertHash) → type-3, op-code 4 kind 1 (hash→va,
-                global cache via FUN_7e841bff).
-            0x07 (vaConvertTopicNumber) → type-3, op-code 4 kind 0
-                (topic→va+addr, global cache via FUN_7e841be4).
-            0x10 (HighlightsInTopic) → not pushed.
+          0x15 FetchNearbyTopic     → type-0, opcode 0xBF case-1 (text row)
+          0x05 ConvertAddressToVa   → type-3, op-code 4, kind 2 (va→addr)
+          0x06 ConvertHashToVa      → type-3, op-code 4, kind 1 (hash→va)
+          0x07 ConvertTopicToVa     → type-3, op-code 4, kind 0 (topic→va+addr)
 
-        TODO: derive the case-1 text from the title's authored
-        TextTree/TextRuns rather than the hardcoded caption — placeholder
-        until VIEWDLL.DLL CContent serializers are RE'd.
+        Returns `None` when the matching subscription isn't open yet.
         """
-        if selector == MEDVIEW_SELECTOR_VA_RESOLVE:
-            if self.type0_sub_req_id is None:
+        if selector == MEDVIEW_FETCH_NEARBY_TOPIC:
+            sub_class = self._sub_class.get(0)
+            sub_req_id = self._sub_req_id.get(0)
+            if sub_req_id is None:
                 return None
             text = self._case1_text_for_key(key)
-            chunk = build_case1_bf_chunk(text, title_byte, key)
+            chunk = build_case1_bf_chunk(text, title_slot, key)
             channel = "type0_bf_case1"
-            sub_class = self.type0_sub_class
-            sub_req_id = self.type0_sub_req_id
-        elif selector in (MEDVIEW_SELECTOR_VA_CONVERT_HASH, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC):
-            if self.type3_sub_req_id is None:
+        elif selector in (
+            MEDVIEW_CONVERT_ADDRESS_TO_VA,
+            MEDVIEW_CONVERT_HASH_TO_VA,
+            MEDVIEW_CONVERT_TOPIC_TO_VA,
+        ):
+            sub_class = self._sub_class.get(3)
+            sub_req_id = self._sub_req_id.get(3)
+            if sub_req_id is None:
                 return None
-            kind = 1 if selector == MEDVIEW_SELECTOR_VA_CONVERT_HASH else 0
-            # Resolve to real va/addr from the title's per-topic mapping
-            # (synthesizer's `build_visible_entry_metadata`). Falls back
-            # to echo-key only if no matching topic exists — the engine
-            # will then re-query and we may get a more useful key on the
-            # retry.
+            kind = {
+                MEDVIEW_CONVERT_TOPIC_TO_VA: 0,
+                MEDVIEW_CONVERT_HASH_TO_VA: 1,
+                MEDVIEW_CONVERT_ADDRESS_TO_VA: 2,
+            }[selector]
             topic = self._topic_for_wire_key(key)
-            if topic is not None:
-                va = topic.address
-                addr = topic.address
-            else:
-                va = key
-                addr = key
-            chunk = _build_type3_op4_frame(title_byte, kind, key, va=va, addr=addr)
-            sub_class = self.type3_sub_class
-            sub_req_id = self.type3_sub_req_id
+            va = topic.address if topic else key
+            addr = topic.address if topic else key
+            chunk = _build_type3_op4_frame(title_slot, kind, key, va=va, addr=addr)
             channel = "type3_op4"
             log.info(
                 "type3_op4_resolve selector=0x%02x key=0x%08x → va=0x%08x addr=0x%08x topic=%s",
@@ -485,25 +474,25 @@ class MEDVIEWHandler:
             )
         else:
             return None
-        # 0x85 chunk tag + raw chunk bytes.  MPCCL parses 0x85 as a
-        # dynamic-recv chunk on the matching subscription iterator
-        # (key = req_id), fires chunk signal at +0x28's event, and
-        # the type-N callback consumes the chunk.
+        # 0x85 chunk tag + raw chunk bytes — MPCCL parses 0x85 as a
+        # dynamic-recv chunk on the matching subscription iterator.
         push_payload = bytes([0x85]) + chunk
         push_host = build_host_block(
             sub_class,
-            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
             sub_req_id,
             push_payload,
         )
         log.info(
-            "cache_push selector=0x%02x title_byte=0x%02x key=0x%08x channel=%s chunk_len=%d",
-            selector, title_byte, key, channel, len(chunk),
+            "cache_push selector=0x%02x title_slot=0x%02x key=0x%08x channel=%s chunk_len=%d",
+            selector, title_slot, key, channel, len(chunk),
         )
         return build_service_packet(self.pipe_idx, push_host, server_seq, client_ack)
 
+    # --- Top-level dispatch ----------------------------------------
+
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        """Dispatch a MEDVIEW request.  Returns packet list or None."""
+        """Dispatch a MEDVIEW request to its spec class handler."""
         if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
             log.info(
                 "oneway_continuation class=0x%02x selector=0x%02x payload_len=%d",
@@ -511,234 +500,438 @@ class MEDVIEWHandler:
             )
             return None
 
-        if selector == MEDVIEW_SELECTOR_HANDSHAKE:
-            log.info("handshake req_id=%d payload=%s", request_id, payload.hex())
-            reply_payload = _build_handshake_reply_payload()
-            log.info("handshake_reply validation=1")
-        elif selector == MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY:
-            log.info(
-                "title_pre_notify req_id=%d payload_len=%d payload=%s",
-                request_id, len(payload), payload.hex(),
-            )
-            reply_payload = _build_title_pre_notify_reply_payload()
-        elif selector == MEDVIEW_SELECTOR_TITLE_OPEN:
-            title_spec = _extract_title_spec(payload)
-            log.info("title_open req_id=%d spec=%r", request_id, title_spec)
-            result = _load_title_body(title_spec)
-            # Stash per-topic mapping + caption on the handler so subsequent
-            # selector 0x06 / 0x07 / 0x15 cache pushes can ship authored
-            # va / addr / context_hash / TextRuns text instead of echo-key
-            # placeholders.
-            self.topics = result.topics
-            self.title_caption = result.caption
-            reply_payload = _build_title_open_reply_payload(result.payload, result.metadata)
-            log.info(
-                "title_open_reply title_id=0x%02x body_len=%d "
-                "va=0x%08x addr=0x%08x topics=%d cache_header0=0x%08x",
-                _TITLE_ID_PRIMARY, len(result.payload),
-                result.metadata.va_get_contents,
-                result.metadata.addr_get_contents,
-                result.metadata.topic_count,
-                result.metadata.cache_header0,
-            )
-        elif selector == MEDVIEW_SELECTOR_TITLE_GET_INFO:
-            info_kind, index, bufsize = _extract_get_info_args(payload)
-            kind_class = (
-                "local_should_not_hit_wire" if info_kind in _TITLE_GET_INFO_LOCAL_KINDS
-                else "remote_documented" if info_kind in _TITLE_GET_INFO_REMOTE_KINDS
-                else "remote_unknown"
-            )
-            log.info(
-                "title_get_info req_id=%d info_kind=0x%x index=%d bufsize=%d class=%s",
-                request_id, info_kind, index, bufsize, kind_class,
-            )
-            reply_payload = _build_title_get_info_reply_payload(info_kind)
-        elif selector in (
-            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
-            MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
-            MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
-            MEDVIEW_SELECTOR_VA_RESOLVE,
+        # Cache-miss group — these run an ack reply followed by an
+        # async cache push on the matching subscription channel. The
+        # client's recv loop completes on the synchronous ack; the push
+        # arrives later as a dynamic-recv chunk.
+        if selector in (
+            MEDVIEW_CONVERT_ADDRESS_TO_VA,
+            MEDVIEW_CONVERT_HASH_TO_VA,
+            MEDVIEW_CONVERT_TOPIC_TO_VA,
+            MEDVIEW_FETCH_NEARBY_TOPIC,
         ):
-            title_byte, key = _extract_cache_miss_args(payload)
-            log.info(
-                "cache_miss_rpc selector=0x%02x req_id=%d title_byte=%r key=%s payload=%s",
-                selector,
-                request_id,
-                title_byte,
-                f"0x{key:08x}" if key is not None else None,
-                payload.hex(),
+            return self._handle_cache_miss(
+                msg_class, selector, request_id, payload, server_seq, client_ack,
             )
-            reply_payload = _build_va_resolve_reply_payload()
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            reply_pkts = build_service_packet(
-                self.pipe_idx, host_block, server_seq, client_ack
-            )
-            # On selector 0x15 (HfcNear) with type-0 subscription
-            # registered, push a `0xBF` chunk on the type-0 iterator.
-            # The chunk gets consumed by HfcNear's own retry loop via
-            # FUN_7e845875 → FUN_7e8451bf(idx=0, …) → FUN_7e8450d5 →
-            # FUN_7e844a3b → FUN_7e8452d3 → FUN_7e8460df, which
-            # inserts (key → 60-byte content) into the title+4 tree.
-            # On the next iteration FUN_7e845efa finds the entry and
-            # HfcNear returns success → fMVSetAddress returns 1.
-            if title_byte is not None and key is not None:
-                next_seq = (server_seq + len(reply_pkts)) & 0x7F
-                push_pkts = self._build_cache_push_packet(
-                    title_byte, selector, key, next_seq, client_ack
-                )
-                if push_pkts is not None:
-                    return reply_pkts + push_pkts
-            return reply_pkts
-        elif selector == MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION:
-            notification_type = payload[1] if len(payload) >= 2 else None
-            log.info(
-                "subscribe_notification req_id=%d type=%r payload=%s",
-                request_id, notification_type, payload.hex(),
-            )
-            if notification_type == 0:
-                # Type 0 is the topic-metadata subscriber
-                # (FUN_7e8452d3).  Capture the iface coordinates so
-                # later vaResolve cache pushes (selector 0x15) can
-                # ride the same iterator and trigger
-                # FUN_7e8460df → title+4 tree insert.  Reply
-                # `0x87 0x88` (iterator stream-end) so the subscribe
-                # iface advances cleanly.
-                self.type0_sub_class = msg_class
-                self.type0_sub_req_id = request_id
-                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
-            elif notification_type == 3:
-                # Type 3 is the va/addr cache-pump subscriber
-                # (FUN_7e8451ec, op-code 4 frames into the global
-                # kind-0/1/2 cache at PTR_DAT_7e84e130).  Iterator
-                # reply for the pump thread (FUN_7e844c7c).
-                self.type3_sub_class = msg_class
-                self.type3_sub_req_id = request_id
-                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
-            else:
-                # Types 1/2/4: same iterator-stream-end reply as 0/3.
-                # 0x88 alone makes m_pMoreDatRef non-NULL (passes the
-                # master-flag check at MVTTL14C 0x7E844FA7) without
-                # firing SignalRequestCompletion.  0x86 sets request
-                # +0x18=1 in MPCCL!ProcessTaggedServiceReply, which in
-                # turn skips ResetEvent in WaitForMessage/PollDynMsg
-                # and produces a tight MsgWaitForSingleObject spin
-                # (~30% CPU per request × 3 ⇒ 90% total).
-                reply_payload = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
-        elif selector == MEDVIEW_SELECTOR_HFC_NEXT_PREV:
-            # 0x16 HfcNextPrevHfc — same wire shape as vaResolve (0x15)
-            # plus a direction byte.  Reply ack-only; engine retries
-            # ~6× internally then falls back to its in-cache entries.
-            log.info(
-                "hfc_next_prev req_id=%d payload_len=%d payload=%s",
-                request_id, len(payload), payload.hex(),
-            )
-            reply_payload = bytes([TAG_END_STATIC])
-        elif selector == MEDVIEW_SELECTOR_HFS_OPEN:
-            # 0x1A HfOpenHfs — baggage open.  Per docs/MEDVIEW.md §6c.
-            # `bm<N>` filenames come from MVCL14N!FUN_7e886980 @
-            # 0x7E886980 via wsprintfA("|bm%d", index) with index from
-            # the layout descriptor; on 0x3EC the same call retries
-            # without the leading `|`.  Accept the canonical `bm<N>`
-            # form with a synthetic handle to expose the next gate
-            # (whether 0x1B HFS_READ fires, or the engine short-
-            # circuits via the size DWORD).  Decline anything else
-            # with byte=0 — engine treats that as 0x3EC.
-            name = _extract_baggage_name(payload)
-            canonical = name.lstrip("|")
-            log.info(
-                "hfs_open req_id=%d name=%r canonical=%r payload=%s",
-                request_id, name, canonical, payload.hex(),
-            )
-            if canonical == "bm0":
-                reply_payload = (
-                    bytes([TAG_END_STATIC])
-                    + build_tagged_reply_byte(_BAGGAGE_HANDLE_BM0)
-                    + build_tagged_reply_dword(len(_BM0_CONTAINER))
-                )
-            else:
-                reply_payload = (
-                    bytes([TAG_END_STATIC])
-                    + build_tagged_reply_byte(0)
-                    + build_tagged_reply_dword(0)
-                )
-        elif selector == MEDVIEW_SELECTOR_HFS_READ:
-            # 0x1B LcbReadHf.  See docs/MEDVIEW.md §6c.
-            # Wire request: 0x81 (status byte) + 0x85 (dynamic-recv,
-            # single-shot blob — NOT 0x88 iterator).  Reply pattern
-            # is the GetShabby shape with byte-status: 0x81 <status=0>
-            # 0x87 0x86 <bytes>.  LcbReadHf @ 0x7E847C45 waits, then
-            # reply_iface->m0x1c(&iter) → iter->m0x10()=length →
-            # iter->m0xC()=ptr (MPCCL chunk-walker over the 0x86
-            # blob).  Probe with 1 zero byte: FUN_7e887a40 @
-            # 0x7E887A40 sees kind=0 < 5 → returns -2 → caller
-            # zeroes slot → bitmap NULL but no AV.
-            send_params, _ = parse_request_params(payload)
-            handle_byte = next(
-                (p.value for p in send_params if getattr(p, "tag", None) == 0x01),
-                None,
-            )
-            dwords = [p.value for p in send_params if getattr(p, "tag", None) == 0x03]
-            count = dwords[0] if len(dwords) >= 1 else 0
-            offset = dwords[1] if len(dwords) >= 2 else 0
-            log.info(
-                "hfs_read req_id=%d handle=%r count=%d offset=%d payload=%s",
-                request_id, handle_byte, count, offset, payload.hex(),
-            )
-            if handle_byte == _BAGGAGE_HANDLE_BM0 and count > 0:
-                end = min(offset + count, len(_BM0_CONTAINER))
-                chunk = _BM0_CONTAINER[offset:end]
-                reply_payload = (
-                    build_tagged_reply_byte(0)
-                    + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-                    + chunk
-                )
-            else:
-                reply_payload = (
-                    build_tagged_reply_byte(0xFF)
-                    + bytes([TAG_END_STATIC])
-                )
-        elif selector == MEDVIEW_SELECTOR_HFS_CLOSE:
-            # 0x1C HfCloseHf — same comment as 0x1B.
-            log.info(
-                "hfs_close req_id=%d payload_len=%d payload=%s",
-                request_id, len(payload), payload.hex(),
-            )
-            reply_payload = bytes([TAG_END_STATIC])
-        else:
+
+        reply_payload = self._dispatch(msg_class, selector, request_id, payload)
+        if reply_payload is None:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
-
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
+    def _dispatch(self, msg_class, selector, request_id, payload) -> bytes | None:
+        """Return the reply payload for selectors that produce a single
+        synchronous reply packet. Returns `None` for unknown selectors."""
+        # SessionService
+        if selector == MEDVIEW_ATTACH_SESSION:
+            return self._handle_attach_session(request_id, payload)
+        if selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS:
+            return self._handle_subscribe_notifications(msg_class, request_id, payload)
+        if selector == MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS:
+            return self._handle_unsubscribe_notifications(request_id, payload)
 
-def _extract_title_spec(payload):
-    """Pull the ASCIIZ title spec out of a TitleOpen request (first 0x04 var)."""
-    send_params, _ = parse_request_params(payload)
-    for p in send_params:
-        if getattr(p, "tag", None) == 0x04:
-            data = p.data.rstrip(b"\x00")
-            try:
-                return data.decode("ascii")
-            except UnicodeDecodeError:
-                return data.hex()
-    return ""
+        # TitleService
+        if selector == MEDVIEW_VALIDATE_TITLE:
+            return self._handle_validate_title(request_id, payload)
+        if selector == MEDVIEW_OPEN_TITLE:
+            return self._handle_open_title(request_id, payload)
+        if selector == MEDVIEW_CLOSE_TITLE:
+            return self._handle_close_title(request_id, payload)
+        if selector == MEDVIEW_GET_TITLE_INFO_REMOTE:
+            return self._handle_get_title_info_remote(request_id, payload)
+        if selector == MEDVIEW_QUERY_TOPICS:
+            return self._handle_query_topics(request_id, payload)
+        if selector == MEDVIEW_PRE_NOTIFY_TITLE:
+            return self._handle_pre_notify_title(request_id, payload)
+
+        # WordWheelService
+        if selector == MEDVIEW_OPEN_WORD_WHEEL:
+            return self._handle_open_word_wheel(request_id, payload)
+        if selector == MEDVIEW_QUERY_WORD_WHEEL:
+            return self._handle_query_word_wheel(request_id, payload)
+        if selector == MEDVIEW_CLOSE_WORD_WHEEL:
+            return _ack()
+        if selector == MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX:
+            return self._handle_resolve_word_wheel_prefix(request_id, payload)
+        if selector == MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY:
+            return _ack()
+        if selector == MEDVIEW_COUNT_KEY_MATCHES:
+            return self._handle_count_key_matches(request_id, payload)
+        if selector == MEDVIEW_READ_KEY_ADDRESSES:
+            return self._handle_read_key_addresses(request_id, payload)
+        if selector == MEDVIEW_SET_KEY_COUNT_HINT:
+            return self._handle_set_key_count_hint(request_id, payload)
+
+        # AddressHighlightService — synchronous selectors (the async
+        # converters 0x05/0x06/0x07 are handled by the cache-miss group
+        # above; 0x10 has a dynbytes reply, not an async push)
+        if selector == MEDVIEW_LOAD_TOPIC_HIGHLIGHTS:
+            return self._handle_load_topic_highlights(request_id, payload)
+        if selector == MEDVIEW_FIND_HIGHLIGHT_ADDRESS:
+            return self._handle_find_highlight_address(request_id, payload)
+        if selector == MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT:
+            return _ack()
+        if selector == MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS:
+            return _ack()  # actual result would push via type-2 — we don't push
+
+        # TopicCacheService synchronous (0x15 is async via cache-miss)
+        if selector == MEDVIEW_FETCH_ADJACENT_TOPIC:
+            return self._handle_fetch_adjacent_topic(request_id, payload)
+
+        # RemoteFileService
+        if selector == MEDVIEW_OPEN_REMOTE_HFS_FILE:
+            return self._handle_open_remote_hfs_file(request_id, payload)
+        if selector == MEDVIEW_READ_REMOTE_HFS_FILE:
+            return self._handle_read_remote_hfs_file(request_id, payload)
+        if selector == MEDVIEW_CLOSE_REMOTE_HFS_FILE:
+            return _ack()
+        if selector == MEDVIEW_GET_REMOTE_FS_ERROR:
+            return self._handle_get_remote_fs_error(request_id, payload)
+
+        return None
+
+    # --- SessionService --------------------------------------------
+
+    def _handle_attach_session(self, request_id, payload) -> bytes:
+        """`AttachSession.validationToken : u32`. Spec: nonzero accepted,
+        zero triggers "Handshake validation failed" MessageBox + detach.
+        Static-only reply, no dynamic section."""
+        log.info("attach_session req_id=%d payload=%s", request_id, payload.hex())
+        return build_tagged_reply_dword(1) + bytes([TAG_END_STATIC])
+
+    def _handle_subscribe_notifications(self, msg_class, request_id, payload) -> bytes:
+        """`SubscribeNotifications.notificationStream` — long-lived
+        streamed pending handle. We capture (msg_class, request_id) for
+        each notification type so subsequent cache pushes ride the same
+        iterator. Reply `0x87 0x88` keeps the iterator open without
+        firing SignalRequestCompletion."""
+        notification_type = payload[1] if len(payload) >= 2 else None
+        log.info(
+            "subscribe_notifications req_id=%d type=%r payload=%s",
+            request_id, notification_type, payload.hex(),
+        )
+        if notification_type is not None:
+            self._sub_class[notification_type] = msg_class
+            self._sub_req_id[notification_type] = request_id
+        return _stream_end()
+
+    def _handle_unsubscribe_notifications(self, request_id, payload) -> bytes:
+        """`UnsubscribeNotifications.ack`."""
+        notification_type = payload[1] if len(payload) >= 2 else None
+        log.info(
+            "unsubscribe_notifications req_id=%d type=%r payload=%s",
+            request_id, notification_type, payload.hex(),
+        )
+        if notification_type is not None:
+            self._sub_class.pop(notification_type, None)
+            self._sub_req_id.pop(notification_type, None)
+        return _ack()
+
+    # --- TitleService ----------------------------------------------
+
+    def _handle_validate_title(self, request_id, payload) -> bytes:
+        """`ValidateTitle.isValid : u8`. Zero = invalid; nonzero = valid."""
+        send_params, _ = parse_request_params(payload)
+        slot = next(
+            (p.value for p in send_params if getattr(p, "tag", None) == 0x01),
+            None,
+        )
+        is_valid = 1 if slot in self._open_title_slots else 0
+        log.info(
+            "validate_title req_id=%d slot=%r is_valid=%d",
+            request_id, slot, is_valid,
+        )
+        return build_tagged_reply_byte(is_valid) + bytes([TAG_END_STATIC])
+
+    def _handle_open_title(self, request_id, payload) -> bytes:
+        """`OpenTitle` static section + `payloadBlob` dynbytes.
+
+        Spec return order:
+          titleSlot:u8, fileSystemMode:u8, contentsVa:u32,
+          contentsAddr:u32, topicUpperBound:u32, cacheHeader0:u32,
+          cacheHeader1:u32, payloadBlob:dynbytes
+        """
+        title_token = _extract_title_token(payload)
+        deid = _deid_from_title_token(title_token).strip()
+        log.info("open_title req_id=%d token=%r deid=%r", request_id, title_token, deid)
+        result = build_m14_payload_for_deid(deid)
+        # Stash per-topic mapping + caption on the handler so subsequent
+        # selector 0x05 / 0x06 / 0x07 / 0x15 cache pushes can ship
+        # authored values (`_case1_text_for_key`, `_topic_for_wire_key`).
+        self.topics = result.topics
+        self.title_caption = result.caption
+        self._open_title_slots.add(_TITLE_SLOT_PRIMARY)
+        log.info(
+            "open_title_reply title_slot=0x%02x fs_mode=%d body_len=%d "
+            "va=0x%08x addr=0x%08x topic_upper=%d cache_header0=0x%08x",
+            _TITLE_SLOT_PRIMARY, 0, len(result.payload),
+            result.metadata.va_get_contents,
+            result.metadata.addr_get_contents,
+            result.metadata.topic_count,
+            result.metadata.cache_header0,
+        )
+        return _build_open_title_reply(result.payload, result.metadata)
+
+    def _handle_close_title(self, request_id, payload) -> bytes:
+        """`CloseTitle.ack`."""
+        send_params, _ = parse_request_params(payload)
+        slot = next(
+            (p.value for p in send_params if getattr(p, "tag", None) == 0x01),
+            None,
+        )
+        log.info("close_title req_id=%d slot=%r", request_id, slot)
+        if slot is not None:
+            self._open_title_slots.discard(slot)
+            if not self._open_title_slots:
+                # All titles closed — drop per-title state so the next
+                # OpenTitle starts clean.
+                self.topics = ()
+                self.title_caption = ""
+        return _ack()
+
+    def _handle_get_title_info_remote(self, request_id, payload) -> bytes:
+        """`GetTitleInfoRemote.lengthOrScalar : u32, payload : dynbytes`."""
+        info_kind, info_arg, caller_cookie = _extract_get_info_args(payload)
+        kind_class = (
+            "local_should_not_hit_wire" if info_kind in _LOCAL_INFO_KINDS
+            else _REMOTE_INFO_KIND_CLASS.get(info_kind, "remote_unknown")
+        )
+        log.info(
+            "get_title_info_remote req_id=%d kind=0x%x arg=0x%08x cookie=0x%08x class=%s",
+            request_id, info_kind, info_arg, caller_cookie, kind_class,
+        )
+        return _build_get_title_info_remote_reply(info_kind)
+
+    def _handle_query_topics(self, request_id, payload) -> bytes:
+        """`QueryTopics` reply.
+
+        Spec return: highlightContext:u8, logicalCount:u32,
+        secondaryResult:u32, auxReply:dynbytes, sideband12:bytes[12].
+
+        First-paint client doesn't drive search, so we return the
+        empty-result shape: highlight=0, count=0, secondary=0, no aux,
+        no sideband. The dynamic section is empty — `0x86` wakes Wait()
+        with zero bytes."""
+        log.info(
+            "query_topics req_id=%d payload_len=%d payload=%s",
+            request_id, len(payload), payload.hex(),
+        )
+        static = (
+            build_tagged_reply_byte(_NO_HIGHLIGHT_CONTEXT)
+            + build_tagged_reply_dword(0)
+            + build_tagged_reply_dword(0)
+        )
+        return _dynamic_complete(static, b"")
+
+    def _handle_pre_notify_title(self, request_id, payload) -> bytes:
+        """`PreNotifyTitle.ack`. Local-only opcodes (0x09, 0x0B, 0x0C,
+        0x0F per spec §`PreNotifyTitleOpcode`) are absorbed by the
+        client wrapper and never reach the wire — anything we receive
+        here is a remote-bound opcode and gets a bare ack."""
+        send_params, _ = parse_request_params(payload)
+        opcode = next(
+            (p.value for p in send_params if getattr(p, "tag", None) == 0x02),
+            None,
+        )
+        log.info(
+            "pre_notify_title req_id=%d opcode=%r payload_len=%d payload=%s",
+            request_id, opcode, len(payload), payload.hex(),
+        )
+        return _ack()
+
+    # --- WordWheelService ------------------------------------------
+
+    def _handle_open_word_wheel(self, request_id, payload) -> bytes:
+        """`OpenWordWheel.wordWheelId:u8, itemCount:u32`. Empty wheel
+        (no word-wheel index synthesized today)."""
+        log.info("open_word_wheel req_id=%d payload=%s", request_id, payload.hex())
+        return (
+            build_tagged_reply_byte(0)        # wordWheelId = 0 (no wheel)
+            + build_tagged_reply_dword(0)     # itemCount  = 0
+            + bytes([TAG_END_STATIC])
+        )
+
+    def _handle_query_word_wheel(self, request_id, payload) -> bytes:
+        """`QueryWordWheel.status : u16`."""
+        log.info("query_word_wheel req_id=%d payload=%s", request_id, payload.hex())
+        return build_tagged_reply_word(0) + bytes([TAG_END_STATIC])
+
+    def _handle_resolve_word_wheel_prefix(self, request_id, payload) -> bytes:
+        """`ResolveWordWheelPrefix.prefixResult : u32`."""
+        log.info("resolve_word_wheel_prefix req_id=%d payload=%s", request_id, payload.hex())
+        return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+
+    def _handle_count_key_matches(self, request_id, payload) -> bytes:
+        """`CountKeyMatches.matchCount : u16`."""
+        log.info("count_key_matches req_id=%d payload=%s", request_id, payload.hex())
+        return build_tagged_reply_word(0) + bytes([TAG_END_STATIC])
+
+    def _handle_read_key_addresses(self, request_id, payload) -> bytes:
+        """`ReadKeyAddresses.addressList : dynbytes`. Empty result."""
+        log.info("read_key_addresses req_id=%d payload=%s", request_id, payload.hex())
+        return _dynamic_complete(b"", b"")
+
+    def _handle_set_key_count_hint(self, request_id, payload) -> bytes:
+        """`SetKeyCountHint.success : u8`. Zero = no-op."""
+        log.info("set_key_count_hint req_id=%d payload=%s", request_id, payload.hex())
+        return build_tagged_reply_byte(0) + bytes([TAG_END_STATIC])
+
+    # --- AddressHighlightService -----------------------------------
+
+    def _handle_load_topic_highlights(self, request_id, payload) -> bytes:
+        """`LoadTopicHighlights.highlightBlob : dynbytes`. Empty blob:
+        8-byte opaque header + zero highlightCount = 12 bytes."""
+        title_slot, key = _extract_cache_miss_args(payload)
+        log.info(
+            "load_topic_highlights req_id=%d title_slot=%r key=%s",
+            request_id, title_slot,
+            f"0x{key:08x}" if key is not None else None,
+        )
+        return _dynamic_complete(b"", _empty_highlight_blob())
+
+    def _handle_find_highlight_address(self, request_id, payload) -> bytes:
+        """`FindHighlightAddress.addressToken : u32`. No highlight
+        session — return zero."""
+        log.info("find_highlight_address req_id=%d payload=%s", request_id, payload.hex())
+        return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+
+    # --- TopicCacheService synchronous -----------------------------
+
+    def _handle_fetch_adjacent_topic(self, request_id, payload) -> bytes:
+        """`FetchAdjacentTopic.ack` (real result via type-0 push, which
+        we don't push for adjacency yet — the engine retries internally
+        ~6× and falls back to its in-cache entries)."""
+        log.info(
+            "fetch_adjacent_topic req_id=%d payload_len=%d payload=%s",
+            request_id, len(payload), payload.hex(),
+        )
+        return _ack()
+
+    # --- RemoteFileService -----------------------------------------
+
+    def _handle_open_remote_hfs_file(self, request_id, payload) -> bytes:
+        """`OpenRemoteHfsFile.remoteHandleId : u8, fileSize : u32`.
+
+        We only host bm0 (engine-synthesised parent-cell backdrop, see
+        `_build_bm0_container` docstring). Anything else replies handle=0,
+        size=0, which the wrapper treats as failure (`HfOpenHfs` returns
+        no handle)."""
+        name = _extract_baggage_name(payload)
+        # `wsprintfA("|bm%d", index)` — strip the leading '|' marker.
+        canonical = name.lstrip("|")
+        log.info(
+            "open_remote_hfs_file req_id=%d name=%r canonical=%r",
+            request_id, name, canonical,
+        )
+        if canonical == "bm0":
+            handle = _BAGGAGE_HANDLE_BM0
+            size = len(_BM0_CONTAINER)
+        else:
+            handle = 0
+            size = 0
+        return (
+            bytes([TAG_END_STATIC])
+            + build_tagged_reply_byte(handle)
+            + build_tagged_reply_dword(size)
+        )
+
+    def _handle_read_remote_hfs_file(self, request_id, payload) -> bytes:
+        """`ReadRemoteHfsFile.status : u8, fileBytes : dynbytes`.
+
+        Wire shape: `0x81 status=0 0x87 0x86 <bytes>`. Status byte is
+        0 on success."""
+        send_params, _ = parse_request_params(payload)
+        handle_byte = next(
+            (p.value for p in send_params if getattr(p, "tag", None) == 0x01),
+            None,
+        )
+        dwords = [p.value for p in send_params if getattr(p, "tag", None) == 0x03]
+        count = dwords[0] if len(dwords) >= 1 else 0
+        offset = dwords[1] if len(dwords) >= 2 else 0
+        log.info(
+            "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d",
+            request_id, handle_byte, count, offset,
+        )
+        if handle_byte == _BAGGAGE_HANDLE_BM0 and count > 0:
+            end = min(offset + count, len(_BM0_CONTAINER))
+            chunk = _BM0_CONTAINER[offset:end]
+            return _dynamic_complete(build_tagged_reply_byte(0), chunk)
+        return build_tagged_reply_byte(0xFF) + bytes([TAG_END_STATIC])
+
+    def _handle_get_remote_fs_error(self, request_id, payload) -> bytes:
+        """`GetRemoteFsError.fsError : u16`. Spec: wrapper initialises
+        to `8` before request and keeps that on setup failure. Returning
+        `0` means "no error" — the wrapper overwrites its initial 8."""
+        log.info("get_remote_fs_error req_id=%d", request_id)
+        return build_tagged_reply_word(0) + bytes([TAG_END_STATIC])
+
+    # --- Shared cache-miss handler (selectors 0x05 / 0x06 / 0x07 / 0x15) ---
+
+    def _handle_cache_miss(self, msg_class, selector, request_id, payload, server_seq, client_ack):
+        """Common handler for the four cache-miss selectors.
+
+        The ack reply lets the engine's retry loop poll the cache again;
+        the cache push delivers the actual result async on the matching
+        notification iterator (type-0 for 0x15, type-3 for 0x05/0x06/0x07).
+        """
+        title_slot, key = _extract_cache_miss_args(payload)
+        log.info(
+            "cache_miss_rpc selector=0x%02x req_id=%d title_slot=%r key=%s payload=%s",
+            selector, request_id, title_slot,
+            f"0x{key:08x}" if key is not None else None,
+            payload.hex(),
+        )
+        host_block = build_host_block(msg_class, selector, request_id, _ack())
+        reply_pkts = build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        if title_slot is None or key is None:
+            return reply_pkts
+        next_seq = (server_seq + len(reply_pkts)) & 0x7F
+        push_pkts = self._build_cache_push_packet(
+            title_slot, selector, key, next_seq, client_ack,
+        )
+        if push_pkts is not None:
+            return reply_pkts + push_pkts
+        return reply_pkts
 
 
-def _extract_get_info_args(payload):
-    """Unpack (info_kind, index, buffer_size) from a TitleGetInfo request.
+# --------------------------------------------------------------------------
+# OpenTitle reply builder (top-level so tests can pin the byte layout)
+# --------------------------------------------------------------------------
 
-    Wire layout (send side): 0x01 <title_byte> 0x03 <info_kind> 0x03
-    <dwBufCtl> 0x03 <buffer_ptr>.  The client packs `(buffer_size << 16)
-    | index` into dwBufCtl at call time.  Return zeros on malformed
-    input — the MVP reply is identical either way.
+
+def _build_open_title_reply(title_body: bytes, metadata: TitleOpenMetadata) -> bytes:
+    """Build the `OpenTitle` reply per spec §0x01.
+
+    Static section (7 tagged primitives, exact order required by the
+    MVTTL14C `TitleOpenEx` recv loop, mapped to the spec's return field
+    names):
+
+        0x81 <byte=titleSlot>          → spec.titleSlot       → title +0x02
+        0x81 <byte=fileSystemMode>     → spec.fileSystemMode  → title +0x88
+        0x83 <dword=contentsVa>        → spec.contentsVa      → title +0x8c
+        0x83 <dword=contentsAddr>      → spec.contentsAddr    → title +0x90
+        0x83 <dword=topicUpperBound>   → spec.topicUpperBound → title +0x94
+        0x83 <dword=cacheHeader0>      → spec.cacheHeader0    → MVCache.tmp half 1
+        0x83 <dword=cacheHeader1>      → spec.cacheHeader1    → MVCache.tmp half 2
+        0x87                           end-static
+        0x86 <payloadBlob>             dynamic-complete
     """
-    send_params, _ = parse_request_params(payload)
-    dwords = [p.value for p in send_params if getattr(p, "tag", None) == 0x03]
-    if len(dwords) < 2:
-        return (0, 0, 0)
-    info_kind = dwords[0]
-    dw_buf_ctl = dwords[1]
-    index = (dw_buf_ctl >> 16) & 0xFFFF
-    bufsize = dw_buf_ctl & 0xFFFF
-    return (info_kind, index, bufsize)
+    # `fileSystemMode` is 0 on the synthesized model — older code shipped
+    # 1 here mistakenly (we'd called it `_TITLE_ID_SERVICE_BYTE`). Per
+    # spec §0x01, fs_mode is the byte later surfaced through local
+    # `TitleGetInfo(0x69)`, NOT a duplicate title-id.
+    file_system_mode = 0
+    static = b"".join(
+        [
+            build_tagged_reply_byte(_TITLE_SLOT_PRIMARY),
+            build_tagged_reply_byte(file_system_mode),
+            build_tagged_reply_dword(metadata.va_get_contents),
+            build_tagged_reply_dword(metadata.addr_get_contents),
+            build_tagged_reply_dword(metadata.topic_count),
+            build_tagged_reply_dword(metadata.cache_header0),
+            build_tagged_reply_dword(metadata.cache_header1),
+        ]
+    )
+    return static + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + title_body

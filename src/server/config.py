@@ -243,10 +243,60 @@ MEDVIEW_INTERFACE_GUIDS = [
 # stores it locally only — the server just has to accept the pipe.
 MEDVIEW_SERVICE_VERSION = 0x1400800A
 
-# MEDVIEW selectors used on the initial-open path.  Hard-coded in
-# MVTTL14C as integer immediates to slot 0x0C on the service proxy.
-MEDVIEW_SELECTOR_TITLE_OPEN = 0x01
-MEDVIEW_SELECTOR_TITLE_GET_INFO = 0x03
+# MEDVIEW selector constants per `docs/medview-service-contract.md`.
+# Names mirror the spec's `Class.Method` form so call sites read like the
+# wire contract.
+
+# --- BootstrapDiscovery (class 0x00) ---
+# Discovery selector 0x00 is bound to `class=0x00` and synthesised by
+# `build_discovery_packet` rather than dispatched through `handle_request`,
+# so no constant is exposed.
+
+# --- TitleService ---
+MEDVIEW_VALIDATE_TITLE = 0x00
+MEDVIEW_OPEN_TITLE = 0x01
+MEDVIEW_CLOSE_TITLE = 0x02
+MEDVIEW_GET_TITLE_INFO_REMOTE = 0x03
+MEDVIEW_QUERY_TOPICS = 0x04
+MEDVIEW_PRE_NOTIFY_TITLE = 0x1E
+
+# --- AddressHighlightService ---
+MEDVIEW_CONVERT_ADDRESS_TO_VA = 0x05
+MEDVIEW_CONVERT_HASH_TO_VA = 0x06
+MEDVIEW_CONVERT_TOPIC_TO_VA = 0x07
+MEDVIEW_LOAD_TOPIC_HIGHLIGHTS = 0x10
+MEDVIEW_FIND_HIGHLIGHT_ADDRESS = 0x11
+MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT = 0x12
+MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS = 0x13
+
+# --- WordWheelService ---
+MEDVIEW_QUERY_WORD_WHEEL = 0x08
+MEDVIEW_OPEN_WORD_WHEEL = 0x09
+MEDVIEW_CLOSE_WORD_WHEEL = 0x0A
+MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX = 0x0B
+MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY = 0x0C
+MEDVIEW_COUNT_KEY_MATCHES = 0x0D
+MEDVIEW_READ_KEY_ADDRESSES = 0x0E
+MEDVIEW_SET_KEY_COUNT_HINT = 0x0F
+
+# --- TopicCacheService ---
+MEDVIEW_FETCH_NEARBY_TOPIC = 0x15
+MEDVIEW_FETCH_ADJACENT_TOPIC = 0x16
+
+# --- SessionService ---
+MEDVIEW_SUBSCRIBE_NOTIFICATIONS = 0x17
+MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS = 0x18
+MEDVIEW_ATTACH_SESSION = 0x1F
+
+# --- RemoteFileService ---
+MEDVIEW_OPEN_REMOTE_HFS_FILE = 0x1A
+MEDVIEW_READ_REMOTE_HFS_FILE = 0x1B
+MEDVIEW_CLOSE_REMOTE_HFS_FILE = 0x1C
+MEDVIEW_GET_REMOTE_FS_ERROR = 0x1D
+
+# --- Legacy aliases retained for callers that imported the old names ---
+MEDVIEW_SELECTOR_TITLE_OPEN = MEDVIEW_OPEN_TITLE
+MEDVIEW_SELECTOR_TITLE_GET_INFO = MEDVIEW_GET_TITLE_INFO_REMOTE
 # Cache-miss fallback selectors (`docs/MEDVIEW.md` §6b).  All three
 # share the same wire shape — `0x01 <title_byte> 0x03 <key:dword>` —
 # and the same reply contract: ack-only via `0x87`, the real answer
@@ -256,9 +306,9 @@ MEDVIEW_SELECTOR_TITLE_GET_INFO = 0x03
 # iteration.  Empirically (live SoftIce trace 2026-04-27),
 # vaConvertHash fires for the initial-selector navigation in
 # `MOSVIEW!FUN_7f3c6790` once the lp's title-handle slot is wired.
-MEDVIEW_SELECTOR_VA_CONVERT_HASH = 0x06       # MVTTL14C!vaConvertHash @ 0x7E841E9A
-MEDVIEW_SELECTOR_VA_CONVERT_TOPIC = 0x07      # MVTTL14C!vaConvertTopicNumber @ 0x7E841FCF
-MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC = 0x10   # MVTTL14C!HighlightsInTopic @ 0x7E841526
+MEDVIEW_SELECTOR_VA_CONVERT_HASH = MEDVIEW_CONVERT_HASH_TO_VA
+MEDVIEW_SELECTOR_VA_CONVERT_TOPIC = MEDVIEW_CONVERT_TOPIC_TO_VA
+MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC = MEDVIEW_LOAD_TOPIC_HIGHLIGHTS
 # va→content-chunk fallback fired by `MVTTL14C!HfcNear @ 0x7E84589F` when
 # the per-title cache (`FUN_7e845efa`, tree at `title+4`, recent at
 # `title+0x10..0x34`) misses.  Wire shape mirrors selector 0x07
@@ -274,31 +324,31 @@ MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC = 0x10   # MVTTL14C!HighlightsInTopic @ 0x7
 # MOSVIEW!FUN_7f3c6790 (CreateMediaViewWindow's pane attach) at
 # initial open, NOT from NavigateViewerSelection (which is the
 # click-handler path the original docs/MEDVIEW.md §6b assumed).
-MEDVIEW_SELECTOR_VA_RESOLVE = 0x15
+MEDVIEW_SELECTOR_VA_RESOLVE = MEDVIEW_FETCH_NEARBY_TOPIC
 # `MVTTL14C!HfcNextPrevHfc @ 0x7E845ABB` — next/prev navigation on the
 # per-title cache (`title+4` tree).  Same wire shape as 0x15 plus a
 # direction byte (0=prev, 1=next).  Fires on cache miss when MVCL14N
 # walks adjacent content during render scrollback / pagination.  Reply
 # ack-only — engine retries internally; with the va=1 entry already
 # cached from our 0x15 push, it falls back to local cache.
-MEDVIEW_SELECTOR_HFC_NEXT_PREV = 0x16
+MEDVIEW_SELECTOR_HFC_NEXT_PREV = MEDVIEW_FETCH_ADJACENT_TOPIC
 # Async-notification subscribe: `hrAttachToService` allocates 5 callback
 # slots via `FUN_7e84485f`, each of which fires `FUN_7e844ee6` to call
 # selector 0x17 with a single byte (the notification-type index, 0-7).
 # The reply is expected to carry an async-iterator handle; an empty
 # static-only reply tells the client "subscribe declined" so it stops
 # retrying this slot.  No live notification feed exists server-side yet.
-MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION = 0x17
+MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION = MEDVIEW_SUBSCRIBE_NOTIFICATIONS
 # Baggage / HFS file access (docs/MEDVIEW.md §6c).  HFS = a Marvel-
 # specific bundle of supporting media (icons, sounds, helper files)
 # referenced by authored content.  Fires once render starts and the
 # content graph references a baggage filename.  Three-call protocol:
 # OpenHfs → LcbReadHf (variable bytes) → HfCloseHf.  Decline opens
 # (reply byte=0) when no baggage is hosted server-side.
-MEDVIEW_SELECTOR_HFS_OPEN = 0x1A
-MEDVIEW_SELECTOR_HFS_READ = 0x1B
-MEDVIEW_SELECTOR_HFS_CLOSE = 0x1C
-MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY = 0x1E
-MEDVIEW_SELECTOR_HANDSHAKE = 0x1F
+MEDVIEW_SELECTOR_HFS_OPEN = MEDVIEW_OPEN_REMOTE_HFS_FILE
+MEDVIEW_SELECTOR_HFS_READ = MEDVIEW_READ_REMOTE_HFS_FILE
+MEDVIEW_SELECTOR_HFS_CLOSE = MEDVIEW_CLOSE_REMOTE_HFS_FILE
+MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY = MEDVIEW_PRE_NOTIFY_TITLE
+MEDVIEW_SELECTOR_HANDSHAKE = MEDVIEW_ATTACH_SESSION
 
 del _guid_le
