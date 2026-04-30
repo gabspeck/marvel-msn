@@ -1339,15 +1339,147 @@ with a trailer carrying `child_count > 0` and `tail_size > 0`, plus a
 populated tail block carrying CElementData strings / link offsets keyed by
 each child's `[tag, tag2]` pair.
 
-### 10.5. Rendering text via slot tag 1 (alternate path)
+### 10.5. Rendering text via slot tag 1 (case-1 BF chunk)
 
 For chunks whose `name_buf[0x26]` decodes to chunk_tag = 1 / 0x20,
 `FUN_7e8915d0` (case 1) creates slot tag 1 entries that paint via
-`FUN_7e893010` reading text bytes **directly from the BF chunk content**
-past the varint at offset 0x26. This is the path for plain text rows
-that don't need a backdrop bitmap. `4.ttl` content can be partially
-rendered through case-1 chunks for text and case-3 chunks for the
-banner/page bitmap together.
+`FUN_7e893010` reading text bytes **directly from the BF chunk content**.
+This is the plain-text row path; complementary to case-3 (which paints
+backdrop bitmaps).
+
+#### Wire layout (128-byte type-0 0xBF chunk, case-1 form)
+
+```
++0x00  0xBF                                cache opcode
++0x01  title_byte                          per-title routing
++0x02  name_size = 0x40 (LE u16)           memcpy length into entry
++0x04..0x0B  zero padding                  name_buf[0..7]
++0x0C  key (LE u32)                        FUN_7e8452d3 reads here
++0x10..0x29  zero padding                  name_buf[12..0x25]
++0x2A  0x01                                name_buf[0x26] — case-1 dispatch
++0x2B..0x2C  preamble length raw           narrow varint, decoded = 7
++0x2D..0x32  null TLV (6 bytes)            length=0, bitmap=0
++0x33  0xFF                                end-of-chunk control byte
++0x34..      ASCII text + NUL              up to 13 bytes (incl. NUL)
++...         zero padding to 0x44
++0x44..0x7F  60-byte content block         zeros (HGLOBAL slots NULL)
+```
+
+After the cache strips the 4-byte wire header, the entry stores
+chunk[4..0x7F] at entry[0..0x7B]. So `entry+0x26` = `name_buf[0x26]`
+= the case-dispatch byte, and the walker reads from there.
+
+#### Preamble parser (`FUN_7e897ed0`)
+
+Reads from `entry+0x26`:
+- byte 0: type tag (switched on by `FUN_7e894c50`)
+- bytes 1..2 (narrow) or 1..4 (wide): signed-int length value
+  - narrow form (1-bit LSB clear): 2-byte LE u16, decoded `(raw>>1) - 0x4000`
+  - wide form (LSB set): 4-byte LE u32, decoded `(raw>>1) - 0x40000000`
+- For type tag > 0x10: additional 1-byte (narrow) or 2-byte (wide) varint at offset +5
+- For type tag <= 0x10: preamble is 3 bytes (narrow) or 5 bytes (wide)
+
+The decoded `length_value` becomes the byte offset from
+`entry+0x26+preamble_size` to `local_c` (TEXT_BASE pointer). With
+preamble length = 7 and TLV size = 6, TEXT_BASE = `entry+0x26+3+7` =
+`entry+0x30`, so the 0xFF byte at `entry+0x2F` (= end_of_TLV) sits
+between the TLV and the text bytes.
+
+#### TLV parser (`FUN_7e897ad0`)
+
+Reads from `entry+0x26 + preamble_size` and writes to a 168-byte
+zero-initialised local struct (`local_120` in `FUN_7e8915d0`):
+
+| TLV offset | Field | Source | Bias |
+|-----------|-------|--------|------|
+| `+0x00` | length (signed int) | first varint | -0x4000 / -0x40000000 |
+| `+0x04` | flag bit 0 | bitmap bit 0 | unconditional |
+| `+0x08` | flag bit 0x10000 | bitmap bit 16 | unconditional + presence for `+0x12` |
+| `+0x0A` | flag bit 0x01000000 | bitmap bit 24 | unconditional + presence for `+0x24` |
+| `+0x0C` | 2-bit field | bitmap bits 26-27 | unconditional |
+| `+0x0E` | flag bit 0x10000000 | bitmap bit 28 | unconditional |
+| `+0x12` | signed int | varint, gated by bit 16 | -0x4000 / -0x40000000 |
+| `+0x16` | signed short | varint, gated by bit 17 | -0x40 / -0x4000 |
+| `+0x18` | signed short | varint, gated by bit 18 | -0x40 / -0x4000 |
+| `+0x1A` | signed short | varint, gated by bit 19 | -0x40 / -0x4000 |
+| `+0x1C` | signed short | varint, gated by bit 20 | -0x40 / -0x4000 |
+| `+0x1E` | signed short | varint, gated by bit 21 | -0x40 / -0x4000 |
+| `+0x20` | signed short | varint, gated by bit 22 | -0x40 / -0x4000 |
+| `+0x22` | signed short | varint, gated by bit 23; default formula otherwise | -0x40 / -0x4000 |
+| `+0x24` | ushort | 3-byte raw read (low 2 bytes stored), gated by bit 24 | none |
+| `+0x27` | signed short | varint, gated by bit 25 (= count of trailing pairs) | -0x40 / -0x4000 |
+| `+0x29..` | pair entries | `(varint, varint)` × `[+0x27]` | unbiased |
+
+Encoded by `src/server/blackbird/wire.py`'s `encode_signed_int_varint`,
+`encode_signed_short_varint`, `encode_null_tlv`, and `decode_case1_tlv`
+(round-trip verifier).
+
+The DPI scale pass (`FUN_7e892b90`) immediately after parse rescales
+`+0x16..+0x22` and each pair entry's first ushort by
+`(devCaps × field × dpi_scale) / (base × 100)`, where `base = 144`
+when `TLV[0x12] & 1 == 0` else `1440`. Suggests fields are
+sub-pixel layout values in points×10 / twips.
+
+#### Slot tag-1 emission (`FUN_7e891810` / `FUN_7e892d30`)
+
+`FUN_7e8915d0` initialises a 42-byte working template (`local_5c`)
+copied from `local_74 + 0x36`, then calls `FUN_7e891810` repeatedly
+until it returns ≥ 5. Inside `FUN_7e891810`:
+
+- Pre-test: `chunk_content_base[TLV[0x00]] == 0` AND
+  `*end_of_TLV == 0xFF` → "skip empty row," return 5. Both must be
+  true; the encoder picks layouts where one or both fail.
+- Main loop: dispatches via `FUN_7e891f50 → FUN_7e892200` →
+  - text byte at current idx ≠ NUL: `FUN_7e8925d0` walks ASCII
+    classifying NUL=0 / space=2 / letter=1, breaks on word
+    boundaries, emits slot via `FUN_7e892d30`.
+  - text byte at current idx == NUL: `FUN_7e894ec0` reads byte at
+    control walker (`template[+0x14]` = end_of_TLV). 0xFF → return 5,
+    advance walker +1. Other bytes dispatch to font-change /
+    paragraph / nested-chunk handlers. Default: treat byte as a link
+    tag and read `*(ushort *)(walker+1)` as length-prefix → walker
+    advances by `length+3`. **Without a 0xFF terminator at
+    end_of_TLV, the default case mis-reads ASCII text as link tags
+    and walks out of bounds → "service is not available" dialog.**
+
+Slot fields written by `FUN_7e892d30` (slot at
+`title+0xf6 + slot_idx*0x47`):
+
+| Slot offset | Source | Notes |
+|-----|--------|-------|
+| `+0x00` | const 1 | slot tag = 1 (text) |
+| `+0x01..+0x04` | template + flag | bit 1 of flags1 = "active" |
+| `+0x05` | `template[+0x15]` | X local |
+| `+0x07` | `template[+0x17]` | Y local |
+| `+0x09` | title font width metric | computed |
+| `+0x0B` | `template[+0x16]` + metric | width |
+| `+0x0D` | title line height metric | computed |
+| `+0x0F` | `template[+0x18]` u32 | (4-byte field) |
+| `+0x13` | `template[+0x0E]` u32 | (4-byte field) |
+| `+0x39` | `template[+0x18]` int | **text byte offset** within `chunk_content_base`. Set to `TLV[0x00]` (= 0 for null TLV) on `FUN_7e8925d0` entry. |
+| `+0x3D` | `template[+0x1A]` short | **text length** — computed by walk, terminates at NUL or chunk_end (= initial offset + 32) |
+| `+0x3F` | `template[+0]` short | **font index** — inherited from `puVar2[+0x18]` (initialised to 0xFFFF in `FUN_7e890fd0`) |
+
+Paint-time `FUN_7e893010` reads `slot+0x39`, `+0x3D`, `+0x3F` and
+calls `ExtTextOutA(hdc, x, y, …, content_base + slot+0x39,
+slot+0x3D, …)`.
+
+#### Status (2026-04-29)
+
+Encoder shipped behind env var `MSN_MEDVIEW_CASE1_TEXT`
+(`build_case1_bf_chunk` in `src/server/blackbird/wire.py`). Live
+SoftIce trace confirms:
+
+- Chunk delivered byte-perfect to `FUN_7e890fd0` at the cache buffer
+  (verified at 0x0040539C; bytes match wire encoding exactly).
+- Layout pass dispatches case 1 → `FUN_7e8915d0` → `FUN_7e891810` →
+  `FUN_7e891f50` → `FUN_7e892200` → `FUN_7e8925d0` → `FUN_7e892d30`
+  (slot tag-1 emit reached, text length = 9 for "MSN Today").
+- Connection stays alive; "service is not available" dialog gone
+  after the 0xFF fix.
+- Paint not yet visibly producing text — engine clears hourglass and
+  shows blank pane; possibly font index 0xFFFF (slot+0x3F inherited
+  from sentinel, not yet diverted) or X/Y outside visible region.
 
 ## 11. End-to-end wire trace (MSN Today open → bm0 paint)
 
@@ -1477,3 +1609,16 @@ schema (see §10.5).
   treats them as (a) a content hash, (b) a version stamp, or (c) a
   client-opaque token is not yet nailed down; for the MVP they can be any
   stable non-zero pair.
+- **Case-1 paint pass**. With `MSN_MEDVIEW_CASE1_TEXT=1`, the case-1
+  chunk (§10.5) clears layout end-to-end and the connection stays
+  alive (no "service is not available" dialog), but `ExtTextOutA` does
+  not visibly produce text — pane goes blank after hourglass clears.
+  Two suspects: (a) `slot+0x3F` = 0xFFFF (font index inherited from
+  `puVar2[+0x18]` sentinel set in `FUN_7e890fd0`), so the
+  `FUN_7e896760` paint-time font select either fails or maps to an
+  invisible HFONT; (b) `slot+0x05` / `+0x07` (X, Y) values come from
+  uninitialised template positions and may land outside the pane.
+  Resolution requires either a font-control byte in the chunk
+  (`FUN_7e894ec0` case 0x80, length 3 = byte tag + ushort font index)
+  or populating section 0 of the title body so the engine resolves
+  0xFFFF to font 0.

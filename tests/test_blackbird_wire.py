@@ -15,10 +15,16 @@ import unittest
 
 from src.server.blackbird.wire import (
     build_baggage_container,
+    build_case1_bf_chunk,
     build_child_record,
     build_kind5_raster,
     build_trailer,
+    decode_case1_tlv,
     encode_byte_or_ushort_varint,
+    encode_case1_preamble,
+    encode_null_tlv,
+    encode_signed_int_varint,
+    encode_signed_short_varint,
     encode_ushort_or_u32_varint,
 )
 
@@ -213,6 +219,202 @@ class TestBaggageContainer(unittest.TestCase):
         self.assertEqual(container[0:8], bytes.fromhex("00000100 08000000".replace(" ", "")))
         # Bitmap follows.
         self.assertEqual(container[8:], bitmap)
+
+
+class TestSignedIntVarint(unittest.TestCase):
+    """Length-form varint used by `FUN_7e897ad0` / `FUN_7e897ed0`.
+
+    Narrow form: 2 B, low bit clear, decoded `(raw>>1) - 0x4000`.
+    Wide form:   4 B, low bit set,   decoded `(raw>>1) - 0x40000000`.
+    """
+
+    def test_narrow_zero_encodes_to_0080(self):
+        # raw word = (0 + 0x4000) << 1 = 0x8000 → LE bytes `00 80`.
+        self.assertEqual(encode_signed_int_varint(0), bytes.fromhex("0080"))
+
+    def test_narrow_negative_extreme(self):
+        # value = -0x4000 → raw = 0x0000 → LE `00 00`.
+        self.assertEqual(encode_signed_int_varint(-0x4000), bytes.fromhex("0000"))
+
+    def test_narrow_positive_extreme(self):
+        # value = 0x3FFF → raw = 0xFFFE → LE `fe ff`.
+        self.assertEqual(encode_signed_int_varint(0x3FFF), bytes.fromhex("feff"))
+
+    def test_wide_when_value_overflows_narrow(self):
+        # 0x4000 needs wide form; raw = ((0x4000 + 0x40000000) << 1) | 1
+        # = 0x80008001 → LE `01 80 00 80`.
+        self.assertEqual(encode_signed_int_varint(0x4000), bytes.fromhex("01800080"))
+
+    def test_overflow_rejected(self):
+        with self.assertRaises(ValueError):
+            encode_signed_int_varint(0x40000000)
+        with self.assertRaises(ValueError):
+            encode_signed_int_varint(-0x40000001)
+
+
+class TestSignedShortVarint(unittest.TestCase):
+    """Short-form varint used by `FUN_7e897ad0` for fields TLV+0x16..+0x22.
+
+    Narrow form: 1 B, low bit clear, decoded `(raw>>1) - 0x40`.
+    Wide form:   2 B, low bit set,   decoded `(raw>>1) - 0x4000`.
+    """
+
+    def test_narrow_zero(self):
+        self.assertEqual(encode_signed_short_varint(0), bytes([0x80]))
+
+    def test_narrow_negative_extreme(self):
+        self.assertEqual(encode_signed_short_varint(-0x40), bytes([0x00]))
+
+    def test_narrow_positive_extreme(self):
+        self.assertEqual(encode_signed_short_varint(0x3F), bytes([0xFE]))
+
+    def test_wide_when_value_overflows_narrow(self):
+        # value=0x40 → raw=((0x40+0x4000)<<1)|1=0x8081 → LE `81 80`.
+        self.assertEqual(encode_signed_short_varint(0x40), bytes.fromhex("8180"))
+
+    def test_overflow_rejected(self):
+        with self.assertRaises(ValueError):
+            encode_signed_short_varint(0x4000)
+        with self.assertRaises(ValueError):
+            encode_signed_short_varint(-0x4001)
+
+
+class TestCase1Preamble(unittest.TestCase):
+    """Per-chunk preamble (`FUN_7e897ed0`).
+
+    Layout for type tag in [0x03..0x10]: `[tag][signed-int varint]`.
+    The varint value is added to `entry+0x26 + preamble_size` to find
+    the text base pointer.
+    """
+
+    def test_case1_zero_length_value(self):
+        # type=0x01, length_value=0: 3 bytes `01 00 80`.
+        self.assertEqual(encode_case1_preamble(0, 0x01), bytes.fromhex("010080"))
+
+    def test_case1_length_value_seven(self):
+        # length_value=7 → raw=(7+0x4000)<<1=0x800E → bytes `0E 80`.
+        # Used to put text after a 6-byte null TLV + 1-byte 0xFF control
+        # byte (TEXT_BASE one byte past end_of_TLV).
+        self.assertEqual(encode_case1_preamble(7, 0x01), bytes.fromhex("010e80"))
+
+    def test_tag_above_0x10_rejected(self):
+        # FUN_7e897ed0's `if (0x10 < bVar1)` branch reads an extra
+        # varint we don't yet generate.
+        with self.assertRaises(NotImplementedError):
+            encode_case1_preamble(0, 0x11)
+
+    def test_tag_byte_range(self):
+        with self.assertRaises(ValueError):
+            encode_case1_preamble(0, 256)
+
+
+class TestCase1Tlv(unittest.TestCase):
+    """TLV produced by `FUN_7e897ad0` — the case-1 layout descriptor."""
+
+    def test_null_tlv_is_six_bytes(self):
+        # Length=0 narrow (`00 80`) + bitmap u32 = 0 (`00 00 00 00`).
+        self.assertEqual(encode_null_tlv(), bytes.fromhex("008000000000"))
+
+    def test_decode_null_tlv_round_trip(self):
+        fields, consumed = decode_case1_tlv(encode_null_tlv())
+        self.assertEqual(consumed, 6)
+        self.assertEqual(fields[0x00], 0)
+        # All flag fields are zero.
+        for offset in (0x04, 0x08, 0x0A, 0x0C, 0x0E):
+            self.assertEqual(fields[offset], 0, f"flag {offset:#x}")
+        # Conditional fields zero by absence.
+        for offset in (0x12, 0x16, 0x18, 0x1A, 0x1C, 0x1E, 0x20, 0x24, 0x27):
+            self.assertEqual(fields[offset], 0, f"field {offset:#x}")
+        # Default for absent +0x22: depends on (TLV[0x12] & 1).
+        self.assertEqual(fields[0x22], 0x0048)
+        # No trailing pairs.
+        self.assertEqual(fields["pairs"], [])
+
+    def test_decode_consumes_only_narrow_length_plus_bitmap(self):
+        # Trailing bytes after the 6-byte null TLV must NOT be read.
+        suffix = b"\xCA\xFE\xBA\xBE"
+        fields, consumed = decode_case1_tlv(encode_null_tlv() + suffix)
+        self.assertEqual(consumed, 6)
+
+
+class TestCase1BfChunk(unittest.TestCase):
+    """Byte-pinned case-1 chunk produced by `build_case1_bf_chunk`."""
+
+    def test_chunk_is_128_bytes(self):
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE)
+        self.assertEqual(len(chunk), 4 + 0x40 + 60)
+
+    def test_chunk_header_and_key_placement(self):
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE)
+        self.assertEqual(chunk[0], 0xBF)        # type-0 cache opcode
+        self.assertEqual(chunk[1], 0x01)        # title byte
+        self.assertEqual(chunk[2:4], bytes.fromhex("4000"))  # name_size = 0x40
+        self.assertEqual(chunk[12:16], struct.pack("<I", 0xCAFEBABE))  # key
+
+    def test_chunk_dispatch_byte_is_case1(self):
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        # name_buf[0x26] = 0x01 → case-1 dispatch in FUN_7e894c50.
+        self.assertEqual(chunk[4 + 0x26], 0x01)
+
+    def test_chunk_preamble_drives_text_base_to_entry_0x30(self):
+        # Preamble at name_buf[0x26..0x28]:
+        #   byte 0x26: 0x01 (tag)
+        #   bytes 0x27-0x28: signed-int varint, value = 7 (TLV size + 1).
+        # text_base = entry + 0x26 + 3 + 7 = entry + 0x30.
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        self.assertEqual(chunk[4 + 0x26:4 + 0x29], bytes.fromhex("010e80"))
+
+    def test_chunk_tlv_is_null(self):
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        # TLV at name_buf[0x29..0x2E] = 6-byte null TLV.
+        self.assertEqual(chunk[4 + 0x29:4 + 0x2F], bytes.fromhex("008000000000"))
+
+    def test_chunk_end_of_chunk_marker_at_end_of_tlv(self):
+        # 0xFF at name_buf[0x2F] = end_of_TLV. Read by FUN_7e894ec0
+        # via control walker (template[+0x14]) when text walker hits NUL.
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        self.assertEqual(chunk[4 + 0x2F], 0xFF)
+
+    def test_chunk_text_at_entry_0x30_with_nul_terminator(self):
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        # Text at name_buf[0x30..0x39] = 9 ASCII + NUL.
+        self.assertEqual(
+            chunk[4 + 0x30:4 + 0x30 + 10],
+            b"MSN Today\x00",
+        )
+
+    def test_chunk_full_byte_layout_for_msn_today(self):
+        # Pin the entire 128-byte sequence so any encoder drift is caught.
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE)
+        expected = bytearray(128)
+        expected[0] = 0xBF
+        expected[1] = 0x01
+        expected[2:4] = bytes.fromhex("4000")
+        expected[12:16] = struct.pack("<I", 0xCAFEBABE)
+        expected[4 + 0x26:4 + 0x29] = bytes.fromhex("010e80")
+        expected[4 + 0x29:4 + 0x2F] = bytes.fromhex("008000000000")
+        expected[4 + 0x2F] = 0xFF
+        expected[4 + 0x30:4 + 0x3A] = b"MSN Today\x00"
+        # Bytes 0x3A..0x43 in name_buf and 0x44..0x7F in content block
+        # remain zero.
+        self.assertEqual(chunk, bytes(expected))
+
+    def test_chunk_content_block_is_zero(self):
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        # Content block = chunk[0x44..0x7F]; bytes +0x2C / +0x34 of the
+        # block are HGLOBAL slots, kept NULL by zeros.
+        self.assertEqual(chunk[0x44:], b"\x00" * 60)
+
+    def test_empty_text_rejected(self):
+        # FUN_7e891810's skip-empty pre-test fires if first text byte
+        # is NUL — we'd never emit slot tag 1.
+        with self.assertRaises(ValueError):
+            build_case1_bf_chunk("", title_byte=0x01, key=0)
+
+    def test_text_too_long_for_in_name_buf_form_rejected(self):
+        # 13 bytes of text + NUL = 14 bytes, exceeds 13-byte budget.
+        with self.assertRaises(ValueError):
+            build_case1_bf_chunk("X" * 13, title_byte=0x01, key=0)
 
 
 if __name__ == "__main__":
