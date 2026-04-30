@@ -1,10 +1,21 @@
 """Blackbird-side encoders that bridge authored `.ttl` content to MEDVIEW
 wire bytes.
 
-The `wire` submodule contains the kind=5 raster + trailer + child-record
-builders consumed by `services.medview` to synthesise `bm<N>` baggage
-payloads from authored `CContent` and `CSection` data.
+Submodules:
 
-Format references — `docs/MEDVIEW.md` §10.2/§10.3 (trailer + child
-record), `docs/BLACKBIRD.md` §8 (VIEWDLL Serialize methods).
+- `wire` — kind=5 raster, trailer, child-record, case-1 0xBF chunk
+  builders consumed by `services.medview` to synthesise `bm<N>` baggage
+  payloads (`docs/MEDVIEW.md` §10.2/§10.3, `docs/BLACKBIRD.md` §8).
+- `ttl_inspect` — Blackbird `.ttl` (OLE2 compound file) parser
+  (`docs/blackbird-title-format.md`).
+- `m14_parse` — MediaView 1.4 cache/payload structural parser
+  (`docs/mosview-mediaview-format.md` "Payload Grammar").
+- `m14_synth` — `.ttl` → MediaView 1.4 payload synthesizer.
+- `m14_payload` — wire-mode adapter for `services.medview`; handles
+  missing/unsynthesizable `.ttl` files with an empty fallback and strips
+  the synthesizer's `FNTB` font_blob (which would crash MVTTL14C).
 """
+
+from .m14_payload import build_empty_m14_payload, build_m14_payload_for_deid
+
+__all__ = ["build_empty_m14_payload", "build_m14_payload_for_deid"]

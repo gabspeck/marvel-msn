@@ -1,28 +1,26 @@
-"""MEDVIEW service handler: MedView title loader for MOSVIEW.EXE.
+"""MEDVIEW service handler: MediaView 1.4 title loader for MOSVIEW.EXE.
 
-Bound to svc_name="MEDVIEW", version 0x1400800A.  MSN Today (wire node
+Bound to svc_name="MEDVIEW", version 0x1400800A. MSN Today (wire node
 `4:0`, App #6) is the first surface that opens a pipe here via
 `HRMOSExec(c=6)` → `MOSVIEW.EXE -MOS:6:<spec>` → `MVTTL14C!TitleConnection`.
 
-Wire contract is documented end-to-end in `docs/MEDVIEW.md`.  The title
-body shipped in TitleOpen's 0x86 dynamic section is a flat 9-section
-stream consumed by `MVTTL14C!TitleOpenEx @ 0x7E842D4E` + TitleGetInfo —
-NOT Blackbird's "Release" OLE2 compound file (that's the authoring-side
-format; see `docs/BLACKBIRD.md` §4.4).  The 1996 MSN server synthesised
-the 9-section stream at query-time from the Blackbird publish upload.
+Wire contract: `docs/MEDVIEW.md` (project-internal RE notes) and
+`docs/mosview-mediaview-format.md` (code-proven payload grammar lifted
+from blackbird-re). The TitleOpen reply's 0x86 dynamic section is the
+flat MediaView 1.4 payload consumed by `MVTTL14C!TitleOpenEx @ 0x7E842D4E`
+and `TitleGetInfo @ 0x7E842558` — NOT Blackbird's authoring-side OLE2
+compound file (`docs/BLACKBIRD.md`).
 
-This handler replicates that synthesis from the authored `.ttl`
-compound file: `resources/titles/<deid>.ttl` → `Title` object → body
-with `CTitle.name` placed in section 4 (info_kind=1), the only field
-MSN Today actually reads at startup (see docs/MEDVIEW.md §4.4).  The
-remaining sections stay empty pending RE of COSCL's `extract_object`
-compression scheme (tracked in docs/BLACKBIRD.md §7).
+The payload is synthesized at query-time from the authored `.ttl`
+fixture at `resources/titles/<deid>.ttl` via
+`src/server/blackbird/m14_synth.py`. The `m14_payload` adapter handles
+the wire-mode font_blob strip and the empty-fallback path for missing
+or unsynthesizable titles.
 """
 
 import logging
 import os
 import struct
-from pathlib import Path
 
 from ..config import (
     MEDVIEW_INTERFACE_GUIDS,
@@ -44,8 +42,10 @@ from ..config import (
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
+from ..blackbird.m14_payload import build_m14_payload_for_deid
 from ..blackbird.wire import (
     build_baggage_container,
+    build_case1_bf_chunk,
     build_kind5_raster,
     build_trailer,
 )
@@ -59,169 +59,22 @@ from ..mpc import (
     parse_request_params,
 )
 from ._dispatch import log_unhandled_selector
-from .ttl import Title, TTLError
 
 log = logging.getLogger(__name__)
 
 
-# Root directory for per-title fixtures.  Override with MSN_TITLES_ROOT;
-# default is the repo's `resources/titles/` checked in alongside the
-# server source (4 levels up from services/medview.py:
-# services → server → src → repo).
-def _titles_root() -> Path:
-    env = os.environ.get("MSN_TITLES_ROOT")
-    if env:
-        return Path(env)
-    return Path(__file__).resolve().parents[3] / "resources" / "titles"
-
-
-def _resolve_title(deid: str) -> tuple[str, Title | None]:
-    """Map a DIRSRV deid to (caption, Title-or-None).
-
-    Parses `<_titles_root()>/<deid>.ttl` when present.  Returns the
-    authored `CTitle.name` plus the parsed Title object (so callers
-    can inspect class objects); on missing / invalid `.ttl`, returns
-    a `"Title <deid>"` fallback caption and `None`.
-    """
-    if not deid:
-        return ("Untitled", None)
-    path = _titles_root() / f"{deid}.ttl"
-    if not path.is_file():
-        log.info("ttl_missing deid=%r path=%s — using deid fallback", deid, path)
-        return (f"Title {deid}", None)
-    try:
-        title = Title.from_path(str(path))
-    except TTLError as exc:
-        log.warning("ttl_parse_failed deid=%r path=%s: %s", deid, path, exc)
-        return (f"Title {deid}", None)
-    name = title.display_name
-    if not name:
-        log.warning("ttl_no_display_name deid=%r path=%s types=%r", deid, path, title.types)
-        return (f"Title {deid}", title)
-    log.info("ttl_loaded deid=%r path=%s display_name=%r", deid, path, name)
-    return (name, title)
-
-
-def _resolve_display_name(deid: str) -> str:
-    """Backwards-compat wrapper used by tests and callers that only
-    need the caption string.  See `_resolve_title` for the full form."""
-    name, _ = _resolve_title(deid)
-    return name
-
-
-def _section1_records_from_csections(title: Title | None) -> bytes:
-    """Concatenate every CSection's ver=0x03 body into wire body
-    section 1 (43-byte topic records, see docs/MEDVIEW.md §4.4).
-
-    Hypothesis (single-sample, see ttl.py): BBDESIGN release path
-    flattens authored CSection instances to wire-ready records and
-    tags them ver=0x03 so the 1996 Marvel server could memcpy each
-    body straight into wire section 1.  Each CSection sub-storage
-    contributes one 43-byte record; multiple sub-storages
-    concatenate in sub-id order.
-
-    Records that aren't exactly 43 bytes are skipped with a warning
-    rather than poisoning the wire body — better blank than corrupt.
-    """
-    if title is None:
-        return b""
-    records: list[bytes] = []
-    for sid, class_name in sorted(title.types.items()):
-        if class_name != "CSection":
-            continue
-        for sub, body in sorted(title.objects.get(sid, {}).items()):
-            if len(body) != 43:
-                log.warning(
-                    "csection_skip sid=%d sub=%d len=%d — not 43-byte wire record",
-                    sid, sub, len(body),
-                )
-                continue
-            records.append(body)
-    return b"".join(records)
-
-
-def _build_title_body(display_name: str, title: Title | None = None) -> bytes:
-    """Synthesize a MedView 9-section body from authored title state.
-
-    Layout (little-endian; see docs/MEDVIEW.md §4.4):
-
-        section 0:     [u16 size=0]              # font table — empty
-        section 1:     [u16 size=N][N bytes]     # 43-byte topic records,
-                                                 #   one per CSection (ver=0x03 hypothesis)
-        sections 2-3:  2 × [u16 size=0]          # link / layout — empty
-        section 4:     [u16 size=N][N ASCII bytes]  # title name (raw blob)
-        sections 5-7:  3 × [u16 size=0]          # copyright + 2 raw blobs, empty
-        section 8:     [u16 count=0]             # string table, empty
-
-    Section 0 empty (`u16==0`) steers `MVTTL14C!TitleOpenEx @ 0x7E842D4E`
-    into the safe `LAB_7e8432c4` branch that skips the DIB alloc /
-    `memcpy.REP` DIB copy.  Sections 1-3 empty make the fixed-record
-    queries in `TitleGetInfo @ 0x7E842558` return -1.
-
-    Section 4 carries the title name.  `MOSVIEW!OpenMediaTitleSession @
-    0x7F3C6575` queries `TitleGetInfo(info_kind=1, dwBufCtl=0xBB8, buf)`
-    right before the "Unknown Title Name" fallback — info_kind=1 is the
-    raw-blob section 4, copied verbatim into the caller's buffer (no
-    implicit NUL), then run through `UnquoteCommandArgument` (strips
-    backticks / double-quotes) and stored at `title+0x58` as the
-    viewer's caption.  Including a trailing NUL in the blob keeps
-    downstream string walks safe.
-
-    Section 6 (`info=0x6A` "title string") MUST be non-empty.  Live
-    SoftIce trace 2026-04-27 at `MVCL14N!fMVSetTitle @ 0x7E882910`
-    confirmed the path: `dwBytes = lMVTitleGetInfo(title, 0x6A, 0, 0)`
-    queries section-6 size, then `GlobalAlloc(GMEM_MOVEABLE |
-    GMEM_ZEROINIT, dwBytes)` allocates the buffer.  On Win95
-    `GlobalAlloc` with `cb=0` returns NULL, so fMVSetTitle bails
-    BEFORE its `*(int *)(lp + 0x18) = title_handle` assignment at
-    `0x7E882988`.  The lp's title-handle slot stays NULL, then
-    `fMVSetAddress(lp, va, ...)` calls `FUN_7e885fc0(*(int *)(lp +
-    0xc), ...)` = `FUN_7e885fc0(NULL, ...)` which short-circuits at
-    its `if (param_1 != 0)` guard — `GetProcAddress("HfcNear")` is
-    never attempted.  HfcNear never runs, fMVSetAddress returns 0,
-    `MOSVIEW!FUN_7f3c3670` sets pane FAIL flag at `pane+0x84`, panes
-    don't paint.  Verified by inspecting lp at 0x00406C70 with
-    SoftIce: `lp[0x18] == 0` at the fMVSetAddress entry.
-
-    Sections 5 and 7 stay empty.  Selector `0x02` (copyright) and
-    `0x13` etc. fall through to -1; MOSVIEW's second-string query at
-    `0x7F3C6634` drops the result silently.
-    """
-    name = display_name.rstrip("\x00") or "Untitled"
-    name_bytes = name.encode("ascii", errors="replace") + b"\x00"
-    section6 = name_bytes  # reuse caption as the section-6 title-string blob
-    section1 = _section1_records_from_csections(title)
-    return (
-        b"\x00\x00"                                 # Section 0: empty (font table)
-        + struct.pack("<H", len(section1)) + section1  # Section 1: CSection records
-        + b"\x00\x00"                               # Section 2: empty
-        + b"\x00\x00"                               # Section 3: empty
-        + struct.pack("<H", len(name_bytes))        # Section 4 size
-        + name_bytes                                # Section 4 data (ASCIIZ caption)
-        + b"\x00\x00"                               # Section 5: empty
-        + struct.pack("<H", len(section6))          # Section 6 size — MUST be non-zero
-        + section6                                  # Section 6 data (title string)
-        + b"\x00\x00"                               # Section 7: empty
-        + b"\x00\x00"                               # Section 8: string count=0
-    )
-
-
 def _load_title_body(title_spec: str) -> bytes:
-    """Resolve a TitleOpen spec to a synthesized 9-section title body."""
+    """Resolve a TitleOpen spec to a wire-ready MediaView 1.4 payload.
+
+    Delegates to `blackbird.m14_payload.build_m14_payload_for_deid`,
+    which synthesizes the 9-section body from `<deid>.ttl` (or returns
+    an empty caption-only fallback on missing / unsynthesizable .ttl).
+    """
     deid = _title_name_from_spec(title_spec).strip()
-    display, title = _resolve_title(deid)
-    body = _build_title_body(display, title)
-    section1_len = 0
-    if title is not None:
-        section1_len = sum(
-            len(b)
-            for sid, cls in title.types.items() if cls == "CSection"
-            for b in title.objects.get(sid, {}).values()
-            if len(b) == 43
-        )
+    body, caption = build_m14_payload_for_deid(deid)
     log.info(
-        "synthesized_title_body spec=%r deid=%r display=%r body_len=%d section1_len=%d",
-        title_spec, deid, display, len(body), section1_len,
+        "synthesized_title_body spec=%r deid=%r caption=%r body_len=%d",
+        title_spec, deid, caption, len(body),
     )
     return body
 
@@ -583,14 +436,12 @@ class MEDVIEWHandler:
         Selector → push channel + frame:
             0x15 (HfcNear / vaResolve) → type-0, opcode 0xBF.  Inserts
                 into the per-title `title+4` tree via
-                FUN_7e8452d3 → FUN_7e8460df.  Required to unblock
-                HfcNear; downstream the engine walks the buffer
-                through `FUN_7e890fd0 → FUN_7e894c50` and currently
-                AVs at 0x7E894D4C with zero-filled content.  The
-                engine's SEH catches that, surfaces "service is not
-                available", and MOSVIEW stays alive — strictly
-                better signal than the silent no-paint state we get
-                with ack-only.
+                FUN_7e8452d3 → FUN_7e8460df.  When the env var
+                `MSN_MEDVIEW_CASE1_TEXT` is set, ships a case-1 (text)
+                chunk that drives FUN_7e890fd0 → FUN_7e894c50 case 1 →
+                slot tag 1 → ExtTextOutA at paint time.  Otherwise
+                ships the case-3 (bm0 parent-cell backdrop) chunk
+                that's the current default.
             0x06 (vaConvertHash) → type-3, op-code 4 kind 1 (hash→va,
                 global cache via FUN_7e841bff).
             0x07 (vaConvertTopicNumber) → type-3, op-code 4 kind 0
@@ -600,10 +451,19 @@ class MEDVIEWHandler:
         if selector == MEDVIEW_SELECTOR_VA_RESOLVE:
             if self.type0_sub_req_id is None:
                 return None
-            chunk = _build_type0_bf_chunk(title_byte, key)
+            case1_flag = os.environ.get("MSN_MEDVIEW_CASE1_TEXT", "")
+            if case1_flag:
+                # `=1` (or any truthy non-numeric like "MSN Today") ships
+                # the case-1 text chunk. Custom strings other than "1"
+                # become the literal text bytes; "1" maps to "MSN Today".
+                text = "MSN Today" if case1_flag == "1" else case1_flag
+                chunk = build_case1_bf_chunk(text, title_byte, key)
+                channel = "type0_bf_case1"
+            else:
+                chunk = _build_type0_bf_chunk(title_byte, key)
+                channel = "type0_bf"
             sub_class = self.type0_sub_class
             sub_req_id = self.type0_sub_req_id
-            channel = "type0_bf"
         elif selector in (MEDVIEW_SELECTOR_VA_CONVERT_HASH, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC):
             if self.type3_sub_req_id is None:
                 return None

@@ -58,6 +58,7 @@ from server.services.logsrv import (
     build_logsrv_bootstrap_payload,
     build_logsrv_service_map_payload,
 )
+from server.blackbird.m14_parse import parse_payload
 from server.services.medview import MEDVIEWHandler
 from server.services.olregsrv import (
     OLREGSRVHandler,
@@ -1603,8 +1604,9 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
     # TitleOpen spec format is `:%d[%s]%d` (docs/MOSVIEW.md §5.3); on the
     # HRMOSExec(c=6) path MSN Today lands as `:2[4]0` — svcid=2, deid=4,
     # serial=0.  `_title_name_from_spec` extracts "4", the handler then
-    # reads `resources/titles/4.ttl` and pulls CTitle.name ("MSN Today")
-    # via the TTL parser (see src/server/services/ttl.py and docs/BLACKBIRD.md §3).
+    # reads `resources/titles/4.ttl` (the reference `msn today.ttl` lifted
+    # from blackbird-re) and lowers it to a MediaView 1.4 payload via
+    # `src/server/blackbird/m14_synth.py`.
     _MSN_TODAY_REQ = (
         b"\x04\x87:2[4]0\x00"        # tag=0x04 var, len|0x80=0x87, 7-byte ASCIIZ
         b"\x03\x00\x00\x00\x00"      # cached checksum 1 = 0
@@ -1624,6 +1626,11 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # + selector(1) + vli(1) — reply tagged stream starts at +8.
         return parsed.payload[8:]
 
+    def _split_body(self, reply):
+        # Static prefix: 2×2 (tagged bytes) + 5×5 (tagged dwords) + 1 (0x87)
+        # + 1 (0x86) = 31 bytes before the dynamic payload.
+        return reply[31:]
+
     def test_title_open_reply_has_static_plus_dynamic(self):
         reply = self._decode_reply(self._MSN_TODAY_REQ)
         # Must start with 0x81 (title_id byte), nonzero value.
@@ -1642,42 +1649,36 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # Dynamic-complete
         self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
-    def test_title_open_body_is_nine_section_with_msn_today_label(self):
-        # MSN Today's authored .ttl carries one CSection (9/1, ver=0x03,
-        # 43-byte body) → wire body section 1 = 1 record = 45 B
-        # (2 header + 43 data).  Section 0 stays empty, sections 2-3
-        # stay empty, section 4 = caption blob, section 6 = title
-        # string, section 8 = empty count.
+    def test_title_open_body_carries_synthesized_m14_payload(self):
+        # `resources/titles/4.ttl` is the reference Blackbird `msn today.ttl`
+        # (sha256 4a6e884f…). Synthesizer lowers it to: 3 visible content
+        # entries (2 text + 1 image) → 3 records each in sec07/08/06; the
+        # CStringTable (sec04) carries 9 strings (title/section/form/frame/
+        # stylesheet/resource_folder + 3 proxy names).
         reply = self._decode_reply(self._MSN_TODAY_REQ)
-        # Static prefix: 2×2 (tagged bytes) + 5×5 (tagged dwords) + 1 (0x87)
-        # + 1 (0x86) = 31 bytes before the dynamic payload.
-        body = reply[31:]
-        # Section 0: empty header
-        self.assertEqual(body[0:2], b"\x00\x00")
-        # Section 1: size=43 (0x2B), then 43 bytes of CSection body
-        self.assertEqual(body[2:4], b"\x2b\x00")
-        section1_data = body[4:47]
-        self.assertEqual(len(section1_data), 43)
-        # Sections 2 + 3 empty
-        self.assertEqual(body[47:51], b"\x00\x00\x00\x00")
-        # Section 4: caption
-        self.assertEqual(body[51:53], b"\x0a\x00")
-        self.assertEqual(body[53:63], b"MSN Today\x00")
-        # Section 5 empty
-        self.assertEqual(body[63:65], b"\x00\x00")
-        # Section 6: title string
-        self.assertEqual(body[65:67], b"\x0a\x00")
-        self.assertEqual(body[67:77], b"MSN Today\x00")
-        # Section 7 empty
-        self.assertEqual(body[77:79], b"\x00\x00")
-        # Section 8: count=0
-        self.assertEqual(body[79:81], b"\x00\x00")
-        self.assertEqual(len(body), 81)
+        body = self._split_body(reply)
+        parsed = parse_payload(bytes(body))
+        # Wire-mode strip: font_blob section is empty (`m14_payload._strip_font_blob`
+        # replaces the synthesizer's FNTB-magic blob with `b"\x00\x00"` so
+        # MVTTL14C steers into the safe LAB_7e8432c4 branch).
+        self.assertEqual(parsed.font_blob.length, 0)
+        self.assertEqual(parsed.sec07.record_count, 3)
+        self.assertEqual(parsed.sec08.record_count, 3)
+        self.assertEqual(parsed.sec06.record_count, 3)
+        self.assertEqual(parsed.sec04.count, 9)
+        self.assertEqual(parsed.sec13.count, 2)
+        self.assertEqual(parsed.sec01.data, b"MSN Today\x00")
+        # sec02 is the section name: "Section 1"
+        self.assertEqual(parsed.sec02.data, b"Section 1\x00")
+        # sec6a carries the bare deid (Marvel HRMOSExec path, not a
+        # Windows path — see `m14_payload` module docstring).
+        self.assertEqual(parsed.sec6a.data, b"4\x00")
+        self.assertEqual(parsed.trailing, b"")
 
     def test_title_open_body_falls_back_to_deid_for_unknown(self):
-        # deid "42" isn't in _TITLE_NAMES — the handler synthesizes
-        # "Title 42\0" so the viewer still shows something informative
-        # instead of "Unknown Title Name".
+        # deid "42" has no .ttl fixture — the handler emits an empty
+        # payload with caption "Title 42\0" in sec01/sec6a so the viewer
+        # still shows something informative.
         req = (
             b"\x04\x88:2[42]0\x00"
             b"\x03\x00\x00\x00\x00"
@@ -1685,15 +1686,18 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
         reply = self._decode_reply(req)
-        body = reply[31:]
-        self.assertEqual(body[:8], b"\x00\x00" * 4)
-        self.assertEqual(body[8:10], b"\x09\x00")        # Section 4 size=9
-        self.assertEqual(body[10:19], b"Title 42\x00")
-        self.assertEqual(body[19:21], b"\x00\x00")       # Section 5 empty
-        self.assertEqual(body[21:23], b"\x09\x00")       # Section 6 size=9
-        self.assertEqual(body[23:32], b"Title 42\x00")
-        self.assertEqual(body[32:34], b"\x00\x00")       # Section 7 empty
-        self.assertEqual(body[34:36], b"\x00\x00")       # Section 8 count=0
+        body = self._split_body(reply)
+        parsed = parse_payload(bytes(body))
+        self.assertEqual(parsed.font_blob.length, 0)
+        self.assertEqual(parsed.sec07.record_count, 0)
+        self.assertEqual(parsed.sec08.record_count, 0)
+        self.assertEqual(parsed.sec06.record_count, 0)
+        self.assertEqual(parsed.sec01.data, b"Title 42\x00")
+        self.assertEqual(parsed.sec02.length, 0)
+        self.assertEqual(parsed.sec6a.data, b"Title 42\x00")
+        self.assertEqual(parsed.sec13.count, 0)
+        self.assertEqual(parsed.sec04.count, 0)
+        self.assertEqual(parsed.trailing, b"")
 
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
