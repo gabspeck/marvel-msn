@@ -1668,11 +1668,13 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # FNTB placeholder for a wire-faithful section-0 per
         # `docs/mosview-authored-text-and-font-re.md` "Minimal Valid Recipe".
         self.assertEqual(parsed.font_blob.length, 0x60)
-        # Header: descriptor_count=1, face_off=0x12, descriptor_off=0x32,
+        # Header: descriptor_count=0xFFFF (sign-extended → -1 forces every
+        # incoming style_id through the FUN_7e896610 clamp to 0; one real
+        # descriptor remains in the table), face_off=0x12, descriptor_off=0x32,
         # override_count=0, override_off=0x5c, header_word_0c=0
         self.assertEqual(
             struct.unpack_from("<HHHHHH", parsed.font_blob.data, 0x02),
-            (1, 0x12, 0x32, 0, 0x5C, 0),
+            (0xFFFF, 0x12, 0x32, 0, 0x5C, 0),
         )
         # Face[0] = "Times New Roman"
         self.assertEqual(

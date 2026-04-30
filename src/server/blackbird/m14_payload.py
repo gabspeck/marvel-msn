@@ -299,7 +299,7 @@ def _build_section0_font_table() -> bytes:
     Layout:
 
       +0x00  header (18 B) — face_name_table_off, descriptor_table_off,
-             override_table_off, pointer_table_off, descriptor_count=1,
+             override_table_off, pointer_table_off, descriptor_count=0xFFFF,
              override_count=0
       +0x12  face table  — one 0x20-byte entry: "Times New Roman"
       +0x32  descriptors — one 0x2a-byte entry: face_slot=0, lfHeight=-12,
@@ -311,12 +311,37 @@ def _build_section0_font_table() -> bytes:
 
     Per `docs/mosview-authored-text-and-font-re.md` §"Minimal Valid
     Section-0 Recipe" — covers `CreateFontIndirectA` on style 0.
+
+    DESCRIPTOR_COUNT = 0xFFFF — clamp every style_id to 0
+    `MVCL14N!FUN_7e896610 @ 0x7E896632` does
+        MOVSX EAX, word ptr [EDI+2]   ; sign-extend descriptor_count
+        CMP   EAX, style_id
+        JG    skip                    ; signed: skip clamp if count > id
+        XOR   ECX, ECX                ; else style_id = 0
+    The case-1 layout pass inherits font index from `puVar2[+0x18]`
+    (initialised to 0xFFFF / -1 in `MVCL14N!FUN_7e890fd0 @ 0x7E891034`),
+    so the slot emitted by `FUN_7e892d30` carries `slot+0x3F = -1`.
+    With `descriptor_count = 1` (signed `1 > -1` → true) the clamp is
+    skipped and `FUN_7e896590` reads at
+    `descriptor_table_off + (-1)*0x2a = base - 42` — garbage outside
+    the descriptor table → `CreateFontIndirectA` builds an invisible
+    font (lfHeight ≈ 0, lfWeight = stray bytes from the face entry).
+    Setting `descriptor_count = 0xFFFF` makes the sign-extended value
+    -1, so `signed -1 > -1` is FALSE → style_id is forced to 0 →
+    descriptor[0] is read → Times New Roman renders. With one
+    descriptor, every legal style id resolves to the same font, which
+    matches the first-paint contract anyway.
     """
-    descriptor_count = 1
+    # `descriptor_count` is only consumed by the clamp at FUN_7e896610;
+    # the engine never iterates that count, so reporting 0xFFFF (= -1)
+    # in the header is safe even though we still emit exactly one
+    # descriptor record on the wire.
+    advertised_descriptor_count = 0xFFFF
+    actual_descriptor_count = 1
     override_count = 0
     face_name_table_off = _SEC0_HEADER_SIZE
     descriptor_table_off = face_name_table_off + (1 * _SEC0_FACE_ENTRY_SIZE)
-    override_table_off = descriptor_table_off + (descriptor_count * _SEC0_DESCRIPTOR_SIZE)
+    override_table_off = descriptor_table_off + (actual_descriptor_count * _SEC0_DESCRIPTOR_SIZE)
     pointer_table_off = override_table_off + (override_count * _SEC0_OVERRIDE_SIZE)
 
     header = bytearray(_SEC0_HEADER_SIZE)
@@ -324,13 +349,13 @@ def _build_section0_font_table() -> bytes:
         "<HHHHHHH",
         header,
         0x00,
-        0,                       # +0x00 header_word_0 (unused on first paint)
-        descriptor_count,        # +0x02 descriptor_count
-        face_name_table_off,     # +0x04 face_name_table_off
-        descriptor_table_off,    # +0x06 descriptor_table_off
-        override_count,          # +0x08 override_count
-        override_table_off,      # +0x0a override_table_off
-        0,                       # +0x0c header_word_0c (unused on first paint)
+        0,                            # +0x00 header_word_0 (unused on first paint)
+        advertised_descriptor_count,  # +0x02 descriptor_count (sign-extended → -1)
+        face_name_table_off,          # +0x04 face_name_table_off
+        descriptor_table_off,         # +0x06 descriptor_table_off
+        override_count,               # +0x08 override_count
+        override_table_off,           # +0x0a override_table_off
+        0,                            # +0x0c header_word_0c (unused on first paint)
     )
     # +0x0e/+0x0f padding stays zero; +0x10 pointer_table_off
     struct.pack_into("<H", header, 0x10, pointer_table_off)
