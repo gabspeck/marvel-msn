@@ -1692,8 +1692,9 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(parsed.sec04.count, 9)
         self.assertEqual(parsed.sec13.count, 2)
         self.assertEqual(parsed.sec01.data, b"MSN Today\x00")
-        # sec02 is the section name: "Section 1"
-        self.assertEqual(parsed.sec02.data, b"Section 1\x00")
+        # sec02 is "Copyright information" (MOSVIEW message 0x406); empty
+        # because no TTL we synthesize today carries a copyright property.
+        self.assertEqual(parsed.sec02.data, b"")
         # sec6a carries the bare deid (Marvel HRMOSExec path, not a
         # Windows path — see `m14_payload` module docstring).
         self.assertEqual(parsed.sec6a.data, b"4\x00")

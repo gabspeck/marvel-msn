@@ -612,8 +612,13 @@ def synthesize_payload(model: dict, mosview_open_path: str) -> tuple[bytes, dict
     sec07_records = synthesize_sec07_records(entries, string_index)
     sec08_records = synthesize_sec08_records(entries, string_index)
     sec06_records = synthesize_sec06_records(entries, string_index)
+    # sec01 → MOSVIEW title descriptor +0x58 → "About Title" message 0x414
+    # ("Title name"). sec02 → +0x5c → message 0x406 ("Copyright information").
+    # See `docs/mosview-mediaview-format.md` §"Selector 0x01 / 0x02 String
+    # Handling". Authored TTLs don't carry a copyright property today, so
+    # ship sec02 empty rather than misrouting the section name into it.
     sec01 = encode_c_string(model["title"]["name"])
-    sec02 = encode_c_string(model["section"]["name"])
+    sec02 = b""
     sec6a = encode_c_string(mosview_open_path)
     sec13_entries = build_selector_13_entries()
     sec04_strings = strings
