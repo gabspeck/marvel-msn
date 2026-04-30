@@ -19,6 +19,7 @@ Submodules:
 from .m14_payload import (
     M14PayloadResult,
     TitleOpenMetadata,
+    TopicEntry,
     build_empty_m14_payload,
     build_m14_payload_for_deid,
 )
@@ -26,6 +27,7 @@ from .m14_payload import (
 __all__ = [
     "M14PayloadResult",
     "TitleOpenMetadata",
+    "TopicEntry",
     "build_empty_m14_payload",
     "build_m14_payload_for_deid",
 ]

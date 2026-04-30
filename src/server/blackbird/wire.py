@@ -296,8 +296,112 @@ def encode_null_tlv() -> bytes:
     With this TLV in front of text bytes, `slot+0x39` (text byte
     offset into chunk content base) = 0 — i.e. text begins at the
     text base pointer.
+
+    Equivalent to `encode_text_item_tlv({0x00: 0})`.
     """
     return encode_signed_int_varint(0) + struct.pack("<I", 0)
+
+
+# `encode_text_item_tlv` field map per `docs/mosview-authored-text-and-font-re.md`
+# §"Text Header Grammar". Keys match the decoded struct's offsets so
+# `decode_case1_tlv(encode_text_item_tlv(x))` round-trips.
+_TLV_OPTIONAL_INT_FIELDS = (
+    # offset, bitmap_mask
+    (0x12, 0x10000),       # text_base_or_mode (signed-int varint)
+)
+_TLV_OPTIONAL_SHORT_FIELDS = (
+    (0x16, 0x20000),       # space_before
+    (0x18, 0x40000),       # space_after
+    (0x1A, 0x80000),       # min_line_extent
+    (0x1C, 0x100000),      # left_indent
+    (0x1E, 0x200000),      # right_indent
+    (0x20, 0x400000),      # first_line_indent
+    (0x22, 0x800000),      # tab_interval
+)
+
+
+def encode_text_item_tlv(fields: dict[int, int] | None = None) -> bytes:
+    """Encode a `FUN_7e897ad0`-shaped TLV from a field dict.
+
+    Inverse of `decode_case1_tlv`. Field semantics per
+    `docs/mosview-authored-text-and-font-re.md` §"Text Header Grammar":
+
+      0x00  text_start_index        i32  starting char index (length field)
+      0x04  text_base_present       u16  flag, packed into bitmap bit 0
+      0x08  header_flag_16_0        u16  flag, packed into bitmap bit 16
+      0x0A  edge_metrics_enabled    u16  flag, packed into bitmap bit 24
+      0x0C  alignment_mode          u16  2-bit field, packed bits 26-27
+      0x0E  header_flag_28          u16  flag, packed into bitmap bit 28
+      0x12  text_base_or_mode       i32  optional, gated by bitmap bit 0x10000
+      0x16  space_before            i16  optional, gated by bitmap bit 0x20000
+      0x18  space_after             i16  optional, gated by bitmap bit 0x40000
+      0x1A  min_line_extent         i16  optional, gated by bitmap bit 0x80000
+      0x1C  left_indent             i16  optional, gated by bitmap bit 0x100000
+      0x1E  right_indent            i16  optional, gated by bitmap bit 0x200000
+      0x20  first_line_indent       i16  optional, gated by bitmap bit 0x400000
+      0x22  tab_interval            i16  optional, gated by bitmap bit 0x800000
+      0x24  edge_metric_flags       u16  optional, gated by bitmap bit 0x1000000
+      0x27  inline_run_count        i16  optional, gated by bitmap bit 0x2000000
+
+    Optional fields are emitted when their key is present in `fields`
+    (regardless of value — explicit zero still shows up on the wire).
+    Inline-run pair list is not yet supported (set inline_run_count = 0
+    or omit). Unknown keys raise `ValueError`.
+    """
+    f = dict(fields or {})
+    length_value = f.pop(0x00, 0)
+
+    bitmap = 0
+    # Bitmap-packed flag fields (no separate payload bytes).
+    if f.pop(0x04, 0):
+        bitmap |= 0x1
+    if f.pop(0x08, 0):
+        bitmap |= 0x10000
+    if f.pop(0x0A, 0):
+        bitmap |= 0x1000000
+    align = f.pop(0x0C, 0) & 0x3
+    bitmap |= align << 26
+    if f.pop(0x0E, 0):
+        bitmap |= 0x10000000
+
+    optional_payload = bytearray()
+
+    # Optional signed-int field at +0x12.
+    if 0x12 in f:
+        bitmap |= 0x10000
+        optional_payload += encode_signed_int_varint(f.pop(0x12))
+
+    # Optional signed-short fields at +0x16..+0x22.
+    for offset, bit_mask in _TLV_OPTIONAL_SHORT_FIELDS:
+        if offset in f:
+            bitmap |= bit_mask
+            optional_payload += encode_signed_short_varint(f.pop(offset))
+
+    # Optional `edge_metric_flags` u16 — parser reads 3 bytes but only
+    # stores low 2; emit value LE-packed + a trailing zero.
+    if 0x24 in f:
+        bitmap |= 0x1000000
+        optional_payload += struct.pack("<H", f.pop(0x24) & 0xFFFF) + b"\x00"
+
+    # Optional inline_run_count + pair list.
+    if 0x27 in f:
+        bitmap |= 0x2000000
+        run_count = f.pop(0x27)
+        optional_payload += encode_signed_short_varint(run_count)
+        if run_count != 0:
+            raise NotImplementedError(
+                "non-zero inline_run_count requires pair-list encoding "
+                "which has not been implemented yet"
+            )
+
+    if f:
+        raise ValueError(f"unknown TLV field keys: {sorted(f)}")
+
+    return (
+        encode_signed_int_varint(length_value)
+        + struct.pack("<I", bitmap)
+        + bytes(optional_payload)
+    )
 
 
 def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
@@ -442,23 +546,58 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
     return (fields, pos)
 
 
-# In-name_buf text region: bytes name_buf[0x29..0x40) = 0x17 = 23 bytes
-# total available before the content block. The minimum case-1 chunk
-# spends 3 (preamble) + 6 (null TLV) + 1 (0xFF end-of-chunk control
-# byte) = 10 bytes, leaving 13 bytes for ASCII text + NUL terminator.
-#
-# The 0xFF byte sits at end_of_TLV (= name_buf[0x29 + 6] = name_buf[0x2F])
-# so the control walker (`template[+0x14]` in FUN_7e891810, initialised
-# to end_of_TLV by FUN_7e8915d0) finds an end-of-chunk marker once the
-# text walker hits the NUL terminator. Without it, FUN_7e894ec0's
-# default case treats 'M' (or whatever first text byte) as a link tag
-# and reads `*(ushort *)('M'+1)` = 'SN' = 0x4E53 = 20051, advancing the
-# walker out of bounds and triggering the "service is not available"
-# dialog. Live SoftIce trace 2026-04-29 at FUN_7e892d30 confirmed.
-_CASE1_NAME_BUF_TEXT_BUDGET = 0x40 - 0x29 - 3 - 6 - 1
+# Default name_size for the case-1 chunk. The original RE pinned the
+# minimum-viable shape at name_size=0x40 (16-byte text region after
+# the case-1 dispatch + preamble + null TLV + 0xFF control byte).
+# Authored stories on the reference .ttl exceed that — Homepage.bdf
+# alone is 119 bytes — so the wire-mode default grows name_size to
+# 0x100 (256 B), giving room for ASCII text + NUL well past 200 B.
+# Per `docs/MEDVIEW.md` §10.5, the engine memcpy's `name_size` bytes
+# from the chunk into the cache entry's name_buf; larger values are
+# accepted up to u16 capacity.
+_CASE1_DEFAULT_NAME_SIZE = 0x100
+
+_CASE1_FIXED_OVERHEAD = 0x29 + 3 + 1   # skipped pad (0x29) + preamble (3) + 0xFF control byte (1)
 
 
-def build_case1_bf_chunk(text: str, title_byte: int, key: int) -> bytes:
+def case1_text_budget(
+    name_size: int = _CASE1_DEFAULT_NAME_SIZE,
+    tlv_size: int = 6,
+) -> int:
+    """Maximum text+NUL bytes that fit in a case-1 chunk's name_buf.
+
+    Formula: `name_size - 0x29 (skipped pad) - 3 (preamble) -
+    tlv_size - 1 (0xFF control byte)`. The default `tlv_size=6`
+    matches the null TLV; non-null TLVs grow with their conditional
+    fields (1-2 bytes per signed-short / 2-4 per signed-int).
+
+    Within the chunk, name_buf starts at offset +0x04 and the case-1
+    dispatch byte sits at name_buf+0x26 = chunk+0x2A. The 0xFF byte
+    sits at end_of_TLV (= name_buf[0x29 + tlv_size]) so the control
+    walker (`template[+0x14]` in FUN_7e891810, initialised to end_of_TLV
+    by FUN_7e8915d0) finds an end-of-chunk marker once the text
+    walker hits the NUL terminator. Without it, FUN_7e894ec0's
+    default case treats the first text byte as a link tag and reads
+    `*(ushort *)(first+1)`, advancing the walker out of bounds and
+    triggering the "service is not available" dialog. Live SoftIce
+    trace 2026-04-29 at FUN_7e892d30 confirmed.
+    """
+    return name_size - _CASE1_FIXED_OVERHEAD - tlv_size
+
+
+# Legacy constant retained for the existing 0x40-shape tests. New
+# callers should use `case1_text_budget(name_size)`.
+_CASE1_NAME_BUF_TEXT_BUDGET = case1_text_budget(0x40)
+
+
+def build_case1_bf_chunk(
+    text: str,
+    title_byte: int,
+    key: int,
+    *,
+    name_size: int = _CASE1_DEFAULT_NAME_SIZE,
+    tlv_fields: dict[int, int] | None = None,
+) -> bytes:
     """Build a 128-byte type-0 0xBF chunk that drives the case-1 path.
 
     Wire layout (all offsets are within the chunk; the first 4 bytes
@@ -498,15 +637,31 @@ def build_case1_bf_chunk(text: str, title_byte: int, key: int) -> bytes:
         # caller's do-while loop terminates without emitting tag 1.
         raise ValueError("case-1 chunk requires non-empty text")
 
-    text_bytes = text.encode("ascii", errors="replace") + b"\x00"
-    if len(text_bytes) > _CASE1_NAME_BUF_TEXT_BUDGET:
+    if not (0x40 <= name_size <= 0xFFFF):
         raise ValueError(
-            f"text + NUL = {len(text_bytes)} bytes; in-name_buf form caps "
-            f"at {_CASE1_NAME_BUF_TEXT_BUDGET} bytes"
+            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
         )
 
-    name_size = 0x40
-    chunk = bytearray(4 + name_size + 60)  # 128 bytes total
+    tlv = encode_null_tlv() if tlv_fields is None else encode_text_item_tlv(tlv_fields)
+    if len(tlv) < 6:
+        raise AssertionError(f"TLV must be >= 6 bytes, got {len(tlv)}")
+
+    text_bytes = text.encode("ascii", errors="replace") + b"\x00"
+    budget = case1_text_budget(name_size, tlv_size=len(tlv))
+    if len(text_bytes) > budget:
+        raise ValueError(
+            f"text + NUL = {len(text_bytes)} bytes; in-name_buf form caps "
+            f"at {budget} bytes (name_size=0x{name_size:x}, "
+            f"tlv_size={len(tlv)})"
+        )
+
+    # Preamble length value = TLV size + 1 (skips past TLV + 0xFF control
+    # byte) so that text_base = entry + 0x26 + 3 + (tlv + 1) lands on
+    # the first text byte. With null TLV (6 B) → length=7 (matches the
+    # legacy form); larger TLVs scale linearly.
+    preamble_length_value = len(tlv) + 1
+
+    chunk = bytearray(4 + name_size + 60)  # 4-byte header + name_buf + content_block
     chunk[0] = 0xBF
     chunk[1] = title_byte & 0xFF
     chunk[2:4] = struct.pack("<H", name_size)
@@ -515,22 +670,20 @@ def build_case1_bf_chunk(text: str, title_byte: int, key: int) -> bytes:
     case_offset = 4 + 0x26  # = 0x2A
     chunk[case_offset] = 0x01
 
-    preamble = encode_case1_preamble(length_value=7, type_tag=0x01)
+    preamble = encode_case1_preamble(length_value=preamble_length_value, type_tag=0x01)
     if len(preamble) != 3:
-        raise AssertionError(f"narrow case-1 preamble must be 3 bytes, got {len(preamble)}")
-    # Preamble already wrote `0x01` at byte 0; copy bytes 1-2 (length raw).
+        raise AssertionError(
+            f"non-narrow case-1 preamble not implemented for length_value={preamble_length_value}"
+        )
     chunk[case_offset + 1:case_offset + 3] = preamble[1:3]
 
-    tlv = encode_null_tlv()
-    if len(tlv) != 6:
-        raise AssertionError(f"null TLV must be 6 bytes, got {len(tlv)}")
-    chunk[case_offset + 3:case_offset + 3 + 6] = tlv
+    chunk[case_offset + 3:case_offset + 3 + len(tlv)] = tlv
 
     # 0xFF end-of-chunk control byte at end_of_TLV — read by FUN_7e894ec0
     # via control walker (template[+0x14]) when text walker hits NUL.
-    chunk[case_offset + 3 + 6] = 0xFF
+    chunk[case_offset + 3 + len(tlv)] = 0xFF
 
-    text_offset = case_offset + 3 + 6 + 1  # = 0x34
+    text_offset = case_offset + 3 + len(tlv) + 1
     chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
 
     return bytes(chunk)

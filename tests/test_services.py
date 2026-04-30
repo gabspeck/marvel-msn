@@ -1704,13 +1704,26 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(result.metadata.addr_get_contents, 0x1000)
         self.assertNotEqual(result.metadata.cache_header0, 0)
         self.assertNotEqual(result.metadata.cache_header1, 0)
-        # TextRuns lowering: only the Homepage.bdf entry has non-empty
-        # ANSI text (Calendar of Events.bdf TextRuns is `00 00`); image
-        # entries don't contribute. Topic numbers are 1-based per
+        # Per-topic mapping: 3 entries (2 text + 1 image) with the
+        # synthesizer's address/topic_number/context_hash assignments.
+        # Only Homepage.bdf has non-empty ANSI text — Calendar of
+        # Events.bdf's TextRuns is `00 00`, image entries don't
+        # contribute. Topic numbers are 1-based per
         # `m14_synth.build_visible_entry_metadata`.
-        self.assertIn(1, result.topic_texts)
-        self.assertTrue(result.topic_texts[1].startswith(b"This is an example"))
-        self.assertNotIn(2, result.topic_texts)  # Calendar entry has no text
+        self.assertEqual(len(result.topics), 3)
+        topic1 = result.topic_by_number(1)
+        self.assertIsNotNone(topic1)
+        self.assertEqual(topic1.address, 0x1000)
+        self.assertEqual(topic1.kind, "text")
+        self.assertTrue(topic1.text.startswith(b"This is an example"))
+        topic2 = result.topic_by_number(2)
+        self.assertIsNotNone(topic2)
+        self.assertEqual(topic2.address, 0x1100)
+        self.assertEqual(topic2.kind, "text")
+        self.assertEqual(topic2.text, b"")  # empty TextRuns
+        topic3 = result.topic_by_number(3)
+        self.assertIsNotNone(topic3)
+        self.assertEqual(topic3.kind, "image")
 
     def test_title_open_body_falls_back_to_deid_for_unknown(self):
         # deid "42" has no .ttl fixture — the handler emits an empty
@@ -1733,13 +1746,13 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(parsed.sec04.count, 0)
         self.assertEqual(parsed.trailing, b"")
         # Empty fallback metadata: zero dwords + only header0 non-zero
-        # (CRC32 of the empty payload). topic_texts is empty.
+        # (CRC32 of the empty payload). topics tuple is empty.
         self.assertEqual(result.metadata.topic_count, 0)
         self.assertEqual(result.metadata.va_get_contents, 0)
         self.assertEqual(result.metadata.addr_get_contents, 0)
         self.assertNotEqual(result.metadata.cache_header0, 0)
         self.assertEqual(result.metadata.cache_header1, 0)
-        self.assertEqual(dict(result.topic_texts), {})
+        self.assertEqual(result.topics, ())
 
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):

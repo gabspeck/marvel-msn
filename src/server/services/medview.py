@@ -44,14 +44,15 @@ from ..config import (
 from ..blackbird.m14_payload import (
     M14PayloadResult,
     TitleOpenMetadata,
+    TopicEntry,
     build_m14_payload_for_deid,
 )
 from ..blackbird.wire import (
-    _CASE1_NAME_BUF_TEXT_BUDGET,
     build_baggage_container,
     build_case1_bf_chunk,
     build_kind5_raster,
     build_trailer,
+    case1_text_budget,
 )
 from ..mpc import (
     build_discovery_host_block,
@@ -81,9 +82,9 @@ def _load_title_body(title_spec: str) -> M14PayloadResult:
     result = build_m14_payload_for_deid(deid)
     log.info(
         "synthesized_title_body spec=%r deid=%r caption=%r body_len=%d "
-        "topics=%d topic_texts=%d",
+        "topic_count=%d topics=%d",
         title_spec, deid, result.caption, len(result.payload),
-        result.metadata.topic_count, len(result.topic_texts),
+        result.metadata.topic_count, len(result.topics),
     )
     return result
 
@@ -375,12 +376,11 @@ class MEDVIEWHandler:
         # subscribe; reused for vaConvertHash / Topic cache pushes.
         self.type3_sub_class = None
         self.type3_sub_req_id = None
-        # Per-topic ANSI story buffer extracted from each TextProxy's
-        # TextRuns CContent at TitleOpen-time.  Indexed by topic_number
-        # (= the synthesizer's vaConvertTopicNumber key, which is also
-        # what selector 0x15 / 0x07 cache-miss requests carry).  Empty
-        # until TitleOpen runs; falls back to caption on miss.
-        self.topic_texts: dict[int, bytes] = {}
+        # Per-topic mapping from `M14PayloadResult.topics` — assigned at
+        # TitleOpen time so subsequent selector 0x06 / 0x07 / 0x15 cache
+        # pushes can ship real authored values (va, addr, context_hash,
+        # ANSI text) instead of echo-key placeholders.
+        self.topics: tuple[TopicEntry, ...] = ()
         self.title_caption: str = ""
 
     def build_discovery_packet(self, server_seq, client_ack):
@@ -389,21 +389,40 @@ class MEDVIEWHandler:
         host_block = build_discovery_host_block(payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
+    def _topic_for_wire_key(self, key: int) -> TopicEntry | None:
+        """Resolve a cache-miss key to the matching `TopicEntry`.
+
+        Selectors 0x06 / 0x07 / 0x15 each carry a different key kind
+        (hash / topic_number / va) but the engine sometimes uses one
+        when the doc says another (the empirical traffic we've observed
+        sends `key=topic_number=1` even on selector 0x06). Match across
+        all three projections; first hit wins.
+        """
+        for topic in self.topics:
+            if (
+                topic.address == key
+                or topic.topic_number == key
+                or topic.context_hash == key
+            ):
+                return topic
+        return None
+
     def _case1_text_for_key(self, key: int) -> str:
         """Resolve the ANSI text shipped in a case-1 0xBF chunk for `key`.
 
-        Selector 0x15 cache-miss requests use `vaConvertTopicNumber`-style
-        keys, which the synthesizer assigns as `topic_number = entry_index + 1`
-        (`m14_synth.build_visible_entry_metadata`). Look up the matching
-        TextRuns body in `self.topic_texts`; truncate to fit the case-1
-        chunk's in-name_buf text budget. Falls back to the title caption
-        (or `Untitled`) when the key doesn't map to a TextProxy entry.
+        Walks `self.topics` to find a matching entry by va / topic_no /
+        hash. Truncates to fit the case-1 chunk's in-name_buf text
+        budget. Falls back to the title caption when the key doesn't
+        map to a TextProxy entry (or the matched entry is image-kind).
         """
-        text_bytes = self.topic_texts.get(key)
-        if text_bytes is None:
+        topic = self._topic_for_wire_key(key)
+        if topic is not None and topic.text:
+            text_bytes = topic.text
+        else:
             text_bytes = (self.title_caption or "Untitled").encode("latin-1", errors="replace")
-        # +1 for the trailing NUL `build_case1_bf_chunk` appends.
-        budget = _CASE1_NAME_BUF_TEXT_BUDGET - 1
+        # `build_case1_bf_chunk` appends a NUL terminator before checking
+        # against `case1_text_budget(name_size)` — leave headroom for it.
+        budget = case1_text_budget() - 1
         if len(text_bytes) > budget:
             text_bytes = text_bytes[:budget]
         # build_case1_bf_chunk takes a str — decode latin-1 (round-trip
@@ -443,14 +462,27 @@ class MEDVIEWHandler:
             if self.type3_sub_req_id is None:
                 return None
             kind = 1 if selector == MEDVIEW_SELECTOR_VA_CONVERT_HASH else 0
-            # Stub answer: va = addr = key.  Real values come from
-            # the title's authored content; without that we just
-            # echo the key so vaConvertHash returns *something* and
-            # the engine can drive forward to HfcNear.
-            chunk = _build_type3_op4_frame(title_byte, kind, key, va=key, addr=key)
+            # Resolve to real va/addr from the title's per-topic mapping
+            # (synthesizer's `build_visible_entry_metadata`). Falls back
+            # to echo-key only if no matching topic exists — the engine
+            # will then re-query and we may get a more useful key on the
+            # retry.
+            topic = self._topic_for_wire_key(key)
+            if topic is not None:
+                va = topic.address
+                addr = topic.address
+            else:
+                va = key
+                addr = key
+            chunk = _build_type3_op4_frame(title_byte, kind, key, va=va, addr=addr)
             sub_class = self.type3_sub_class
             sub_req_id = self.type3_sub_req_id
             channel = "type3_op4"
+            log.info(
+                "type3_op4_resolve selector=0x%02x key=0x%08x → va=0x%08x addr=0x%08x topic=%s",
+                selector, key, va, addr,
+                topic.proxy_name if topic else "<unmatched>",
+            )
         else:
             return None
         # 0x85 chunk tag + raw chunk bytes.  MPCCL parses 0x85 as a
@@ -493,10 +525,11 @@ class MEDVIEWHandler:
             title_spec = _extract_title_spec(payload)
             log.info("title_open req_id=%d spec=%r", request_id, title_spec)
             result = _load_title_body(title_spec)
-            # Stash per-topic text + caption on the handler so subsequent
-            # selector 0x15 cache pushes can ship authored TextRuns content
-            # instead of the title caption (`_case1_text_for_key`).
-            self.topic_texts = dict(result.topic_texts)
+            # Stash per-topic mapping + caption on the handler so subsequent
+            # selector 0x06 / 0x07 / 0x15 cache pushes can ship authored
+            # va / addr / context_hash / TextRuns text instead of echo-key
+            # placeholders.
+            self.topics = result.topics
             self.title_caption = result.caption
             reply_payload = _build_title_open_reply_payload(result.payload, result.metadata)
             log.info(

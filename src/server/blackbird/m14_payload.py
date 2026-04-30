@@ -75,23 +75,64 @@ class TitleOpenMetadata:
 
 
 @dataclass(frozen=True)
+class TopicEntry:
+    """Per-topic mapping consumed by selector 0x06 / 0x07 / 0x15 cache pushes.
+
+    Synthesizer assigns these in `m14_synth.build_visible_entry_metadata`:
+      - `topic_number` = `entry_index + 1` (selector 0x07 cache key)
+      - `address`      = `0x1000 + entry_index * 0x100` (va, also addr for first paint)
+      - `context_hash` = `CRC32(proxy_name.lower())` (selector 0x06 cache key)
+      - `text`         = ANSI story buffer from TextRuns CContent (case-1 chunk text)
+
+    `text` is empty for image entries or empty-TextRuns text entries.
+    """
+
+    topic_number: int
+    address: int
+    context_hash: int
+    proxy_name: str
+    kind: str  # "text" | "image"
+    text: bytes = b""
+
+
+@dataclass(frozen=True)
 class M14PayloadResult:
-    """Output of `build_m14_payload_for_deid` — wire body + per-topic text.
+    """Output of `build_m14_payload_for_deid` — wire body + per-topic mapping.
 
     `payload` is the wire-ready bytes shipped in the TitleOpen `0x86`
     section; `caption` drives logging and the "About Title" dialog
     (`docs/mosview-mediaview-format.md` §"Selector 0x01 / 0x02 String
     Handling"); `metadata` carries the static-section dwords; and
-    `topic_texts` maps `topic_number` (= `vaConvertTopicNumber` key)
-    to the ANSI story buffer extracted from each TextRuns CContent
-    payload (`docs/mosview-authored-text-and-font-re.md` §"Authored
-    Lowering Checklist": "TextRuns -> ANSI story buffer").
+    `topics` is the per-topic mapping consumed by cache-miss handlers
+    (selector 0x06 vaConvertHash, 0x07 vaConvertTopicNumber, 0x15
+    vaResolve). Indexed lookups on the handler side use:
+      - `topic_number` → cache-pushed va (real, not echo-key)
+      - `context_hash` → same va via hash→va mapping
+      - `address` (va) → text content for case-1 chunks
     """
 
     payload: bytes
     caption: str
     metadata: TitleOpenMetadata = field(default_factory=TitleOpenMetadata)
-    topic_texts: dict[int, bytes] = field(default_factory=dict)
+    topics: tuple[TopicEntry, ...] = ()
+
+    def topic_by_number(self, topic_number: int) -> TopicEntry | None:
+        for t in self.topics:
+            if t.topic_number == topic_number:
+                return t
+        return None
+
+    def topic_by_hash(self, context_hash: int) -> TopicEntry | None:
+        for t in self.topics:
+            if t.context_hash == context_hash:
+                return t
+        return None
+
+    def topic_by_address(self, address: int) -> TopicEntry | None:
+        for t in self.topics:
+            if t.address == address:
+                return t
+        return None
 
 
 # Sentinel rect values for the first sec06 record (window scaffold).
@@ -356,47 +397,58 @@ def _clear_synthesizer_fixed_records(payload: bytes) -> bytes:
     )
 
 
-def _extract_topic_texts(model: dict) -> dict[int, bytes]:
-    """Lower each TextProxy's `TextRuns` CContent into an ANSI story buffer.
+def _extract_text_runs_body(payload: bytes) -> bytes:
+    """Lower one TextRuns CContent payload to its ANSI story buffer.
 
-    Per `docs/mosview-authored-text-and-font-re.md` §"Authored Lowering
-    Checklist": "TextRuns -> the shared ANSI story buffer consumed by
-    ExtTextOutA". Observed on-disk format (Homepage.bdf TextRuns):
-
-        [u16 prefix][ANSI text bytes]
-
-    The leading `u16` is `0x0002` (likely a CContent schema version
-    byte; `0x0000` for empty stories). Strategy: skip the 2-byte
-    prefix, strip a leading `'S'` marker that prefixes every observed
-    body, and key the result by `topic_number` (= `entry_index + 1`,
-    matching the synthesizer's `vaConvertTopicNumber` key emitted by
-    `build_visible_entry_metadata`).
+    Observed format (`docs/blackbird-title-format.md` "CContent" +
+    Homepage.bdf empirical dump): `[u16 schema_prefix][ANSI text]`.
+    Strategy: skip the 2-byte prefix, strip a leading `'S'` marker
+    that prefixes every observed body, truncate at the first NUL.
 
     The exact role of the leading `'S'` byte and the `'#'` paragraph
-    delimiters in the body is RE-deferred — for first paint we ship
-    the contiguous text region as-is.
+    delimiters is RE-deferred. Returns empty bytes for empty / unknown
+    payloads.
     """
-    texts: dict[int, bytes] = {}
-    for entry in model["visible_entries"]:
-        if entry["kind"] != "text":
-            continue
-        topic_no = entry["entry_index"] + 1
-        payload = entry.get("text_runs", {}).get("payload", b"")
-        if len(payload) < 3:
-            continue
-        body = payload[2:]
-        # Trim trailing NUL/non-printable runs so case-1 chunks ship
-        # ASCII-only text (the case-1 paint walker reads until the
-        # first NUL byte; per docs/MEDVIEW.md §10.5).
-        nul = body.find(b"\x00")
-        if nul >= 0:
-            body = body[:nul]
-        if body.startswith(b"S"):
-            body = body[1:]
-        if not body:
-            continue
-        texts[topic_no] = body
-    return texts
+    if len(payload) < 3:
+        return b""
+    body = payload[2:]
+    nul = body.find(b"\x00")
+    if nul >= 0:
+        body = body[:nul]
+    if body.startswith(b"S"):
+        body = body[1:]
+    return bytes(body)
+
+
+def _build_topic_entries(model: dict) -> tuple[TopicEntry, ...]:
+    """Assemble per-topic entries from the synthesizer's visible entries.
+
+    Coordinates `m14_synth.build_visible_entry_metadata` — same address
+    seed (0x1000), same topic_number assignment (entry_index + 1), same
+    context_hash (CRC32 of lowercased proxy name) — so that the va
+    values shipped in TitleOpen reply match the keys the engine sends
+    back via selectors 0x06 (hash) / 0x07 (topic) / 0x15 (va).
+    """
+    entries = build_visible_entry_metadata(model)
+    out: list[TopicEntry] = []
+    for entry in entries:
+        if entry["kind"] == "text":
+            text = _extract_text_runs_body(
+                entry.get("text_runs", {}).get("payload", b"")
+            )
+        else:
+            text = b""
+        out.append(
+            TopicEntry(
+                topic_number=entry["topic_number"],
+                address=entry["address"],
+                context_hash=entry["context_hash"],
+                proxy_name=entry["proxy_name"],
+                kind=entry["kind"],
+                text=text,
+            )
+        )
+    return tuple(out)
 
 
 def _try_caption_from_ttl(path: Path) -> str | None:
@@ -435,7 +487,8 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
       - `caption`: `CTitle.name` or `"Title <deid>"` fallback
       - `metadata`: TitleOpen static-section dwords (per
         `docs/mosview-mediaview-format.md` "Materialized Title Object Fields")
-      - `topic_texts`: per-topic ANSI story buffers from TextRuns CContent
+      - `topics`: per-topic mapping (topic_number / address / context_hash /
+        text) consumed by selector 0x06 / 0x07 / 0x15 cache pushes
 
     Never raises; on any failure (missing file, parse error,
     subset-validation rejection) falls back to an empty payload with
@@ -449,7 +502,7 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
             payload=empty,
             caption=fallback_caption,
             metadata=_empty_metadata(empty),
-            topic_texts={},
+            topics=(),
         )
 
     path = _titles_root() / f"{deid}.ttl"
@@ -460,14 +513,14 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
             payload=empty,
             caption=fallback_caption,
             metadata=_empty_metadata(empty),
-            topic_texts={},
+            topics=(),
         )
 
     try:
         model = build_source_model(path)
         raw_payload, _ = synthesize_payload(model, deid)
         synth_metadata, _ = synthesize_metadata(model, raw_payload, deid)
-        topic_texts = _extract_topic_texts(model)
+        topics = _build_topic_entries(model)
     except (SynthesisError, ValueError, OSError) as exc:
         log.warning(
             "m14_synthesize_failed deid=%r path=%s: %s — using empty payload",
@@ -479,7 +532,7 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
             payload=empty,
             caption=caption,
             metadata=_empty_metadata(empty),
-            topic_texts={},
+            topics=(),
         )
 
     caption = model["title"]["name"] or fallback_caption
@@ -503,9 +556,9 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
     )
     log.info(
         "m14_synthesized deid=%r path=%s caption=%r raw_len=%d wire_len=%d "
-        "entries=%d topic_texts=%d va=0x%08x addr=0x%08x topics=%d",
+        "entries=%d topics=%d va=0x%08x addr=0x%08x topic_count=%d",
         deid, path, caption, len(raw_payload), len(wire_payload),
-        len(model["visible_entries"]), len(topic_texts),
+        len(model["visible_entries"]), len(topics),
         metadata.va_get_contents, metadata.addr_get_contents,
         metadata.topic_count,
     )
@@ -513,5 +566,5 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
         payload=wire_payload,
         caption=caption,
         metadata=metadata,
-        topic_texts=topic_texts,
+        topics=topics,
     )

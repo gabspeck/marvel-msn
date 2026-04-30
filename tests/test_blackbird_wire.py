@@ -23,6 +23,7 @@ from src.server.blackbird.wire import (
     encode_byte_or_ushort_varint,
     encode_case1_preamble,
     encode_null_tlv,
+    encode_text_item_tlv,
     encode_signed_int_varint,
     encode_signed_short_varint,
     encode_ushort_or_u32_varint,
@@ -337,22 +338,91 @@ class TestCase1Tlv(unittest.TestCase):
         self.assertEqual(consumed, 6)
 
 
-class TestCase1BfChunk(unittest.TestCase):
-    """Byte-pinned case-1 chunk produced by `build_case1_bf_chunk`."""
+class TestTextItemTlvEncoder(unittest.TestCase):
+    """`encode_text_item_tlv` — encoder counterpart of `decode_case1_tlv`.
+
+    Round-trip coverage: any field set the decoder produces should round
+    back through the encoder identically (modulo parser-default fill-in).
+    """
+
+    def test_empty_dict_matches_null_tlv(self):
+        self.assertEqual(encode_text_item_tlv({}), encode_null_tlv())
+        self.assertEqual(encode_text_item_tlv(None), encode_null_tlv())
+
+    def test_alignment_mode_packs_into_bitmap_bits_26_27(self):
+        # alignment_mode = 1 (right) → bitmap = (1 << 26) = 0x04000000.
+        # Length=0 narrow (`00 80`) + bitmap LE (`00 00 00 04`) = 6 B total.
+        encoded = encode_text_item_tlv({0x0C: 1})
+        self.assertEqual(encoded, bytes.fromhex("008000000004"))
+
+    def test_text_start_index_emitted_as_length_field(self):
+        # text_start_index = 16 → length raw = (16 + 0x4000) << 1 = 0x8020 → "20 80"
+        # bitmap = 0 → "00 00 00 00"
+        encoded = encode_text_item_tlv({0x00: 16})
+        self.assertEqual(encoded, bytes.fromhex("208000000000"))
+
+    def test_optional_fields_emit_only_when_present(self):
+        # space_before = 5 → bitmap |= 0x20000; payload = encode_signed_short_varint(5)
+        # = ((5+0x40)<<1) = 0x8A → 1-byte narrow.
+        # Length(2) + bitmap_LE(4) + payload(1) = 7 B.
+        encoded = encode_text_item_tlv({0x16: 5})
+        self.assertEqual(encoded, bytes.fromhex("0080000002008a"))
+
+    def test_round_trip_with_real_authored_defaults(self):
+        # Recipe-derived field set: left-aligned text with non-zero spacing.
+        # text_start_index=0, alignment_mode=0 (left), space_before=12,
+        # space_after=12, left_indent=0x40, first_line_indent=0x80.
+        fields = {
+            0x00: 0,
+            0x0C: 0,
+            0x16: 12,
+            0x18: 12,
+            0x1C: 0x40,
+            0x20: 0x80,
+        }
+        encoded = encode_text_item_tlv(fields)
+        decoded, consumed = decode_case1_tlv(encoded)
+        self.assertEqual(consumed, len(encoded))
+        for k, v in fields.items():
+            self.assertEqual(decoded[k], v, f"field 0x{k:02x}")
+
+    def test_round_trip_with_alignment_and_inline_runs_zero(self):
+        fields = {
+            0x00: 0,
+            0x0C: 2,        # alignment_mode = center
+            0x27: 0,        # inline_run_count = 0 (encoded but no payload)
+        }
+        encoded = encode_text_item_tlv(fields)
+        decoded, consumed = decode_case1_tlv(encoded)
+        self.assertEqual(consumed, len(encoded))
+        self.assertEqual(decoded[0x0C], 2)
+        self.assertEqual(decoded[0x27], 0)
+
+    def test_unknown_key_raises(self):
+        with self.assertRaises(ValueError):
+            encode_text_item_tlv({0x99: 1})
+
+    def test_inline_run_count_nonzero_not_implemented(self):
+        with self.assertRaises(NotImplementedError):
+            encode_text_item_tlv({0x27: 1})
+
+
+class TestCase1BfChunkLegacy0x40(unittest.TestCase):
+    """Byte-pinned case-1 chunk in the original RE form (name_size=0x40)."""
 
     def test_chunk_is_128_bytes(self):
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE, name_size=0x40)
         self.assertEqual(len(chunk), 4 + 0x40 + 60)
 
     def test_chunk_header_and_key_placement(self):
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE, name_size=0x40)
         self.assertEqual(chunk[0], 0xBF)        # type-0 cache opcode
         self.assertEqual(chunk[1], 0x01)        # title byte
         self.assertEqual(chunk[2:4], bytes.fromhex("4000"))  # name_size = 0x40
         self.assertEqual(chunk[12:16], struct.pack("<I", 0xCAFEBABE))  # key
 
     def test_chunk_dispatch_byte_is_case1(self):
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0, name_size=0x40)
         # name_buf[0x26] = 0x01 → case-1 dispatch in FUN_7e894c50.
         self.assertEqual(chunk[4 + 0x26], 0x01)
 
@@ -361,22 +431,22 @@ class TestCase1BfChunk(unittest.TestCase):
         #   byte 0x26: 0x01 (tag)
         #   bytes 0x27-0x28: signed-int varint, value = 7 (TLV size + 1).
         # text_base = entry + 0x26 + 3 + 7 = entry + 0x30.
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0, name_size=0x40)
         self.assertEqual(chunk[4 + 0x26:4 + 0x29], bytes.fromhex("010e80"))
 
     def test_chunk_tlv_is_null(self):
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0, name_size=0x40)
         # TLV at name_buf[0x29..0x2E] = 6-byte null TLV.
         self.assertEqual(chunk[4 + 0x29:4 + 0x2F], bytes.fromhex("008000000000"))
 
     def test_chunk_end_of_chunk_marker_at_end_of_tlv(self):
         # 0xFF at name_buf[0x2F] = end_of_TLV. Read by FUN_7e894ec0
         # via control walker (template[+0x14]) when text walker hits NUL.
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0, name_size=0x40)
         self.assertEqual(chunk[4 + 0x2F], 0xFF)
 
     def test_chunk_text_at_entry_0x30_with_nul_terminator(self):
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0, name_size=0x40)
         # Text at name_buf[0x30..0x39] = 9 ASCII + NUL.
         self.assertEqual(
             chunk[4 + 0x30:4 + 0x30 + 10],
@@ -385,7 +455,7 @@ class TestCase1BfChunk(unittest.TestCase):
 
     def test_chunk_full_byte_layout_for_msn_today(self):
         # Pin the entire 128-byte sequence so any encoder drift is caught.
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0xCAFEBABE, name_size=0x40)
         expected = bytearray(128)
         expected[0] = 0xBF
         expected[1] = 0x01
@@ -400,7 +470,7 @@ class TestCase1BfChunk(unittest.TestCase):
         self.assertEqual(chunk, bytes(expected))
 
     def test_chunk_content_block_is_zero(self):
-        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0, name_size=0x40)
         # Content block = chunk[0x44..0x7F]; bytes +0x2C / +0x34 of the
         # block are HGLOBAL slots, kept NULL by zeros.
         self.assertEqual(chunk[0x44:], b"\x00" * 60)
@@ -409,12 +479,51 @@ class TestCase1BfChunk(unittest.TestCase):
         # FUN_7e891810's skip-empty pre-test fires if first text byte
         # is NUL — we'd never emit slot tag 1.
         with self.assertRaises(ValueError):
-            build_case1_bf_chunk("", title_byte=0x01, key=0)
+            build_case1_bf_chunk("", title_byte=0x01, key=0, name_size=0x40)
 
     def test_text_too_long_for_in_name_buf_form_rejected(self):
-        # 13 bytes of text + NUL = 14 bytes, exceeds 13-byte budget.
+        # 13 bytes of text + NUL = 14 bytes, exceeds 13-byte budget at name_size=0x40.
         with self.assertRaises(ValueError):
-            build_case1_bf_chunk("X" * 13, title_byte=0x01, key=0)
+            build_case1_bf_chunk("X" * 13, title_byte=0x01, key=0, name_size=0x40)
+
+
+class TestCase1BfChunkExtended(unittest.TestCase):
+    """Default name_size=0x100 chunk fits the full 119-byte authored
+    Homepage.bdf TextRuns body; legacy 0x40 form still accepted via
+    explicit `name_size=` kwarg for byte-pin coverage."""
+
+    def test_default_chunk_is_320_bytes(self):
+        chunk = build_case1_bf_chunk("MSN Today", title_byte=0x01, key=0)
+        # 4-byte header + 0x100 name_buf + 60-byte content block = 320 B.
+        self.assertEqual(len(chunk), 4 + 0x100 + 60)
+        self.assertEqual(chunk[2:4], bytes.fromhex("0001"))  # name_size = 0x100 LE
+
+    def test_default_chunk_fits_authored_text_119_bytes(self):
+        # 119 B (Homepage.bdf TextRuns body length) + NUL fits with the
+        # 0x100 default; the 0x40 form would reject this.
+        text = "T" * 119
+        chunk = build_case1_bf_chunk(text, title_byte=0x01, key=0)
+        # Text starts at name_buf[0x30] regardless of name_size; with a
+        # 0x100 buffer there's room through name_buf[0x100 - 1] = 0xFF.
+        self.assertEqual(
+            chunk[4 + 0x30:4 + 0x30 + 120],
+            text.encode("ascii") + b"\x00",
+        )
+
+    def test_dispatch_and_preamble_unchanged_at_extended_size(self):
+        # The case-1 dispatch / preamble / TLV / control byte / text
+        # offsets are all measured from name_buf[0x26] — they don't shift
+        # when name_size grows.
+        chunk = build_case1_bf_chunk("hello", title_byte=0x01, key=0xDEADBEEF)
+        self.assertEqual(chunk[4 + 0x26], 0x01)              # case-1 dispatch
+        self.assertEqual(chunk[4 + 0x26:4 + 0x29], bytes.fromhex("010e80"))  # preamble
+        self.assertEqual(chunk[4 + 0x29:4 + 0x2F], bytes.fromhex("008000000000"))  # null TLV
+        self.assertEqual(chunk[4 + 0x2F], 0xFF)              # end-of-TLV
+        self.assertEqual(chunk[4 + 0x30:4 + 0x36], b"hello\x00")
+        # Content block is appended at the end (after the larger name_buf).
+        self.assertEqual(chunk[-60:], b"\x00" * 60)
+        # Key still in the canonical name_buf+0x08 slot (= chunk[12..16]).
+        self.assertEqual(chunk[12:16], struct.pack("<I", 0xDEADBEEF))
 
 
 if __name__ == "__main__":
