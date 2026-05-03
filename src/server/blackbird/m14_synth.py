@@ -8,7 +8,8 @@ the offline `.m14`-envelope writer (`encode_synthetic_m14`,
 Public surface used by `m14_payload.build_m14_payload_for_deid`:
 - `build_source_model(ttl_path)` — parse a Blackbird .ttl into a structured model
 - `validate_supported_subset(model)` — assert the narrow shape this synthesizer
-  knows how to lower (1 CTitle / 1 CSection / 3 CContent / 2 text + 1 image)
+  knows how to lower (1 CTitle / 1 CSection / 1 CBForm / >=1 supported
+  top-level topic-source entries)
 - `synthesize_payload(model, mosview_open_path)` — emit the 9-section MediaView
   1.4 payload bytes (font_blob + sec07 + sec08 + sec06 + sec01 + sec02 + sec6a
   + sec13 + sec04)
@@ -19,13 +20,19 @@ Public surface used by `m14_payload.build_m14_payload_for_deid`:
 The structural model documented in `docs/mosview-mediaview-format.md`
 "Payload Grammar" / "TitleGetInfo Selector Contract".
 
-KNOWN STRUCTURAL PLACEHOLDERS:
+The structured model intentionally stops at the authored subset this repo
+can currently decode with confidence: one top-level `CSection`, one
+`CBForm`, and supported top-level content/proxy entries. Those entries
+feed topic/address lowering; they are not authored page/window/control
+descriptors.
+
+KNOWN OFFLINE STRUCTURAL PLACEHOLDERS:
 - font_blob starts with `b"FNTB"` magic; MVTTL14C reads font_count as i16
-  at offset 0 and would walk off the GlobalAlloc'd copy. Wire callers
-  MUST strip the leading [u16 len][font_blob] section before sending
-  bytes on the wire (see `m14_payload._strip_font_blob`).
+  at offset 0 and would walk off the GlobalAlloc'd copy. The live wire
+  path in `m14_payload.py` replaces it with a real section-0 font table.
 - Records 0x06/0x07/0x08 carry "BB06"/"BB07"/"BB08" magic at offset 0;
-  acceptable because MOSVIEW reads from positive named offsets, but
+  acceptable for offline parser round-trips because MOSVIEW reads from
+  positive named offsets, but
   flagged as a candidate suspect if downstream code ever indexes
   `record[0:4]`.
 """
@@ -154,19 +161,15 @@ def validate_supported_subset(model: dict) -> None:
     require(not section["sections"], "nested sections are unsupported")
     require(not section["magnets"], "section magnets are unsupported")
     require(len(section["forms"]) == 1, "expected exactly one section form")
-    require(len(section["contents"]) == 3, "expected exactly three top-level content proxies")
+    require(section["contents"], "expected at least one top-level content proxy")
     require(not section["styles"], "section-specific styles are unsupported")
     require(not section["frames"], "section-specific frames are unsupported")
 
     require(form["embedded_vform_present"] == 1, "expected one embedded CVForm")
     require(resource_folder["base_folder"]["trailing_byte"] == 0, "unsupported resource folder trailer")
 
-    visible_entries = model["visible_entries"]
-    require(len(visible_entries) == 3, "expected exactly three visible content entries")
-    text_entries = [entry for entry in visible_entries if entry["kind"] == "text"]
-    image_entries = [entry for entry in visible_entries if entry["kind"] == "image"]
-    require(len(text_entries) == 2, "expected exactly two text stories")
-    require(len(image_entries) == 1, "expected exactly one image")
+    topic_source_entries = model["topic_source_entries"]
+    require(topic_source_entries, "expected at least one supported topic-source entry")
 
     supported_types = {"TextTree", "TextRuns", "WaveletImage"}
     content_types = {
@@ -246,7 +249,10 @@ def build_source_model(ttl_path: Path) -> dict:
         "CStyleSheet",
     )
 
-    visible_entries = []
+    # These are the supported top-level `CSection.contents` entries that
+    # feed today's synthetic topic/address map. They are authored content
+    # references, not authored page/window/control layout records.
+    topic_source_entries = []
     content_records = []
     for entry_index, content_ref in enumerate(section_info["contents"]):
         proxy_record = resolve_handle(handle_index, content_ref, "CProxyTable")
@@ -303,7 +309,7 @@ def build_source_model(ttl_path: Path) -> dict:
         if proxy_type == "TextProxy":
             text_tree = resolved_targets[0x1400]
             text_runs = resolved_targets[0x1500]
-            visible_entries.append(
+            topic_source_entries.append(
                 {
                     "entry_index": entry_index,
                     "kind": "text",
@@ -318,7 +324,7 @@ def build_source_model(ttl_path: Path) -> dict:
         else:
             image = resolved_targets[0x0600]
             image_record = image["record"]
-            visible_entries.append(
+            topic_source_entries.append(
                 {
                     "entry_index": entry_index,
                     "kind": "image",
@@ -367,7 +373,7 @@ def build_source_model(ttl_path: Path) -> dict:
             "object_root": vform_record["object_root"],
             "payload_size": len(vform_record["payload"]),
         },
-        "visible_entries": visible_entries,
+        "topic_source_entries": topic_source_entries,
         "content_records": content_records,
         "class_counts": class_counts,
     }
@@ -421,7 +427,7 @@ def build_section_strings(model: dict) -> list[str]:
         model["stylesheet"]["name"],
         model["resource_folder"]["name"],
     ]
-    for entry in model["visible_entries"]:
+    for entry in model["topic_source_entries"]:
         strings.append(entry["proxy_name"])
     return strings
 
@@ -444,10 +450,15 @@ def record_label(text: str, size: int) -> bytes:
     return encoded.ljust(size, b"\x00")
 
 
-def build_visible_entry_metadata(model: dict) -> list[dict]:
+def build_topic_source_metadata(model: dict) -> list[dict]:
+    """Attach synthetic topic/address keys to supported top-level entries.
+
+    This is a lowering helper for MEDVIEW topic resolution only. It does
+    not describe authored page/window/control layout.
+    """
     first_address = 0x1000
     entries = []
-    for entry in model["visible_entries"]:
+    for entry in model["topic_source_entries"]:
         entry_copy = copy.deepcopy(entry)
         address = first_address + entry["entry_index"] * 0x100
         topic_number = entry["entry_index"] + 1
@@ -604,7 +615,7 @@ def encode_c_string_table(strings: list[str]) -> bytes:
 
 
 def synthesize_payload(model: dict, mosview_open_path: str) -> tuple[bytes, dict]:
-    entries = build_visible_entry_metadata(model)
+    entries = build_topic_source_metadata(model)
     strings = build_section_strings(model)
     string_index = {text: index for index, text in enumerate(strings)}
 
@@ -688,11 +699,11 @@ def synthesize_payload(model: dict, mosview_open_path: str) -> tuple[bytes, dict
 
 
 def synthesize_metadata(model: dict, payload: bytes, mosview_open_path: str) -> tuple[dict, list[dict]]:
-    visible_entries = build_visible_entry_metadata(model)
+    topic_source_entries = build_topic_source_metadata(model)
     parser_title_path = build_stock_parser_title_path(mosview_open_path)
-    va_get_contents = visible_entries[0]["address"]
+    va_get_contents = topic_source_entries[0]["address"]
     addr_get_contents = va_get_contents
-    title_info_0b = len(visible_entries)
+    title_info_0b = len(topic_source_entries)
     header0 = synthetic_crc(payload)
     header1 = synthetic_crc(parser_title_path.encode("latin-1", errors="replace"))
     metadata = {
@@ -712,7 +723,7 @@ def synthesize_metadata(model: dict, payload: bytes, mosview_open_path: str) -> 
                 "topic_number": entry["topic_number"],
                 "context_hash": entry["context_hash"],
             }
-            for entry in visible_entries
+            for entry in topic_source_entries
         ],
     }
     unresolved = [

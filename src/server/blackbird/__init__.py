@@ -12,8 +12,9 @@ Submodules:
   (`docs/mosview-mediaview-format.md` "Payload Grammar").
 - `m14_synth` — `.ttl` → MediaView 1.4 payload synthesizer.
 - `m14_payload` — wire-mode adapter for `services.medview`; handles
-  missing/unsynthesizable `.ttl` files with an empty fallback and strips
-  the synthesizer's `FNTB` font_blob (which would crash MVTTL14C).
+  missing/unsynthesizable `.ttl` files with an empty fallback and emits
+  the live wire path's real section-0 font table plus code-proven
+  fixed-record sections.
 """
 
 from .m14_payload import (

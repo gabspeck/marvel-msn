@@ -905,20 +905,21 @@ Fields:
 
 ### `WindowScaffoldRecord`
 
-Purpose: describe the outer container and optional non-scrolling pane.
+Purpose: describe the outer container, the top child band, and the scrolling
+host strip.
 
 Fields:
 - `containerCaption:cstring`. Outer container caption.
 - `flags:u8`. Known bits:
   `0x08` outer-container rect mode,
-  `0x01` non-scrolling rect mode,
-  `0x40` bottom-align non-scrolling pane.
+  `0x01` top-band rect mode,
+  `0x40` bottom-align top band.
 - `outerRect`. `x:u32`, `y:u32`, `width:u32`, `height:u32`.
 - `containerControl:u32`. Carried into runtime state; not interpreted on the
   recovered stock path.
-- `nonScrollingBackground:u32`. `COLORREF`.
-- `scrollingBackground:u32`. `COLORREF`.
-- `nonScrollingRect`. `x:u32`, `y:u32`, `width:u32`, `height:u32`.
+- `topBandBackground:u32`. `COLORREF`.
+- `scrollingHostBackground:u32`. `COLORREF`.
+- `topBandRect`. `x:u32`, `y:u32`, `width:u32`, `height:u32`.
 
 ## Runtime Handle Shapes
 

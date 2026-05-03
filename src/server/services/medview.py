@@ -29,7 +29,18 @@ from ..blackbird.m14_payload import (
     M14PayloadResult,
     TitleOpenMetadata,
     TopicEntry,
+    _SECTION0_FONT_BLOB,
+    _build_sec06_window_scaffold_record,
     build_m14_payload_for_deid,
+)
+from ..blackbird.m14_synth import (
+    build_selector_13_entries,
+    build_stock_parser_title_path,
+    encode_blob_section,
+    encode_c_string,
+    encode_c_string_table,
+    encode_counted_string_section,
+    synthetic_crc,
 )
 from ..blackbird.wire import (
     build_baggage_container,
@@ -113,6 +124,108 @@ _BAGGAGE_HANDLE_BM0 = 0x42
 # query session, which we don't implement.
 _NO_HIGHLIGHT_CONTEXT = 0x00
 
+# Title source branch used by the live MEDVIEW handler. The older
+# Blackbird-backed lowering path remains available in `_resolve_title_result`
+# but is no longer the default path for MOSVIEW.
+_TITLE_SOURCE_SYNTHETIC = "synthetic"
+_TITLE_SOURCE_BLACKBIRD = "blackbird"
+_TITLE_SOURCE_BRANCH = _TITLE_SOURCE_SYNTHETIC
+
+_SYNTHETIC_TITLE_CAPTION = "Synthetic MEDVIEW"
+_SYNTHETIC_SECTION_NAME = "Synthetic Section"
+_SYNTHETIC_FORM_NAME = "Synthetic Form"
+_SYNTHETIC_FRAME_NAME = "Synthetic Window"
+_SYNTHETIC_STYLE_NAME = "Synthetic Style"
+_SYNTHETIC_RESOURCE_FOLDER_NAME = "Synthetic Resources"
+_SYNTHETIC_TOPIC_NAME = "Synthetic Story"
+_SYNTHETIC_TOPIC_TEXT = (
+    "This title is served by the MEDVIEW synthetic branch. "
+    "Blackbird title lowering is bypassed on purpose."
+)
+_SYNTHETIC_TOPIC_ADDRESS = 0x1000
+
+
+def _encode_fixed_section(records: list[bytes], record_size: int) -> bytes:
+    """Encode one fixed-record MEDVIEW section."""
+    for record in records:
+        if len(record) != record_size:
+            raise ValueError(f"record does not match size 0x{record_size:x}")
+    payload = b"".join(records)
+    if len(payload) > 0xFFFF:
+        raise ValueError(f"fixed-record section too large: 0x{len(payload):x}")
+    return struct.pack("<H", len(payload)) + payload
+
+
+def _build_synthetic_title_result(title_token: str, deid: str) -> M14PayloadResult:
+    """Build a hardcoded title body for the live synthetic branch.
+
+    This bypasses Blackbird `.ttl` lowering entirely while keeping the
+    same `OpenTitle` / cache-miss contract the rest of the handler uses.
+    """
+    mosview_open_path = deid or title_token or _SYNTHETIC_TITLE_CAPTION
+    topic_text = _SYNTHETIC_TOPIC_TEXT.encode("latin-1", errors="replace")
+    context_hash = synthetic_crc(
+        _SYNTHETIC_TOPIC_NAME.lower().encode("latin-1", errors="replace"),
+    ) or 1
+    topics = (
+        TopicEntry(
+            topic_number=1,
+            address=_SYNTHETIC_TOPIC_ADDRESS,
+            context_hash=context_hash,
+            proxy_name=_SYNTHETIC_TOPIC_NAME,
+            kind="text",
+            text=topic_text,
+        ),
+    )
+
+    sec01 = encode_c_string(_SYNTHETIC_TITLE_CAPTION)
+    sec02 = b""
+    sec6a = encode_c_string(mosview_open_path)
+    sec13_entries = build_selector_13_entries()
+    sec04_strings = [
+        _SYNTHETIC_TITLE_CAPTION,
+        _SYNTHETIC_SECTION_NAME,
+        _SYNTHETIC_FORM_NAME,
+        _SYNTHETIC_FRAME_NAME,
+        _SYNTHETIC_STYLE_NAME,
+        _SYNTHETIC_RESOURCE_FOLDER_NAME,
+        _SYNTHETIC_TOPIC_NAME,
+    ]
+    payload = b"".join(
+        [
+            encode_blob_section(_SECTION0_FONT_BLOB),
+            _encode_fixed_section([], 0x2B),
+            _encode_fixed_section([], 0x1F),
+            _encode_fixed_section([_build_sec06_window_scaffold_record()], 0x98),
+            encode_blob_section(sec01),
+            encode_blob_section(sec02),
+            encode_blob_section(sec6a),
+            encode_counted_string_section(sec13_entries),
+            encode_c_string_table(sec04_strings),
+        ]
+    )
+    parser_title_path = build_stock_parser_title_path(mosview_open_path)
+    metadata = TitleOpenMetadata(
+        va_get_contents=_SYNTHETIC_TOPIC_ADDRESS,
+        addr_get_contents=_SYNTHETIC_TOPIC_ADDRESS,
+        topic_count=len(topics),
+        cache_header0=synthetic_crc(payload),
+        cache_header1=synthetic_crc(parser_title_path.encode("latin-1", errors="replace")),
+    )
+    return M14PayloadResult(
+        payload=payload,
+        caption=_SYNTHETIC_TITLE_CAPTION,
+        metadata=metadata,
+        topics=topics,
+    )
+
+
+def _resolve_title_result(title_token: str, deid: str) -> tuple[str, M14PayloadResult]:
+    """Choose the live title source branch while preserving the old path."""
+    if _TITLE_SOURCE_BRANCH == _TITLE_SOURCE_SYNTHETIC:
+        return (_TITLE_SOURCE_SYNTHETIC, _build_synthetic_title_result(title_token, deid))
+    return (_TITLE_SOURCE_BLACKBIRD, build_m14_payload_for_deid(deid))
+
 
 # --------------------------------------------------------------------------
 # bm0 baggage backdrop
@@ -120,8 +233,8 @@ _NO_HIGHLIGHT_CONTEXT = 0x00
 
 _BM0_WIDTH = 640
 _BM0_HEIGHT = 480
-_BM0_BPP = 1
-_BM0_PIXEL_BYTES = (_BM0_WIDTH // 8) * _BM0_HEIGHT  # 38400 B for 640×480 1bpp
+_BM0_BPP = 24
+_BM0_PIXEL_BYTES = _BM0_WIDTH * _BM0_HEIGHT * 3  # 921600 B for 640×480 24bpp
 
 
 def _build_bm0_container():
@@ -137,14 +250,16 @@ def _build_bm0_container():
     parent-cell backdrop, NOT authored title content. Authored images
     (e.g. the `bitmap.bmp` WaveletImage in the reference .ttl) ship as
     `bm1+` baggage and are referenced by image-tag (`0x03`/`0x22`)
-    topic items. The empty-trailer recipe matches the doc's "first
-    authored text milestone does not need this trailer" deferment.
+    topic items. The synthetic branch forces a solid yellow 24bpp fill
+    here as a visibility probe; the empty-trailer recipe still matches
+    the doc's "first authored text milestone does not need this
+    trailer" deferment.
     """
     bitmap = build_kind5_raster(
         width=_BM0_WIDTH,
         height=_BM0_HEIGHT,
         bpp=_BM0_BPP,
-        pixel_data=b"\xFF" * _BM0_PIXEL_BYTES,
+        pixel_data=b"\x00\xFF\xFF" * (_BM0_WIDTH * _BM0_HEIGHT),
         trailer=build_trailer([], b""),
     )
     return build_baggage_container(bitmap)
@@ -629,7 +744,7 @@ class MEDVIEWHandler:
         title_token = _extract_title_token(payload)
         deid = _deid_from_title_token(title_token).strip()
         log.info("open_title req_id=%d token=%r deid=%r", request_id, title_token, deid)
-        result = build_m14_payload_for_deid(deid)
+        source_branch, result = _resolve_title_result(title_token, deid)
         # Stash per-topic mapping + caption on the handler so subsequent
         # selector 0x05 / 0x06 / 0x07 / 0x15 cache pushes can ship
         # authored values (`_case1_text_for_key`, `_topic_for_wire_key`).
@@ -637,9 +752,9 @@ class MEDVIEWHandler:
         self.title_caption = result.caption
         self._open_title_slots.add(_TITLE_SLOT_PRIMARY)
         log.info(
-            "open_title_reply title_slot=0x%02x fs_mode=%d body_len=%d "
+            "open_title_reply source=%s title_slot=0x%02x fs_mode=%d body_len=%d "
             "va=0x%08x addr=0x%08x topic_upper=%d cache_header0=0x%08x",
-            _TITLE_SLOT_PRIMARY, 0, len(result.payload),
+            source_branch, _TITLE_SLOT_PRIMARY, 0, len(result.payload),
             result.metadata.va_get_contents,
             result.metadata.addr_get_contents,
             result.metadata.topic_count,

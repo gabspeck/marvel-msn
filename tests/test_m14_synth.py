@@ -13,7 +13,6 @@ from pathlib import Path
 
 from server.blackbird.m14_parse import parse_payload
 from server.blackbird.m14_synth import (
-    SynthesisError,
     build_source_model,
     sanitize_cache_leaf,
     synthesize_payload,
@@ -32,11 +31,14 @@ class SynthesizeM14Tests(unittest.TestCase):
             "MVCache__C__A__B__file.m14_0.tmp",
         )
 
-    def test_supported_subset_rejects_extra_visible_entry(self) -> None:
+    def test_supported_subset_accepts_extra_topic_source_entry(self) -> None:
         model = build_source_model(SAMPLE_TTL)
-        model["visible_entries"].append(dict(model["visible_entries"][0]))
-        with self.assertRaises(SynthesisError):
-            validate_supported_subset(model)
+        extra_entry = dict(model["topic_source_entries"][0])
+        extra_entry["entry_index"] = len(model["topic_source_entries"])
+        extra_entry["proxy_name"] = "Homepage Copy"
+        model["topic_source_entries"].append(extra_entry)
+        model["section"]["contents"].append(model["section"]["contents"][0])
+        validate_supported_subset(model)
 
     def test_payload_round_trips_through_cache_parser(self) -> None:
         model = build_source_model(SAMPLE_TTL)

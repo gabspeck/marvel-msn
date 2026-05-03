@@ -21,6 +21,15 @@ Both files are OLE Compound Document files and carry the same logical title payl
 - A standalone `.ttl` is the `Title0` subtree lifted to the compound root.
 - `BBVIEW`/Blackbird runtime code consumes this title object-store format through `VIEWDLL.DLL` and `COSCL.DLL`.
 
+Help-file model (`AUTHOR.HLP`, `BBDESIGN.HLP`):
+
+- project → title → section / page → window / controls → story / media assets
+- story text is authored separately (`.bdf` in Word) and attached through story controls
+- pages choose windows; windows and controls own layout semantics
+
+So the standalone `.ttl` is an authored object graph, not a precomputed
+MEDVIEW pane/layout cache.
+
 ## Root layout
 
 Observed root streams/storages:
@@ -281,6 +290,14 @@ High-confidence semantics:
     - styles `[]`
     - frames `[]`
     - `CSectionProp = {all refs absent, field_0 = 0, field_1 = 2, field_2 = 0, form ref absent}`
+  - lowering note:
+    - the serialized `CSection` payload contains section/form/content/style/frame
+      lists plus `CSectionProp`; there is no authored fixed-width pane-descriptor
+      table analogous to MediaView selectors `0x07`, `0x08`, or `0x06`
+    - in the sample, the three top-level authored content refs are section
+      membership entries, not authored child-pane records
+    - help-file hierarchy puts page/window/control semantics elsewhere, so
+      `CSection.contents` is a topic/media source layer, not a direct pane map
 
 - `CResourceFolder`
   - wire grammar:
@@ -405,6 +422,8 @@ High-confidence semantics:
       - `0x00001400 -> index 1 -> handle 0x01000006`
     - `7/2/\x03object`:
       - `0x00000600 -> index 0 -> handle 0x01000005`
+  - in the supported sample, top-level `CSection.contents` handles land here
+    first; proxy keys then fan out to the actual `CContent` payloads
 
 - `CStyle`
   - version byte `3` in the sample

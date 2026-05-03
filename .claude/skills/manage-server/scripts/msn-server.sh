@@ -19,8 +19,13 @@ cmd_start() {
     fi
     rm -f "$PID_FILE"
     cd "$REPO_DIR"
-    MSN_LOG_LEVEL="${MSN_LOG_LEVEL:-INFO}" nohup uv run python -u -m server \
-        > "$LOG" 2>&1 &
+    # In this tool environment, plain `nohup ... &` remains in the
+    # parent session/process group and is reaped when the launching
+    # shell exits. `setsid` detaches the server into a new session so
+    # the process survives after this script returns.
+    setsid env MSN_LOG_LEVEL="${MSN_LOG_LEVEL:-INFO}" \
+        uv run python -u -m server \
+        > "$LOG" 2>&1 < /dev/null &
     local pid=$!
     echo "$pid" > "$PID_FILE"
     sleep 1

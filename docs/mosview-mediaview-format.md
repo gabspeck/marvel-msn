@@ -1679,7 +1679,9 @@ proc `MosChildViewWndProc` now pins down most of the fixed-record layouts.
 
 ### Selector `0x07`: `0x2b`-byte Child-Pane Descriptors
 
-Each `0x07` record feeds one extra `MosChildView` window.
+`OpenMediaTitleSession` enumerates selector `0x07` in its own loop, separate
+from both selector `0x08` and selector `0x06`. Each `0x07` record then feeds
+one extra `MosChildView` window.
 
 - `+0x0b`: flags byte
   - bit `0x08` selects coordinate interpretation
@@ -1705,6 +1707,8 @@ Behavior:
     instantiation through the local `0x42a` path
   - so this field is a lazy-open threshold / visibility-tier, not a static pane
     id
+- no recovered `MOSVIEW` read in this constructor path treats any `0x07` bytes
+  as a content pointer, authored object handle, or section/form index
 
 ### Selector `0x08`: `0x1f`-byte Popup Descriptors
 
@@ -1728,8 +1732,9 @@ Behavior:
 
 ### Selector `0x06`: `0x98`-byte Window-Scaffold Records
 
-The main open path only consumes the first `0x06` record. Additional records, if
-any, were not used in the constructor recovered here.
+`OpenMediaTitleSession` enumerates selector `0x06` in a third independent loop.
+The main open path only consumes the first `0x06` record. Additional records,
+if any, were not used in the constructor recovered here.
 
 Code-proven fields in that first record:
 
@@ -1737,17 +1742,18 @@ Code-proven fields in that first record:
   `MosViewContainer` window
 - `+0x48`: flags byte
   - bit `0x08` selects the outer-container rect mode
-  - bit `0x01` selects the non-scrolling child rect mode
+  - bit `0x01` selects the top-child-band rect mode
   - bit `0x40` sets child object `+0x9c`, which later bottom-aligns the
-    non-scrolling pane during resize
+    top child band during resize
 - `+0x49`, `+0x4d`, `+0x51`, `+0x55`: outer container `x`, `y`, `w`, `h`
 - `+0x5b`: unaligned dword copied into the viewer object at `+0x20`
   - the recovered constructor path stores it as a container-side control field
   - no recovered `MOSVIEW` read path in this pass interprets it as geometry,
     text, or startup navigation state
-- `+0x78`: `COLORREF` for the synthetic `Non Scrolling Pane`
-- `+0x7c`: `COLORREF` for the main scrolling pane
-- `+0x80`, `+0x84`, `+0x88`, `+0x8c`: non-scrolling pane `x`, `y`, `w`, `h`
+- `+0x78`: `COLORREF` for the thin top child band tied to the child rect below
+- `+0x7c`: `COLORREF` for the scrolling host strip; in the synthetic-title
+  probe this is the white strip that carries the vertical scrollbar
+- `+0x80`, `+0x84`, `+0x88`, `+0x8c`: top child band `x`, `y`, `w`, `h`
 
 Behavior:
 
@@ -1755,8 +1761,14 @@ Behavior:
   - applies either `0x400`-relative or absolute-origin coordinates
   - compensates for the parent window's chrome
   - scales sizes by `DAT_7f3cd310 / 0x60`
-- the main scrolling pane and synthetic `Non Scrolling Pane` are then created
-  from this one scaffold record
+- the first `0x06` record creates the outer container plus two visible layers:
+  - a thin top child band from `+0x78` / `+0x80..+0x8c`
+  - a separate scrolling host strip from `+0x7c`
+- empiric synthetic-title probes show the deeper black content surface sits
+  below that scrolling host strip and is not recolored by either `+0x78` or
+  `+0x7c`
+- this record does not substitute for selector `0x07`: extra child panes are
+  still created only by the separate `0x07` table
 - if selector `0x06` is absent, MOSVIEW falls back to the literal outer caption
   `Online Viewer Container`
 
@@ -1897,22 +1909,51 @@ Concrete sample: `msn today.ttl`
 - top-level section object:
   - properties name: `Section 1`
   - linked form list: one `CBForm`
-  - linked content list: three `CContent` refs
+  - linked content list: three top-level authored content/proxy refs
+  - no authored fixed-width pane table analogous to MediaView selectors
+    `0x07`, `0x08`, or `0x06`
 - proxy/source content visible in properties:
   - `Homepage.bdf`
   - `Calendar of Events_.bdf`
   - `bitmap.bmp`
+- AUTHOR.HLP / BBDESIGN.HLP model:
+  - project → title → section / page → window / controls → story / media assets
+  - so `CSection.contents` is only one authored layer, not the whole display tree
 
-Practical lowering sketch:
+What the recovered client behavior now pins down:
 
 - Blackbird title / section / resource names:
   - candidate sources for selectors `0x01`, `0x02`, `0x04`, `0x13`, and `0x6a`
-- Blackbird content ordering:
-  - candidate source for the indexed fixed-record tables `0x07`, `0x08`, `0x06`
+- selector `0x06`:
+  - container scaffold only
+  - drives the outer `MosViewContainer`, the thin top child band, and the
+    scrolling host strip
+- selector `0x07`:
+  - separate child-pane table
+  - each record creates one extra `MosChildView`
+  - carries per-window metadata only on the recovered stock path
 - Blackbird style-sheet and frame choices:
   - candidate source for the font blob that becomes selector `0x6f`
 
-Blackbird concepts with no direct MediaView equivalent yet:
+Practical lowering sketch:
+
+- Blackbird section structure, not OLE container geometry, should drive the
+  lowering input model
+- the authored `CSection.contents` list is real authored data, but those
+  entries are not themselves MediaView pane records
+- the authored `CSection.forms` list is separate from `contents`, so treating
+  the sample's three content proxies as a serialized child-pane table is not
+  supported by the TTL object model
+- the fixed-width MediaView tables `0x07`, `0x08`, and `0x06` should therefore
+  be treated as lowering products synthesized from authored page/window/control
+  structure, not from proxy count alone
+- current live subset uses supported top-level proxy order only for
+  topic/address/context mapping and string-table population; it emits one
+  code-proven `0x06` scaffold and empty `0x07` / `0x08`
+- the exact historical rule used by MSN's original lowering path is still open;
+  authored child-pane and popup sources remain RE work
+
+Blackbird concepts with no direct MediaView equivalent:
 
 - OLE storages and numbered ref streams
 - swizzled Blackbird object handles

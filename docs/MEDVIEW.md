@@ -258,7 +258,7 @@ stream**. Ground-truth from the `MVTTL14C!TitleOpenEx @ 0x7E842D4E` and
      `title+0x08` (no font table). `TitleGetInfo(0x6F)` returns `0`.
      The MedView engine runs on its default font table with whatever
      built-in faces it has, but custom fonts for the title are absent.
-     **This is the safe path** — what the server ships today.
+     This is the empty-section-0 safe path.
    - `b0 != 0` → `GlobalAlloc(GPTR=0x40, b0)`, `MOVSD.REP` the `b0`
      bytes from `B+2`, then:
      - Read `i16` at copy+0x00 as **font count** (sign-extended; zero
@@ -282,9 +282,9 @@ Section-by-section (`u16` = little-endian 16-bit):
 | # | `TitleGetInfo` selector(s) | Header | Payload | Role |
 |--:|---------------------------|--------|---------|------|
 | 0 | `0x6F` (returns `title+0x08`, the copy handle) | `[u16 size]` | Font table — `i16 count @ +0x00`, `i16 slots_offset @ +0x10`, engine zeros `count` dwords at `base+slots_offset` at load time. 14 bytes of font descriptors in the gap (unresolved). | font table |
-| 1 | `7` | `[u16 size]` | array of fixed **43-byte** records (10 u32 + u16 + byte) | topic / TOC table |
-| 2 | `8` | `[u16 size]` | array of fixed **31-byte** records (7 u32 + u16 + byte) | link / jump table |
-| 3 | `6` | `[u16 size]` | array of fixed **152-byte** records (38 u32) | per-title layout / style table |
+| 1 | `7` | `[u16 size]` | array of fixed **43-byte** records (10 u32 + u16 + byte) | extra child-pane descriptors |
+| 2 | `8` | `[u16 size]` | array of fixed **31-byte** records (7 u32 + u16 + byte) | popup descriptors |
+| 3 | `6` | `[u16 size]` | array of fixed **152-byte** records (38 u32) | outer-container / pane scaffold descriptors |
 | 4 | `1` | `[u16 size]` | raw blob | title caption (ASCII) |
 | 5 | `2` | `[u16 size]` | raw blob | second string (subtitle / copyright) |
 | 6 | `0x6A` | `[u16 size]` | raw blob | "title string" — `fMVSetTitle` allocates it to `view+0x1c` when called with NULL path; purpose beyond cache key not yet pinned |
@@ -297,26 +297,21 @@ Section 7's empty form is just `[u16 size=0]` (the walker uses
 is a direct string count.
 
 The 43/31/152-byte record sizes are hard-coded inside `TitleGetInfo`
-and come from the 1996 server's synthesis of these sections from a
-Blackbird "Release" compound-file upload (see `docs/BLACKBIRD.md` §4.4).
-MVTTL14C never touches `ole32`'s `IStorage` APIs — the section stream
-is the MSN wire format; the OLE2 compound file is purely the
-authoring-side / Local-target artifact.
+and come from the 1996 server's lowering of an authored Blackbird title
+into the MedView wire body (see `docs/BLACKBIRD.md` §4.4). MVTTL14C
+never touches `ole32`'s `IStorage` APIs — the section stream is the MSN
+wire format; the OLE2 compound file is purely the authoring-side /
+Local-target artifact.
 
-**ver=0x03 object stream → wire-ready record (single-sample
-hypothesis).** A second authored MSN Today fixture emits CSection
-storages (e.g. `9/1/object`) with a new version byte `0x03` whose
-44-byte raw stream strips to a **43-byte body** — exactly the section-1
-record stride. Decomposes as `10 u32 + u16 + u8` per the documented
-record shape, with no compression header and no class-specific
-serialisation prefix. Strong inference: the 1996 BBDESIGN release path
-flattens CSection instances to wire-ready records and tags them
-`ver=0x03` so the server can `memcpy` the body straight into wire
-section 1 (concatenating across multiple CSections in DPORef-handle
-order). If this holds, populating section 1 needs no engine RE — just
-walk `Title.objects[csection_sid][sub]` and concatenate. Pending
-empirical verification (need a fixture with multiple CSections to
-confirm ordering and lookup semantics).
+These record shapes are wire-only facts, not proven direct dumps of one
+Blackbird class. Current RE no longer supports flattening raw
+`CSection` bodies into section 1: the sampled `CSection` serialization
+is authored section membership data (form refs + top-level content/proxy
+refs), while selectors `7` / `8` / `6` are consumed as separate
+child-pane / popup / scaffold tables by MOSVIEW. The authored source for
+extra child panes and popups remains unresolved, so the current live
+server emits empty selector-7/8 tables and one code-proven selector-6
+scaffold for the supported subset.
 
 **Empty-but-valid body** (18 bytes): `00 00 × 8` (sections 0-7 all
 empty) followed by `00 00` (section 8 count=0). The first `u16 == 0`
@@ -331,7 +326,7 @@ title name, sections 5-8 empty. `MOSVIEW!OpenMediaTitleSession @
 info_kind=1 reads **section 4**, copies its raw bytes into `buf`, runs
 them through `UnquoteCommandArgument` (strips backticks / double-quotes),
 and stores the result at `title+0x58` as the viewer's window caption.
-This is the MVP the server ships today.
+This is the minimal caption-only body.
 
 Note: the string table in section 8 (info_kind=4) is a **separate**
 field — a variable-length list of ASCIIZ items MOSVIEW pulls earlier in
@@ -380,12 +375,11 @@ The display name the authoring tool intends to surface here is
 (`docs/BLACKBIRD.md` §3.1.2). The MedView viewer reads it via
 `TitleGetInfo(info_kind=1)` against section 4 of the 9-section body
 (§4.4) and runs it through `UnquoteCommandArgument` before storing at
-`title+0x58` as the window caption. Rich title content — the structural
-header (section 0) and the fixed-size record arrays
-(sections 1/2/3/7) — is carried in the compound file's per-class
-`\x03object` streams, which are opaque pending RE of
-`COSCL.DLL!extract_object` and the MS-stock compression on larger
-streams (`docs/BLACKBIRD.md` §3.1.3 and §7).
+`title+0x58` as the window caption. Rich title content comes from a
+server-side lowering step over authored object streams such as
+`CBForm`, `CVForm`, `CProxyTable`, and `CContent`; the fixed record
+arrays in the 9-section body are not a proven direct dump of one on-disk
+class (`docs/BLACKBIRD.md` §3.1.3 and §7).
 
 ### 4.6 Layout walker dispatch byte is engine-internal, not on-disk
 
