@@ -28,13 +28,12 @@ Format derived from RE of `MVCL14N.DLL`:
     slot+0x39 (int) = TLV[0x00] (length field, treated as text byte
                                  offset into chunk content base)
     slot+0x3D (short) = walked text length (NUL- or chunk_end-terminated)
-    slot+0x3F (short) = font index (inherited from caller, not from chunk)
+    slot+0x3F (short) = font index (primed by a leading 0x80 control by default)
 """
 
 from __future__ import annotations
 
 import struct
-
 
 _NARROW_BYTE_MAX = 0x7F
 _NARROW_USHORT_MAX = 0x7FFF
@@ -608,19 +607,19 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
 # accepted up to u16 capacity.
 _CASE1_DEFAULT_NAME_SIZE = 0x100
 
-_CASE1_FIXED_OVERHEAD = 0x29 + 3 + 1   # skipped pad (0x29) + preamble (3) + 0xFF control byte (1)
-
-
 def case1_text_budget(
     name_size: int = _CASE1_DEFAULT_NAME_SIZE,
     tlv_size: int = 6,
+    initial_font_style: int | None = 0,
 ) -> int:
     """Maximum text+NUL bytes that fit in a case-1 chunk's name_buf.
 
     Formula: `name_size - 0x29 (skipped pad) - 3 (preamble) -
-    tlv_size - 1 (0xFF control byte)`. The default `tlv_size=6`
-    matches the null TLV; non-null TLVs grow with their conditional
-    fields (1-2 bytes per signed-short / 2-4 per signed-int).
+    tlv_size - len(control stream) - len(text prefix)`. The default
+    primes style 0 with a `0x80 <u16 style>` control before the first
+    printable byte, so `text_prefix` is one leading NUL that forces the
+    control walker to run before the text run is emitted. Pass
+    `initial_font_style=None` for the old `0xFF`-only stream.
 
     Within the chunk, name_buf starts at offset +0x04 and the case-1
     dispatch byte sits at name_buf+0x26 = chunk+0x2A. The 0xFF byte
@@ -633,12 +632,14 @@ def case1_text_budget(
     triggering the "service is not available" dialog. Live SoftIce
     trace 2026-04-29 at FUN_7e892d30 confirmed.
     """
-    return name_size - _CASE1_FIXED_OVERHEAD - tlv_size
+    control_len = 1 if initial_font_style is None else 4
+    text_prefix_len = 0 if initial_font_style is None else 1
+    return name_size - 0x29 - 3 - tlv_size - control_len - text_prefix_len
 
 
 # Legacy constant retained for the existing 0x40-shape tests. New
 # callers should use `case1_text_budget(name_size)`.
-_CASE1_NAME_BUF_TEXT_BUDGET = case1_text_budget(0x40)
+_CASE1_NAME_BUF_TEXT_BUDGET = case1_text_budget(0x40, initial_font_style=None)
 
 
 def build_case1_bf_chunk(
@@ -648,6 +649,7 @@ def build_case1_bf_chunk(
     *,
     name_size: int = _CASE1_DEFAULT_NAME_SIZE,
     tlv_fields: dict[int, int] | None = None,
+    initial_font_style: int | None = 0,
 ) -> bytes:
     """Build a 128-byte type-0 0xBF chunk that drives the case-1 path.
 
@@ -662,20 +664,20 @@ def build_case1_bf_chunk(
         +0x0C  key (LE u32)                        FUN_7e8452d3 reads here
         +0x10..0x29  zero padding                  name_buf[12..0x25]
         +0x2A  0x01                                name_buf[0x26] — case-1 dispatch
-        +0x2B..0x2C  preamble length raw           narrow varint, decoded = 7
+        +0x2B..0x2C  preamble length raw           narrow varint, decoded = 10 by default
         +0x2D..0x32  null TLV (6 bytes)            length=0, bitmap=0
-        +0x33  0xFF                                end-of-chunk control byte (FUN_7e894ec0 case 0xFF)
-        +0x34..      ASCII text + NUL              up to 13 bytes (incl. NUL)
+        +0x33..      control stream                default: 0x80, style u16, 0xFF
+        +...         text prefix                   default: leading NUL to run 0x80 before text
+        +...         ASCII text + NUL
         +...         zero padding to 0x44
         +0x44..0x7F  60-byte content block         zeros (HGLOBAL slots NULL)
 
-    With preamble length = 7, TLV length field = 0, 0xFF at end_of_TLV:
-      - control walker (template[+0x14]) starts at end_of_TLV =
-        entry+0x2F = chunk[0x33] = the 0xFF byte
-      - text base = entry + 0x26 + 3 + 7 = entry + 0x30 = chunk[0x34]
-      - slot+0x39 = TLV[0x00] = 0 (text byte offset within text base)
-      - text walk (`FUN_7e8925d0`) reads from text_base[0] until NUL →
-        text length = len(text); emits slot tag 1
+    With the default font-control stream:
+      - control walker starts at end_of_TLV and reads 0x80, style 0, then 0xFF
+      - text base starts after the control stream
+      - text_base[0] is NUL so `FUN_7e894ec0` applies style 0 before the first
+        printable run
+      - text walk then reads from text_base[1] until NUL and emits slot tag 1
       - next loop iteration: text byte at idx N is NUL → `FUN_7e892200`
         calls `FUN_7e894ec0`, which reads 0xFF at control walker → case
         0xFF → return 5 → loop exits cleanly
@@ -697,20 +699,31 @@ def build_case1_bf_chunk(
     if len(tlv) < 6:
         raise AssertionError(f"TLV must be >= 6 bytes, got {len(tlv)}")
 
-    text_bytes = text.encode("ascii", errors="replace") + b"\x00"
-    budget = case1_text_budget(name_size, tlv_size=len(tlv))
+    if initial_font_style is not None and not -0x8000 <= initial_font_style <= 0xFFFF:
+        raise ValueError(f"initial_font_style out of int16/u16 range: {initial_font_style}")
+
+    control_stream = b"\xFF"
+    text_prefix = b""
+    if initial_font_style is not None:
+        control_stream = b"\x80" + struct.pack("<H", initial_font_style & 0xFFFF) + b"\xFF"
+        text_prefix = b"\x00"
+
+    text_bytes = text_prefix + text.encode("ascii", errors="replace") + b"\x00"
+    budget = case1_text_budget(
+        name_size,
+        tlv_size=len(tlv),
+        initial_font_style=initial_font_style,
+    )
     if len(text_bytes) > budget:
         raise ValueError(
-            f"text + NUL = {len(text_bytes)} bytes; in-name_buf form caps "
+            f"text payload = {len(text_bytes)} bytes; in-name_buf form caps "
             f"at {budget} bytes (name_size=0x{name_size:x}, "
             f"tlv_size={len(tlv)})"
         )
 
-    # Preamble length value = TLV size + 1 (skips past TLV + 0xFF control
-    # byte) so that text_base = entry + 0x26 + 3 + (tlv + 1) lands on
-    # the first text byte. With null TLV (6 B) → length=7 (matches the
-    # legacy form); larger TLVs scale linearly.
-    preamble_length_value = len(tlv) + 1
+    # Preamble length value skips past TLV + control stream so text_base lands
+    # on the leading NUL (default) or the first text byte (legacy).
+    preamble_length_value = len(tlv) + len(control_stream)
 
     chunk = bytearray(4 + name_size + 60)  # 4-byte header + name_buf + content_block
     chunk[0] = 0xBF
@@ -730,11 +743,12 @@ def build_case1_bf_chunk(
 
     chunk[case_offset + 3:case_offset + 3 + len(tlv)] = tlv
 
-    # 0xFF end-of-chunk control byte at end_of_TLV — read by FUN_7e894ec0
-    # via control walker (template[+0x14]) when text walker hits NUL.
-    chunk[case_offset + 3 + len(tlv)] = 0xFF
+    # Control stream at end_of_TLV — read by FUN_7e894ec0 when the text
+    # walker sees NUL. The default stream selects style 0 before text.
+    control_offset = case_offset + 3 + len(tlv)
+    chunk[control_offset:control_offset + len(control_stream)] = control_stream
 
-    text_offset = case_offset + 3 + len(tlv) + 1
+    text_offset = case_offset + 3 + len(tlv) + len(control_stream)
     chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
 
     return bytes(chunk)
