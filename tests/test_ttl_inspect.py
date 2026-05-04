@@ -96,6 +96,20 @@ class CStyleSheetParseTests(unittest.TestCase):
             self.assertTrue(s["name"].startswith("Wrap:"),
                             f"intrusion sid {s['style_id']} resolves to {s['name']!r}")
 
+    def test_intrusion_index_within_published_range(self):
+        # BBDESIGN validator "Intrusion argument is invalid. Valid
+        # values are 0 to 8." pins the on-disk range. Any future TTL
+        # we add must respect this so the engine's GetIntrusion
+        # consumer doesn't reject the style.
+        for s in self.parsed["styles"]:
+            if not s["is_intrusion"]:
+                continue
+            self.assertIsNotNone(s["intrusion_index"])
+            self.assertGreaterEqual(s["intrusion_index"], 0)
+            self.assertLessEqual(s["intrusion_index"], 8,
+                                 f"sid {s['style_id']} intrusion_index "
+                                 f"{s['intrusion_index']} > 8 (BBDESIGN max)")
+
     def test_style_1_has_authored_text_color(self):
         # Style 1's CCharProps is the only one with an explicit color
         # in this TTL — the masks decode to bit-3-set, yielding

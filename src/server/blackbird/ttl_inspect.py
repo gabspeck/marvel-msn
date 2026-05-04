@@ -534,13 +534,27 @@ def parse_stylesheet_header(data):
 # `text_color` / `back_color` use `EGetColorRef` and read 4 raw bytes
 # via `FUN_4070f2f2` (a CArchive byte-copy helper).
 _CCHARPROPS_FIELDS = (
-    (0, 2, "flags_word"),    # u16 packed: bit-pairs (high-byte mask, low-byte
-                              # value) for bold (0x100/0x02), italic
-                              # (0x200/0x04), underline (0x400/0x08),
-                              # superscript (0x800/0x10), subscript
-                              # (0x1000/0x20). High byte set = "this attr
-                              # absent in this style". 0xfffe = "field
-                              # absent", 0xffff = "no_change".
+    # bit 0 — `flags_word`: bit-pairs (absent_mask, value) for the five
+    # text-attribute toggles. Pinned via VIEWDLL `SetBoldState` /
+    # `SetItalicState` / `SetUnderlineState` / `SetSuperscriptState` /
+    # `SetSubscriptState` (each clears its absent_mask bit then sets/
+    # clears its value bit) and the `SetDefault*` peers (which OR the
+    # absent_mask bit back in). BBDESIGN enforces super/sub mutual
+    # exclusion at authoring time ("Conflicting postionng information.
+    # Check superscript and subscript values.") — VIEWDLL does NOT
+    # enforce it on the wire, so a malformed TTL can technically have
+    # both bits set; the renderer's behavior is engine-defined.
+    #
+    #   attr        absent_mask  value_bit
+    #   bold        0x0100       0x0002
+    #   italic      0x0200       0x0004
+    #   underline   0x0400       0x0008
+    #   superscript 0x0800       0x0010
+    #   subscript   0x1000       0x0020
+    #
+    # Field-level sentinels (whole u16): 0xfffe = "absent", 0xffff =
+    # "no_change".
+    (0, 2, "flags_word"),
     (1, 2, "font_id"),       # u16 — index into CStyleSheet.fonts[].key
     (2, 2, "pt_size"),       # u16 — point size (default 12 per GetPtSize)
     (3, 4, "text_color"),    # u32 colorref
@@ -552,6 +566,15 @@ _CCHARPROPS_FIELDS = (
 # `?EGetXxx@CParaProps@@…` accessors (kind→offset map in
 # `?EGetWord@CParaProps@@…` @ 0x4070733d and `?EGetShort@…` @ 0x4070812e).
 # Bit 12 (mask 0x1000) is the tab list header, handled separately.
+#
+# VIEWDLL's `Set*` peers (`SetJustify` @ 0x40727348, `SetLineSpacingRule`
+# @ 0x4072739c, `SetSpecialLineIndent` @ 0x4072736c, `SetInitialCaps` @
+# 0x40727354, `SetBulletState` @ 0x407273cc, `CTab::SetTabAlignment` @
+# 0x407271ca, …) are pure stores — they don't validate ranges. Enum
+# bounds live in BBDESIGN.EXE (per-field validator strings "Invalid X
+# argument" in its .data section, e.g. "Invalid justify argument",
+# "Invalid line spacing rule argument"). Parsing here is permissive;
+# wire-side lowering should accept any u8/u16 the publisher wrote.
 _CPARAPROPS_FIELDS = (
     (0,  1, "justify"),               # text alignment (left/center/right/justify)
     (1,  1, "initial_caps"),          # leading caps style
@@ -947,6 +970,9 @@ CSTYLE_DEFAULT_PROPS: tuple[dict, ...] = (
 assert len(CSTYLE_DEFAULT_PROPS) == 47
 
 
+_CSTYLE_INTRUSION_INDEX_MAX = 8
+
+
 def parse_cstyle_record(data, off):
     """Parse a serialized `CStyle` v3 body. Returns ({...}, new_off).
 
@@ -958,11 +984,14 @@ def parse_cstyle_record(data, off):
         CParaProps), bit 0 = `is_intrusion` (style is an "intrusion"
         — text wrapping around an inline graphic, e.g. one of the
         "Wrap: …" entries 0x2f..0x35; ships no body)
-      - u8 secondary — when intrusion: index passed to
-        `?GetIntrusion@CStyle@@QBEGXZ` @ 0x40727778 (semantics TBD —
-        likely a content/proxy reference, always 0 in the reference
-        TTL); when based-on: parent style id, `0xff` = "no parent"
-        (root)
+      - u8 secondary — when intrusion: `intrusion_index`, range 0..8
+        per BBDESIGN.EXE validator string "Intrusion argument is
+        invalid. Valid values are 0 to 8." — exposed via
+        `?GetIntrusion@CStyle@@QBEGXZ` @ VIEWDLL 0x40727778; reference
+        TTL ships 0 for all 7 wrap styles. When based-on: parent
+        style id, `0xff` = "no parent" (root); BBDESIGN enforces
+        non-existence ("Based on name '%1' does not exist") and
+        non-cyclic ("would cause a circular defininition") chains.
       - if `!is_intrusion and !char_props_only`: serialized `CParaProps`
       - if `!is_intrusion`: serialized `CCharProps`"""
     version, off = read_u8(data, off)

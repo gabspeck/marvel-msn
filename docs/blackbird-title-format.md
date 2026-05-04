@@ -441,10 +441,14 @@ High-confidence semantics:
        - bit `0` = `is_intrusion`: when set, this is a wrap/intrusion
          style; no `CParaProps` and no `CCharProps` body follow
     3. `uint8 secondary_index`
-       - if `is_intrusion`: index passed to `CStyle::GetIntrusion`
-         (semantics TBD; always `0` in the reference TTL — likely a
-         content/proxy reference for the wrapped graphic)
-       - else: `based_on` style index — `0xff` = root / no parent
+       - if `is_intrusion`: `intrusion_index` — range `0..8` per
+         BBDESIGN.EXE validator string "Intrusion argument is
+         invalid. Valid values are 0 to 8."; consumed by
+         `CStyle::GetIntrusion`. Always `0` in the reference TTL.
+       - else: `based_on` style index — `0xff` = root / no parent.
+         BBDESIGN validates non-existence ("Based on name '%1' does
+         not exist") and non-cyclic chains ("would cause a circular
+         defininition")
     4. if `!is_intrusion and !char_props_only`: serialized `CParaProps`
     5. if `!is_intrusion`: serialized `CCharProps`
   - older versions (`1`, `2`) read names or u16 indices; legacy paths
@@ -523,12 +527,28 @@ High-confidence semantics:
        - bit `3`: `uint32 text_color` COLORREF
        - bit `4`: `uint32 back_color` COLORREF
   - `flags_word` bit layout (high byte = "absent" mask, low byte =
-    value bits):
-    - bold:        absent `0x0100` / value `0x0002`
-    - italic:      absent `0x0200` / value `0x0004`
-    - underline:   absent `0x0400` / value `0x0008`
-    - superscript: absent `0x0800` / value `0x0010`
-    - subscript:   absent `0x1000` / value `0x0020`
+    value bits) — pinned via VIEWDLL's `Set*State` setters:
+    - bold (`SetBoldState` @ `0x407275f3`):
+      absent `0x0100` / value `0x0002`
+    - italic (`SetItalicState` @ `0x40727615`):
+      absent `0x0200` / value `0x0004`
+    - underline (`SetUnderlineState` @ `0x40727637`):
+      absent `0x0400` / value `0x0008`
+    - superscript (`SetSuperscriptState` @ `0x40727659`):
+      absent `0x0800` / value `0x0010`
+    - subscript (`SetSubscriptState` @ `0x4072767b`):
+      absent `0x1000` / value `0x0020`
+  - Each `Set*State(int v)` clears the absent bit then sets/clears
+    the value bit per `v`. The peer `SetDefault*` (e.g.
+    `SetDefaultBold` @ `0x4072769d`) ORs the absent bit back in
+    (= "inherit from parent"). Authoring-time pattern: explicit
+    on/off ⇒ absent=0; inherit ⇒ absent=1.
+  - **superscript and subscript are mutually exclusive at authoring
+    time** — BBDESIGN.EXE validator "Conflicting postionng
+    information. Check superscript and subscript values." refuses
+    to author styles that set both. VIEWDLL's wire-side setters do
+    NOT enforce this, so a malformed TTL can technically have both
+    bits set; rendering behavior in that case is engine-defined.
   - version `1` reads four `uint16`s + two `uint32`s without masks;
     not produced by current publishers.
 
@@ -560,13 +580,29 @@ High-confidence semantics:
        - bit `11`: `int16 indent_by` (special-line displacement)
     5. if `mask_explicit` bit `12` is set, read tab list:
        - `uint16 tab_count`
-       - per tab: `uint16 position` + `uint8 type`
+       - per tab: `uint16 position` (must be > 0 per BBDESIGN
+         validator "Invalid tab position. Must be greater than
+         zero.") + `uint8 type` (alignment enum — exact values not
+         pinned today; runtime accessor `GetTabAlignmentAt` reads
+         it as `u16` from the in-memory CTab struct at offset +6)
   - in the reference TTL only `bit 0 (justify)` (sid 1) and the tab
     list (sids 7–24) carry explicit values. The MOSVIEW wire
     descriptor does not consume CParaProps fields directly;
     paragraph layout flows through item-record headers (see
     `docs/mosview-authored-text-and-font-re.md` §"Authored Lowering
-    Checklist").
+    Checklist"). VIEWDLL's `CParaProps::Set*` setters
+    (`SetJustify` @ `0x40727348`, `SetLineSpacingRule` @
+    `0x4072739c`, `SetSpecialLineIndent` @ `0x4072736c`,
+    `SetInitialCaps` @ `0x40727354`, `SetBulletState` @
+    `0x407273cc`, `CTab::SetTabAlignment` @ `0x407271ca`, …) are
+    **pure stores — no range validation**. Enum bounds live in
+    BBDESIGN.EXE: each field has a generic "Invalid X argument"
+    validator string but the binary doesn't emit the value list
+    inline. Specific values (e.g. `justify` 0=left/2=center per
+    the per-style defaults table — Abstract Heading uses 2;
+    `line_spacing_rule` 0=single per Normal's default) can be
+    inferred from the per-style defaults at `0x40770e00` but the
+    full enum range remains unconfirmed.
 
 - `CContent`
   - handled specially
