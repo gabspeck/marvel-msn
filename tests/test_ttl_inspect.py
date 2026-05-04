@@ -13,6 +13,7 @@ from pathlib import Path
 from server.blackbird.ttl_inspect import (
     CSTYLE_DEFAULT_PROPS,
     CSTYLE_NAME_DICTIONARY,
+    INTRUSION_CODE_TO_NAME_INDEX,
     decode_handle,
     encode_handle,
     inspect_blackbird_title,
@@ -304,8 +305,12 @@ class FirstTitleSampleTests(unittest.TestCase):
         self.assertEqual(counts['CSection'], 2)
         self.assertEqual(counts['CStyleSheet'], 2)
         self.assertEqual(counts['CMagnet'], 1)
-        self.assertEqual(counts['CContent'], 4)
-        self.assertEqual(counts['CProxyTable'], 3)
+        # Sample mix: BMP image content (Houndstooth + 2× Sandstone),
+        # Audio MIDI, plus TextTree + TextRuns = 6 contents and 4
+        # proxies (the Sandstone proxy carries 0x0600 + 0x0601 wrap-
+        # variant entries).
+        self.assertEqual(counts['CContent'], 6)
+        self.assertEqual(counts['CProxyTable'], 4)
 
     def test_linked_stylesheet_swizzle_resolves_to_base(self):
         # Section-local `4/1` with linked_stylesheet_present=1 should
@@ -345,6 +350,38 @@ class FirstTitleSampleTests(unittest.TestCase):
                 self.assertIn(f"{tid:x}/{slot:x}", roots,
                               f"handle 0x{h:08x} from {o['object_root']} "
                               f"does not resolve to a stored object")
+
+    def test_text_tree_carries_intrude_property(self):
+        # The current sample exercises the intrusion mechanism via an
+        # embedded picture control with property INTRUDE=ad — the
+        # length-prefixed bytes `\x07INTRUDE\x02ad` appear verbatim in
+        # the (decompressed) TextTree payload at a/b. BBCTL.OCX
+        # FUN_4001b534 maps `ad` → name_index 0x33 = "Wrap:
+        # Advertisement".
+        tree = next(o for o in self.r['object_streams']
+                    if o['object_root'] == 'a/b')
+        self.assertIn(b'\x07INTRUDE\x02ad', tree['payload'])
+
+    def test_intrusion_code_table(self):
+        # Pin the full code → name_index mapping recovered from
+        # BBCTL.OCX FUN_4001b534 @ 0x4001b534. Each of the 7 wrap
+        # styles (CSTYLE_NAME_DICTIONARY indices 0x2f..0x35) has a
+        # short ASCII code that picture-control authors use in the
+        # TextTree's INTRUDE property.
+        self.assertEqual(INTRUSION_CODE_TO_NAME_INDEX, {
+            "feature": 0x2f,
+            "support": 0x30,
+            "related": 0x31,
+            "sidebar": 0x32,
+            "ad":      0x33,
+            "custom1": 0x34,
+            "custom2": 0x35,
+        })
+        # Each value must point into the Wrap: … cluster of the
+        # predefined dictionary.
+        for code, idx in INTRUSION_CODE_TO_NAME_INDEX.items():
+            self.assertTrue(CSTYLE_NAME_DICTIONARY[idx].startswith("Wrap:"),
+                            f"code {code!r} → idx {idx} = {CSTYLE_NAME_DICTIONARY[idx]!r} not a wrap style")
 
 
 if __name__ == "__main__":

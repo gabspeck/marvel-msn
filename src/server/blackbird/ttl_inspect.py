@@ -1022,6 +1022,25 @@ assert len(CSTYLE_DEFAULT_PROPS) == 47
 _CSTYLE_INTRUSION_INDEX_MAX = 8
 
 
+# Intrusion code → predefined wrap-style `name_index` mapping. Used by
+# embedded picture controls in TextTree streams: each picture's
+# property table optionally carries an "INTRUDE" property whose value
+# is one of these short codes. BBCTL.OCX `FUN_4001b534` @ 0x4001b534
+# decodes the code to a `name_index` in 0x2f..0x35, which in turn
+# selects the predefined `Wrap: …` style from `CSTYLE_NAME_DICTIONARY`.
+# Mismatched / unknown codes fall through to 0x34 (= "Wrap: Custom 1")
+# in BBCTL's logic.
+INTRUSION_CODE_TO_NAME_INDEX = {
+    "feature": 0x2f,  # Wrap: Design feature
+    "support": 0x30,  # Wrap: Supporting graphic
+    "related": 0x31,  # Wrap: Related graphic
+    "sidebar": 0x32,  # Wrap: Sidebar graphic
+    "ad":      0x33,  # Wrap: Advertisement
+    "custom1": 0x34,  # Wrap: Custom 1
+    "custom2": 0x35,  # Wrap: Custom 2
+}
+
+
 def parse_cstyle_record(data, off):
     """Parse a serialized `CStyle` v3 body. Returns ({...}, new_off).
 

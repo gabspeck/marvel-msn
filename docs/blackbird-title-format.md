@@ -535,6 +535,29 @@ High-confidence semantics:
   style. Intrusion styles (`0x2f..0x35`) are pure-metadata records
   marking text-wrap behavior around an inline graphic.
 
+  **Wrap-style reference from picture controls**: in addition to a
+  CStyle with `is_intrusion=true`, embedded picture controls in the
+  TextTree carry an `INTRUDE` property whose value is one of the
+  following short codes. BBCTL.OCX `FUN_4001b534` @ `0x4001b534`
+  decodes the code to a `name_index` in `0x2f..0x35`:
+
+  | INTRUDE code | name_index | predefined wrap style    |
+  | ------------ | ---------- | ------------------------ |
+  | `feature`    | `0x2f`     | Wrap: Design feature     |
+  | `support`    | `0x30`     | Wrap: Supporting graphic |
+  | `related`    | `0x31`     | Wrap: Related graphic    |
+  | `sidebar`    | `0x32`     | Wrap: Sidebar graphic    |
+  | `ad`         | `0x33`     | Wrap: Advertisement      |
+  | `custom1`    | `0x34`     | Wrap: Custom 1           |
+  | `custom2`    | `0x35`     | Wrap: Custom 2           |
+
+  Captured verbatim as `INTRUSION_CODE_TO_NAME_INDEX` at
+  `src/server/blackbird/ttl_inspect.py`. Unknown codes fall through
+  to `0x34` (Wrap: Custom 1) per BBCTL.OCX's logic. Picture controls
+  also typically pair an INTRUDE property with a duplicated
+  CContent slot at proxy_key `0x0601` (vs. the regular `0x0600`),
+  giving the renderer a wrap-aware rendition of the same image.
+
 - `CCharProps`
   - source: `?Serialize@CCharProps@@UAEXAAVCArchive@@@Z` @ VIEWDLL.DLL
     `0x40707fcc`; field semantics from `?EGetWord@CCharProps@@…`
