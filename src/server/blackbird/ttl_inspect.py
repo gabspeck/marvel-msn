@@ -520,6 +520,528 @@ def parse_stylesheet_header(data):
     }
 
 
+# CCharProps mask bit → field. Each entry: (bit, size_in_bytes, name).
+# Bit set in BOTH mask_explicit and mask_concrete on the wire = field has
+# explicit value. Bit clear in mask_explicit + set in mask_concrete =
+# "no_change" (engine sentinel 0xFFFF / 0xFFFFFFFF). Both clear, or only
+# mask_explicit set = "absent" (0xFFFE / 0xFFFFFFFE).
+# Field names match VIEWDLL accessors `?EGetXxx@CCharProps@@…`. Each
+# accessor calls `EGetWord(kind, ...)` (`?EGetWord@CCharProps@@QAEGGH@Z`
+# @ 0x4070692e) which maps kind→on-disk offset:
+#   kind 5 → this+4 (flags word: bold/italic/underline/super/sub bits)
+#   kind 3 → this+8 (font_id; resolved against CStyleSheet.fonts[].key)
+#   kind 4 → this+10 (point size in points; default 12)
+# `text_color` / `back_color` use `EGetColorRef` and read 4 raw bytes
+# via `FUN_4070f2f2` (a CArchive byte-copy helper).
+_CCHARPROPS_FIELDS = (
+    (0, 2, "flags_word"),    # u16 packed: bit-pairs (high-byte mask, low-byte
+                              # value) for bold (0x100/0x02), italic
+                              # (0x200/0x04), underline (0x400/0x08),
+                              # superscript (0x800/0x10), subscript
+                              # (0x1000/0x20). High byte set = "this attr
+                              # absent in this style". 0xfffe = "field
+                              # absent", 0xffff = "no_change".
+    (1, 2, "font_id"),       # u16 — index into CStyleSheet.fonts[].key
+    (2, 2, "pt_size"),       # u16 — point size (default 12 per GetPtSize)
+    (3, 4, "text_color"),    # u32 colorref
+    (4, 4, "back_color"),    # u32 colorref
+)
+
+# CParaProps mask bit → field, bits 0..11. Source: VIEWDLL
+# `CParaProps::Serialize` @ 0x407082e2; field semantics from
+# `?EGetXxx@CParaProps@@…` accessors (kind→offset map in
+# `?EGetWord@CParaProps@@…` @ 0x4070733d and `?EGetShort@…` @ 0x4070812e).
+# Bit 12 (mask 0x1000) is the tab list header, handled separately.
+_CPARAPROPS_FIELDS = (
+    (0,  1, "justify"),               # text alignment (left/center/right/justify)
+    (1,  1, "initial_caps"),          # leading caps style
+    (2,  2, "drop_by"),                # drop-cap height (signed)
+    (3,  1, "bullet"),                 # bullet character / kind
+    (4,  1, "line_spacing_rule"),      # single / 1.5x / double / exact / multiple
+    (5,  2, "space_before"),           # signed twips before paragraph
+    (6,  2, "space_after"),            # signed twips after paragraph
+    (7,  2, "space_at"),               # signed line-height value
+    (8,  1, "special_line_indent"),    # special-line indent kind (none/first/hanging)
+    (9,  2, "left_indent"),            # signed twips left indent
+    (10, 2, "right_indent"),           # signed twips right indent
+    (11, 2, "indent_by"),              # signed twips special-line displacement
+)
+_CPARAPROPS_TAB_BIT = 12
+
+
+def parse_cchar_props(data, off):
+    """Parse a serialized `CCharProps` v2 body. Returns ({...}, new_off).
+
+    Wire format (`?Serialize@CCharProps@@UAEXAAVCArchive@@@Z` @ VIEWDLL
+    0x40707fcc): u8 version (must be 2); u8 mask_explicit; u8 mask_concrete.
+    For each bit k in 0..4 where (mask_explicit & mask_concrete) bit k is
+    set, read field per `_CCHARPROPS_FIELDS` (u16 or u32)."""
+    version, off = read_u8(data, off)
+    if version != 2:
+        raise ValueError(f"unsupported CCharProps version {version}")
+    mask_explicit, off = read_u8(data, off)
+    mask_concrete, off = read_u8(data, off)
+    fields = {}
+    both = mask_explicit & mask_concrete
+    for bit, size, name in _CCHARPROPS_FIELDS:
+        if not (both & (1 << bit)):
+            continue
+        if size == 2:
+            value, off = read_u16(data, off)
+        else:
+            value, off = read_u32(data, off)
+        fields[name] = value
+    return {
+        "version": version,
+        "mask_explicit": mask_explicit,
+        "mask_concrete": mask_concrete,
+        "fields": fields,
+    }, off
+
+
+def parse_cpara_props(data, off):
+    """Parse a serialized `CParaProps` v2 body. Returns ({...}, new_off).
+
+    Wire format (`?Serialize@CParaProps@@UAEXAAVCArchive@@@Z` @ VIEWDLL
+    0x407082e2): u8 version (must be 2); u16 LE mask_explicit; u16 LE
+    mask_concrete. For each bit k in 0..11 where both masks are set, read
+    field per `_CPARAPROPS_FIELDS` (u8 or u16). If mask_explicit bit 12 is
+    set, read tab list (u16 count, then per tab: u16 position + u8 type)."""
+    version, off = read_u8(data, off)
+    if version != 2:
+        raise ValueError(f"unsupported CParaProps version {version}")
+    mask_explicit, off = read_u16(data, off)
+    mask_concrete, off = read_u16(data, off)
+    fields = {}
+    both = mask_explicit & mask_concrete
+    for bit, size, name in _CPARAPROPS_FIELDS:
+        if not (both & (1 << bit)):
+            continue
+        if size == 1:
+            value, off = read_u8(data, off)
+        else:
+            value, off = read_u16(data, off)
+        fields[name] = value
+    tabs = []
+    if mask_explicit & (1 << _CPARAPROPS_TAB_BIT):
+        tab_count, off = read_u16(data, off)
+        for _ in range(tab_count):
+            position, off = read_u16(data, off)
+            tab_type, off = read_u8(data, off)
+            tabs.append({"position": position, "type": tab_type})
+    return {
+        "version": version,
+        "mask_explicit": mask_explicit,
+        "mask_concrete": mask_concrete,
+        "fields": fields,
+        "tabs": tabs,
+    }, off
+
+
+def parse_mfc_class_tag(data, off, registered_classes):
+    """Parse an MFC `CRuntimeClass` tag. Returns (class_name, new_off).
+
+    On first occurrence of a class: u16 0xFFFF + u16 schema + u16 name_len
+    + name_len ANSI bytes. On subsequent occurrences: u16
+    (0x8000 | class_index_1based) referencing a previously registered
+    class. `registered_classes` is a list extended in place per first
+    occurrence (1-based index). Length prefix is a plain u16, NOT the
+    MFC `CString` variable-length escape used by `parse_mfc_ansi_string`."""
+    tag, off = read_u16(data, off)
+    if tag == NEW_CLASS_TAG:
+        schema, off = read_u16(data, off)
+        name_len, off = read_u16(data, off)
+        raw, off = read_bytes(data, off, name_len)
+        name = raw.decode("ascii", errors="replace")
+        registered_classes.append({"name": name, "schema": schema})
+        return name, off
+    if tag & 0x8000:
+        index = tag & 0x7FFF
+        if index < 1 or index > len(registered_classes):
+            raise ValueError(
+                f"MFC class index {index} out of range "
+                f"(have {len(registered_classes)} registered)"
+            )
+        return registered_classes[index - 1]["name"], off
+    raise ValueError(f"unexpected MFC class tag 0x{tag:04x} at offset {off - 2}")
+
+
+# Predefined style-name dictionary recovered from VIEWDLL.DLL
+# `&PTR_s_Normal_40770e00` (primary, indices 0..0x2e) and
+# `DAT_40771648` (secondary, indices 0x2f..0x35), walked via
+# `?GetBasedOn@CStyle@@QBEPBDXZ` @ 0x407087c6. The 54 names align 1:1
+# with `style_id` (== `name_index`) in TTLs that use the default
+# stylesheet — they are the Blackbird-fixed style class set, not
+# per-TTL strings.
+#
+# Per-style defaults that the engine falls back to when an authored
+# CCharProps leaves a field "absent" / "no_change" are colocated in
+# the same 52-byte-stride table at `0x40770e00`:
+#   +0x00: name pointer
+#   +0x0c: u16 default `flags_word` (bold/italic/underline/super/sub
+#          packed, same encoding as on-disk CCharProps `flags_word`)
+#   +0x10: u16 default `font_id` (key into `CStyleSheet.fonts[].key`)
+#   +0x12: u16 default `pt_size` (point size; 0 = inherit from parent)
+# Read by `?EGetWord@CCharProps@@QAEGGH@Z` @ 0x4070692e for kinds
+# 5/3/4. Mirrored for `LoadDefaultStyle` initialization at
+# `0x40773224` (stride 0x34) plus an intrusion-defaults table at
+# `0x40773a6c` (stride 8) for indices 0x2f..0x35.
+CSTYLE_NAME_DICTIONARY = (
+    "Normal",                # 0
+    "Heading 1", "Heading 2", "Heading 3", "Heading 4", "Heading 5", "Heading 6",
+    "TOC 1", "TOC 2", "TOC 3", "TOC 4", "TOC 5", "TOC 6", "TOC 7", "TOC 8", "TOC 9",
+    "Section 1", "Section 2", "Section 3", "Section 4", "Section 5",
+    "Section 6", "Section 7", "Section 8", "Section 9",
+    "Abstract Heading", "Term Definition", "List Bullet", "List Number",
+    "Term", "Hyperlink", "Emphasized", "Bold", "Italic", "Strikethrough",
+    "Preformatted", "Blockquote", "Address", "Underline", "Strong", "Code",
+    "Keyboard", "Citation", "Variable Name", "Fixed Width", "Abstract Body",
+    "Sample",                # 0x2e
+    "Wrap: Design feature",  # 0x2f — first intrusion style
+    "Wrap: Supporting graphic", "Wrap: Related graphic", "Wrap: Sidebar graphic",
+    "Wrap: Advertisement", "Wrap: Custom 1", "Wrap: Custom 2",  # 0x35
+)
+assert len(CSTYLE_NAME_DICTIONARY) == 54
+
+_CSTYLE_BASED_ON_NONE = 0xFF
+
+
+# Per-style runtime defaults baked into VIEWDLL.DLL at table
+# `0x40770e00`. Stride 0x34 (52 bytes) per `name_index`. Indexed
+# 0..0x2e (47 entries — the non-intrusion styles). Used by the
+# engine when an authored CCharProps/CParaProps leaves a field
+# absent — wire-side lowering should mirror the same fallback to
+# keep rendering consistent with the standalone Blackbird viewer.
+#
+# Layout per entry (field origin in parens — `EGetWord`/`EGetShort`/
+# `EGetColorRef` kind for the runtime accessor that consults this
+# table; `LoadDefaultStyle` for the construction-time consumer):
+#   +0x00 name_ptr               u32   (GetBasedOn)
+#   +0x04 based_on                u16   (LoadDefaultStyle, sentinel
+#                                       0xffff = "no parent")
+#   +0x06 padding                 u16
+#   +0x08 char_props_only         u32   (LoadDefaultStyle; 0/1)
+#   +0x0c flags_word              u16   (CCharProps EGetWord kind 5;
+#                                       high byte = "absent" mask
+#                                       (bit 8=bold, 9=italic,
+#                                       10=underline, 11=super,
+#                                       12=sub); low byte = values
+#                                       (1=bold, 2=italic, 3=ul,
+#                                       4=super, 5=sub))
+#   +0x0e padding                 u16
+#   +0x10 font_id                 u16   (CCharProps kind 3)
+#   +0x12 pt_size                 u16   (CCharProps kind 4)
+#   +0x14 text_color              u32   (CCharProps EGetColorRef 0)
+#   +0x18 back_color              u32   (CCharProps EGetColorRef 1)
+#   +0x1c justify                 u16   (CParaProps EGetWord kind 0)
+#   +0x1e initial_caps            u16   (kind 11)
+#   +0x20 drop_by                 i16   (kind 12)
+#   +0x22 bullet                  u16   (kind 10)
+#   +0x24 line_spacing_rule       u16   (kind 2)
+#   +0x26 indent_by               i16   (kind 3)
+#   +0x28 left_indent             i16   (kind 4)
+#   +0x2a right_indent            i16   (kind 5)
+#   +0x2c space_at                i16   (kind 8)
+#   +0x2e special_line_indent     u16   (kind 1)
+#   +0x30 space_before            i16   (kind 6)
+#   +0x32 space_after             i16   (kind 7)
+#
+# Sentinels: `0xffff` / `-1` = "no_change" (inherit unchanged);
+# `0xfffe` / `-2` = "absent" (treated like "no_change" for getters
+# but distinct in serialize masks). For `font_id`/`pt_size`,
+# `0` means inherit (TTLs reserve font key 0 for the empty/inherit
+# slot — e.g. `resources/titles/4.ttl`).
+CSTYLE_DEFAULT_PROPS: tuple[dict, ...] = (
+    # 0x00 Normal
+    {'based_on': 0xffff, 'char_props_only': 0, 'flags_word': 0x0000, 'font_id': 1, 'pt_size': 11, 'text_color': 0x00000000, 'back_color': 0x00ffffff,
+     'justify': 0, 'initial_caps': 0, 'drop_by': 0, 'bullet': 0, 'line_spacing_rule': 0,
+     'indent_by': 0, 'left_indent': 0, 'right_indent': 0, 'space_at': 0, 'special_line_indent': 0, 'space_before': 0, 'space_after': 11},
+    # 0x01 Heading 1
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7e02, 'font_id': 2, 'pt_size': 22, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': 18, 'space_after': 0},
+    # 0x02 Heading 2
+    {'based_on': 1, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 18, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': 14, 'space_after': -1},
+    # 0x03 Heading 3
+    {'based_on': 2, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 14, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': 12, 'space_after': -1},
+    # 0x04 Heading 4
+    {'based_on': 3, 'char_props_only': 0, 'flags_word': 0x7d04, 'font_id': 0, 'pt_size': 12, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x05 Heading 5
+    {'based_on': 4, 'char_props_only': 0, 'flags_word': 0x7e02, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x06 Heading 6
+    {'based_on': 5, 'char_props_only': 0, 'flags_word': 0x7d04, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x07 TOC 1 — first run of TOC indents (left_indent grows by 18 per level)
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7e02, 'font_id': 2, 'pt_size': 12, 'text_color': 0x00000080, 'back_color': 0xffffffff,
+     'justify': 0, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 18, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x08 TOC 2
+    {'based_on': 7, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 36, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x09 TOC 3
+    {'based_on': 8, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 54, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x0a TOC 4
+    {'based_on': 9, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 72, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x0b TOC 5
+    {'based_on': 10, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 90, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x0c TOC 6
+    {'based_on': 11, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 108, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x0d TOC 7
+    {'based_on': 12, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 126, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x0e TOC 8
+    {'based_on': 13, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 144, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x0f TOC 9
+    {'based_on': 14, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 162, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x10 Section 1
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7e02, 'font_id': 2, 'pt_size': 14, 'text_color': 0x00808000, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x11 Section 2
+    {'based_on': 16, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 12, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x12 Section 3
+    {'based_on': 17, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 10, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x13 Section 4
+    {'based_on': 18, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x14 Section 5
+    {'based_on': 19, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x15 Section 6
+    {'based_on': 20, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x16 Section 7
+    {'based_on': 21, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x17 Section 8
+    {'based_on': 22, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x18 Section 9
+    {'based_on': 23, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x19 Abstract Heading — note `justify=2` (center)
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7e02, 'font_id': 1, 'pt_size': 22, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 2, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x1a Term Definition
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 8, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': 36, 'left_indent': 36, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 2, 'space_before': -1, 'space_after': -1},
+    # 0x1b List Bullet
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 1, 'line_spacing_rule': 0xffff,
+     'indent_by': 18, 'left_indent': 18, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 2, 'space_before': -1, 'space_after': -1},
+    # 0x1c List Number
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 1, 'line_spacing_rule': 0xffff,
+     'indent_by': 18, 'left_indent': 18, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 2, 'space_before': -1, 'space_after': -1},
+    # 0x1d Term
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7e02, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x1e Hyperlink — text_color = 0x00ff0000 (pure blue COLORREF)
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7b08, 'font_id': 0, 'pt_size': 0, 'text_color': 0x00ff0000, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x1f Emphasized
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7d04, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x20 Bold
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7e02, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x21 Italic
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7d04, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x22 Strikethrough — flags_word matches Hyperlink/Underline; the
+    # strike effect is name-special-cased in the renderer, not encoded here.
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7b08, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x23 Preformatted — Courier (font_id=3 by convention)
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 3, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x24 Blockquote
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7d04, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 1, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': 36, 'right_indent': 36, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x25 Address
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x26 Underline
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7b08, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x27 Strong
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7e02, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x28 Code
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7f00, 'font_id': 3, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x29 Keyboard
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7c06, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x2a Citation
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7f00, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x2b Variable Name
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7c06, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x2c Fixed Width
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x7f00, 'font_id': 3, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x2d Abstract Body
+    {'based_on': 0, 'char_props_only': 0, 'flags_word': 0x7d04, 'font_id': 1, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # 0x2e Sample
+    {'based_on': 0, 'char_props_only': 1, 'flags_word': 0x750a, 'font_id': 0, 'pt_size': 0, 'text_color': 0xffffffff, 'back_color': 0xffffffff,
+     'justify': 0xffff, 'initial_caps': 0xffff, 'drop_by': -1, 'bullet': 0, 'line_spacing_rule': 0xffff,
+     'indent_by': -1, 'left_indent': -1, 'right_indent': -1, 'space_at': -1, 'special_line_indent': 0xffff, 'space_before': -1, 'space_after': -1},
+    # Indices 0x2f..0x35 are intrusion styles — no per-character
+    # defaults; they ship pure metadata via `intrusion_index`.
+)
+assert len(CSTYLE_DEFAULT_PROPS) == 47
+
+
+def parse_cstyle_record(data, off):
+    """Parse a serialized `CStyle` v3 body. Returns ({...}, new_off).
+
+    Wire format (`?Serialize@CStyle@@UAEXAAVCArchive@@@Z` @ VIEWDLL
+    0x40707d6f, version 3 branch):
+      - u8 version (must be 3)
+      - u8 packed_selector — bits 2..7 = `name_index` (look up in
+        `CSTYLE_NAME_DICTIONARY`), bit 1 = `char_props_only` (skip
+        CParaProps), bit 0 = `is_intrusion` (style is an "intrusion"
+        — text wrapping around an inline graphic, e.g. one of the
+        "Wrap: …" entries 0x2f..0x35; ships no body)
+      - u8 secondary — when intrusion: index passed to
+        `?GetIntrusion@CStyle@@QBEGXZ` @ 0x40727778 (semantics TBD —
+        likely a content/proxy reference, always 0 in the reference
+        TTL); when based-on: parent style id, `0xff` = "no parent"
+        (root)
+      - if `!is_intrusion and !char_props_only`: serialized `CParaProps`
+      - if `!is_intrusion`: serialized `CCharProps`"""
+    version, off = read_u8(data, off)
+    if version != 3:
+        raise ValueError(f"unsupported CStyle version {version}")
+    selector, off = read_u8(data, off)
+    name_index = selector >> 2
+    char_props_only = bool((selector >> 1) & 1)
+    is_intrusion = bool(selector & 1)
+    secondary, off = read_u8(data, off)
+    name = (
+        CSTYLE_NAME_DICTIONARY[name_index]
+        if name_index < len(CSTYLE_NAME_DICTIONARY)
+        else None
+    )
+    record = {
+        "version": version,
+        "selector": selector,
+        "name_index": name_index,
+        "name": name,
+        "char_props_only": char_props_only,
+        "is_intrusion": is_intrusion,
+        "intrusion_index": secondary if is_intrusion else None,
+        "based_on": (
+            None
+            if (is_intrusion or secondary == _CSTYLE_BASED_ON_NONE)
+            else secondary
+        ),
+        "para_props": None,
+        "char_props": None,
+    }
+    if not is_intrusion and not char_props_only:
+        record["para_props"], off = parse_cpara_props(data, off)
+    if not is_intrusion:
+        record["char_props"], off = parse_cchar_props(data, off)
+    return record, off
+
+
+def parse_cstylesheet(data):
+    """Full `CStyleSheet` payload parser, including the style map.
+
+    Returns the same keys as `parse_stylesheet_header` plus:
+      - `styles`: list of parsed `CStyle` records keyed by `style_id`
+      - `linked_stylesheet_present`: trailing u8
+      - `linked_stylesheet_swizzle`: u32 if `linked_stylesheet_present`
+        is non-zero, else None
+
+    Raises `ValueError` on stale/unsupported versions or trailing bytes
+    (callers wrap into `SynthesisError` upstream)."""
+    header = parse_stylesheet_header(data)
+    off = header["style_map_offset"]
+    classes: list[dict] = []
+    styles = []
+    for _ in range(header["style_count"]):
+        style_id, off = read_u16(data, off)
+        class_name, off = parse_mfc_class_tag(data, off, classes)
+        if class_name != "CStyle":
+            raise ValueError(
+                f"style_id 0x{style_id:04x}: expected CStyle, got {class_name!r}"
+            )
+        record, off = parse_cstyle_record(data, off)
+        record["style_id"] = style_id
+        styles.append(record)
+    linked_present, off = read_u8(data, off)
+    linked_swizzle = None
+    if linked_present:
+        linked_swizzle, off = read_u32(data, off)
+    if off != len(data):
+        raise ValueError(
+            f"CStyleSheet has {len(data) - off} trailing bytes after style map"
+        )
+    return {
+        **header,
+        "styles": styles,
+        "linked_stylesheet_present": linked_present,
+        "linked_stylesheet_swizzle": linked_swizzle,
+    }
+
+
 def parse_object_payload(class_name, payload, handles):
     if class_name == "CTitle":
         return parse_ctitle_object(payload, handles)
@@ -534,7 +1056,7 @@ def parse_object_payload(class_name, payload, handles):
     if class_name == "CProxyTable":
         return parse_proxy_data_map(payload, handles)
     if class_name == "CStyleSheet":
-        return parse_stylesheet_header(payload)
+        return parse_cstylesheet(payload)
     return None
 
 

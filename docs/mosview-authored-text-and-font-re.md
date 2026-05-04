@@ -364,14 +364,125 @@ For this first milestone, a null pointer-table entry is acceptable from the
 client-side evidence currently recovered. The real first-paint blocker is a
 valid descriptor and face string that reach `CreateFontIndirectA`.
 
+## On-Disk → Wire Field Mapping
+
+The on-disk authored format is documented in `docs/blackbird-title-format.md`
+(`CStyle` / `CCharProps` / `CParaProps` sections). The mapping into the wire
+descriptor / override layout above:
+
+| on-disk source                          | wire target                          |
+| --------------------------------------- | ------------------------------------ |
+| `CStyleSheet.fonts[].name`              | face name table entry, slot = `key`  |
+| `CStyle.name_index`                     | descriptor index (`style_id`)        |
+| `CStyle.based_on`                       | override `parent_style_id`           |
+| `CCharProps.fields.font_id`             | descriptor `face_slot_index`         |
+| `CCharProps.fields.pt_size`             | descriptor `lfHeight` (negate; MM_TEXT) |
+| `CCharProps.fields.flags_word` bold     | descriptor `lfWeight` (700 vs 400)   |
+| `CCharProps.fields.flags_word` italic   | descriptor `lfItalic`                |
+| `CCharProps.fields.flags_word` underline | descriptor `lfUnderline`            |
+| `CCharProps.fields.flags_word` super/sub | NOT in section-0 — handled by item  |
+|                                         | records; informational here          |
+| `CCharProps.fields.text_color`          | descriptor `text_color`              |
+| `CCharProps.fields.back_color`          | descriptor `back_color`              |
+| `CCharProps.mask_concrete` bit clear    | "-2 absent" → wire `0x010101`        |
+|                                         | inherit sentinel for colors, or skip |
+|                                         | the override field for LOGFONTA      |
+| `CStyle.is_intrusion`                   | text-wrap metadata, NOT a descriptor |
+|                                         | — these styles ship empty bodies     |
+|                                         | and are consumed by the layout pass  |
+|                                         | (intrusion / image-wrap), not the    |
+|                                         | font/glyph descriptor                |
+| `CStyle.char_props_only`                | descriptor without paragraph data;   |
+|                                         | wire side is unaffected (paragraphs  |
+|                                         | live outside section-0)              |
+| inheritance through `CStyle.based_on`   | wire override-record `parent_style_id` |
+|                                         | chain (depth limit 0x14, both sides) |
+| `CParaProps` fields                     | NOT in section-0 — paragraph layout  |
+|                                         | is driven by item-record headers     |
+
+Note: strikethrough is NOT a `flags_word` bit. The predefined-style
+default for `name_index 0x22` ("Strikethrough") at VIEWDLL
+`0x40770e00 + 0x22 * 0x34` carries `flags_word = 0x7b08` —
+**identical** to Hyperlink (0x1e) and Underline (0x26): underline ON,
+others absent. The visual strike effect is delivered by the renderer
+special-casing the style NAME, not by a font/glyph descriptor bit.
+The `flags_word` proper carries only bold / italic / underline /
+superscript / subscript bits.
+
+Per-style typography defaults (used when an authored CCharProps or
+CParaProps leaves a field absent) live in VIEWDLL at `0x40770e00`,
+stride `0x34` (52 bytes) per name_index, captured verbatim in
+`CSTYLE_DEFAULT_PROPS` at `src/server/blackbird/ttl_inspect.py`.
+Layout per entry:
+
+| offset | size | field                | runtime accessor              |
+| ------ | ---- | -------------------- | ----------------------------- |
+| 0x00   | u32  | name pointer         | `CStyle::GetBasedOn`          |
+| 0x04   | u16  | based_on             | `LoadDefaultStyle` (sentinel `0xffff`) |
+| 0x08   | u32  | char_props_only      | `LoadDefaultStyle` (0/1)      |
+| 0x0c   | u16  | flags_word           | `CCharProps::EGetWord` kind 5 |
+| 0x10   | u16  | font_id              | kind 3                        |
+| 0x12   | u16  | pt_size              | kind 4                        |
+| 0x14   | u32  | text_color           | `CCharProps::EGetColorRef` 0  |
+| 0x18   | u32  | back_color           | kind 1                        |
+| 0x1c   | u16  | justify              | `CParaProps::EGetWord` kind 0 |
+| 0x1e   | u16  | initial_caps         | kind 11                       |
+| 0x20   | i16  | drop_by              | `CParaProps::EGetShort` k12   |
+| 0x22   | u16  | bullet               | `EGetWord` kind 10            |
+| 0x24   | u16  | line_spacing_rule    | kind 2                        |
+| 0x26   | i16  | indent_by            | `EGetShort` kind 3            |
+| 0x28   | i16  | left_indent          | kind 4                        |
+| 0x2a   | i16  | right_indent         | kind 5                        |
+| 0x2c   | i16  | space_at             | kind 8                        |
+| 0x2e   | u16  | special_line_indent  | `EGetWord` kind 1             |
+| 0x30   | i16  | space_before         | `EGetShort` kind 6            |
+| 0x32   | i16  | space_after          | kind 7                        |
+
+Pinned highlights (full set in `CSTYLE_DEFAULT_PROPS`):
+
+| name_index               | flags_word | font_id | pt_size | text_color   | extras                |
+| ------------------------ | ---------- | ------- | ------- | ------------ | --------------------- |
+| 0x00 Normal              | 0x0000     | 1       | 11      | 0x00000000   | root, Times New Roman |
+| 0x01 Heading 1           | 0x7e02     | 2       | 22      | inherit      | bold, Arial 22pt      |
+| 0x07 TOC 1               | 0x7e02     | 2       | 12      | 0x00000080   | dark red, left=18tw   |
+| 0x10 Section 1           | 0x7e02     | 2       | 14      | 0x00808000   | teal heading          |
+| 0x19 Abstract Heading    | 0x7e02     | 1       | 22      | inherit      | `justify=2` (center)  |
+| 0x1e Hyperlink           | 0x7b08     | 0       | 0       | 0x00ff0000   | blue + underline      |
+| 0x22 Strikethrough       | 0x7b08     | 0       | 0       | inherit      | name-special-cased    |
+| 0x23 Preformatted        | 0x7f00     | 3       | 0       | inherit      | Courier (monospace)   |
+| 0x29 Keyboard            | 0x7c06     | 0       | 0       | inherit      | bold + italic         |
+
+The TOC and Section indent ladders are encoded directly in the
+`left_indent` field: TOC 1..9 → 18, 36, 54, …, 162 twips (multiples
+of 18). Wire-side lowering should mirror these defaults whenever an
+authored CCharProps/CParaProps field is "absent" — otherwise
+rendering will diverge from how the standalone Blackbird viewer
+handles the same TTL.
+
+A second copy of the same data lives at `0x40773224` (stride 0x34,
+no name pointer prefix — entry +0x00 = `based_on`, +0x04 = `cpo`).
+Engine-internal duplication for `LoadDefaultStyle`'s construction
+fast-path; semantics match `0x40770e00` exactly.
+
+Open questions deferred until a TTL exercises them:
+- charset / lfPitchAndFamily / lfQuality lowering — none are exposed
+  on disk, so the wire descriptor uses `0` for all of them
+- linked stylesheet inheritance (`linked_stylesheet_present` is `0` in
+  the reference TTL)
+- `CStyle.intrusion_index` content/proxy reference semantics
+  (`?GetIntrusion@CStyle@@…` reads the byte raw — always `0` in the
+  reference TTL, suggesting a "no specific target" sentinel)
+
 ## Authored Lowering Checklist
 
 Current minimal authored-to-runtime lowering should be:
 
 - `CStyleSheet.fonts`
-  - lower to the section-0 face table
+  - lower to the section-0 face table (slot index = font key)
 - `CStyleSheet.styles` plus linked stylesheet inheritance
   - lower to the section-0 descriptor table and override table
+  - parser pinned: `parse_cstylesheet` in
+    `src/server/blackbird/ttl_inspect.py`
 - `TextRuns`
   - lower to the shared ANSI story buffer consumed by `ExtTextOutA`
 - `TextTree`

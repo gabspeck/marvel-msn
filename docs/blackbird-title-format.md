@@ -426,16 +426,147 @@ High-confidence semantics:
     first; proxy keys then fan out to the actual `CContent` payloads
 
 - `CStyle`
-  - version byte `3` in the sample
-  - begins with one packed byte:
-    - high 6 bits -> primary style/name index
-    - bit 1 -> inherit-char-props flag
-    - bit 0 -> alternate/based-on selector
-  - then serializes one or two style-index bytes/words depending on version and selector
-  - if the style does not fully defer to another style, it serializes:
-    - `CParaProps`
-    - `CCharProps`
-  - the exact inner bit grammar of `CParaProps` / `CCharProps` is more detailed than the container-level title format and is not needed to reconstruct stream boundaries
+  - source: `?Serialize@CStyle@@UAEXAAVCArchive@@@Z` @ VIEWDLL.DLL
+    `0x40707d6f`; intrusion semantics from
+    `?GetIntrusion@CStyle@@QBEGXZ` @ `0x40727778`; based-on name
+    table from `?GetBasedOn@CStyle@@QBEPBDXZ` @ `0x407087c6`
+  - version `3` body grammar:
+    1. `uint8 version` (must be `3`)
+    2. `uint8 packed_selector`
+       - bits `2..7` = `name_index` — index into the **predefined
+         54-entry name dictionary** baked into VIEWDLL (see below);
+         valid range `0..0x35`
+       - bit `1` = `char_props_only`: when set, skip `CParaProps`
+         (style modifies character properties only)
+       - bit `0` = `is_intrusion`: when set, this is a wrap/intrusion
+         style; no `CParaProps` and no `CCharProps` body follow
+    3. `uint8 secondary_index`
+       - if `is_intrusion`: index passed to `CStyle::GetIntrusion`
+         (semantics TBD; always `0` in the reference TTL — likely a
+         content/proxy reference for the wrapped graphic)
+       - else: `based_on` style index — `0xff` = root / no parent
+    4. if `!is_intrusion and !char_props_only`: serialized `CParaProps`
+    5. if `!is_intrusion`: serialized `CCharProps`
+  - older versions (`1`, `2`) read names or u16 indices; legacy paths
+    upgrade in-place during deserialize. The on-disk format the
+    publisher writes today is version `3` only.
+
+- **Predefined style-name dictionary** (54 entries, indexed by
+  `name_index` and `based_on`). Recovered from VIEWDLL.DLL data
+  tables `&PTR_s_Normal_40770e00` (entries 0..0x2e, stride `0xd`
+  dwords) and `DAT_40771648 + idx*8` (entries 0x2f..0x35).
+  Captured verbatim in `CSTYLE_NAME_DICTIONARY` at
+  `src/server/blackbird/ttl_inspect.py`:
+  - `0x00`: `Normal` (root)
+  - `0x01..0x06`: `Heading 1` … `Heading 6`
+  - `0x07..0x0f`: `TOC 1` … `TOC 9`
+  - `0x10..0x18`: `Section 1` … `Section 9`
+  - `0x19`: `Abstract Heading`
+  - `0x1a`: `Term Definition`
+  - `0x1b`: `List Bullet`
+  - `0x1c`: `List Number`
+  - `0x1d`: `Term`
+  - `0x1e`: `Hyperlink`
+  - `0x1f`: `Emphasized`
+  - `0x20`: `Bold`
+  - `0x21`: `Italic`
+  - `0x22`: `Strikethrough`
+  - `0x23`: `Preformatted`
+  - `0x24`: `Blockquote`
+  - `0x25`: `Address`
+  - `0x26`: `Underline`
+  - `0x27`: `Strong`
+  - `0x28`: `Code`
+  - `0x29`: `Keyboard`
+  - `0x2a`: `Citation`
+  - `0x2b`: `Variable Name`
+  - `0x2c`: `Fixed Width`
+  - `0x2d`: `Abstract Body`
+  - `0x2e`: `Sample`
+  - `0x2f`: `Wrap: Design feature` *(first intrusion style)*
+  - `0x30`: `Wrap: Supporting graphic`
+  - `0x31`: `Wrap: Related graphic`
+  - `0x32`: `Wrap: Sidebar graphic`
+  - `0x33`: `Wrap: Advertisement`
+  - `0x34`: `Wrap: Custom 1`
+  - `0x35`: `Wrap: Custom 2`
+
+  Effects like strikethrough are NOT bits in CCharProps — they're
+  delivered by inheriting from (or alt-referencing) one of these
+  named styles. The "Bold" / "Italic" / "Underline" entries are
+  parallel to the CCharProps `flags_word` bits — a style can either
+  set the bit directly or inherit from the corresponding named
+  style. Intrusion styles (`0x2f..0x35`) are pure-metadata records
+  marking text-wrap behavior around an inline graphic.
+
+- `CCharProps`
+  - source: `?Serialize@CCharProps@@UAEXAAVCArchive@@@Z` @ VIEWDLL.DLL
+    `0x40707fcc`; field semantics from `?EGetWord@CCharProps@@…`
+    @ `0x4070692e` (kind→on-disk offset map) plus `EGetBold` /
+    `EGetItalic` / `EGetUnderline` / `EGetSuperscriptPos` /
+    `EGetSubscriptPos`
+  - version `2` body grammar:
+    1. `uint8 version` (must be `2`)
+    2. `uint8 mask_explicit` — bit set = field has explicit value
+    3. `uint8 mask_concrete` — bit clear = field is "absent" sentinel
+       (`0xfffe` for u16 / `0xfffffffe` for u32); bit set + bit clear
+       in `mask_explicit` = "no_change" sentinel (`0xffff` /
+       `0xffffffff`)
+    4. for each bit `k` where `(mask_explicit & mask_concrete)` bit
+       `k` is set, read field:
+       - bit `0`: `uint16 flags_word` — packed bold/italic/underline/
+         superscript/subscript bits
+       - bit `1`: `uint16 font_id` — index into
+         `CStyleSheet.fonts[].key`
+       - bit `2`: `uint16 pt_size` — point size (engine default `12`
+         when unset, per `GetPtSize` @ `0x40706b85`)
+       - bit `3`: `uint32 text_color` COLORREF
+       - bit `4`: `uint32 back_color` COLORREF
+  - `flags_word` bit layout (high byte = "absent" mask, low byte =
+    value bits):
+    - bold:        absent `0x0100` / value `0x0002`
+    - italic:      absent `0x0200` / value `0x0004`
+    - underline:   absent `0x0400` / value `0x0008`
+    - superscript: absent `0x0800` / value `0x0010`
+    - subscript:   absent `0x1000` / value `0x0020`
+  - version `1` reads four `uint16`s + two `uint32`s without masks;
+    not produced by current publishers.
+
+- `CParaProps`
+  - source: `?Serialize@CParaProps@@UAEXAAVCArchive@@@Z` @ VIEWDLL.DLL
+    `0x407082e2`; field semantics from `?EGetWord@CParaProps@@…`
+    @ `0x4070733d` and `?EGetShort@CParaProps@@…` @ `0x4070812e`
+    (kind→on-disk offset maps) plus the `EGetXxx` accessors that
+    name each kind
+  - version `2` body grammar:
+    1. `uint8 version` (must be `2`)
+    2. `uint16 mask_explicit` (LE) — same semantics as `CCharProps`
+    3. `uint16 mask_concrete` (LE)
+    4. for each bit `k` in `0..11` where both masks set, read field
+       (size = 1 byte for bits `0`, `1`, `3`, `4`, `8`; 2 bytes for
+       the rest. The engine reads the 1-byte fields back as `u16`
+       in memory but only the low byte is on the wire):
+       - bit `0`: `uint8 justify` (text alignment)
+       - bit `1`: `uint8 initial_caps`
+       - bit `2`: `int16 drop_by` (drop-cap height)
+       - bit `3`: `uint8 bullet`
+       - bit `4`: `uint8 line_spacing_rule`
+       - bit `5`: `int16 space_before`
+       - bit `6`: `int16 space_after`
+       - bit `7`: `int16 space_at` (line-height value)
+       - bit `8`: `uint8 special_line_indent`
+       - bit `9`: `int16 left_indent`
+       - bit `10`: `int16 right_indent`
+       - bit `11`: `int16 indent_by` (special-line displacement)
+    5. if `mask_explicit` bit `12` is set, read tab list:
+       - `uint16 tab_count`
+       - per tab: `uint16 position` + `uint8 type`
+  - in the reference TTL only `bit 0 (justify)` (sid 1) and the tab
+    list (sids 7–24) carry explicit values. The MOSVIEW wire
+    descriptor does not consume CParaProps fields directly;
+    paragraph layout flows through item-record headers (see
+    `docs/mosview-authored-text-and-font-re.md` §"Authored Lowering
+    Checklist").
 
 - `CContent`
   - handled specially
