@@ -549,6 +549,17 @@ High-confidence semantics:
     to author styles that set both. VIEWDLL's wire-side setters do
     NOT enforce this, so a malformed TTL can technically have both
     bits set; rendering behavior in that case is engine-defined.
+  - **Reserved bits**: `0x0040`, `0x0080` (low byte) and `0x2000`,
+    `0x4000`, `0x8000` (high byte) are NOT consumed by VIEWDLL —
+    confirmed via exhaustive bit-immediate search and the `IsStyle`
+    @ `0x40707b3f` / `ResetCharProps` @ `0x4073194b` consumers,
+    which only read the 5 documented pairs. The per-style baked
+    defaults table at `0x40770e00` always sets bits `0x2000` and
+    `0x4000` in non-zero entries (likely an assembler/data-table
+    artifact); user-authored TTLs may also set bit `0x8000`
+    (observed in `/var/share/drop/first title.ttl` 4/1 sid=1
+    `flags_word=0xfcfe`). Carry them through verbatim — the
+    renderer ignores them.
   - version `1` reads four `uint16`s + two `uint32`s without masks;
     not produced by current publishers.
 

@@ -539,11 +539,13 @@ _CCHARPROPS_FIELDS = (
     # `SetItalicState` / `SetUnderlineState` / `SetSuperscriptState` /
     # `SetSubscriptState` (each clears its absent_mask bit then sets/
     # clears its value bit) and the `SetDefault*` peers (which OR the
-    # absent_mask bit back in). BBDESIGN enforces super/sub mutual
-    # exclusion at authoring time ("Conflicting postionng information.
-    # Check superscript and subscript values.") — VIEWDLL does NOT
-    # enforce it on the wire, so a malformed TTL can technically have
-    # both bits set; the renderer's behavior is engine-defined.
+    # absent_mask bit back in). `IsStyle` @ 0x40707b3f and
+    # `ResetCharProps` @ 0x4073194b confirm the engine reads ONLY these
+    # five bit-pairs. BBDESIGN enforces super/sub mutual exclusion at
+    # authoring time ("Conflicting postionng information. Check
+    # superscript and subscript values.") — VIEWDLL does NOT enforce
+    # it on the wire, so a malformed TTL can technically have both
+    # bits set; the renderer's behavior is engine-defined.
     #
     #   attr        absent_mask  value_bit
     #   bold        0x0100       0x0002
@@ -551,6 +553,16 @@ _CCHARPROPS_FIELDS = (
     #   underline   0x0400       0x0008
     #   superscript 0x0800       0x0010
     #   subscript   0x1000       0x0020
+    #
+    # Bits 0x0040, 0x0080 (low byte), 0x2000, 0x4000, 0x8000 (high
+    # byte) are RESERVED — no VIEWDLL function reads or writes them.
+    # Per-style baked defaults at 0x40770e00 always set bits 0x2000
+    # and 0x4000 in non-zero entries (likely a binary-data-table
+    # assembler artifact); user-authored TTLs may also set 0x8000
+    # (`/var/share/drop/first title.ttl` 4/1 sid=1 has flags_word
+    # 0xfcfe with bit 15 set). Carry them through verbatim — the
+    # renderer ignores them. Constructor (`CCharProps::CCharProps`
+    # @ 0x407080ce) inits the whole word to 0xffff = "no_change".
     #
     # Field-level sentinels (whole u16): 0xfffe = "absent", 0xffff =
     # "no_change".
@@ -1145,7 +1157,7 @@ def parse_object_streams(ole, table_names, handle_tables, property_tables):
         wrapper = maybe_decompress_ck(stream_data)
         payload = wrapper["payload"] if wrapper else stream_data
         object_root = path[:-len("/\x03object")]
-        table_id = int(path.split("/")[0], 10)
+        table_id = int(path.split("/")[0], 16)
         class_name = table_names.get(table_id, "?")
         handles = handle_tables.get(object_root, [])
         properties = property_tables.get(object_root, [])
@@ -1184,7 +1196,7 @@ def parse_ref_streams(ole):
             continue
         info = parse_ref_table(ole.openstream(entry).read())
         ref_tables.append({"path": path, "info": info})
-        by_table_id[int(path.split("_", 1)[1], 10)] = info
+        by_table_id[int(path.split("_", 1)[1], 16)] = info
     return ref_tables, by_table_id
 
 
@@ -1196,7 +1208,19 @@ def inspect_blackbird_title(path):
         entry["level_specifier"]: entry["name"]
         for entry in type_map
     }
-    title_props = parse_simple_property_table(ole.openstream("\x03TitleProps").read())
+    # Older Blackbird TTLs (e.g. `/var/share/drop/first title.ttl`)
+    # ship without a `\x03TitleProps` stream — title-level metadata
+    # lives only in object 1/0/properties (CTitle's property table)
+    # in those builds.
+    try:
+        title_props_raw = ole.openstream("\x03TitleProps").read()
+    except OSError:
+        title_props = []
+    else:
+        try:
+            title_props = parse_simple_property_table(title_props_raw)
+        except ValueError:
+            title_props = []
     title_prop_map = {prop["key"]: prop for prop in title_props}
     handle_tables = parse_handle_streams(ole)
     property_tables, property_streams = parse_property_streams(ole)
