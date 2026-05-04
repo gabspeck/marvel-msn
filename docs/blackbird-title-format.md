@@ -127,6 +127,38 @@ Example:
 
 `handle_count` is the exact number of valid zero-based swizzle indices for that object.
 
+### Handle bit format
+
+Each `uint32` handle stored in `\x03handles` (and mirrored as
+`obj_cos_path_handle` in the matching `\x03ref_<table_id>` CDPORef
+entry) packs two fields:
+
+```
+handle = (table_id << 21) | slot
+table_id = handle >> 21
+slot     = handle & 0x1FFFFF
+```
+
+`table_id` is the same level-specifier that keys the
+`\x03type_names_map` entries. `slot` names the per-class sub-storage
+(`<table_id>/<slot>/\x03object`). 11 bits are nominally available
+for `table_id` (max observed = `0xa = 10` for `CContent`) and 21 for
+`slot` (max observed = `0x7`).
+
+Verified across the reference Marvel TTL (`resources/titles/4.ttl`,
+15 handles) and the older Blackbird sample
+(`/var/share/drop/first title.ttl`, 21 handles) — 36/36
+round-trip cleanly. Helpers `decode_handle` / `encode_handle` in
+`src/server/blackbird/ttl_inspect.py` expose the format.
+
+Concrete example: in `/var/share/drop/first title.ttl`, the
+section-local CStyleSheet `4/1` has
+`linked_stylesheet_present=1` and `linked_stylesheet_swizzle=0`. Its
+own `\x03handles` table reads `[0x00800000]`. Decode:
+`(0x800000 >> 21, 0x800000 & 0x1FFFFF)` = `(4, 0)` → CStyleSheet
+slot 0 → `4/0/\x03object`, the title-level base stylesheet. The
+section thus inherits everything not overridden in `4/1`.
+
 Observed MFC count/string conventions inside object payloads:
 
 - list and map container counts are written through MFC `CArchive::WriteCount` / `ReadCount`

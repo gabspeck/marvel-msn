@@ -277,13 +277,50 @@ def parse_mfc_ansi_string(data, off):
     return raw.decode("ascii", errors="replace"), off
 
 
+# Object-handle bit format (verified via every handle in the
+# reference Marvel TTL `resources/titles/4.ttl` and the older
+# Blackbird sample `/var/share/drop/first title.ttl` — 36/36
+# handles round-trip): `handle = (table_id << 21) | slot`. The
+# `table_id` is the same level-specifier that keys
+# `\x03type_names_map`; `slot` is the integer that names the per-
+# class sub-storage (`<table_id>/<slot>/\x03object`). The
+# `\x03ref_<table_id>` stream holds one CDPORef per slot — its
+# `obj_cos_path_handle` field equals the encoded handle, so any
+# handle observed in an object's `\x03handles` stream points to
+# both a concrete OLE storage (via decode) and an entry in the
+# matching ref table (via the same value).
+_HANDLE_SLOT_MASK = (1 << 21) - 1
+
+
+def decode_handle(handle):
+    """Split a CDPO handle into `(table_id, slot)`.
+
+    The format is `(table_id << 21) | slot`, with `slot` occupying
+    the low 21 bits (mask `0x1FFFFF`). `table_id` matches the
+    level_specifier in `\\x03type_names_map`.
+    """
+    return (handle >> 21, handle & _HANDLE_SLOT_MASK)
+
+
+def encode_handle(table_id, slot):
+    """Inverse of `decode_handle`."""
+    if slot & ~_HANDLE_SLOT_MASK:
+        raise ValueError(f"slot 0x{slot:x} exceeds 21-bit field")
+    return (table_id << 21) | slot
+
+
 def resolve_swizzle(index, handles):
     handle = None
+    table_id = None
+    slot = None
     if 0 <= index < len(handles):
         handle = handles[index]
+        table_id, slot = decode_handle(handle)
     return {
         "index": index,
         "handle": handle,
+        "table_id": table_id,
+        "slot": slot,
     }
 
 

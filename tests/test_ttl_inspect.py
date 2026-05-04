@@ -13,6 +13,8 @@ from pathlib import Path
 from server.blackbird.ttl_inspect import (
     CSTYLE_DEFAULT_PROPS,
     CSTYLE_NAME_DICTIONARY,
+    decode_handle,
+    encode_handle,
     inspect_blackbird_title,
     parse_cstylesheet,
 )
@@ -240,6 +242,109 @@ class CStyleSheetParseTests(unittest.TestCase):
         self.assertEqual(CSTYLE_DEFAULT_PROPS[25]["justify"], 2)
 
         self.assertEqual(len(CSTYLE_DEFAULT_PROPS), 47)
+
+
+class HandleEncodingTests(unittest.TestCase):
+    """Pin the CDPO object-handle bit format.
+
+    Verified against every handle in `resources/titles/4.ttl` and
+    in `/var/share/drop/first title.ttl` — 36/36 round-trip cleanly.
+    """
+
+    def test_encode_decode_roundtrip(self):
+        for tid in (0, 1, 4, 10, 0x1f, 0x3ff):
+            for slot in (0, 1, 7, 0x100, 0x1FFFFF):
+                self.assertEqual(decode_handle(encode_handle(tid, slot)),
+                                 (tid, slot))
+
+    def test_known_pins(self):
+        # Pinned values from `resources/titles/4.ttl` and the older
+        # Blackbird sample.
+        # CTitle slot 0 = first instance of CTitle in this TTL.
+        # In 4.ttl CTitle's table_id is 2 → handle 0x00400000.
+        self.assertEqual(encode_handle(2, 0), 0x00400000)
+        # The "first title.ttl" 4/1 linked-stylesheet swizzle pin:
+        # tid=4 (CStyleSheet) slot=0 → 0x00800000 → 4/0 (the base).
+        self.assertEqual(encode_handle(4, 0), 0x00800000)
+        # CContent slot 7 → 0x01400007 (the Canyon.mid in the sample).
+        self.assertEqual(encode_handle(10, 7), 0x01400007)
+
+    def test_slot_field_caps_at_21_bits(self):
+        # Slot exceeding 21 bits must reject. The format leaves 11
+        # bits for table_id (which matches the observed maximum
+        # level_specifier `0xa = 10` in TTLs surveyed).
+        with self.assertRaises(ValueError):
+            encode_handle(1, 1 << 21)
+
+
+class FirstTitleSampleTests(unittest.TestCase):
+    """End-to-end smoke test for `/var/share/drop/first title.ttl`.
+
+    Older Blackbird title that ships without `\\x03TitleProps`, uses
+    HEX storage names (`a/1`, `a/7`), and has TWO stylesheets with
+    the section-local one linking to the title-level one. Skipped
+    if the sample isn't present on the filesystem.
+    """
+
+    SAMPLE_PATH = Path("/var/share/drop/first title.ttl")
+
+    @classmethod
+    def setUpClass(cls):
+        if not cls.SAMPLE_PATH.is_file():
+            raise unittest.SkipTest(f"sample not present at {cls.SAMPLE_PATH}")
+        cls.r = inspect_blackbird_title(cls.SAMPLE_PATH)
+
+    def test_class_inventory(self):
+        counts = {}
+        for o in self.r['object_streams']:
+            counts[o['class_name']] = counts.get(o['class_name'], 0) + 1
+        # CMagnet, AudioProxy via CProxyTable, two CStyleSheets,
+        # nested sections — features absent from the Marvel reference.
+        self.assertEqual(counts['CTitle'], 1)
+        self.assertEqual(counts['CSection'], 2)
+        self.assertEqual(counts['CStyleSheet'], 2)
+        self.assertEqual(counts['CMagnet'], 1)
+        self.assertEqual(counts['CContent'], 4)
+        self.assertEqual(counts['CProxyTable'], 3)
+
+    def test_linked_stylesheet_swizzle_resolves_to_base(self):
+        # Section-local `4/1` with linked_stylesheet_present=1 should
+        # have its swizzle resolve via its own handle table to `4/0`.
+        roots = {o['object_root']: o for o in self.r['object_streams']}
+        local = roots['4/1']
+        self.assertEqual(local['parsed']['linked_stylesheet_present'], 1)
+        self.assertEqual(local['parsed']['linked_stylesheet_swizzle'], 0)
+        target_handle = local['handles'][0]
+        tid, slot = decode_handle(target_handle)
+        self.assertEqual(self.r['table_names'][tid], 'CStyleSheet')
+        self.assertEqual(slot, 0)
+        # The linked-to base really is 4/0 — empty styles, more
+        # constrained font list (no Garamond).
+        base = roots[f"{tid:x}/{slot:x}"]
+        self.assertEqual(base['object_root'], '4/0')
+        self.assertEqual(base['parsed']['style_count'], 0)
+        self.assertEqual(base['parsed']['linked_stylesheet_present'], 0)
+
+    def test_section_local_stylesheet_overrides_heading_1(self):
+        # 4/1 customizes Heading 1 with Garamond 26pt (font key 4 in
+        # 4/1's font map, NOT in 4/0's).
+        roots = {o['object_root']: o for o in self.r['object_streams']}
+        local = roots['4/1']
+        h1 = next(s for s in local['parsed']['styles'] if s['name'] == 'Heading 1')
+        self.assertEqual(h1['char_props']['fields']['font_id'], 4)
+        self.assertEqual(h1['char_props']['fields']['pt_size'], 26)
+        # Garamond is the new font this stylesheet adds.
+        local_fonts = {f['key']: f['name'] for f in local['parsed']['fonts']}
+        self.assertEqual(local_fonts[4], 'Garamond')
+
+    def test_all_handles_decode_to_existing_storage(self):
+        roots = {o['object_root'] for o in self.r['object_streams']}
+        for o in self.r['object_streams']:
+            for h in o['handles']:
+                tid, slot = decode_handle(h)
+                self.assertIn(f"{tid:x}/{slot:x}", roots,
+                              f"handle 0x{h:08x} from {o['object_root']} "
+                              f"does not resolve to a stored object")
 
 
 if __name__ == "__main__":
