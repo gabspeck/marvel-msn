@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import uuid
 import zlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import olefile
-
 
 VT_BOOL = 0x000B
 VT_UI1 = 0x0011
@@ -194,7 +193,7 @@ def format_filetime(raw):
     ticks = int.from_bytes(raw, "little")
     if ticks == 0:
         return "0"
-    base = datetime(1601, 1, 1, tzinfo=timezone.utc)
+    base = datetime(1601, 1, 1, tzinfo=UTC)
     stamp = base + timedelta(microseconds=ticks // 10)
     return f"0x{ticks:016x} ({stamp.isoformat()})"
 
@@ -1137,6 +1136,42 @@ def parse_cstylesheet(data):
         "linked_stylesheet_present": linked_present,
         "linked_stylesheet_swizzle": linked_swizzle,
     }
+
+
+def parse_text_runs_paragraphs(payload: bytes) -> list[str]:
+    """Parse a TextRuns CContent payload into authored paragraphs.
+
+    Wire shape (`docs/blackbird-title-format.md` §"CContent" + observed
+    Homepage.bdf dump): `[u16 schema_prefix][ANSI body]`. The body has a
+    leading `'S'` marker, paragraphs separated by `'#'`, and may
+    end mid-byte (no NUL terminator) when consumed entirely.
+
+    Strategy: drop the 2-byte prefix, strip a leading `'S'` if present,
+    truncate at the first NUL (defensive — empirical samples don't have
+    one but the doc says to), then split on `'#'`. Empty / whitespace-
+    only paragraphs are filtered. Returns `[]` for the empty-payload
+    sentinel `\\x00\\x00`.
+
+    Reference samples (`resources/titles/4.ttl`):
+      - Homepage.bdf TextRuns → 2 paragraphs starting with "This is an
+        example…" and "Ordered list is supported…".
+      - Calendar of Events.bdf TextRuns → empty `\\x00\\x00`, no
+        paragraphs (authored text lives in TextTree instead — RE-deferred).
+
+    The exact role of the leading `'S'` byte is RE-deferred but every
+    observed body carries it; treating as a tag and stripping is the
+    minimum that round-trips authored text.
+    """
+    if len(payload) < 3:
+        return []
+    body = payload[2:]
+    nul = body.find(b"\x00")
+    if nul >= 0:
+        body = body[:nul]
+    if body.startswith(b"S"):
+        body = body[1:]
+    text = body.decode("latin-1", errors="replace")
+    return [p.strip() for p in text.split("#") if p.strip()]
 
 
 def parse_object_payload(class_name, payload, handles):

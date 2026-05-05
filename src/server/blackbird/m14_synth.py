@@ -47,7 +47,6 @@ from pathlib import Path
 from .m14_parse import parse_payload
 from .ttl_inspect import inspect_blackbird_title
 
-
 SUPPORTED_PROXY_KEYS = {
     "TextProxy": {0x1400: "TextTree", 0x1500: "TextRuns"},
     "ImageProxy": {0x0600: "WaveletImage"},

@@ -18,8 +18,8 @@ from server.blackbird.ttl_inspect import (
     encode_handle,
     inspect_blackbird_title,
     parse_cstylesheet,
+    parse_text_runs_paragraphs,
 )
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_TTL = REPO_ROOT / "resources" / "titles" / "4.ttl"
@@ -382,6 +382,268 @@ class FirstTitleSampleTests(unittest.TestCase):
         for code, idx in INTRUSION_CODE_TO_NAME_INDEX.items():
             self.assertTrue(CSTYLE_NAME_DICTIONARY[idx].startswith("Wrap:"),
                             f"code {code!r} → idx {idx} = {CSTYLE_NAME_DICTIONARY[idx]!r} not a wrap style")
+
+
+class TypographyLoweringTests(unittest.TestCase):
+    """End-to-end pins for the multi-face / multi-descriptor section-0
+    builder in `server.blackbird.m14_payload`. Walks a parsed
+    `CStyleSheet` through the lowering pipeline and asserts the resulting
+    descriptors carry the merged LOGFONTA bytes documented in
+    `docs/typography-lowering-plan.md` §"Verification".
+
+    These tests exercise `_resolve_style_attrs` + `_descriptor_from_resolved`
+    on the reference `resources/titles/4.ttl` stylesheet — the same blob
+    `_build_section0_for_stylesheet` ships on the wire."""
+
+    @classmethod
+    def setUpClass(cls):
+        from server.blackbird import m14_payload
+        cls.m14_payload = m14_payload
+        inspection = inspect_blackbird_title(SAMPLE_TTL)
+        ss = next(
+            o for o in inspection["object_streams"]
+            if o["class_name"] == "CStyleSheet"
+        )
+        cls.stylesheet = ss["parsed"]
+        cls.parsed_by_id = {
+            s["style_id"]: s for s in cls.stylesheet["styles"]
+        }
+
+    def _resolve(self, style_id):
+        return self.m14_payload._resolve_style_attrs(style_id, self.parsed_by_id)
+
+    def _build(self):
+        return self.m14_payload._build_section0_for_stylesheet(self.stylesheet)
+
+    def test_normal_style_resolves_to_times_new_roman_11pt(self):
+        # Normal (0x00) is the root style. CSTYLE_DEFAULT_PROPS[0] pins
+        # font_id=1 (Times New Roman), pt_size=11, flags_word=0x0000
+        # (everything explicit OFF). Authored CCharProps in 4.ttl is
+        # empty for sid 0 → defaults are the final answer.
+        attrs = self._resolve(0)
+        self.assertEqual(attrs["font_id"], 1)
+        self.assertEqual(attrs["pt_size"], 11)
+        self.assertFalse(attrs["bold"])
+        self.assertFalse(attrs["italic"])
+        self.assertFalse(attrs["underline"])
+        self.assertFalse(attrs["strikeout"])
+        self.assertEqual(attrs["text_color"], 0x00000000)
+        self.assertEqual(attrs["back_color"], 0x00FFFFFF)
+
+    def test_heading_1_inherits_bold_from_defaults_and_keeps_authored_color(self):
+        # Heading 1 (0x01): defaults set font_id=2 (Arial), pt_size=22,
+        # flags_word=0x7e02 (bold ON, italic/underline/super/sub absent
+        # → inherited from Normal=OFF). Authored CCharProps in 4.ttl
+        # adds text_color=128 (dark red) — only mutation across all
+        # 54 styles.
+        attrs = self._resolve(1)
+        self.assertEqual(attrs["font_id"], 2)
+        self.assertEqual(attrs["pt_size"], 22)
+        self.assertTrue(attrs["bold"])
+        self.assertFalse(attrs["italic"])
+        self.assertFalse(attrs["underline"])
+        self.assertEqual(attrs["text_color"], 128)
+        # back_color inherits from Normal default (white).
+        self.assertEqual(attrs["back_color"], 0x00FFFFFF)
+
+    def test_hyperlink_inherits_blue_underline_from_defaults(self):
+        # Hyperlink (0x1e): defaults flags_word=0x7b08 (underline ON,
+        # bold/italic/super/sub absent), text_color=0x00ff0000 (blue).
+        attrs = self._resolve(0x1E)
+        self.assertTrue(attrs["underline"])
+        self.assertFalse(attrs["bold"])
+        self.assertFalse(attrs["italic"])
+        self.assertEqual(attrs["text_color"], 0x00FF0000)
+
+    def test_strikethrough_special_cased_by_name(self):
+        # Strikethrough (0x22): flags_word identical to Hyperlink/Underline
+        # (0x7b08) — underline ON, no flag bit for strike. The renderer
+        # name-special-cases sid 0x22 and sets lfStrikeOut, so the
+        # lowering must mirror that.
+        attrs = self._resolve(0x22)
+        self.assertTrue(attrs["strikeout"])
+        # Underline still ON because flags_word matches Hyperlink.
+        self.assertTrue(attrs["underline"])
+
+    def test_preformatted_resolves_to_courier(self):
+        # Preformatted (0x23): font_id=3 in defaults (Courier in standard
+        # TTL conventions). 4.ttl maps font key 3 → "Courier New".
+        attrs = self._resolve(0x23)
+        self.assertEqual(attrs["font_id"], 3)
+
+    def test_keyboard_inherits_bold_and_italic(self):
+        # Keyboard (0x29): defaults flags_word=0x7c06 — bold ON +
+        # italic ON, underline/super/sub absent. Both attributes
+        # explicit, no inheritance for them.
+        attrs = self._resolve(0x29)
+        self.assertTrue(attrs["bold"])
+        self.assertTrue(attrs["italic"])
+        self.assertFalse(attrs["underline"])
+
+    def test_heading_2_pt_size_and_font_inherit_through_chain(self):
+        # Heading 2 (0x02): defaults font_id=0 (inherit), pt_size=18 explicit,
+        # based_on=1 (Heading 1). Inheritance must walk back to Heading 1
+        # (font_id=2 / Arial) for the font_id resolution.
+        attrs = self._resolve(0x02)
+        self.assertEqual(attrs["font_id"], 2)
+        self.assertEqual(attrs["pt_size"], 18)
+        self.assertTrue(attrs["bold"])
+
+    def test_section_3_inherits_font_through_two_levels(self):
+        # Section 3 (0x12): defaults font_id=0, based_on=Section 2 (0x11).
+        # Section 2 also has font_id=0 inheriting from Section 1 (0x10).
+        # Section 1 has font_id=2 (Arial). Resolution must reach back
+        # two levels.
+        attrs = self._resolve(0x12)
+        self.assertEqual(attrs["font_id"], 2)
+        self.assertEqual(attrs["pt_size"], 10)
+
+    def test_section0_blob_round_trips_through_m14_parse(self):
+        # Wire-bytes round-trip: lower the stylesheet, embed in a fake
+        # 9-section payload, parse back, assert face/descriptor counts
+        # and per-descriptor LOGFONTA bytes match expectations.
+        import struct
+
+        from server.blackbird.m14_parse import parse_payload
+
+        blob = self._build()
+        # Stitch a minimal valid 9-section envelope so parse_payload
+        # accepts the whole thing.
+        payload = (
+            struct.pack("<H", len(blob)) + blob +  # sec0
+            b"\x00\x00" * 3 +                      # sec07/08/06 empty
+            b"\x00\x00" * 3 +                      # sec01/02/6a empty
+            b"\x00\x00" +                          # sec13 entry_bytes=0
+            b"\x00\x00"                            # sec04 count=0
+        )
+        parsed = parse_payload(payload)
+        self.assertEqual(parsed.font_blob.length, len(blob))
+        # 7 fonts × 0x20 = 0xE0; 54 descriptors × 0x2A = 0x8DC.
+        face_off, desc_off = struct.unpack_from(
+            "<HH", parsed.font_blob.data, 0x04,
+        )
+        self.assertEqual(face_off, 0x12)
+        self.assertEqual(desc_off, 0x12 + 7 * 0x20)
+        self.assertEqual(
+            struct.unpack_from("<H", parsed.font_blob.data, 0x02)[0],
+            54,
+        )
+        # Spot-check: face[1] = Times New Roman, face[2] = Arial.
+        self.assertEqual(
+            parsed.font_blob.data[face_off + 0x20:face_off + 0x40].rstrip(b"\x00"),
+            b"Times New Roman",
+        )
+        self.assertEqual(
+            parsed.font_blob.data[face_off + 0x40:face_off + 0x60].rstrip(b"\x00"),
+            b"Arial",
+        )
+        # Per-style LOGFONTA pins from
+        # `docs/typography-lowering-plan.md` §"Verification".
+        def descriptor_bytes(sid: int) -> bytes:
+            return parsed.font_blob.data[
+                desc_off + sid * 0x2A:desc_off + (sid + 1) * 0x2A
+            ]
+        normal = descriptor_bytes(0x00)
+        self.assertEqual(struct.unpack_from("<H", normal, 0x00)[0], 1)
+        self.assertEqual(struct.unpack_from("<i", normal, 0x0C)[0], -220)
+        self.assertEqual(struct.unpack_from("<i", normal, 0x1C)[0], 400)
+        h1 = descriptor_bytes(0x01)
+        self.assertEqual(struct.unpack_from("<H", h1, 0x00)[0], 2)
+        self.assertEqual(struct.unpack_from("<i", h1, 0x0C)[0], -440)
+        self.assertEqual(struct.unpack_from("<i", h1, 0x1C)[0], 700)
+        hyper = descriptor_bytes(0x1E)
+        self.assertEqual(hyper[0x21], 1)  # lfUnderline
+        self.assertEqual(hyper[0x06:0x09], b"\x00\x00\xFF")  # blue
+        strike = descriptor_bytes(0x22)
+        self.assertEqual(strike[0x22], 1)  # lfStrikeOut
+        pre = descriptor_bytes(0x23)
+        self.assertEqual(struct.unpack_from("<H", pre, 0x00)[0], 3)
+
+    def test_face_table_keys_zero_slot_when_font_name_empty(self):
+        # 4.ttl reserves font key 0 with an empty name. The face table
+        # must still have a slot at index 0 (so face_slot indexing stays
+        # consistent) but it should be all-NUL — `hMVSetFontTable` reads
+        # up to first NUL and gets an empty face string.
+        blob = self._build()
+        face_off = 0x12
+        self.assertEqual(blob[face_off:face_off + 0x20], b"\x00" * 0x20)
+
+    def test_descriptor_count_field_matches_actual_records(self):
+        # When every authored style_id has a real descriptor, the field
+        # is the dense count and the FUN_7e896610 clamp passes any sid
+        # < count through to its real descriptor (not 0).
+        import struct
+        blob = self._build()
+        descriptor_count = struct.unpack_from("<H", blob, 0x02)[0]
+        self.assertEqual(descriptor_count, 54)
+
+
+class TextRunsParagraphsTests(unittest.TestCase):
+    """Pin the TextRuns body parser used by the case-1 lowering path.
+
+    Reference samples come from `resources/titles/4.ttl`. The format is
+    `[u16 schema_prefix][ANSI body]` with paragraphs separated by `'#'`
+    and a leading `'S'` marker; both sentinels are RE-deferred but
+    consistent across observed samples."""
+
+    @classmethod
+    def setUpClass(cls):
+        inspection = inspect_blackbird_title(SAMPLE_TTL)
+        cls.text_runs_payloads = {
+            o["object_root"]: o["payload"]
+            for o in inspection["object_streams"]
+            if o["class_name"] == "CContent"
+        }
+
+    def test_homepage_splits_into_two_paragraphs(self):
+        # Homepage.bdf TextRuns is at object root `8/7` in 4.ttl:
+        # 122-byte body with one `'#'` boundary between intro and tail.
+        payload = self.text_runs_payloads["8/7"]
+        paragraphs = parse_text_runs_paragraphs(payload)
+        self.assertEqual(len(paragraphs), 2)
+        self.assertTrue(paragraphs[0].startswith("This is an example"))
+        self.assertTrue(paragraphs[1].startswith("Ordered list"))
+
+    def test_calendar_empty_text_runs_yields_no_paragraphs(self):
+        # Calendar of Events.bdf TextRuns is `00 00` — empty body. The
+        # authored text lives in TextTree instead; lowering falls back
+        # to the title caption when paragraphs is empty.
+        for payload in self.text_runs_payloads.values():
+            if payload == b"\x00\x00":
+                self.assertEqual(parse_text_runs_paragraphs(payload), [])
+                break
+        else:
+            self.fail("expected at least one empty TextRuns payload in 4.ttl")
+
+    def test_short_payload_yields_no_paragraphs(self):
+        # < 3 bytes → no body to parse.
+        self.assertEqual(parse_text_runs_paragraphs(b""), [])
+        self.assertEqual(parse_text_runs_paragraphs(b"\x00"), [])
+        self.assertEqual(parse_text_runs_paragraphs(b"\x00\x00"), [])
+
+    def test_synthetic_payload_strips_S_marker_and_splits(self):
+        # `02 00` prefix + 'S' marker + "A#B" body → ["A", "B"].
+        payload = b"\x02\x00SA#B"
+        self.assertEqual(parse_text_runs_paragraphs(payload), ["A", "B"])
+
+    def test_payload_without_S_marker_still_splits(self):
+        # Defensive: if a future authored TextRuns omits the 'S', the
+        # body should still split on '#' rather than refusing to parse.
+        payload = b"\x02\x00first#second"
+        self.assertEqual(parse_text_runs_paragraphs(payload), ["first", "second"])
+
+    def test_payload_truncates_at_first_nul(self):
+        # Per the doc, NUL terminates the body. Anything after is
+        # ignored.
+        payload = b"\x02\x00Sone#two\x00three#four"
+        self.assertEqual(parse_text_runs_paragraphs(payload), ["one", "two"])
+
+    def test_paragraphs_strip_surrounding_whitespace(self):
+        # Authored bodies often have a trailing space before the next
+        # `#`; the parser strips so heuristic style assignment doesn't
+        # ship leading/trailing whitespace into the case-1 chunk.
+        payload = b"\x02\x00S  hello  #  world  "
+        self.assertEqual(parse_text_runs_paragraphs(payload), ["hello", "world"])
 
 
 if __name__ == "__main__":

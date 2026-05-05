@@ -19,7 +19,6 @@ from server.blackbird.m14_synth import (
     validate_supported_subset,
 )
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_TTL = REPO_ROOT / "resources" / "titles" / "4.ttl"
 

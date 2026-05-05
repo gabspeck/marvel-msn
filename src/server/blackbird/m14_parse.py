@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 SELECTOR_LABELS = {
     0x04: "nul_string_table",
     0x06: "record_table_0x98",

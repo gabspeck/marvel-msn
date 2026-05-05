@@ -204,6 +204,33 @@ def build_baggage_container(bitmap: bytes) -> bytes:
     return struct.pack("<HHI", 0, 1, 8) + bitmap
 
 
+def build_case3_bf_chunk(
+    title_byte: int,
+    key: int,
+    *,
+    name_size: int = 0x40,
+) -> bytes:
+    """Build a type-0 0xBF chunk that drives the case-3 bitmap cell path.
+
+    Case 3 (`FUN_7e894560`) materialises a parent cell whose bitmap is
+    loaded from baggage (`bm0` for the current zeroed descriptor fields).
+    This is the plain bitmap/background path, complementary to
+    `build_case1_bf_chunk`'s text-row path.
+    """
+    if not (0x40 <= name_size <= 0xFFFF):
+        raise ValueError(
+            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
+        )
+
+    chunk = bytearray(4 + name_size + 60)
+    chunk[0] = 0xBF
+    chunk[1] = title_byte & 0xFF
+    chunk[2:4] = struct.pack("<H", name_size)
+    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
+    chunk[4 + 0x26] = 0x03
+    return bytes(chunk)
+
+
 # --------------------------------------------------------------------------
 # Type-0 0xBF cache chunk — case-1 (text slot) wire format.
 #

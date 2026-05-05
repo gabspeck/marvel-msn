@@ -16,6 +16,7 @@ import unittest
 from src.server.blackbird.wire import (
     build_baggage_container,
     build_case1_bf_chunk,
+    build_case3_bf_chunk,
     build_child_record,
     build_kind5_raster,
     build_trailer,
@@ -564,6 +565,19 @@ class TestCase1BfChunkExtended(unittest.TestCase):
         self.assertEqual(chunk[-60:], b"\x00" * 60)
         # Key still in the canonical name_buf+0x08 slot (= chunk[12..16]).
         self.assertEqual(chunk[12:16], struct.pack("<I", 0xDEADBEEF))
+
+
+class TestCase3BfChunk(unittest.TestCase):
+    def test_chunk_dispatches_to_bitmap_cell_path(self):
+        chunk = build_case3_bf_chunk(title_byte=0x01, key=0xCAFEBABE)
+        self.assertEqual(len(chunk), 4 + 0x40 + 60)
+        self.assertEqual(chunk[0], 0xBF)
+        self.assertEqual(chunk[1], 0x01)
+        self.assertEqual(chunk[2:4], bytes.fromhex("4000"))
+        self.assertEqual(struct.unpack("<I", chunk[12:16])[0], 0xCAFEBABE)
+        self.assertEqual(chunk[4 + 0x26], 0x03)
+        self.assertEqual(chunk[4 + 0x27:4 + 0x40], b"\x00" * 0x19)
+        self.assertEqual(chunk[0x44:], b"\x00" * 60)
 
 
 if __name__ == "__main__":

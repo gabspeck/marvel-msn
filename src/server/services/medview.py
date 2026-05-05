@@ -23,28 +23,16 @@ Async data paths:
 from __future__ import annotations
 
 import logging
-import struct
 
 from ..blackbird.m14_payload import (
-    M14PayloadResult,
     TitleOpenMetadata,
     TopicEntry,
-    _SECTION0_FONT_BLOB,
-    _build_sec06_window_scaffold_record,
     build_m14_payload_for_deid,
-)
-from ..blackbird.m14_synth import (
-    build_selector_13_entries,
-    build_stock_parser_title_path,
-    encode_blob_section,
-    encode_c_string,
-    encode_c_string_table,
-    encode_counted_string_section,
-    synthetic_crc,
 )
 from ..blackbird.wire import (
     build_baggage_container,
     build_case1_bf_chunk,
+    build_case3_bf_chunk,
     build_kind5_raster,
     build_trailer,
     build_type0_status_record,
@@ -96,7 +84,6 @@ from ..mpc import (
     build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
-    build_tagged_reply_var,
     build_tagged_reply_word,
     parse_request_params,
 )
@@ -113,128 +100,32 @@ log = logging.getLogger(__name__)
 # here short-circuits MVTTL14C `TitleOpenEx` to LAB_7E8432D4 and the
 # viewer shows "service temporarily unavailable".
 _TITLE_SLOT_PRIMARY = 0x01
+_TITLE_FILE_SYSTEM_MODE = 0x01
 
 # Synthetic non-zero handle returned by `OpenRemoteHfsFile` for the only
 # baggage open we currently service (`bm0`). MVTTL14C `HfOpenHfs @
 # 0x7E84771E` gates allocation of its tracking struct on `(char) != 0`.
 _BAGGAGE_HANDLE_BM0 = 0x42
 
+# Logical pipe messages carry a uint16 reassembly length before the
+# transport-level 1024-byte fragmentation. Keep each HFS read reply below
+# that pipe-frame ceiling; the client advances by the returned byte count
+# and can issue subsequent reads for the remainder.
+_HFS_READ_CHUNK_MAX = 0xF000
+
 # Highlight context byte returned synchronously by `QueryTopics` (zero =
 # no highlight session). The spec says nonzero opens a highlight-aware
 # query session, which we don't implement.
 _NO_HIGHLIGHT_CONTEXT = 0x00
 
-# Title source branch used by the live MEDVIEW handler. The older
-# Blackbird-backed lowering path remains available in `_resolve_title_result`
-# but is no longer the default path for MOSVIEW.
-_TITLE_SOURCE_SYNTHETIC = "synthetic"
-_TITLE_SOURCE_BLACKBIRD = "blackbird"
-_TITLE_SOURCE_BRANCH = _TITLE_SOURCE_SYNTHETIC
-
-_SYNTHETIC_TITLE_CAPTION = "Synthetic MEDVIEW"
-_SYNTHETIC_SECTION_NAME = "Synthetic Section"
-_SYNTHETIC_FORM_NAME = "Synthetic Form"
-_SYNTHETIC_FRAME_NAME = "Synthetic Window"
-_SYNTHETIC_STYLE_NAME = "Synthetic Style"
-_SYNTHETIC_RESOURCE_FOLDER_NAME = "Synthetic Resources"
-_SYNTHETIC_TOPIC_NAME = "Synthetic Story"
-_SYNTHETIC_TOPIC_TEXT = (
-    "This title is served by the MEDVIEW synthetic branch. "
-    "Blackbird title lowering is bypassed on purpose."
-)
-_SYNTHETIC_TOPIC_ADDRESS = 0x1000
-
-
-def _encode_fixed_section(records: list[bytes], record_size: int) -> bytes:
-    """Encode one fixed-record MEDVIEW section."""
-    for record in records:
-        if len(record) != record_size:
-            raise ValueError(f"record does not match size 0x{record_size:x}")
-    payload = b"".join(records)
-    if len(payload) > 0xFFFF:
-        raise ValueError(f"fixed-record section too large: 0x{len(payload):x}")
-    return struct.pack("<H", len(payload)) + payload
-
-
-def _build_synthetic_title_result(title_token: str, deid: str) -> M14PayloadResult:
-    """Build a hardcoded title body for the live synthetic branch.
-
-    This bypasses Blackbird `.ttl` lowering entirely while keeping the
-    same `OpenTitle` / cache-miss contract the rest of the handler uses.
-    """
-    mosview_open_path = deid or title_token or _SYNTHETIC_TITLE_CAPTION
-    topic_text = _SYNTHETIC_TOPIC_TEXT.encode("latin-1", errors="replace")
-    context_hash = synthetic_crc(
-        _SYNTHETIC_TOPIC_NAME.lower().encode("latin-1", errors="replace"),
-    ) or 1
-    topics = (
-        TopicEntry(
-            topic_number=1,
-            address=_SYNTHETIC_TOPIC_ADDRESS,
-            context_hash=context_hash,
-            proxy_name=_SYNTHETIC_TOPIC_NAME,
-            kind="text",
-            text=topic_text,
-        ),
-    )
-
-    sec01 = encode_c_string(_SYNTHETIC_TITLE_CAPTION)
-    sec02 = b""
-    sec6a = encode_c_string(mosview_open_path)
-    sec13_entries = build_selector_13_entries()
-    sec04_strings = [
-        _SYNTHETIC_TITLE_CAPTION,
-        _SYNTHETIC_SECTION_NAME,
-        _SYNTHETIC_FORM_NAME,
-        _SYNTHETIC_FRAME_NAME,
-        _SYNTHETIC_STYLE_NAME,
-        _SYNTHETIC_RESOURCE_FOLDER_NAME,
-        _SYNTHETIC_TOPIC_NAME,
-    ]
-    payload = b"".join(
-        [
-            encode_blob_section(_SECTION0_FONT_BLOB),
-            _encode_fixed_section([], 0x2B),
-            _encode_fixed_section([], 0x1F),
-            _encode_fixed_section([_build_sec06_window_scaffold_record()], 0x98),
-            encode_blob_section(sec01),
-            encode_blob_section(sec02),
-            encode_blob_section(sec6a),
-            encode_counted_string_section(sec13_entries),
-            encode_c_string_table(sec04_strings),
-        ]
-    )
-    parser_title_path = build_stock_parser_title_path(mosview_open_path)
-    metadata = TitleOpenMetadata(
-        va_get_contents=_SYNTHETIC_TOPIC_ADDRESS,
-        addr_get_contents=_SYNTHETIC_TOPIC_ADDRESS,
-        topic_count=len(topics),
-        cache_header0=synthetic_crc(payload),
-        cache_header1=synthetic_crc(parser_title_path.encode("latin-1", errors="replace")),
-    )
-    return M14PayloadResult(
-        payload=payload,
-        caption=_SYNTHETIC_TITLE_CAPTION,
-        metadata=metadata,
-        topics=topics,
-    )
-
-
-def _resolve_title_result(title_token: str, deid: str) -> tuple[str, M14PayloadResult]:
-    """Choose the live title source branch while preserving the old path."""
-    if _TITLE_SOURCE_BRANCH == _TITLE_SOURCE_SYNTHETIC:
-        return (_TITLE_SOURCE_SYNTHETIC, _build_synthetic_title_result(title_token, deid))
-    return (_TITLE_SOURCE_BLACKBIRD, build_m14_payload_for_deid(deid))
-
-
 # --------------------------------------------------------------------------
 # bm0 baggage backdrop
 # --------------------------------------------------------------------------
 
-_BM0_WIDTH = 640
-_BM0_HEIGHT = 480
+_BM0_WIDTH = 64
+_BM0_HEIGHT = 64
 _BM0_BPP = 24
-_BM0_PIXEL_BYTES = _BM0_WIDTH * _BM0_HEIGHT * 3  # 921600 B for 640×480 24bpp
+_BM0_PIXEL_BYTES = _BM0_WIDTH * _BM0_HEIGHT * 3  # 12288 B for 64×64 24bpp
 
 
 def _build_bm0_container():
@@ -245,21 +136,17 @@ def _build_bm0_container():
     `FUN_7e887a40` (which parses the kind=5 raster). The resulting
     HBITMAP is `BitBlt`'d at paint time by `FUN_7e887180`.
 
-    Architecture note (`docs/mosview-authored-text-and-font-re.md`
-    §"Bitmap Child Trailer Boundary"): bm0 is engine-synthesized
-    parent-cell backdrop, NOT authored title content. Authored images
-    (e.g. the `bitmap.bmp` WaveletImage in the reference .ttl) ship as
-    `bm1+` baggage and are referenced by image-tag (`0x03`/`0x22`)
-    topic items. The synthetic branch forces a solid yellow 24bpp fill
-    here as a visibility probe; the empty-trailer recipe still matches
-    the doc's "first authored text milestone does not need this
-    trailer" deferment.
+    Ships a solid-white 64×64 24bpp raster as the backdrop. Authored
+    bitmap content from the title's CBFrame backdrop is RE-deferred —
+    until that lowering exists, white keeps the parent cell visually
+    neutral so authored text rendering on top of it (when the case-1
+    push path is wired) reads correctly.
     """
     bitmap = build_kind5_raster(
         width=_BM0_WIDTH,
         height=_BM0_HEIGHT,
         bpp=_BM0_BPP,
-        pixel_data=b"\x00\xFF\xFF" * (_BM0_WIDTH * _BM0_HEIGHT),
+        pixel_data=b"\xFF" * _BM0_PIXEL_BYTES,
         trailer=build_trailer([], b""),
     )
     return build_baggage_container(bitmap)
@@ -445,12 +332,19 @@ def _build_get_title_info_remote_reply(info_kind: int) -> bytes:
 # Maps async-cache selector → (notification subscription type, chunk builder).
 # Each builder takes (handler, title_slot, key) and returns
 # (chunk_bytes, channel_label_for_log).
-_PUSH_DISPATCH: dict[int, tuple[int, "callable"]] = {}
+_PUSH_DISPATCH: dict[int, tuple[int, callable]] = {}
 
 
 def _push_case1_text(handler, title_slot, key):
-    text = handler._case1_text_for_key(key)
-    return build_case1_bf_chunk(text, title_slot, key), "type0_bf_case1"
+    text, style_id = handler._case1_paragraph_for_key(key)
+    chunk = build_case1_bf_chunk(
+        text, title_slot, key, initial_font_style=style_id,
+    )
+    return chunk, "type0_bf_case1"
+
+
+def _push_case3_bitmap(handler, title_slot, key):
+    return build_case3_bf_chunk(title_slot, key), "type0_bf_case3_bitmap"
 
 
 def _push_a5_status(handler, title_slot, key):
@@ -473,7 +367,7 @@ def _push_type3_op4(kind: int):
     return build
 
 
-_PUSH_DISPATCH[MEDVIEW_FETCH_NEARBY_TOPIC] = (0, _push_case1_text)
+_PUSH_DISPATCH[MEDVIEW_FETCH_NEARBY_TOPIC] = (0, _push_case3_bitmap)
 _PUSH_DISPATCH[MEDVIEW_FETCH_ADJACENT_TOPIC] = (0, _push_a5_status)
 _PUSH_DISPATCH[MEDVIEW_CONVERT_TOPIC_TO_VA] = (3, _push_type3_op4(0))
 _PUSH_DISPATCH[MEDVIEW_CONVERT_HASH_TO_VA] = (3, _push_type3_op4(1))
@@ -538,21 +432,26 @@ class MEDVIEWHandler:
                 return topic
         return None
 
-    def _case1_text_for_key(self, key: int) -> str:
-        """Resolve the ANSI text shipped in a case-1 0xBF chunk for `key`.
+    def _case1_paragraph_for_key(self, key: int) -> tuple[str, int]:
+        """Resolve `(text, style_id)` for the case-1 0xBF chunk at `key`.
 
-        Falls back to the title caption when no topic matches the key
-        or the matched entry is image-kind. Truncates to fit the case-1
-        chunk's in-name_buf budget."""
+        Picks the topic's first authored paragraph when available and
+        falls back to the title caption (rendered as Normal / `style 0`)
+        when no topic matches, the matched entry is image-kind, or the
+        topic has no authored paragraphs (e.g. empty TextRuns). Truncates
+        text to fit the case-1 chunk's in-name_buf budget."""
         topic = self._topic_for_wire_key(key)
-        if topic is not None and topic.text:
-            text_bytes = topic.text
+        if topic is not None and topic.paragraphs:
+            first = topic.paragraphs[0]
+            text = first.text
+            style_id = first.style_id
         else:
-            text_bytes = (self.title_caption or "Untitled").encode("latin-1", errors="replace")
-        budget = case1_text_budget() - 1  # -1 for NUL appended by builder
-        if len(text_bytes) > budget:
-            text_bytes = text_bytes[:budget]
-        return text_bytes.decode("latin-1", errors="replace")
+            text = self.title_caption or "Untitled"
+            style_id = 0
+        budget = case1_text_budget(initial_font_style=style_id) - 1  # -1 for NUL appended by builder
+        if len(text) > budget:
+            text = text[:budget]
+        return text, style_id
 
     # --- Async cache push (selectors 0x05 / 0x06 / 0x07 / 0x15) ----
 
@@ -744,17 +643,17 @@ class MEDVIEWHandler:
         title_token = _extract_title_token(payload)
         deid = _deid_from_title_token(title_token).strip()
         log.info("open_title req_id=%d token=%r deid=%r", request_id, title_token, deid)
-        source_branch, result = _resolve_title_result(title_token, deid)
+        result = build_m14_payload_for_deid(deid)
         # Stash per-topic mapping + caption on the handler so subsequent
         # selector 0x05 / 0x06 / 0x07 / 0x15 cache pushes can ship
-        # authored values (`_case1_text_for_key`, `_topic_for_wire_key`).
+        # authored values (`_case1_paragraph_for_key`, `_topic_for_wire_key`).
         self.topics = result.topics
         self.title_caption = result.caption
         self._open_title_slots.add(_TITLE_SLOT_PRIMARY)
         log.info(
-            "open_title_reply source=%s title_slot=0x%02x fs_mode=%d body_len=%d "
+            "open_title_reply title_slot=0x%02x fs_mode=%d body_len=%d "
             "va=0x%08x addr=0x%08x topic_upper=%d cache_header0=0x%08x",
-            source_branch, _TITLE_SLOT_PRIMARY, 0, len(result.payload),
+            _TITLE_SLOT_PRIMARY, _TITLE_FILE_SYSTEM_MODE, len(result.payload),
             result.metadata.va_get_contents,
             result.metadata.addr_get_contents,
             result.metadata.topic_count,
@@ -925,14 +824,19 @@ class MEDVIEWHandler:
         dwords = [p.value for p in send_params if getattr(p, "tag", None) == 0x03]
         count = dwords[0] if len(dwords) >= 1 else 0
         offset = dwords[1] if len(dwords) >= 2 else 0
+        if handle_byte == _BAGGAGE_HANDLE_BM0 and count > 0:
+            read_count = min(count, _HFS_READ_CHUNK_MAX)
+            end = min(offset + read_count, len(_BM0_CONTAINER))
+            chunk = _BM0_CONTAINER[offset:end]
+            log.info(
+                "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d returned=%d",
+                request_id, handle_byte, count, offset, len(chunk),
+            )
+            return _dynamic_complete(build_tagged_reply_byte(0), chunk)
         log.info(
-            "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d",
+            "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d returned=error",
             request_id, handle_byte, count, offset,
         )
-        if handle_byte == _BAGGAGE_HANDLE_BM0 and count > 0:
-            end = min(offset + count, len(_BM0_CONTAINER))
-            chunk = _BM0_CONTAINER[offset:end]
-            return _dynamic_complete(build_tagged_reply_byte(0), chunk)
         return build_static_reply(build_tagged_reply_byte(0xFF))
 
     def _handle_get_remote_fs_error(self, request_id, payload) -> bytes:
@@ -992,11 +896,10 @@ def _build_open_title_reply(title_body: bytes, metadata: TitleOpenMetadata) -> b
         0x87                           end-static
         0x86 <payloadBlob>             dynamic-complete
     """
-    # `fileSystemMode` is 0 on the synthesized model — older code shipped
-    # 1 here mistakenly (we'd called it `_TITLE_ID_SERVICE_BYTE`). Per
-    # spec §0x01, fs_mode is the byte later surfaced through local
-    # `TitleGetInfo(0x69)`, NOT a duplicate title-id.
-    file_system_mode = 0
+    # Nonzero fileSystemMode selects the remote HFS baggage path. The
+    # synthetic bitmap probe depends on that path so Mosview fetches `bm0`
+    # from the server instead of trying local baggage files.
+    file_system_mode = _TITLE_FILE_SYSTEM_MODE
     static = b"".join(
         [
             build_tagged_reply_byte(_TITLE_SLOT_PRIMARY),

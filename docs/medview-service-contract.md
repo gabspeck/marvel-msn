@@ -915,8 +915,8 @@ Fields:
   `0x01` top-band rect mode,
   `0x40` bottom-align top band.
 - `outerRect`. `x:u32`, `y:u32`, `width:u32`, `height:u32`.
-- `containerControl:u32`. Carried into runtime state; not interpreted on the
-  recovered stock path.
+- `containerControl:u32`. Carried into runtime state. The synthetic title
+  currently sends a red `COLORREF` here as the MosViewContainer color probe.
 - `topBandBackground:u32`. `COLORREF`.
 - `scrollingHostBackground:u32`. `COLORREF`.
 - `topBandRect`. `x:u32`, `y:u32`, `width:u32`, `height:u32`.

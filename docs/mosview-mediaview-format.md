@@ -1748,8 +1748,8 @@ Code-proven fields in that first record:
 - `+0x49`, `+0x4d`, `+0x51`, `+0x55`: outer container `x`, `y`, `w`, `h`
 - `+0x5b`: unaligned dword copied into the viewer object at `+0x20`
   - the recovered constructor path stores it as a container-side control field
-  - no recovered `MOSVIEW` read path in this pass interprets it as geometry,
-    text, or startup navigation state
+  - the synthetic title currently sends a red `COLORREF` here as the
+    MosViewContainer color probe
 - `+0x78`: `COLORREF` for the thin top child band tied to the child rect below
 - `+0x7c`: `COLORREF` for the scrolling host strip; in the synthetic-title
   probe this is the white strip that carries the vertical scrollbar

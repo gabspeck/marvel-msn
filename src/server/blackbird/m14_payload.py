@@ -10,12 +10,15 @@ empty 9-section payload with the deid-derived caption on missing /
 unsynthesizable `.ttl`.
 
 WHY THE REAL SECTION-0 FONT TABLE
-The offline synthesizer's `FNTB` blob is only a debug placeholder.
 MVTTL14C `TitleOpenEx @ 0x7E843291` expects a real section-0 layout
 (header at +0x00..+0x11, face table, 0x2a-stride descriptor table,
-0x92-stride override table, pointer table). Shipping the minimal valid
-section-0 recipe unblocks `CreateFontIndirectA` on style 0 → `Times New
-Roman`.
+0x92-stride override table, pointer table). The live-wire path lowers
+the parsed `CStyleSheet` into a multi-face / multi-descriptor blob via
+`_build_section0_for_stylesheet` — one face entry per font key, one
+descriptor per style_id with fully merged LOGFONTA bytes. The empty-
+fallback path (no `.ttl` available) keeps the minimal recipe (single
+`Times New Roman` face entry, single descriptor) so `CreateFontIndirectA`
+still resolves on style 0.
 
 WHY THE BARE DEID FOR `mosview_open_path`
 Marvel's HRMOSExec(c=6) path does not pass a Windows path to
@@ -49,7 +52,11 @@ from .m14_synth import (
     synthetic_crc,
     validate_supported_subset,
 )
-from .ttl_inspect import inspect_blackbird_title
+from .ttl_inspect import (
+    CSTYLE_DEFAULT_PROPS,
+    inspect_blackbird_title,
+    parse_text_runs_paragraphs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +81,22 @@ class TitleOpenMetadata:
 
 
 @dataclass(frozen=True)
+class TopicParagraph:
+    """One authored paragraph + the section-0 `style_id` it renders with.
+
+    `style_id` indexes into the section-0 descriptor table built by
+    `_build_section0_for_stylesheet`; the case-1 chunk's `\\x80 <style_u16>`
+    control op selects this descriptor. The first paragraph of a topic
+    is currently assigned `style_id = 1` (Heading 1) per heuristic — see
+    `_paragraphs_from_text_runs` for the full rule. Real per-paragraph
+    style refs require TextTree RE that is still deferred.
+    """
+
+    text: str
+    style_id: int
+
+
+@dataclass(frozen=True)
 class TopicEntry:
     """Per-topic mapping consumed by selector 0x06 / 0x07 / 0x15 cache pushes.
 
@@ -82,9 +105,11 @@ class TopicEntry:
       - `topic_number` = `entry_index + 1` (selector 0x07 cache key)
       - `address`      = `0x1000 + entry_index * 0x100` (va, also addr for first paint)
       - `context_hash` = `CRC32(proxy_name.lower())` (selector 0x06 cache key)
-      - `text`         = ANSI story buffer from TextRuns CContent (case-1 chunk text)
+      - `paragraphs`   = ordered authored paragraphs (TextRuns body split on `'#'`)
 
-    `text` is empty for image entries or empty-TextRuns text entries.
+    `paragraphs` is empty for image entries and for text entries with an
+    empty TextRuns payload. Consumers fall back to the title caption
+    when no paragraph is available.
     """
 
     topic_number: int
@@ -92,7 +117,7 @@ class TopicEntry:
     context_hash: int
     proxy_name: str
     kind: str  # "text" | "image"
-    text: bytes = b""
+    paragraphs: tuple[TopicParagraph, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -135,23 +160,24 @@ class M14PayloadResult:
         return None
 
 
-# Sentinel rect values for the first sec06 record (window scaffold).
-# Flags=0 → bit 0x08 clear (outer rect = parent fraction, denominator 0x400),
-# bit 0x01 clear (top-band rect also fractional), bit 0x40 clear
-# (no bottom-align). Outer rect = full parent (0,0,0x400,0x400). The
-# child-rect band is parked as a thin top sliver. Empiric synthetic-title
-# probes show this band sits above the white scrollbar strip; the deeper
-# black content surface comes from a later scrolling-path paint layer.
-# The top band is forced magenta while the scrolling-host strip is forced
-# green for visibility probes. Field offsets are
-# code-proven
-# in `docs/mosview-mediaview-format.md` "Selector 0x06: 0x98-byte
-# Window-Scaffold Records".
+# sec06 window-scaffold defaults. Flags=0 → bit 0x08 clear (outer rect
+# = parent fraction, denominator 0x400), bit 0x01 clear (top-band rect
+# also fractional), bit 0x40 clear (no bottom-align). Outer rect =
+# full parent (0,0,0x400,0x400). The child-rect band is parked as a
+# thin top sliver. Field offsets are code-proven in
+# `docs/mosview-mediaview-format.md` "Selector 0x06: 0x98-byte
+# Window-Scaffold Records". The three COLORREFs (outer container at
+# +0x5B, top band at +0x78, scrolling-host strip at +0x7C) all default
+# to white — matches the authored Normal back_color in
+# `CSTYLE_DEFAULT_PROPS[0]` and avoids the prior red/magenta/green
+# RE-instrument scheme bleeding into shipped .ttl renders.
 _SEC06_DEFAULT_FLAGS = 0x00
 _SEC06_OUTER_RECT = (0, 0, 0x400, 0x400)
 _SEC06_NONSCROLL_RECT = (0, 0, 0x400, 0x40)
-_SEC06_TOP_BAND_COLOR = 0x00FF00FF
-_SEC06_SCROLL_HOST_COLOR = 0x0000FF00
+_SEC06_BACKDROP_WHITE = 0x00FFFFFF
+_SEC06_CONTAINER_COLOR = _SEC06_BACKDROP_WHITE
+_SEC06_TOP_BAND_COLOR = _SEC06_BACKDROP_WHITE
+_SEC06_SCROLL_HOST_COLOR = _SEC06_BACKDROP_WHITE
 
 
 def _titles_root() -> Path:
@@ -202,11 +228,38 @@ _SEC0_POINTER_ENTRY_SIZE = 4
 
 # Sentinel "inherit" rgb24 for descriptor.text_color / descriptor.back_color.
 _SEC0_RGB_INHERIT = b"\x01\x01\x01"
-_SEC0_RGB_WHITE = b"\xFF\xFF\xFF"
 
 _SEC0_DEFAULT_FACE_NAME = "Times New Roman"
 _SEC0_DEFAULT_LF_HEIGHT = -12
 _SEC0_DEFAULT_LF_WEIGHT = 400
+_SEC0_BOLD_LF_WEIGHT = 700
+
+# CCharProps `flags_word` bit pairs (`docs/mosview-authored-text-and-font-re.md`
+# §"On-Disk → Wire Field Mapping"). Each tuple: (attribute key, absent_mask
+# bit in high byte, value bit in low byte). When `absent_mask` is set the
+# attribute inherits from the parent; otherwise `value_bit` IS the explicit
+# value.
+_FLAG_BIT_TABLE = (
+    ("bold",      0x0100, 0x0002),
+    ("italic",    0x0200, 0x0004),
+    ("underline", 0x0400, 0x0008),
+    ("super",     0x0800, 0x0010),
+    ("sub",       0x1000, 0x0020),
+)
+
+# CCharProps field-level sentinels: `0xfffe` = "absent", `0xffff` =
+# "no_change". Both treated as transparent for u16 fields. Color
+# fields use the same sentinels widened to u32.
+_CCP_U16_SENTINELS = (0xFFFE, 0xFFFF)
+_CCP_U32_SENTINELS = (0xFFFFFFFE, 0xFFFFFFFF)
+
+# Resolution-chain depth limit, matches `FUN_7e8963b0` engine-side cap.
+_SEC0_RESOLVE_DEPTH_LIMIT = 0x14
+
+# Strikethrough is a name-tagged effect: `name_index 0x22` always sets
+# `lfStrikeOut`, regardless of `flags_word` bits (per "Reserved bits"
+# finding — strike is delivered by the renderer via NAME, not a flag).
+_NAME_INDEX_STRIKETHROUGH = 0x22
 
 
 def _encode_face_table_entry(face_name: str) -> bytes:
@@ -223,23 +276,45 @@ def _encode_face_table_entry(face_name: str) -> bytes:
     return encoded.ljust(_SEC0_FACE_ENTRY_SIZE, b"\x00")
 
 
+def _build_face_table(fonts: list[dict] | None) -> bytes:
+    """Build the section-0 face table from `CStyleSheet.fonts`.
+
+    `fonts` is a list of `{key, name}` per `parse_stylesheet_header`. Output
+    is sized to `max(key) + 1`; slots without a font entry are zero-filled.
+    Empty / missing names also yield a zero slot — matches font key 0
+    convention (reserved as the "inherit" / empty slot in authored TTLs).
+
+    Returns the minimal `Times New Roman` single-entry table when `fonts`
+    is empty / None — used by the empty-fallback path so descriptor 0
+    still resolves to a real face string.
+    """
+    if not fonts:
+        return _encode_face_table_entry(_SEC0_DEFAULT_FACE_NAME)
+    max_key = max(f["key"] for f in fonts)
+    table = bytearray((max_key + 1) * _SEC0_FACE_ENTRY_SIZE)
+    for f in fonts:
+        if not f["name"]:
+            continue
+        slot = f["key"] * _SEC0_FACE_ENTRY_SIZE
+        table[slot:slot + _SEC0_FACE_ENTRY_SIZE] = _encode_face_table_entry(f["name"])
+    return bytes(table)
+
+
 def _encode_descriptor(
     face_slot_index: int,
-    lf_height: int = _SEC0_DEFAULT_LF_HEIGHT,
-    lf_weight: int = _SEC0_DEFAULT_LF_WEIGHT,
-    text_color: bytes = _SEC0_RGB_WHITE,
+    lf_height: int,
+    lf_weight: int,
+    lf_italic: int = 0,
+    lf_underline: int = 0,
+    lf_strikeout: int = 0,
+    text_color: bytes = _SEC0_RGB_INHERIT,
     back_color: bytes = _SEC0_RGB_INHERIT,
 ) -> bytes:
-    """Encode a 0x2a-byte descriptor record per the §"Descriptor Record" doc.
-
-    Fields not listed (lfWidth, lfEscapement, lfOrientation, lfItalic,
-    lfUnderline, lfStrikeOut, lfCharSet, lfOutPrecision, lfClipPrecision,
-    lfQuality, lfPitchAndFamily, style_flags, extra_flags) default to 0
-    per the "Minimal Valid Section-0 Recipe". The current wire experiment
-    forces descriptor 0 text to white so case-1 text remains visible even
-    when the title-default text color resolves to black; background color
-    still inherits from the title default.
-    """
+    """Encode a 0x2a-byte descriptor record per §"Descriptor Record" in
+    `docs/mosview-authored-text-and-font-re.md`. `descriptor + 0x0c..+0x27`
+    is the LOGFONTA prefix copied into `CreateFontIndirectA` (proved by
+    `FUN_7e896ba0`); face name resolves via `face_slot_index` against the
+    face table at `face_name_table_off + face_slot_index * 0x20`."""
     rec = bytearray(_SEC0_DESCRIPTOR_SIZE)
     struct.pack_into(
         "<HHH",
@@ -261,87 +336,288 @@ def _encode_descriptor(
         0,                             # +0x18 lfOrientation
         lf_weight,                     # +0x1C lfWeight
     )
-    # +0x20..+0x29 — all remaining LOGFONT bytes + style_flags / extra_flags
-    # left at zero (already initialised by bytearray()).
+    rec[0x20] = lf_italic & 0xFF         # +0x20 lfItalic
+    rec[0x21] = lf_underline & 0xFF      # +0x21 lfUnderline
+    rec[0x22] = lf_strikeout & 0xFF      # +0x22 lfStrikeOut
+    # +0x23..+0x29 — lfCharSet/lfOutPrecision/lfClipPrecision/lfQuality/
+    # lfPitchAndFamily/style_flags/extra_flags all zero (defaults documented
+    # in §"Minimal Valid Section-0 Recipe"; on-disk source has no
+    # corresponding fields).
     return bytes(rec)
 
 
-def _build_section0_font_table() -> bytes:
-    """Build the minimal valid section-0 font blob.
+def _initial_resolved_attrs() -> dict:
+    """Engine-global fallback for fields with no source up the chain.
 
-    Layout:
+    Mirrors `LoadDefaultStyle`'s baked-in defaults: Times New Roman 12pt,
+    no styling, both colors set to "inherit from title default" (wire
+    sentinel `0x010101`)."""
+    return {
+        "font_id": 1,
+        "pt_size": 12,
+        "text_color": None,
+        "back_color": None,
+        "bold": False,
+        "italic": False,
+        "underline": False,
+        "super": False,
+        "sub": False,
+        "strikeout": False,
+    }
 
-      +0x00  header (18 B) — face_name_table_off, descriptor_table_off,
-             override_table_off, pointer_table_off, descriptor_count=0xFFFF,
-             override_count=0
-      +0x12  face table  — one 0x20-byte entry: "Times New Roman"
-      +0x32  descriptors — one 0x2a-byte entry: face_slot=0, lfHeight=-12,
-             lfWeight=400, text_color=white, all else 0/inherit
-      +0x5C  overrides   — empty (override_count=0)
-      +0x5C  pointer tbl — one 4-byte null entry
 
-    Total size: 0x60 bytes.
+def _merge_flags(resolved: dict, flags_word: int) -> None:
+    """Merge a CCharProps `flags_word` into a resolved attrs dict.
 
-    Per `docs/mosview-authored-text-and-font-re.md` §"Minimal Valid
-    Section-0 Recipe" — covers `CreateFontIndirectA` on style 0.
+    Per attribute, when the absent_mask bit is clear the value bit is the
+    explicit value; when set, the attribute inherits (no change to
+    `resolved`). See `_FLAG_BIT_TABLE` for bit layout."""
+    for attr, absent_mask, value_bit in _FLAG_BIT_TABLE:
+        if not (flags_word & absent_mask):
+            resolved[attr] = bool(flags_word & value_bit)
 
-    DESCRIPTOR_COUNT = 0xFFFF — clamp every style_id to 0
-    `MVCL14N!FUN_7e896610 @ 0x7E896632` does
-        MOVSX EAX, word ptr [EDI+2]   ; sign-extend descriptor_count
-        CMP   EAX, style_id
-        JG    skip                    ; signed: skip clamp if count > id
-        XOR   ECX, ECX                ; else style_id = 0
-    The case-1 layout pass inherits font index from `puVar2[+0x18]`
-    (initialised to 0xFFFF / -1 in `MVCL14N!FUN_7e890fd0 @ 0x7E891034`),
-    so the slot emitted by `FUN_7e892d30` carries `slot+0x3F = -1`.
-    With `descriptor_count = 1` (signed `1 > -1` → true) the clamp is
-    skipped and `FUN_7e896590` reads at
-    `descriptor_table_off + (-1)*0x2a = base - 42` — garbage outside
-    the descriptor table → `CreateFontIndirectA` builds an invisible
-    font (lfHeight ≈ 0, lfWeight = stray bytes from the face entry).
-    Setting `descriptor_count = 0xFFFF` makes the sign-extended value
-    -1, so `signed -1 > -1` is FALSE → style_id is forced to 0 →
-    descriptor[0] is read → Times New Roman renders. With one
-    descriptor, every legal style id resolves to the same font, which
-    matches the first-paint contract anyway.
-    """
-    # `descriptor_count` is only consumed by the clamp at FUN_7e896610;
-    # the engine never iterates that count, so reporting 0xFFFF (= -1)
-    # in the header is safe even though we still emit exactly one
-    # descriptor record on the wire.
-    advertised_descriptor_count = 0xFFFF
-    actual_descriptor_count = 1
-    override_count = 0
+
+def _apply_default_props(resolved: dict, defaults: dict) -> None:
+    """Apply per-name-index defaults from CSTYLE_DEFAULT_PROPS."""
+    if defaults["font_id"] != 0:
+        resolved["font_id"] = defaults["font_id"]
+    if defaults["pt_size"] != 0:
+        resolved["pt_size"] = defaults["pt_size"]
+    if defaults["text_color"] not in _CCP_U32_SENTINELS:
+        resolved["text_color"] = defaults["text_color"]
+    if defaults["back_color"] not in _CCP_U32_SENTINELS:
+        resolved["back_color"] = defaults["back_color"]
+    _merge_flags(resolved, defaults["flags_word"])
+
+
+def _apply_char_props(resolved: dict, fields: dict) -> None:
+    """Apply authored CCharProps overrides on top of resolved attrs."""
+    fid = fields.get("font_id")
+    if fid is not None and fid != 0 and fid not in _CCP_U16_SENTINELS:
+        resolved["font_id"] = fid
+    pt = fields.get("pt_size")
+    if pt is not None and pt != 0 and pt not in _CCP_U16_SENTINELS:
+        resolved["pt_size"] = pt
+    tc = fields.get("text_color")
+    if tc is not None and tc not in _CCP_U32_SENTINELS:
+        resolved["text_color"] = tc
+    bc = fields.get("back_color")
+    if bc is not None and bc not in _CCP_U32_SENTINELS:
+        resolved["back_color"] = bc
+    fw = fields.get("flags_word")
+    if fw is not None:
+        _merge_flags(resolved, fw)
+
+
+def _resolve_style_attrs(style_id: int, parsed_by_id: dict[int, dict]) -> dict:
+    """Resolve a style's wire attributes by walking its based_on chain.
+
+    Walks from leaf (`style_id`) up to root, capping at
+    `_SEC0_RESOLVE_DEPTH_LIMIT` (mirrors `FUN_7e8963b0` engine cap). Then
+    replays the chain root→leaf, layering per-name-index defaults
+    (`CSTYLE_DEFAULT_PROPS`) followed by authored CCharProps overrides at
+    each level. Result is a flat attrs dict consumed by
+    `_encode_descriptor_for_style`.
+
+    Strikethrough special-case: when the leaf's `name_index == 0x22`, set
+    `strikeout = True` regardless of the merged flags_word (the renderer
+    delivers strike via name match, not a flag bit — pinned in
+    `docs/mosview-authored-text-and-font-re.md` §"Reserved bits")."""
+    chain: list[tuple[int, int, dict | None]] = []
+    seen: set[int] = set()
+    cursor: int | None = style_id
+    while (
+        cursor is not None
+        and len(chain) < _SEC0_RESOLVE_DEPTH_LIMIT
+        and cursor not in seen
+    ):
+        seen.add(cursor)
+        parsed = parsed_by_id.get(cursor)
+        if parsed is None:
+            chain.append((cursor, cursor, None))
+            break
+        chain.append((cursor, parsed["name_index"], parsed))
+        cursor = parsed["based_on"]
+    chain.reverse()  # root → leaf
+
+    resolved = _initial_resolved_attrs()
+    for _sid, name_index, parsed in chain:
+        if name_index < len(CSTYLE_DEFAULT_PROPS):
+            _apply_default_props(resolved, CSTYLE_DEFAULT_PROPS[name_index])
+        if parsed and parsed["char_props"]:
+            _apply_char_props(resolved, parsed["char_props"]["fields"])
+
+    leaf = parsed_by_id.get(style_id)
+    if leaf and leaf["name_index"] == _NAME_INDEX_STRIKETHROUGH:
+        resolved["strikeout"] = True
+
+    return resolved
+
+
+def _encode_color(value: int | None) -> bytes:
+    """Pack a COLORREF (or None for inherit) into the descriptor's rgb24
+    field. COLORREF byte order is `[R, G, B, 0]`; we ship the first three
+    bytes verbatim. `None` resolves to the "inherit from title default"
+    sentinel `0x010101`."""
+    if value is None:
+        return _SEC0_RGB_INHERIT
+    return (value & 0xFFFFFF).to_bytes(3, "little")
+
+
+def _descriptor_from_resolved(resolved: dict) -> bytes:
+    """Encode a fully-resolved attrs dict into a 0x2a-byte descriptor."""
+    pt_size = resolved["pt_size"]
+    lf_height = -(pt_size * 20) if pt_size else _SEC0_DEFAULT_LF_HEIGHT
+    lf_weight = _SEC0_BOLD_LF_WEIGHT if resolved["bold"] else _SEC0_DEFAULT_LF_WEIGHT
+    return _encode_descriptor(
+        face_slot_index=resolved["font_id"],
+        lf_height=lf_height,
+        lf_weight=lf_weight,
+        lf_italic=1 if resolved["italic"] else 0,
+        lf_underline=1 if resolved["underline"] else 0,
+        lf_strikeout=1 if resolved["strikeout"] else 0,
+        text_color=_encode_color(resolved["text_color"]),
+        back_color=_encode_color(resolved["back_color"]),
+    )
+
+
+def _pack_section0_header(
+    descriptor_count_field: int,
+    face_table_size: int,
+    descriptor_count_actual: int,
+    override_count: int,
+) -> bytes:
+    """Emit the 18-byte section-0 header. `descriptor_count_field` is what
+    the engine sign-extends and compares against incoming style_ids in
+    `MVCL14N!FUN_7e896610`; the actual records emitted are determined by
+    `descriptor_count_actual`."""
     face_name_table_off = _SEC0_HEADER_SIZE
-    descriptor_table_off = face_name_table_off + (1 * _SEC0_FACE_ENTRY_SIZE)
-    override_table_off = descriptor_table_off + (actual_descriptor_count * _SEC0_DESCRIPTOR_SIZE)
-    pointer_table_off = override_table_off + (override_count * _SEC0_OVERRIDE_SIZE)
-
+    descriptor_table_off = face_name_table_off + face_table_size
+    override_table_off = (
+        descriptor_table_off + descriptor_count_actual * _SEC0_DESCRIPTOR_SIZE
+    )
+    pointer_table_off = override_table_off + override_count * _SEC0_OVERRIDE_SIZE
     header = bytearray(_SEC0_HEADER_SIZE)
     struct.pack_into(
         "<HHHHHHH",
         header,
         0x00,
-        0,                            # +0x00 header_word_0 (unused on first paint)
-        advertised_descriptor_count,  # +0x02 descriptor_count (sign-extended → -1)
-        face_name_table_off,          # +0x04 face_name_table_off
-        descriptor_table_off,         # +0x06 descriptor_table_off
-        override_count,               # +0x08 override_count
-        override_table_off,           # +0x0a override_table_off
-        0,                            # +0x0c header_word_0c (unused on first paint)
+        0,                              # +0x00 header_word_0 (unused on first paint)
+        descriptor_count_field & 0xFFFF,  # +0x02 descriptor_count
+        face_name_table_off,            # +0x04 face_name_table_off
+        descriptor_table_off,           # +0x06 descriptor_table_off
+        override_count,                 # +0x08 override_count
+        override_table_off,             # +0x0a override_table_off
+        0,                              # +0x0c header_word_0c (unused)
     )
-    # +0x0e/+0x0f padding stays zero; +0x10 pointer_table_off
     struct.pack_into("<H", header, 0x10, pointer_table_off)
+    return bytes(header)
 
+
+def _build_minimal_section0() -> bytes:
+    """Build the minimal valid section-0 font blob (96 bytes total).
+
+    One face entry (`Times New Roman`), one descriptor (face_slot=0,
+    lfHeight=-12, lfWeight=400, both colors inherit). Used on the
+    empty-fallback path when no `.ttl` model is available.
+
+    `descriptor_count = 0xFFFF` (sign-extended → -1) forces every incoming
+    `style_id` through the `FUN_7e896610` clamp to 0, so every authored
+    style_id renders against descriptor[0]. Without this clamp the case-1
+    layout pass inherits font index `-1` from `FUN_7e890fd0` and reads
+    `descriptor_table_off + (-1)*0x2a` — garbage that yields an invisible
+    font."""
     face_table = _encode_face_table_entry(_SEC0_DEFAULT_FACE_NAME)
-    descriptor_table = _encode_descriptor(face_slot_index=0)
-    override_table = b""
-    pointer_table = struct.pack("<I", 0)  # one null entry
+    descriptor_table = _encode_descriptor(
+        face_slot_index=0,
+        lf_height=_SEC0_DEFAULT_LF_HEIGHT,
+        lf_weight=_SEC0_DEFAULT_LF_WEIGHT,
+    )
+    header = _pack_section0_header(
+        descriptor_count_field=0xFFFF,
+        face_table_size=len(face_table),
+        descriptor_count_actual=1,
+        override_count=0,
+    )
+    pointer_table = struct.pack("<I", 0)
+    return header + face_table + descriptor_table + pointer_table
 
-    return bytes(header) + face_table + descriptor_table + override_table + pointer_table
+
+_SECTION0_FONT_BLOB = _build_minimal_section0()
 
 
-_SECTION0_FONT_BLOB = _build_section0_font_table()
+def _merge_linked_stylesheet_styles(
+    stylesheet: dict,
+) -> list[dict]:
+    """Apply Phase 4 linked-stylesheet merge to a section-local stylesheet.
+
+    When `linked_stylesheet_present == 1`, the section-local stylesheet's
+    style list overrides the title-level base for matching `style_id`s.
+    Resolution semantics in `docs/mosview-authored-text-and-font-re.md`:
+    walk handle table at the swizzle index, decode the target via
+    `decode_handle()`, merge by style_id with local taking precedence.
+
+    Today's `build_source_model` exposes only one CStyleSheet, so the
+    linked target is unreachable. Returns the local style list unchanged
+    in that case — Phase 4 is structurally a no-op until multi-stylesheet
+    TTLs are surfaced upstream. The merge logic itself, when a future
+    upstream wires up `stylesheet["linked_stylesheet_styles"]`, is:
+    base.union(local), with local entries overriding base on style_id."""
+    local_styles = stylesheet.get("styles", [])
+    base_styles = stylesheet.get("linked_stylesheet_styles") or []
+    if not base_styles:
+        return list(local_styles)
+    merged_by_id: dict[int, dict] = {s["style_id"]: s for s in base_styles}
+    for s in local_styles:
+        merged_by_id[s["style_id"]] = s
+    return [merged_by_id[k] for k in sorted(merged_by_id)]
+
+
+def _build_section0_for_stylesheet(stylesheet: dict) -> bytes:
+    """Build a multi-face / multi-descriptor section-0 from a parsed
+    `CStyleSheet`.
+
+    Phase 1: face table sized to `max(font.key) + 1`, one entry per
+    `CStyleSheet.fonts[i]`.
+    Phase 2: one descriptor per style_id, fully merged via
+    `_resolve_style_attrs` (per-name-index defaults + based_on chain +
+    authored CCharProps overrides).
+    Phase 3: shipped empty (override_count = 0); descriptors are
+    pre-merged so the engine's override walker has nothing to add.
+    Phase 4: applied via `_merge_linked_stylesheet_styles`.
+
+    Falls back to `_build_minimal_section0()` when the stylesheet has
+    no styles — keeps the engine on a fully-validated branch."""
+    merged_styles = _merge_linked_stylesheet_styles(stylesheet)
+    if not merged_styles:
+        return _build_minimal_section0()
+
+    parsed_by_id = {s["style_id"]: s for s in merged_styles}
+    descriptor_count = max(parsed_by_id) + 1
+    face_table = _build_face_table(stylesheet.get("fonts"))
+
+    descriptor_table = bytearray()
+    for style_id in range(descriptor_count):
+        resolved = _resolve_style_attrs(style_id, parsed_by_id)
+        descriptor_table += _descriptor_from_resolved(resolved)
+
+    header = _pack_section0_header(
+        descriptor_count_field=descriptor_count,
+        face_table_size=len(face_table),
+        descriptor_count_actual=descriptor_count,
+        override_count=0,
+    )
+    # Pointer-table sized to match the face table — `MVCL14N!FUN_7e896661`
+    # indexes `pointer_table[face_slot_index * 4]` and dereferences a
+    # non-zero entry at `[+0x16]` to seed `title+0xB4`. With a one-entry
+    # null table any descriptor whose `face_slot_index >= 1` walks past
+    # the blob end and reads neighbour memory — observed AV at EAX
+    # garbage (0x04080000) on MOSVIEW open of `4.ttl`. Zero-filling all
+    # slots forces the alternate `MOV [ESI+0xB4], 0` branch, which the
+    # first-paint path doesn't read again.
+    face_entry_count = len(face_table) // _SEC0_FACE_ENTRY_SIZE
+    pointer_table = b"\x00" * (face_entry_count * _SEC0_POINTER_ENTRY_SIZE)
+    return header + face_table + bytes(descriptor_table) + pointer_table
 
 
 def _encode_fixed_section(records: list[bytes], record_size: int) -> bytes:
@@ -370,6 +646,7 @@ def _build_sec06_window_scaffold_record() -> bytes:
     record[0x15:0x1E] = b"\x00" * 9
     record[0x48] = _SEC06_DEFAULT_FLAGS
     struct.pack_into("<IIII", record, 0x49, *_SEC06_OUTER_RECT)
+    struct.pack_into("<I", record, 0x5B, _SEC06_CONTAINER_COLOR)
     struct.pack_into(
         "<II",
         record,
@@ -397,9 +674,10 @@ def _build_live_wire_payload(model: dict, mosview_open_path: str) -> bytes:
     sec6a = encode_c_string(mosview_open_path)
     sec13_entries = build_selector_13_entries()
     sec06_records = [_build_sec06_window_scaffold_record()]
+    section0_blob = _build_section0_for_stylesheet(model["stylesheet"])
     return b"".join(
         [
-            encode_blob_section(_SECTION0_FONT_BLOB),
+            encode_blob_section(section0_blob),
             _encode_fixed_section([], 0x2B),
             _encode_fixed_section([], 0x1F),
             _encode_fixed_section(sec06_records, 0x98),
@@ -412,27 +690,31 @@ def _build_live_wire_payload(model: dict, mosview_open_path: str) -> bytes:
     )
 
 
-def _extract_text_runs_body(payload: bytes) -> bytes:
-    """Lower one TextRuns CContent payload to its ANSI story buffer.
+_HEADING_STYLE_ID = 1   # CSTYLE_NAME_DICTIONARY[1] = "Heading 1"
+_BODY_STYLE_ID = 0      # CSTYLE_NAME_DICTIONARY[0] = "Normal"
 
-    Observed format (`docs/blackbird-title-format.md` "CContent" +
-    Homepage.bdf empirical dump): `[u16 schema_prefix][ANSI text]`.
-    Strategy: skip the 2-byte prefix, strip a leading `'S'` marker
-    that prefixes every observed body, truncate at the first NUL.
 
-    The exact role of the leading `'S'` byte and the `'#'` paragraph
-    delimiters is RE-deferred. Returns empty bytes for empty / unknown
-    payloads.
+def _paragraphs_from_text_runs(payload: bytes) -> tuple[TopicParagraph, ...]:
+    """Lower a TextRuns CContent into a tuple of styled paragraphs.
+
+    Heuristic style assignment: the first authored paragraph maps to
+    Heading 1 (`style_id = 1`), the rest to Normal (`style_id = 0`).
+    Per-paragraph style refs are not preserved on the wire by TextRuns
+    alone — that information lives in TextTree, where the inline item-
+    record headers carry name_index/style_id refs (RE-deferred). The
+    heuristic mirrors the typical authored shape (one heading followed
+    by body paragraphs) and is the smallest mapping that exercises both
+    bold/Arial and Roman typography on the rendering path.
     """
-    if len(payload) < 3:
-        return b""
-    body = payload[2:]
-    nul = body.find(b"\x00")
-    if nul >= 0:
-        body = body[:nul]
-    if body.startswith(b"S"):
-        body = body[1:]
-    return bytes(body)
+    paragraphs = parse_text_runs_paragraphs(payload)
+    if not paragraphs:
+        return ()
+    out = [TopicParagraph(text=paragraphs[0], style_id=_HEADING_STYLE_ID)]
+    out.extend(
+        TopicParagraph(text=p, style_id=_BODY_STYLE_ID)
+        for p in paragraphs[1:]
+    )
+    return tuple(out)
 
 
 def _build_topic_entries(model: dict) -> tuple[TopicEntry, ...]:
@@ -448,11 +730,11 @@ def _build_topic_entries(model: dict) -> tuple[TopicEntry, ...]:
     out: list[TopicEntry] = []
     for entry in entries:
         if entry["kind"] == "text":
-            text = _extract_text_runs_body(
+            paragraphs = _paragraphs_from_text_runs(
                 entry.get("text_runs", {}).get("payload", b"")
             )
         else:
-            text = b""
+            paragraphs = ()
         out.append(
             TopicEntry(
                 topic_number=entry["topic_number"],
@@ -460,7 +742,7 @@ def _build_topic_entries(model: dict) -> tuple[TopicEntry, ...]:
                 context_hash=entry["context_hash"],
                 proxy_name=entry["proxy_name"],
                 kind=entry["kind"],
-                text=text,
+                paragraphs=paragraphs,
             )
         )
     return tuple(out)
