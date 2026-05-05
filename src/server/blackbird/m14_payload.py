@@ -163,6 +163,13 @@ class M14PayloadResult:
     metadata: TitleOpenMetadata = field(default_factory=TitleOpenMetadata)
     topics: tuple[TopicEntry, ...] = ()
     captions: tuple[CaptionEntry, ...] = ()
+    # Page pixel dimensions (CBFrame.rect_right/bottom in pt → pixels at
+    # 96 DPI). Drives the off-screen bitmap MOSVIEW allocates for kind=8
+    # metafile playback (`MOSVIEW.EXE!FUN_7e887180` uses `piVar2[3]`/
+    # `piVar2[4]` for `CreateDiscardableBitmap`). Zero ⇒ empty bitmap ⇒
+    # text rendered to nothing.
+    page_pixel_w: int = 0
+    page_pixel_h: int = 0
 
     def topic_by_number(self, topic_number: int) -> TopicEntry | None:
         for t in self.topics:
@@ -976,10 +983,21 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
         )
         for c in model.get("captions", [])
     )
+    # CBFrame stores rect_left/top/right/bottom in points (twips/20 in
+    # the on-disk record but BBDESIGN's UI labels them as pt). Convert
+    # to device pixels at the engine's assumed 96 DPI for the off-screen
+    # bitmap MOSVIEW allocates during PlayMetaFile.
+    frame = model["frame"]
+    page_w_pt = max(0, frame["rect_right"] - frame["rect_left"])
+    page_h_pt = max(0, frame["rect_bottom"] - frame["rect_top"])
+    page_pixel_w = page_w_pt * 96 // 72
+    page_pixel_h = page_h_pt * 96 // 72
     return M14PayloadResult(
         payload=wire_payload,
         caption=caption,
         metadata=metadata,
         topics=topics,
         captions=captions,
+        page_pixel_w=page_pixel_w,
+        page_pixel_h=page_pixel_h,
     )

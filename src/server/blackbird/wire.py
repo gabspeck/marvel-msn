@@ -204,6 +204,210 @@ def build_baggage_container(bitmap: bytes) -> bytes:
     return struct.pack("<HHI", 0, 1, 8) + bitmap
 
 
+# --------------------------------------------------------------------------
+# Win32 metafile (.WMF) — kind=8 baggage carries arbitrary GDI records
+# (TextOut, font select, etc.) that PlayMetaFile renders at the parent
+# slot's origin. This is the wire primitive for absolute-positioned text:
+# `MOSVIEW.EXE!FUN_7e887180` SetViewportOrgEx → SetMapMode → PlayMetaFile;
+# `MVCL14N!FUN_7e8870a0` calls SetMetaFileBitsEx on the bytes at
+# parsed_baggage+0x1e.
+# --------------------------------------------------------------------------
+
+# WMF function codes (META_*) used by `build_text_metafile`.
+_META_EOF = 0x0000
+_META_SETBKMODE = 0x0102
+_META_SELECTOBJECT = 0x012D
+_META_DELETEOBJECT = 0x01F0
+_META_TEXTOUT = 0x0521
+_META_CREATEFONTINDIRECT = 0x02FB
+
+_BKMODE_TRANSPARENT = 1
+
+
+def _wmf_record(rd_function: int, params: bytes) -> bytes:
+    """Encode one WMF record. `rdSize` = total record size in WORDs
+    (including rdSize and rdFunction). `params` must be even-length.
+    """
+    if len(params) & 1:
+        raise ValueError("WMF record params must be even-byte length")
+    rd_size_words = (4 + 2 + len(params)) // 2  # rdSize(4) + rdFunction(2) + params
+    return struct.pack("<IH", rd_size_words, rd_function & 0xFFFF) + params
+
+
+def _wmf_setbkmode(mode: int) -> bytes:
+    return _wmf_record(_META_SETBKMODE, struct.pack("<H", mode & 0xFFFF))
+
+
+def _wmf_selectobject(idx: int) -> bytes:
+    return _wmf_record(_META_SELECTOBJECT, struct.pack("<H", idx & 0xFFFF))
+
+
+def _wmf_deleteobject(idx: int) -> bytes:
+    return _wmf_record(_META_DELETEOBJECT, struct.pack("<H", idx & 0xFFFF))
+
+
+def _wmf_eof() -> bytes:
+    return _wmf_record(_META_EOF, b"")
+
+
+def _wmf_textout(x: int, y: int, text: str) -> bytes:
+    """META_TEXTOUT record. WMF order is: count, string_bytes (padded to
+    even), Y, X (note: Y *before* X — opposite of typical GDI calls).
+    """
+    text_bytes = text.encode("ascii", errors="replace")
+    if len(text_bytes) & 1:
+        text_bytes += b"\x00"  # pad to even
+    params = struct.pack("<H", len(text)) + text_bytes + struct.pack("<hh", y, x)
+    return _wmf_record(_META_TEXTOUT, params)
+
+
+def _wmf_createfontindirect(
+    *,
+    height: int,
+    weight: int = 400,
+    italic: bool = False,
+    underline: bool = False,
+    strikeout: bool = False,
+    face_name: str = "MS Sans Serif",
+) -> bytes:
+    """META_CREATEFONTINDIRECT record carrying a packed LOGFONTA.
+
+    Layout per MS-WMF: 18-byte LOGFONT prefix (Height, Width, Escapement,
+    Orientation, Weight as i16; Italic, Underline, StrikeOut, CharSet,
+    OutPrecision, ClipPrecision, Quality, PitchAndFamily as u8) followed
+    by a NUL-terminated ASCII face name. Record padded to even bytes.
+    """
+    face_bytes = face_name.encode("ascii", errors="replace") + b"\x00"
+    if len(face_bytes) & 1:
+        face_bytes += b"\x00"
+    logfont = struct.pack(
+        "<hhhhhBBBBBBBB",
+        height,
+        0,                  # Width (= 0 → matched on aspect ratio)
+        0,                  # Escapement
+        0,                  # Orientation
+        weight,
+        1 if italic else 0,
+        1 if underline else 0,
+        1 if strikeout else 0,
+        0,                  # CharSet (ANSI_CHARSET)
+        0,                  # OutPrecision (default)
+        0,                  # ClipPrecision (default)
+        0,                  # Quality (default)
+        0,                  # PitchAndFamily (default)
+    )
+    return _wmf_record(_META_CREATEFONTINDIRECT, logfont + face_bytes)
+
+
+def build_text_metafile(
+    items: list[tuple[int, int, str]],
+    *,
+    font_face: str = "MS Sans Serif",
+    font_height: int = -12,
+    font_weight: int = 400,
+) -> bytes:
+    """Build a Win32 .WMF rendering text strings at absolute (x, y).
+
+    `items` is a list of `(x_pixels, y_pixels, text)` tuples in the
+    coordinate system MOSVIEW will set up before `PlayMetaFile`. Caller
+    chooses the mapping mode via the kind=8 baggage `mapmode` byte —
+    for MM_TEXT (=1), x/y are device pixels.
+
+    All items share one font (created at start, deleted at end). Text
+    color and text alignment come from the engine's pre-PlayMetaFile
+    `SetTextColor` (= title+0x8c) — the metafile doesn't override.
+    BkMode is set TRANSPARENT so text doesn't fill its bounding box
+    with the system window color.
+    """
+    records = bytearray()
+    records += _wmf_setbkmode(_BKMODE_TRANSPARENT)
+    records += _wmf_createfontindirect(
+        height=font_height,
+        weight=font_weight,
+        face_name=font_face,
+    )
+    records += _wmf_selectobject(0)
+    for x, y, text in items:
+        records += _wmf_textout(int(x), int(y), text)
+    records += _wmf_deleteobject(0)
+    records += _wmf_eof()
+
+    # METAHEADER (18 bytes = 9 WORDs):
+    #   Type (1=memory), HeaderSize (=9), Version (=0x0300),
+    #   Size (in WORDs), NumberOfObjects, MaxRecord, NumberOfMembers (=0)
+    record_word_sizes = []
+    pos = 0
+    while pos < len(records):
+        rd_size = struct.unpack_from("<I", records, pos)[0]
+        record_word_sizes.append(rd_size)
+        pos += rd_size * 2
+    max_record = max(record_word_sizes) if record_word_sizes else 0
+    total_words = 9 + len(records) // 2  # header + body
+    header = struct.pack(
+        "<HHHIHIH",
+        1,                  # Type (memory)
+        9,                  # HeaderSize (WORDs)
+        0x0300,             # Version
+        total_words,        # Size (WORDs)
+        1,                  # NumberOfObjects (font slot)
+        max_record,         # MaxRecord (WORDs)
+        0,                  # NumberOfMembers
+    )
+    return bytes(header) + bytes(records)
+
+
+def build_kind8_baggage(
+    metafile_bytes: bytes,
+    *,
+    mapmode: int = 1,
+    viewport_w: int = 0,
+    viewport_h: int = 0,
+) -> bytes:
+    """Wrap a Win32 metafile in a kind=8 baggage container.
+
+    Layout consumed by `MVCL14N!FUN_7e887a40` (kind=8 branch):
+      +0      u8     kind = 0x08
+      +1      u8     compression (0 = raw)
+      +2..    varint mapmode (narrow byte if mapmode <= 0x7F)
+      +...    u16    viewport_w (raw, used for SetViewportExtEx when mapmode == 7|8)
+      +...    u16    viewport_h
+      +...    varint decompressed_metafile_size
+      +...    varint compressed_metafile_size
+      +...    varint trailer_size = 0
+      +...    u32    metafile_data_offset (rel. baggage start)
+      +...    u32    trailer_offset
+      +...    metafile bytes (raw)
+
+    For `mapmode = 1` (MM_TEXT), `viewport_w/h` are unused — engine
+    skips both `SetWindowExtEx` and `SetViewportExtEx`. Logical units
+    in the metafile = device pixels.
+    """
+    mapmode_varint = encode_byte_or_ushort_varint(mapmode)
+    decompressed_size = len(metafile_bytes)
+    compressed_size = len(metafile_bytes)
+    trailer_size = 0
+
+    size_varints = (
+        encode_ushort_or_u32_varint(decompressed_size)
+        + encode_ushort_or_u32_varint(compressed_size)
+        + encode_ushort_or_u32_varint(trailer_size)
+    )
+    header_prefix = (
+        bytes([0x08, 0x00])                                    # kind, compression
+        + mapmode_varint
+        + struct.pack("<HH", viewport_w & 0xFFFF, viewport_h & 0xFFFF)
+        + size_varints
+    )
+    header_len = len(header_prefix) + 8                        # + 2 u32 offsets
+    metafile_data_offset = header_len
+    trailer_offset = metafile_data_offset + len(metafile_bytes)
+    return (
+        header_prefix
+        + struct.pack("<II", metafile_data_offset, trailer_offset)
+        + metafile_bytes
+    )
+
+
 def build_case3_bf_chunk(
     title_byte: int,
     key: int,

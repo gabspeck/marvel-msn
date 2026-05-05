@@ -34,6 +34,8 @@ from ..blackbird.wire import (
     build_case1_bf_chunk,
     build_case3_bf_chunk,
     build_kind5_raster,
+    build_kind8_baggage,
+    build_text_metafile,
     build_trailer,
     build_type0_status_record,
     build_type3_op4_frame,
@@ -128,19 +130,14 @@ _BM0_BPP = 24
 _BM0_PIXEL_BYTES = _BM0_WIDTH * _BM0_HEIGHT * 3  # 12288 B for 64×64 24bpp
 
 
-def _build_bm0_container():
-    """Build the bm0 baggage container — the parent cell's backdrop bitmap.
+def _build_bm0_raster_container():
+    """Build a solid-white kind=5 raster bm0 — the empty fallback.
 
-    `MVCL14N!FUN_7e886310` opens the bm0 baggage HFS file, hands the
-    bytes to `FUN_7e886820` (which extracts the trailer) and
-    `FUN_7e887a40` (which parses the kind=5 raster). The resulting
-    HBITMAP is `BitBlt`'d at paint time by `FUN_7e887180`.
-
-    Ships a solid-white 64×64 24bpp raster as the backdrop. Authored
-    bitmap content from the title's CBFrame backdrop is RE-deferred —
-    until that lowering exists, white keeps the parent cell visually
-    neutral so authored text rendering on top of it (when the case-1
-    push path is wired) reads correctly.
+    Used when the title has no authored Caption controls (no positioned
+    text to render). `MVCL14N!FUN_7e886310` opens the bm0 baggage HFS
+    file, hands bytes to `FUN_7e887a40` (kind=5 parser) → BitBlt at
+    `FUN_7e887180`. With trailer empty the parent cell paints just the
+    backdrop and exits cleanly.
     """
     bitmap = build_kind5_raster(
         width=_BM0_WIDTH,
@@ -152,7 +149,87 @@ def _build_bm0_container():
     return build_baggage_container(bitmap)
 
 
-_BM0_CONTAINER = _build_bm0_container()
+# DPI assumption for Caption.rect_twips → device pixels conversion in
+# the metafile. The Win95 default + the value MOSVIEW reports via
+# GetDeviceCaps(LOGPIXELSY) on the standard VGA driver. If the client
+# DPI differs, lf_height / TextOut coords scale together so layout
+# stays visually consistent (just at a different absolute size).
+_METAFILE_ASSUMED_DPI = 96
+
+
+def _twips_to_pixels(twips: int) -> int:
+    return int(round(twips * _METAFILE_ASSUMED_DPI / 1440))
+
+
+def _build_bm0_metafile_container(captions, page_pixel_w: int, page_pixel_h: int) -> bytes:
+    """Build a kind=8 baggage carrying a Win32 metafile of all caption text.
+
+    Each Caption ships one `META_TEXTOUT` record at its authored
+    `(rect_left, rect_top)` (twips → pixels at 96 DPI). All captions
+    share one font (the first caption's authored face/size/weight) for
+    minimal metafile size; per-caption fonts can be added later by
+    bracketing each TextOut with its own CreateFontIndirect /
+    SelectObject / DeleteObject sequence.
+
+    `mapmode = MM_TEXT (1)` keeps logical units = device pixels — the
+    engine then `SetViewportOrgEx`s to the parent slot's screen origin
+    and `PlayMetaFile`s. Resulting text lands at the caption's authored
+    pane-relative position with native GDI font fidelity.
+
+    `page_pixel_w` / `page_pixel_h` are CRITICAL: `MOSVIEW.EXE!FUN_7e887180`
+    allocates an off-screen bitmap of `(piVar2[3], piVar2[4])` —
+    sourced from the kind=8 baggage's `viewport_w/h` ushorts — and
+    plays the metafile INTO that bitmap before BitBlt-ing it to the
+    pane. Zero dimensions ⇒ empty bitmap ⇒ text drawn off-canvas (we
+    saw this empirically — pane stayed blank).
+    """
+    primary = captions[0]
+    # Caption coords are page-relative (twips → pixels at 96 DPI). The
+    # metafile is fetched once but PlayMetaFile'd by every pane that
+    # repaints; each pane draws relative to its own HDC origin. SoftIce
+    # confirmed `title+0x24 = 0` and the row's Y origin is 0, so the
+    # slot-level origin is (0, 0) in pane-HDC space — text at metafile
+    # (X, Y) lands at pane-HDC (X, Y).
+    #
+    # MOSVIEW's `MosViewContainer` hosts TWO `MosChildView` panes
+    # (scrolling + non-scrolling). For a content height that exceeds
+    # the available pane area, `MOSVIEW.EXE!FUN_7f3c3670` clamps the
+    # scrolling pane to 40% of container height and routes the rest
+    # to the non-scrolling pane. Both panes paint the same case-3
+    # cell. Empirically the small top pane clips text at Y > ~218
+    # (its height), so caption coords past that threshold render only
+    # in the larger lower pane, which is the design target. The lower
+    # pane's HDC origin sits below the top pane's, so the page top is
+    # at the start of the lower pane — caption position maps directly.
+    items = [
+        (
+            _twips_to_pixels(c.rect_left),
+            _twips_to_pixels(c.rect_top),
+            c.text,
+        )
+        for c in captions
+    ]
+    # WMF `META_CREATEFONTINDIRECT` ships LOGFONTA.lfHeight in **device
+    # pixels** (negative = absolute char height). At 96 DPI a 12pt font
+    # is 16 pixels tall: `pt × 96 / 72`. The earlier `lf_height = -pt`
+    # rendered 12pt as ~9pt visual.
+    primary_height_px = -int(round((primary.font_size_pt or 12) * 96 / 72))
+    metafile = build_text_metafile(
+        items,
+        font_face=primary.font_name or "MS Sans Serif",
+        font_height=primary_height_px,
+        font_weight=int(primary.font_weight or 400),
+    )
+    baggage = build_kind8_baggage(
+        metafile,
+        mapmode=1,
+        viewport_w=page_pixel_w,
+        viewport_h=page_pixel_h,
+    )
+    return build_baggage_container(baggage)
+
+
+_BM0_CONTAINER_EMPTY = _build_bm0_raster_container()
 
 
 # --------------------------------------------------------------------------
@@ -403,7 +480,26 @@ def _push_type3_op4(kind: int):
     return build
 
 
-_PUSH_DISPATCH[MEDVIEW_FETCH_NEARBY_TOPIC] = (0, _push_case1_text)
+def _push_va_resolve(handler, title_slot, key):
+    """Dispatch selector 0x15 by handler content shape.
+
+    - **Captions** (Pages with authored Caption controls) → case-3 chunk
+      that references bm0; bm0 baggage carries a kind=8 metafile with
+      `TextOut` records at the captions' authored coords. Absolute
+      positioning via Win32 GDI metafile playback.
+    - **Topics** (titles with paragraph content, e.g. MSN Today) →
+      case-1 text-row chunk via `_push_case1_text`. Stacks rows from
+      pane top; per-paragraph absolute positioning is RE-deferred.
+    - **Empty** (no captions, no topics) → empty case-1 (skip-row)
+      keeps the engine from looping the cache miss without producing
+      visible artifacts.
+    """
+    if handler.captions:
+        return _push_case3_bitmap(handler, title_slot, key)
+    return _push_case1_text(handler, title_slot, key)
+
+
+_PUSH_DISPATCH[MEDVIEW_FETCH_NEARBY_TOPIC] = (0, _push_va_resolve)
 _PUSH_DISPATCH[MEDVIEW_FETCH_ADJACENT_TOPIC] = (0, _push_a5_status)
 _PUSH_DISPATCH[MEDVIEW_CONVERT_TOPIC_TO_VA] = (3, _push_type3_op4(0))
 _PUSH_DISPATCH[MEDVIEW_CONVERT_HASH_TO_VA] = (3, _push_type3_op4(1))
@@ -437,6 +533,10 @@ class MEDVIEWHandler:
         self.topics: tuple[TopicEntry, ...] = ()
         self.captions: tuple = ()
         self.title_caption: str = ""
+        # Per-title bm0 baggage. Replaced at OpenTitle: kind=8 metafile
+        # carrying TextOut records for the authored Caption controls
+        # when present, else the empty kind=5 white raster fallback.
+        self.bm0_container: bytes = _BM0_CONTAINER_EMPTY
         # Title slot is owned by the server — we hand out
         # `_TITLE_SLOT_PRIMARY` on OpenTitle and accept `CloseTitle`
         # against it. Multi-title sessions aren't exercised today.
@@ -693,6 +793,15 @@ class MEDVIEWHandler:
         self.topics = result.topics
         self.captions = result.captions
         self.title_caption = result.caption
+        self.bm0_container = (
+            _build_bm0_metafile_container(
+                result.captions,
+                result.page_pixel_w,
+                result.page_pixel_h,
+            )
+            if result.captions
+            else _BM0_CONTAINER_EMPTY
+        )
         self._open_title_slots.add(_TITLE_SLOT_PRIMARY)
         log.info(
             "open_title_reply title_slot=0x%02x fs_mode=%d body_len=%d "
@@ -721,6 +830,7 @@ class MEDVIEWHandler:
                 self.topics = ()
                 self.captions = ()
                 self.title_caption = ""
+                self.bm0_container = _BM0_CONTAINER_EMPTY
         return _ack()
 
     def _handle_get_title_info_remote(self, request_id, payload) -> bytes:
@@ -846,7 +956,7 @@ class MEDVIEWHandler:
         )
         if canonical == "bm0":
             handle = _BAGGAGE_HANDLE_BM0
-            size = len(_BM0_CONTAINER)
+            size = len(self.bm0_container)
         else:
             handle = 0
             size = 0
@@ -871,8 +981,8 @@ class MEDVIEWHandler:
         offset = dwords[1] if len(dwords) >= 2 else 0
         if handle_byte == _BAGGAGE_HANDLE_BM0 and count > 0:
             read_count = min(count, _HFS_READ_CHUNK_MAX)
-            end = min(offset + read_count, len(_BM0_CONTAINER))
-            chunk = _BM0_CONTAINER[offset:end]
+            end = min(offset + read_count, len(self.bm0_container))
+            chunk = self.bm0_container[offset:end]
             log.info(
                 "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d returned=%d",
                 request_id, handle_byte, count, offset, len(chunk),
