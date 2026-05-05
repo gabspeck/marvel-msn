@@ -121,6 +121,28 @@ class TopicEntry:
 
 
 @dataclass(frozen=True)
+class CaptionEntry:
+    """One authored Caption control extracted from a Page's CVForm.
+
+    `text` / `font_name` / `font_size_pt` / `font_weight` are read from
+    the BBCTL.OCX Caption control's persistent property block (see
+    `docs/cvform-page-objects.md`). `rect_left/top/right/bottom` are in
+    twips; the page-relative origin per BBDESIGN's site-descriptor
+    geometry. Consumers that lack absolute positioning (case-1 BF chunk)
+    render `text` only; bm0-trailer paths apply rect.
+    """
+
+    text: str
+    font_name: str
+    font_size_pt: float
+    font_weight: int
+    rect_left: int
+    rect_top: int
+    rect_right: int
+    rect_bottom: int
+
+
+@dataclass(frozen=True)
 class M14PayloadResult:
     """Output of `build_m14_payload_for_deid` — wire body + per-topic mapping.
 
@@ -140,6 +162,7 @@ class M14PayloadResult:
     caption: str
     metadata: TitleOpenMetadata = field(default_factory=TitleOpenMetadata)
     topics: tuple[TopicEntry, ...] = ()
+    captions: tuple[CaptionEntry, ...] = ()
 
     def topic_by_number(self, topic_number: int) -> TopicEntry | None:
         for t in self.topics:
@@ -160,24 +183,24 @@ class M14PayloadResult:
         return None
 
 
-# sec06 window-scaffold defaults. Flags=0 → bit 0x08 clear (outer rect
-# = parent fraction, denominator 0x400), bit 0x01 clear (top-band rect
-# also fractional), bit 0x40 clear (no bottom-align). Outer rect =
-# full parent (0,0,0x400,0x400). The child-rect band is parked as a
-# thin top sliver. Field offsets are code-proven in
-# `docs/mosview-mediaview-format.md` "Selector 0x06: 0x98-byte
-# Window-Scaffold Records". The three COLORREFs (outer container at
-# +0x5B, top band at +0x78, scrolling-host strip at +0x7C) all default
-# to white — matches the authored Normal back_color in
-# `CSTYLE_DEFAULT_PROPS[0]` and avoids the prior red/magenta/green
-# RE-instrument scheme bleeding into shipped .ttl renders.
-_SEC06_DEFAULT_FLAGS = 0x00
-_SEC06_OUTER_RECT = (0, 0, 0x400, 0x400)
-_SEC06_NONSCROLL_RECT = (0, 0, 0x400, 0x40)
-_SEC06_BACKDROP_WHITE = 0x00FFFFFF
-_SEC06_CONTAINER_COLOR = _SEC06_BACKDROP_WHITE
-_SEC06_TOP_BAND_COLOR = _SEC06_BACKDROP_WHITE
-_SEC06_SCROLL_HOST_COLOR = _SEC06_BACKDROP_WHITE
+# sec06 window-scaffold field semantics — pinned via
+# `docs/cbframe-cbform-sec06-mapping.md`. `MosView_BuildContainerHierarchy`
+# (`MOSVIEW.EXE!FUN_7f3c6790`) consumes:
+#   +0x15  inline ASCII window caption (NUL-term, ~0x33 byte budget)
+#   +0x48  flags byte — bit 0x08 = outer rect absolute, bit 0x01 =
+#          top-band rect absolute, bit 0x40 = scroll suppression
+#   +0x49  outer rect (x, y, w, h) — 4 i32, -1 sentinel = use parent
+#   +0x5B  outer container COLORREF (cached at View+0x20, painted later)
+#   +0x78  non-scrolling pane COLORREF — passed to `MVSetBkColor`
+#   +0x7C  scrolling pane COLORREF — passed to `MVSetBkColor`
+#   +0x80  top-band rect (x, y, w, h) — 4 i32, -1 sentinel
+# Color sentinel `-1` (0xFFFFFFFF) → `GetSysColor(COLOR_WINDOW)` per
+# `MosView_SetPaneBackColor`.
+_SEC06_FLAG_TOP_BAND_ABSOLUTE = 0x01
+_SEC06_FLAG_OUTER_RECT_ABSOLUTE = 0x08
+_SEC06_FLAG_SCROLL_SUPPRESS = 0x40
+_SEC06_RECT_INHERIT = (-1, -1, -1, -1)
+_SEC06_COLOR_INHERIT = 0xFFFFFFFF
 
 
 def _titles_root() -> Path:
@@ -465,9 +488,19 @@ def _encode_color(value: int | None) -> bytes:
 
 
 def _descriptor_from_resolved(resolved: dict) -> bytes:
-    """Encode a fully-resolved attrs dict into a 0x2a-byte descriptor."""
+    """Encode a fully-resolved attrs dict into a 0x2a-byte descriptor.
+
+    `lfHeight` follows the standard Win32 point-to-pixel convention at
+    96 DPI: `lfHeight = -MulDiv(pt_size, 96, 72) = -(pt_size * 4 // 3)`.
+    Negative means "character cell height in device pixels" — the form
+    `CreateFontIndirectA` expects when MOSVIEW's DC is in `MM_TEXT`.
+    The `pt_size * 20` (twips) form was a misread of an earlier draft;
+    in MM_TEXT the engine interprets that as a 440-px-tall glyph for
+    22pt text — which renders as filled red rectangles spanning the
+    whole pane (observed live).
+    """
     pt_size = resolved["pt_size"]
-    lf_height = -(pt_size * 20) if pt_size else _SEC0_DEFAULT_LF_HEIGHT
+    lf_height = -(pt_size * 96 // 72) if pt_size else _SEC0_DEFAULT_LF_HEIGHT
     lf_weight = _SEC0_BOLD_LF_WEIGHT if resolved["bold"] else _SEC0_DEFAULT_LF_WEIGHT
     return _encode_descriptor(
         face_slot_index=resolved["font_id"],
@@ -544,6 +577,45 @@ def _build_minimal_section0() -> bytes:
 
 
 _SECTION0_FONT_BLOB = _build_minimal_section0()
+
+
+def _build_section0_for_caption(caption: dict) -> bytes:
+    """Section-0 with the Caption control's authored face/size as descriptor 0.
+
+    Used as the empty-stylesheet fallback when the title has at least
+    one Caption — Test Title's CStyleSheet ships zero `style_count`, so
+    the case-1 chunk's `\\x80 0x0000` control byte points at descriptor
+    0. Routing that descriptor through the Caption's authored face
+    (e.g. MS Sans Serif at 12pt) makes the rendered text match
+    BBDESIGN's reference.
+
+    `descriptor_count = 0xFFFF` (clamp-to-0) per `_build_minimal_section0`
+    rationale: any in-flight `style_id` past 0 still resolves to slot 0.
+    """
+    face_name = caption.get("font_name") or _SEC0_DEFAULT_FACE_NAME
+    pt_size = int(caption.get("font_size_pt") or 12)
+    weight = int(caption.get("font_weight") or _SEC0_DEFAULT_LF_WEIGHT)
+    face_table = _encode_face_table_entry(face_name)
+    # `lf_height` here lands in `LOGFONTA.lfHeight` via
+    # `MVCL14N!FUN_7e896ba0` → `CreateFontIndirectA`. Negative value =
+    # absolute character height in logical units. The engine is in
+    # MM_TEXT (1 logical unit = 1 device pixel) and applies its own DPI
+    # scaling at descriptor expansion time, so `-pt_size` reproduces
+    # BBDESIGN's reference rendering directly. Earlier `-(pt * 96/72)`
+    # double-scaled the height (12pt → -16 → ~24px visual).
+    descriptor_table = _encode_descriptor(
+        face_slot_index=0,
+        lf_height=-pt_size,
+        lf_weight=weight,
+    )
+    header = _pack_section0_header(
+        descriptor_count_field=0xFFFF,
+        face_table_size=len(face_table),
+        descriptor_count_actual=1,
+        override_count=0,
+    )
+    pointer_table = struct.pack("<I", 0)
+    return header + face_table + descriptor_table + pointer_table
 
 
 def _merge_linked_stylesheet_styles(
@@ -630,31 +702,53 @@ def _encode_fixed_section(records: list[bytes], record_size: int) -> bytes:
     return struct.pack("<H", len(payload)) + payload
 
 
-def _build_sec06_window_scaffold_record() -> bytes:
-    """Build the one code-proven window scaffold used on the live wire path.
+def _build_sec06_window_scaffold_record(
+    frame: dict | None = None,
+    form: dict | None = None,
+) -> bytes:
+    """Build the sec06[0] window scaffold record from parsed CBFrame + CBForm.
 
-    RE outcome for the current supported TTL subset:
-      - no authored source recovered for selector 0x07 child panes
-      - no authored source recovered for selector 0x08 popups
-      - selector 0x06[0] alone drives the outer container plus the
-        top-band / scrolling-host split
-
-    The record therefore carries only the documented scaffold fields and
-    leaves all non-proven bytes zeroed.
+    Per-field mapping pinned in `docs/cbframe-cbform-sec06-mapping.md`
+    (showcase TTL probe confirmed `CBForm.background_color = 0x0000FFFF`
+    when BBDESIGN's Page Background color picker was set to yellow):
+      - caption (+0x15) ← `CBFrame.caption`
+      - outer rect (+0x49..+0x58) ← `CBFrame.rect_left/top/right/bottom`
+      - outer / non-scrolling / scrolling pane COLORREFs
+        (+0x5B / +0x78 / +0x7C) all ← `CBForm.background_color`
+        when non-zero, else inherit sentinel. The BBDESIGN Page dialog
+        has a single "Background color" picker; its value drives all
+        three MOSVIEW pane COLORREF slots so the brief
+        `WM_ERASEBKGND` flash on the outer container matches the
+        children's `MVSetBkColor`.
+      - top-band rect (+0x80..+0x8F) ← inherit sentinel
+      - flags (+0x48) ← `0x08` (authored rect is absolute pixels)
     """
+    if frame is None:
+        caption = ""
+        outer_rect = _SEC06_RECT_INHERIT
+        flags = 0
+    else:
+        caption = frame.get("caption", "") or ""
+        outer_rect = (
+            frame["rect_left"],
+            frame["rect_top"],
+            frame["rect_right"],
+            frame["rect_bottom"],
+        )
+        flags = _SEC06_FLAG_OUTER_RECT_ABSOLUTE
+
+    bg = (form or {}).get("background_color", 0) & 0xFFFFFFFF
+    backdrop = bg if bg != 0 else _SEC06_COLOR_INHERIT
+
+    caption_bytes = caption.encode("latin-1", errors="replace")[:0x32] + b"\x00"
+
     record = bytearray(0x98)
-    record[0x15:0x1E] = b"\x00" * 9
-    record[0x48] = _SEC06_DEFAULT_FLAGS
-    struct.pack_into("<IIII", record, 0x49, *_SEC06_OUTER_RECT)
-    struct.pack_into("<I", record, 0x5B, _SEC06_CONTAINER_COLOR)
-    struct.pack_into(
-        "<II",
-        record,
-        0x78,
-        _SEC06_TOP_BAND_COLOR,
-        _SEC06_SCROLL_HOST_COLOR,
-    )
-    struct.pack_into("<IIII", record, 0x80, *_SEC06_NONSCROLL_RECT)
+    record[0x15:0x15 + len(caption_bytes)] = caption_bytes
+    record[0x48] = flags
+    struct.pack_into("<iiii", record, 0x49, *outer_rect)
+    struct.pack_into("<I", record, 0x5B, backdrop)
+    struct.pack_into("<II", record, 0x78, backdrop, backdrop)
+    struct.pack_into("<iiii", record, 0x80, *_SEC06_RECT_INHERIT)
     return bytes(record)
 
 
@@ -669,12 +763,32 @@ def _build_live_wire_payload(model: dict, mosview_open_path: str) -> bytes:
       - selector 0x06: one scaffold record for the default pane layout
     """
     strings = build_section_strings(model)
-    sec01 = encode_c_string(model["title"]["name"])
+    # sec01 (info_kind 1) feeds `OpenMediaTitleSession` → `session+0x58`
+    # → `CreateMediaViewWindow!SetWindowTextA(host, …)`, so it's the
+    # text MOSVIEW shows in its top-level window caption. BBDESIGN's
+    # reference rendering uses the Page's authored Window caption
+    # (`CBFrame.caption`) here; CTitle.name is a tree-label distinct
+    # from the window caption. Fall back to title name when the frame
+    # has no caption authored.
+    sec01_text = (
+        model["frame"].get("caption")
+        or model["title"]["name"]
+    )
+    sec01 = encode_c_string(sec01_text)
     sec02 = b""
     sec6a = encode_c_string(mosview_open_path)
     sec13_entries = build_selector_13_entries()
-    sec06_records = [_build_sec06_window_scaffold_record()]
-    section0_blob = _build_section0_for_stylesheet(model["stylesheet"])
+    sec06_records = [_build_sec06_window_scaffold_record(model["frame"], model["form"])]
+    # Title with no authored styles but at least one Caption falls back
+    # to a Caption-flavoured section 0 so the case-1 chunk's `\x80 0x0000`
+    # control byte resolves descriptor 0 to the Caption's authored
+    # face/size (matches BBDESIGN's reference rendering).
+    captions = model.get("captions") or []
+    has_styles = bool(model["stylesheet"].get("styles"))
+    if not has_styles and captions:
+        section0_blob = _build_section0_for_caption(captions[0])
+    else:
+        section0_blob = _build_section0_for_stylesheet(model["stylesheet"])
     return b"".join(
         [
             encode_blob_section(section0_blob),
@@ -849,9 +963,23 @@ def build_m14_payload_for_deid(deid: str) -> M14PayloadResult:
         metadata.va_get_contents, metadata.addr_get_contents,
         metadata.topic_count,
     )
+    captions = tuple(
+        CaptionEntry(
+            text=c["text"],
+            font_name=c["font_name"],
+            font_size_pt=c["font_size_pt"],
+            font_weight=c["font_weight"],
+            rect_left=c["rect_twips"]["left"],
+            rect_top=c["rect_twips"]["top"],
+            rect_right=c["rect_twips"]["right"],
+            rect_bottom=c["rect_twips"]["bottom"],
+        )
+        for c in model.get("captions", [])
+    )
     return M14PayloadResult(
         payload=wire_payload,
         caption=caption,
         metadata=metadata,
         topics=topics,
+        captions=captions,
     )

@@ -20,7 +20,7 @@ from server.blackbird.m14_synth import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_TTL = REPO_ROOT / "resources" / "titles" / "4.ttl"
+SAMPLE_TTL = REPO_ROOT / "resources" / "titles" / "msn_today.ttl"
 
 
 class SynthesizeM14Tests(unittest.TestCase):

@@ -11,6 +11,7 @@ The MediaView 1.4 synthesizer in `m14_synth.py` consumes this dict.
 
 from __future__ import annotations
 
+import struct
 import uuid
 import zlib
 from datetime import UTC, datetime, timedelta
@@ -442,39 +443,85 @@ def parse_cresourcefolder_object(data, handles):
 
 
 def parse_cbframe_object(data):
+    """Parse a CBFrame v2 payload (`docs/cbframe-cbform-sec06-mapping.md`).
+
+    Field names match VIEWDLL accessors and `CBFrameProp::operator==`
+    layout. The 10 `CBFrameProp` dwords occupy `this+0x10..this+0x37`
+    and sit between `caption` and `is_default_frame`.
+
+    `window_style` (this+0x2C) is a packed Win32 window-style bitmask,
+    NOT a COLORREF. `Properties@CViewerFrameWnd @ 0x40711227` ANDs with
+    `0xA0000`, tests byte +0x2E for `0xC0` to add `WS_CAPTION`
+    (`0xC00000`), and ORs into the CWnd style word. Default
+    `0x00CE0000` from `CBFrame::SetDefaults @ 0x407114b7` decodes as
+    `WS_CAPTION | WS_SYSMENU | WS_GROUP`. The value happens to look
+    like a valid blue COLORREF, but that's coincidental — no MOSVIEW
+    consumer reads this field as a color.
+
+    `border_style` (this+0x20) is the BBDESIGN Window dialog's
+    "Border style:" enum. showcase TTL with "Double fixed" set this
+    to `1`; 4.ttl with default "Single fixed" has `0`. Independent
+    of `window_style` — neither writes to the other."""
     off = 0
     version, off = read_u8(data, off)
-    name_0, off = parse_mfc_ansi_string(data, off)
-    name_1, off = parse_mfc_ansi_string(data, off)
-    u64_0, off = read_u64(data, off)
-    u64_1, off = read_u64(data, off)
-    u32_0, off = read_u32(data, off)
-    u32_1, off = read_u32(data, off)
-    u8_0, off = read_u8(data, off)
-    u32_2, off = read_u32(data, off)
-    u8_1, off = read_u8(data, off)
-    u8_2, off = read_u8(data, off)
-    u8_3, off = read_u8(data, off)
+    frame_name, off = parse_mfc_ansi_string(data, off)
+    caption, off = parse_mfc_ansi_string(data, off)
+    rect_left, off = read_u32(data, off)
+    rect_top, off = read_u32(data, off)
+    rect_right, off = read_u32(data, off)
+    rect_bottom, off = read_u32(data, off)
+    border_style, off = read_u32(data, off)
+    prop_u32_b, off = read_u32(data, off)
+    prop_flag_a, off = read_u8(data, off)
+    window_style, off = read_u32(data, off)
+    prop_flag_b, off = read_u8(data, off)
+    prop_flag_c, off = read_u8(data, off)
+    is_default_frame, off = read_u8(data, off)
     tail_present, off = read_u8(data, off)
     return {
         "version": version,
-        "name_0": name_0,
-        "name_1": name_1,
-        "u64_0": u64_0,
-        "u64_1": u64_1,
-        "u32_0": u32_0,
-        "u32_1": u32_1,
-        "u8_0": u8_0,
-        "u32_2": u32_2,
-        "u8_1": u8_1,
-        "u8_2": u8_2,
-        "u8_3": u8_3,
+        "frame_name": frame_name,
+        "caption": caption,
+        "rect_left": rect_left,
+        "rect_top": rect_top,
+        "rect_right": rect_right,
+        "rect_bottom": rect_bottom,
+        "border_style": border_style,
+        "prop_u32_b": prop_u32_b,
+        "prop_flag_a": prop_flag_a,
+        "window_style": window_style,
+        "prop_flag_b": prop_flag_b,
+        "prop_flag_c": prop_flag_c,
+        "is_default_frame": is_default_frame,
         "tail_present": tail_present,
         "trailing_bytes": len(data) - off,
     }
 
 
 def parse_cbform_object(data, handles):
+    """Parse a CBForm v2 payload (`docs/cbframe-cbform-sec06-mapping.md`).
+
+    `CBForm` is what BBDESIGN calls a "Page" — its Display properties
+    (Window dropdown / Mouse Pointer / Background color / scrollbar
+    checkboxes / Height / Width) map directly to the fields named below.
+    Width / Height are NOT stored on CBForm; they're CBFrame.rect
+    dimensions and the Page dialog edits them via the referenced frame.
+
+    Field name pins from the BBDESIGN "Properties for <page>" dialog,
+    confirmed via the showcase probe TTL:
+      - `background_color` (this+0x30) — COLORREF (RGB(R,G,B) = bytes
+        [low,mid,high]). showcase ships `0x0000FFFF` (yellow) after
+        explicit pick; 4.ttl ships `0x009098A8` (a tan that BBDESIGN
+        displayed as approximately the system color in its small
+        sample swatch).
+      - `mouse_pointer` (this+0x34) — Win32 cursor ID. 4.ttl
+        `0x7F00` = `IDC_ARROW`; showcase `0x7F01` = `IDC_IBEAM`.
+      - `scrollbar_flags` (this+0x38) — bit 1 = vertical scrollbar
+        visible, bit 0 = horizontal. 4.ttl `3` (both); showcase `2`
+        (V only — matches the rendered window's V-only scrollbar).
+
+    Still anonymous: `u32_0` (this+0x2C; `0` in both samples), `u64_0`
+    (8 bytes; rescaled by DPI ratio at runtime), `u8_0`."""
     off = 0
     version, off = read_u8(data, off)
     form_name, off = parse_mfc_ansi_string(data, off)
@@ -486,9 +533,9 @@ def parse_cbform_object(data, handles):
         embedded_vform = resolve_swizzle(index, handles)
     frame_index, off = read_u32(data, off)
     u32_0, off = read_u32(data, off)
-    u32_1, off = read_u32(data, off)
-    u32_2, off = read_u32(data, off)
-    u32_3, off = read_u32(data, off)
+    background_color, off = read_u32(data, off)
+    mouse_pointer, off = read_u32(data, off)
+    scrollbar_flags, off = read_u32(data, off)
     u64_0, off = read_u64(data, off)
     u8_0, off = read_u8(data, off)
     dpi_x, off = read_u32(data, off)
@@ -503,14 +550,156 @@ def parse_cbform_object(data, handles):
         "embedded_vform": embedded_vform,
         "frame": resolve_swizzle(frame_index, handles),
         "u32_0": u32_0,
-        "u32_1": u32_1,
-        "u32_2": u32_2,
-        "u32_3": u32_3,
+        "background_color": background_color,
+        "mouse_pointer": mouse_pointer,
+        "scrollbar_flags": scrollbar_flags,
         "u64_0": u64_0,
         "u8_0": u8_0,
         "dpi_x": dpi_x,
         "dpi_y": dpi_y,
     }
+
+
+_SITE_MARKER = 0x00030073
+_STDFONT_CLSID_BYTES = bytes.fromhex(
+    "03 52 e3 0b 91 8f ce 11 9d e3 00 aa 00 4b b8 51".replace(" ", "")
+)
+
+
+def _parse_caption_block(data, off):
+    """Parse a Caption control's per-control property block.
+
+    Layout (offsets relative to "Caption1" name start at +0):
+
+    | offset | size | field              | source                          |
+    | ------ | ---- | ------------------ | ------------------------------- |
+    | +0x00  | 8    | name "Caption1"    | site descriptor                 |
+    | +0x08  | 16   | rect (twips)       | left, top, right, bottom (i32×4)|
+    | +0x18  | 6    | site_wrapper_a     | u16 + u32 size echo             |
+    | +0x1E  | 4    | form_size dword    | total CVForm size               |
+    | +0x22  | 12   | constants (4,4,3)  | (control_kind?, ver, sub-ver?)  |
+    | +0x2E  | 4    | width_redundant    | rect.right − rect.left (twips)  |
+    | +0x32  | 4    | height_redundant   | rect.bottom − rect.top (twips)  |
+    | +0x36  | 4    | constant 29        | u32                             |
+    | +0x3A  | 4    | zero               | u32                             |
+    | +0x3E  | 6    | font_pre_clsid     | `00 d8 d0 c8 00 00`             |
+    | +0x44  | 16   | StdFont CLSID      | `0BE35203-8F91-11CE-9DE3-…`     |
+    | +0x54  | 1    | font_version       | 1                               |
+    | +0x55  | 3    | font_charset/flags | (varies per Caption styling)    |
+    | +0x58  | 2    | font_weight u16    | 400 = FW_NORMAL                 |
+    | +0x5A  | 4    | font_size CY-lo u32| points × 10000                  |
+    | +0x5E  | 1    | font_name_len      | u8                              |
+    | +0x5F  | N    | font_name ASCII    | no NUL                          |
+    | +0x5F+N | 2   | pad                | `00 00`                         |
+    | +pad+22 | varies| trailer constants| 22 bytes (parent class persist) |
+    | +pad+22 | 1   | caption_text_len   | u8                              |
+    | +(...)  | M   | caption text + NUL | ASCII length-prefixed            |
+
+    Pinned by hex-diff between `4.ttl` Caption "Test caption" and
+    `first title.ttl` slot 7/1 Caption "This is another page". The
+    constant block at +0x6E..+0x83 is identical across both samples;
+    only rect (twips), font_charset/flags byte (+0x57), font face name,
+    and caption text differ.
+    """
+    rect = struct.unpack_from("<iiii", data, off + 0x08)
+    width_redundant, height_redundant = struct.unpack_from(
+        "<ii", data, off + 0x2E
+    )
+    if data[off + 0x44 : off + 0x54] != _STDFONT_CLSID_BYTES:
+        raise ValueError(
+            f"Caption font CLSID mismatch at offset 0x{off + 0x44:x}: "
+            f"{data[off + 0x44 : off + 0x54].hex()}"
+        )
+    font_version = data[off + 0x54]
+    font_flags_block = data[off + 0x55 : off + 0x58]
+    font_weight = struct.unpack_from("<H", data, off + 0x58)[0]
+    font_size_cy = struct.unpack_from("<I", data, off + 0x5A)[0]
+    font_name_len = data[off + 0x5E]
+    font_name = data[off + 0x5F : off + 0x5F + font_name_len].decode(
+        "latin-1", errors="replace"
+    )
+    cap_off = off + 0x5F + font_name_len + 2 + 22
+    caption_len = data[cap_off]
+    caption_text = data[cap_off + 1 : cap_off + 1 + caption_len].decode(
+        "latin-1", errors="replace"
+    )
+    return {
+        "rect_twips": {
+            "left": rect[0],
+            "top": rect[1],
+            "right": rect[2],
+            "bottom": rect[3],
+            "width": rect[2] - rect[0],
+            "height": rect[3] - rect[1],
+        },
+        "width_redundant": width_redundant,
+        "height_redundant": height_redundant,
+        "font_version": font_version,
+        "font_flags_block": font_flags_block.hex(),
+        "font_weight": font_weight,
+        "font_size_cy": font_size_cy,
+        "font_size_pt": font_size_cy / 10000.0,
+        "font_name": font_name,
+        "caption_text": caption_text,
+    }
+
+
+def parse_cvform_object(data):
+    """Parse a CVForm payload's site descriptors, recovering Caption controls.
+
+    The CVForm is an MS Forms 1.0 OLE compound stream. After the form
+    preamble + form CLSID, each embedded control is described by a
+    16-byte site descriptor:
+
+        seq:u32  marker:u32 (0x00030073)  size:u32  flags:u32  name:ASCII
+
+    Followed by per-control property bytes (rect + control state). The
+    `parse_cvform_object` walker locates each descriptor by scanning
+    for the `0x00030073` marker, then dispatches per name suffix:
+      - "Caption*"           → `_parse_caption_block`
+      - other (Story, Audio, CaptionButton, Outline, …) → name-only stub
+
+    Story1R's property layout is documented in
+    `docs/cvform-page-objects.md` — its margins / scroll / stylesheet
+    fields aren't lifted yet because they're not on the wire path the
+    server currently emits.
+    """
+    sites = []
+    off = 0
+    while off + 16 <= len(data):
+        marker_off = data.find(_SITE_MARKER.to_bytes(4, "little"), off)
+        if marker_off < 0:
+            break
+        if marker_off < 4:
+            off = marker_off + 4
+            continue
+        seq = struct.unpack_from("<I", data, marker_off - 4)[0]
+        size_field = struct.unpack_from("<I", data, marker_off + 4)[0]
+        flags = struct.unpack_from("<I", data, marker_off + 8)[0]
+        name_off = marker_off + 12
+        name_end = name_off
+        while name_end < len(data) and data[name_end] != 0 and 32 <= data[name_end] < 127:
+            name_end += 1
+        name = data[name_off:name_end].decode("ascii", errors="replace")
+        site = {
+            "seq": seq,
+            "marker_offset": marker_off,
+            "size_field": size_field,
+            "flags": flags,
+            "name": name,
+            "kind": None,
+            "data": None,
+        }
+        if name.startswith("Caption") and not name.startswith("CaptionButton"):
+            try:
+                site["data"] = _parse_caption_block(data, name_off)
+                site["kind"] = "Caption"
+            except (struct.error, ValueError, IndexError) as exc:
+                site["data"] = {"error": str(exc)}
+                site["kind"] = "Caption?"
+        sites.append(site)
+        off = name_end
+    return {"sites": sites}
 
 
 def parse_proxy_data_map(data, handles):
@@ -1189,6 +1378,8 @@ def parse_object_payload(class_name, payload, handles):
         return parse_proxy_data_map(payload, handles)
     if class_name == "CStyleSheet":
         return parse_cstylesheet(payload)
+    if class_name == "CVForm":
+        return parse_cvform_object(payload)
     return None
 
 

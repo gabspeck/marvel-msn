@@ -336,11 +336,47 @@ _PUSH_DISPATCH: dict[int, tuple[int, callable]] = {}
 
 
 def _push_case1_text(handler, title_slot, key):
-    text, style_id = handler._case1_paragraph_for_key(key)
+    """Push a 0xBF chunk satisfying HfcNear's cache miss on selector 0x15.
+
+    Three content sources, in priority order:
+      1. **Topic paragraph** — `_case1_paragraph_for_key` resolves a
+         topic-bearing title's first authored paragraph (with its
+         section-0 style id).
+      2. **Caption control** — pages without topics but with a single
+         authored Caption (Test Title fixture) ship the caption text;
+         font index defaults to `0` (engine's default style) since the
+         font table has no entry for the Caption's authored typeface.
+      3. **Empty skip-row** — no topics, no captions: empty text
+         triggers `FUN_7e891810`'s "skip empty row" pre-test (return 5)
+         which still populates HfcNear's cache so `fMVSetAddress`
+         completes. Returning `None` here would leave the HfcNear
+         retry loop waiting indefinitely (stuck hourglass).
+    """
+    if handler.topics:
+        text, style_id = handler._case1_paragraph_for_key(key)
+        chunk = build_case1_bf_chunk(
+            text, title_slot, key, initial_font_style=style_id,
+        )
+        return chunk, "type0_bf_case1"
+    if handler.captions:
+        caption = handler.captions[0]
+        # Without an `\x80 <style>` control byte the layout walker leaves
+        # `slot+0x3F` at the 0xFFFF sentinel and `FUN_7e896760` selects
+        # an invisible HFONT — pane paints blank. Style 0 maps to the
+        # one descriptor in `_build_minimal_section0` (currently Times
+        # New Roman 12pt; lowering Caption's authored font onto section
+        # 0 is a separate iteration).
+        style_id = 0
+        budget = case1_text_budget(initial_font_style=style_id) - 1
+        text = caption.text[:budget]
+        chunk = build_case1_bf_chunk(
+            text, title_slot, key, initial_font_style=style_id,
+        )
+        return chunk, "type0_bf_case1_caption"
     chunk = build_case1_bf_chunk(
-        text, title_slot, key, initial_font_style=style_id,
+        "", title_slot, key, initial_font_style=None,
     )
-    return chunk, "type0_bf_case1"
+    return chunk, "type0_bf_case1_empty"
 
 
 def _push_case3_bitmap(handler, title_slot, key):
@@ -367,7 +403,7 @@ def _push_type3_op4(kind: int):
     return build
 
 
-_PUSH_DISPATCH[MEDVIEW_FETCH_NEARBY_TOPIC] = (0, _push_case3_bitmap)
+_PUSH_DISPATCH[MEDVIEW_FETCH_NEARBY_TOPIC] = (0, _push_case1_text)
 _PUSH_DISPATCH[MEDVIEW_FETCH_ADJACENT_TOPIC] = (0, _push_a5_status)
 _PUSH_DISPATCH[MEDVIEW_CONVERT_TOPIC_TO_VA] = (3, _push_type3_op4(0))
 _PUSH_DISPATCH[MEDVIEW_CONVERT_HASH_TO_VA] = (3, _push_type3_op4(1))
@@ -399,6 +435,7 @@ class MEDVIEWHandler:
         # at OpenTitle, used by 0x05/0x06/0x07/0x15 cache pushes to ship
         # real va/addr/text instead of echo-key placeholders.
         self.topics: tuple[TopicEntry, ...] = ()
+        self.captions: tuple = ()
         self.title_caption: str = ""
         # Title slot is owned by the server — we hand out
         # `_TITLE_SLOT_PRIMARY` on OpenTitle and accept `CloseTitle`
@@ -470,6 +507,12 @@ class MEDVIEWHandler:
             return None
         sub_class, sub_req_id = sub
         chunk, channel = builder(self, title_slot, key)
+        if chunk is None:
+            log.info(
+                "cache_push_skipped selector=0x%02x title_slot=0x%02x key=0x%08x channel=%s",
+                selector, title_slot, key, channel,
+            )
+            return None
         # 0x85 chunk tag + raw chunk bytes — MPCCL parses 0x85 as a
         # dynamic-recv chunk on the matching subscription iterator.
         push_payload = bytes([0x85]) + chunk
@@ -648,6 +691,7 @@ class MEDVIEWHandler:
         # selector 0x05 / 0x06 / 0x07 / 0x15 cache pushes can ship
         # authored values (`_case1_paragraph_for_key`, `_topic_for_wire_key`).
         self.topics = result.topics
+        self.captions = result.captions
         self.title_caption = result.caption
         self._open_title_slots.add(_TITLE_SLOT_PRIMARY)
         log.info(
@@ -675,6 +719,7 @@ class MEDVIEWHandler:
                 # All titles closed — drop per-title state so the next
                 # OpenTitle starts clean.
                 self.topics = ()
+                self.captions = ()
                 self.title_caption = ""
         return _ack()
 

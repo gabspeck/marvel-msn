@@ -76,7 +76,7 @@ Field-by-field mapping into the `0x2a`-byte descriptor:
 | `override_style_id`   | `0` (no chain; encoded in override table)      |
 | `text_color`          | resolved `text_color` colorref or sentinel     |
 | `back_color`          | resolved `back_color` colorref or sentinel     |
-| `lfHeight`            | `-(pt_size * 20)` for MM_TEXT twips, `-12` if 0 |
+| `lfHeight`            | `-MulDiv(pt_size, 96, 72) = -(pt_size * 4 // 3)` (Win32 pt-to-px at 96 DPI), `-12` if 0. NOT `-(pt_size * 20)` — that would be twips, but MOSVIEW's DC is `MM_TEXT` (logical units = device pixels). Live test: 22pt with `-440` produces 440-px-tall red rectangles spanning the pane. |
 | `lfWidth`             | `0`                                            |
 | `lfEscapement`        | `0`                                            |
 | `lfOrientation`       | `0`                                            |
@@ -157,8 +157,8 @@ Helpers ready:
 2. **Pin the merge resolution**: for each of the 54 styles in the
    reference TTL, assert the resolved descriptor has the right
    `face_slot_index`, `lfHeight`, `lfWeight`. Pin specifically:
-   - `Normal` (0x00) → font 1, lfHeight `-220` (= -11 * 20), lfWeight 400
-   - `Heading 1` (0x01) → font 2 (Arial), lfHeight `-440` (= -22 * 20),
+   - `Normal` (0x00) → font 1, lfHeight `-14` (= -MulDiv(11, 96, 72)), lfWeight 400
+   - `Heading 1` (0x01) → font 2 (Arial), lfHeight `-29` (= -MulDiv(22, 96, 72)),
      lfWeight 700
    - `Hyperlink` (0x1e) → text_color blue, lfUnderline 1
    - `Strikethrough` (0x22) → lfStrikeOut 1 (name-tagged)

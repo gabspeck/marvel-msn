@@ -22,7 +22,7 @@ from server.blackbird.ttl_inspect import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_TTL = REPO_ROOT / "resources" / "titles" / "4.ttl"
+SAMPLE_TTL = REPO_ROOT / "resources" / "titles" / "msn_today.ttl"
 
 
 class CStyleSheetParseTests(unittest.TestCase):
@@ -545,11 +545,11 @@ class TypographyLoweringTests(unittest.TestCase):
             ]
         normal = descriptor_bytes(0x00)
         self.assertEqual(struct.unpack_from("<H", normal, 0x00)[0], 1)
-        self.assertEqual(struct.unpack_from("<i", normal, 0x0C)[0], -220)
+        self.assertEqual(struct.unpack_from("<i", normal, 0x0C)[0], -14)  # 11pt × 96/72
         self.assertEqual(struct.unpack_from("<i", normal, 0x1C)[0], 400)
         h1 = descriptor_bytes(0x01)
         self.assertEqual(struct.unpack_from("<H", h1, 0x00)[0], 2)
-        self.assertEqual(struct.unpack_from("<i", h1, 0x0C)[0], -440)
+        self.assertEqual(struct.unpack_from("<i", h1, 0x0C)[0], -29)  # 22pt × 96/72
         self.assertEqual(struct.unpack_from("<i", h1, 0x1C)[0], 700)
         hyper = descriptor_bytes(0x1E)
         self.assertEqual(hyper[0x21], 1)  # lfUnderline

@@ -1668,38 +1668,28 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # Dynamic-complete
         self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
-    def test_title_open_handler_caches_blackbird_topics(self):
-        # OpenTitle drives `build_m14_payload_for_deid("4")`, the only
-        # production lowering path. The handler stashes per-topic
-        # mappings + caption for the cache-miss selectors that follow.
-        # Wire-byte assertions live in `test_blackbird_payload_builder_preserved`
-        # (against the body builder directly — the OpenTitle wire reply
-        # fragments past 1024 B for any non-trivial TTL).
+    def test_title_open_handler_caches_test_title_topics(self):
+        # OpenTitle on deid="4" now resolves to the simple inline-section
+        # `Test Title` fixture (`resources/titles/4.ttl`). It has zero
+        # content proxies — only an embedded Caption control inside the
+        # Page's CVForm, which is invisible to the wire — so `topics` is
+        # empty after OpenTitle. Wire-byte content pins for the rich
+        # `msn_today.ttl` fixture live in
+        # `test_blackbird_payload_builder_preserved`.
         handler, _reply = self._open_handler()
-        self.assertEqual(handler.title_caption, "MSN Today")
-        self.assertEqual(len(handler.topics), 3)
-        self.assertEqual(handler.topics[0].topic_number, 1)
-        self.assertEqual(handler.topics[0].kind, "text")
-        # Homepage.bdf TextRuns has 2 `'#'`-separated paragraphs;
-        # heuristic style assignment puts the first as Heading 1.
-        self.assertEqual(len(handler.topics[0].paragraphs), 2)
-        self.assertEqual(handler.topics[0].paragraphs[0].style_id, 1)
-        self.assertTrue(
-            handler.topics[0].paragraphs[0].text.startswith("This is an example")
-        )
+        self.assertEqual(handler.title_caption, "Test Title")
+        self.assertEqual(handler.topics, ())
 
     def test_blackbird_payload_builder_preserved(self):
-        # `resources/titles/4.ttl` is the reference Blackbird `msn today.ttl`
-        # (sha256 4a6e884f…). The preserved Blackbird-backed builder lowers it to:
-        # 3 supported top-level topic-source entries (2 text + 1 image)
-        # → 3 topics,
-        # 1 real sec06 scaffold record, empty sec07/sec08. CStringTable
-        # (sec04) carries 9 strings (title/section/form/frame/stylesheet/
-        # resource_folder + 3 proxy names).
-        # Asserting against the body-builder output directly (the wire
-        # path fragments at the 1024-byte boundary; framing is exercised
-        # by `test_title_open_reply_has_static_plus_dynamic`).
-        result = build_m14_payload_for_deid("4")
+        # `resources/titles/msn_today.ttl` is the reference Blackbird
+        # `msn today.ttl` (sha256 4a6e884f…). The preserved Blackbird-
+        # backed builder lowers it to: 3 supported top-level topic-source
+        # entries (2 text + 1 image) → 3 topics, 1 real sec06 scaffold
+        # record, empty sec07/sec08. CStringTable (sec04) carries 9
+        # strings (title/section/form/frame/stylesheet/resource_folder +
+        # 3 proxy names). Asserting against the body-builder output
+        # directly (the wire path fragments at the 1024-byte boundary).
+        result = build_m14_payload_for_deid("msn_today")
         self.assertEqual(result.caption, "MSN Today")
         parsed = parse_payload(result.payload)
         # Section-0 is now a multi-face / multi-descriptor blob lowered
@@ -1746,8 +1736,11 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
             b"Courier New",
         )
         # Descriptor[0] = Normal: face_slot=1 (Times New Roman), lfHeight
-        # -220 (= -11pt × 20), lfWeight 400, text_color black, back_color
-        # white — pinned in CSTYLE_DEFAULT_PROPS[0].
+        # -14 (= -MulDiv(11pt, 96, 72) = -11 * 4 // 3), lfWeight 400,
+        # text_color black, back_color white — pinned in
+        # CSTYLE_DEFAULT_PROPS[0]. lfHeight uses standard Win32 pt-to-px
+        # at 96 DPI; consumed unmodified by `CreateFontIndirectA` in
+        # MOSVIEW's MM_TEXT DC.
         desc0_off = 0xF2
         self.assertEqual(
             struct.unpack_from("<H", parsed.font_blob.data, desc0_off)[0],
@@ -1763,14 +1756,15 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         )
         self.assertEqual(
             struct.unpack_from("<i", parsed.font_blob.data, desc0_off + 0x0C)[0],
-            -220,
+            -14,
         )
         self.assertEqual(
             struct.unpack_from("<i", parsed.font_blob.data, desc0_off + 0x1C)[0],
             400,
         )
-        # Descriptor[1] = Heading 1: face_slot=2 (Arial), lfHeight -440,
-        # lfWeight 700 (bold), text_color authored = 0x80 (dark red).
+        # Descriptor[1] = Heading 1: face_slot=2 (Arial), lfHeight -29
+        # (= -MulDiv(22pt, 96, 72)), lfWeight 700 (bold), text_color
+        # authored = 0x80 (dark red).
         desc1_off = desc0_off + 0x2A
         self.assertEqual(
             struct.unpack_from("<H", parsed.font_blob.data, desc1_off)[0],
@@ -1782,7 +1776,7 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         )
         self.assertEqual(
             struct.unpack_from("<i", parsed.font_blob.data, desc1_off + 0x0C)[0],
-            -440,
+            -29,
         )
         self.assertEqual(
             struct.unpack_from("<i", parsed.font_blob.data, desc1_off + 0x1C)[0],
@@ -1812,28 +1806,41 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # child-pane/popup source not recovered for the supported subset.
         self.assertEqual(parsed.sec07.record_count, 0)
         self.assertEqual(parsed.sec08.record_count, 0)
-        # sec06 carries one window scaffold record. Geometry: outer
-        # rect = full parent (denominator 0x400), top band = thin top
-        # sliver. Colors: all three COLORREFs default to white
-        # (0x00FFFFFF) — neutral backdrop until authored CBFrame
-        # color/rect lowering exists.
+        # sec06 carries one window scaffold record lowered from
+        # `model["frame"]` + `model["form"]` per
+        # `docs/cbframe-cbform-sec06-mapping.md`:
+        #   caption (+0x15) ← CBFrame.caption = "MSN Today"
+        #   flags  (+0x48) = 0x08 (outer rect absolute pixels)
+        #   outer rect (+0x49..+0x58) ← CBFrame.rect_left/top/right/bottom
+        #     = (0, 0, 640, 480)
+        #   all three COLORREFs (+0x5B / +0x78 / +0x7C) ←
+        #     CBForm.background_color = 0x009098A8 (light tan;
+        #     RGB(168,152,144); BBDESIGN Page Background color picker
+        #     value confirmed via showcase TTL where setting picker
+        #     to yellow produced 0x0000FFFF in this same slot).
+        #   top-band rect (+0x80..+0x8F) = -1 sentinels → use full
+        #     client area
         self.assertEqual(parsed.sec06.record_count, 1)
-        self.assertEqual(parsed.sec06.data[0x48], 0x00)
         self.assertEqual(
-            struct.unpack_from("<IIII", parsed.sec06.data, 0x49),
-            (0, 0, 0x400, 0x400),
+            parsed.sec06.data[0x15:0x15 + len(b"MSN Today\x00")],
+            b"MSN Today\x00",
+        )
+        self.assertEqual(parsed.sec06.data[0x48], 0x08)
+        self.assertEqual(
+            struct.unpack_from("<iiii", parsed.sec06.data, 0x49),
+            (0, 0, 640, 480),
         )
         self.assertEqual(
             struct.unpack_from("<I", parsed.sec06.data, 0x5B)[0],
-            0x00FFFFFF,
+            0x009098A8,
         )
         self.assertEqual(
             struct.unpack_from("<II", parsed.sec06.data, 0x78),
-            (0x00FFFFFF, 0x00FFFFFF),
+            (0x009098A8, 0x009098A8),
         )
         self.assertEqual(
-            struct.unpack_from("<IIII", parsed.sec06.data, 0x80),
-            (0, 0, 0x400, 0x40),
+            struct.unpack_from("<iiii", parsed.sec06.data, 0x80),
+            (-1, -1, -1, -1),
         )
         self.assertEqual(parsed.sec04.count, 9)
         self.assertEqual(parsed.sec13.count, 2)
@@ -1843,7 +1850,7 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(parsed.sec02.data, b"")
         # sec6a carries the bare deid (Marvel HRMOSExec path, not a
         # Windows path — see `m14_payload` module docstring).
-        self.assertEqual(parsed.sec6a.data, b"4\x00")
+        self.assertEqual(parsed.sec6a.data, b"msn_today\x00")
         self.assertEqual(parsed.trailing, b"")
         # Real metadata threaded through: 3 topic-source entries
         # → topic_count=3,
@@ -1882,7 +1889,7 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(topic3.kind, "image")
 
     def test_title_open_body_allows_more_topic_sources_without_more_window_records(self):
-        ttl_path = Path(__file__).resolve().parents[1] / "resources" / "titles" / "4.ttl"
+        ttl_path = Path(__file__).resolve().parents[1] / "resources" / "titles" / "msn_today.ttl"
         model = build_source_model(ttl_path)
         extra_entry = dict(model["topic_source_entries"][0])
         extra_entry["entry_index"] = len(model["topic_source_entries"])
@@ -1890,7 +1897,7 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         model["topic_source_entries"].append(extra_entry)
         model["section"]["contents"].append(model["section"]["contents"][0])
         with mock.patch("server.blackbird.m14_payload.build_source_model", return_value=model):
-            result = build_m14_payload_for_deid("4")
+            result = build_m14_payload_for_deid("msn_today")
         parsed = parse_payload(result.payload)
         self.assertEqual(result.metadata.topic_count, 4)
         self.assertEqual(len(result.topics), 4)
@@ -1959,8 +1966,12 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
 
 
 class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
+    # Open the rich `msn_today.ttl` fixture (3 topics) so the cache-push
+    # tests have a topic mapping to look up against. The TitleOpen spec
+    # is `:%d[%s]%d` per `docs/MOSVIEW.md` §5.3 — svcid=2, deid=msn_today,
+    # serial=0; ASCIIZ string length 15 → length-prefix byte 0x8F.
     _OPEN_TITLE_REQ = (
-        b"\x04\x87:2[4]0\x00"
+        b"\x04\x8f:2[msn_today]0\x00"
         b"\x03\x00\x00\x00\x00"
         b"\x03\x00\x00\x00\x00"
         b"\x81\x81\x83\x83\x83\x83\x83"
@@ -2043,18 +2054,24 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             (4, 18, 0x01, 0, topic1.topic_number, 0x1000, 0x1000),
         )
 
-        bitmap_req = b"\x01\x01\x03" + struct.pack("<I", topic1.address)
-        bitmap_pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, bitmap_req, 5, 5,
+        # Selector 0x15 (VA_RESOLVE) now pushes a case-1 0xBF text chunk
+        # carrying the topic's first authored paragraph + chosen style.
+        # See `_PUSH_DISPATCH` in `services/medview.py` — `MEDVIEW_FETCH_NEARBY_TOPIC`
+        # bound to `_push_case1_text`. Synthetic title has one paragraph
+        # (style_id 0); 4.ttl topics use heuristic style assignment.
+        text_req = b"\x01\x01\x03" + struct.pack("<I", topic1.address)
+        text_pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, text_req, 5, 5,
         )
-        self.assertIsNotNone(bitmap_pkts)
-        self.assertGreaterEqual(len(bitmap_pkts), 2)
-        bitmap_push = parse_packet(bitmap_pkts[1][:-1]).payload[8:]
-        self.assertEqual(bitmap_push[0], 0x85)
-        self.assertEqual(bitmap_push[1], 0xBF)
-        self.assertEqual(bitmap_push[2], 0x01)
-        self.assertEqual(struct.unpack("<I", bitmap_push[13:17])[0], topic1.address)
-        self.assertEqual(bitmap_push[1 + 4 + 0x26], 0x03)
+        self.assertIsNotNone(text_pkts)
+        self.assertGreaterEqual(len(text_pkts), 2)
+        text_push = parse_packet(text_pkts[1][:-1]).payload[8:]
+        self.assertEqual(text_push[0], 0x85)
+        self.assertEqual(text_push[1], 0xBF)
+        self.assertEqual(text_push[2], 0x01)
+        self.assertEqual(struct.unpack("<I", text_push[13:17])[0], topic1.address)
+        # case-1 dispatch byte at name_buf[0x26] = chunk[0x2A] = push[0x2B]
+        self.assertEqual(text_push[1 + 4 + 0x26], 0x01)
 
     def test_fetch_adjacent_topic_acks_then_pushes_a5_status(self):
         # Spec §0x16 (post-update): selector 0x16 is async-refresh —
@@ -2192,9 +2209,12 @@ class TestMEDVIEWTitleService(unittest.TestCase):
 
     def _open_title(self, handler):
         # Drives the handler through a successful OpenTitle so the slot
-        # is registered for ValidateTitle / CloseTitle assertions.
+        # is registered for ValidateTitle / CloseTitle assertions. Use
+        # the rich `msn_today` fixture so the handler caches non-empty
+        # topics — `test_close_title_drops_per_title_state` checks that
+        # CloseTitle then clears them.
         req = (
-            b"\x04\x87:2[4]0\x00"
+            b"\x04\x8f:2[msn_today]0\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x81\x81\x83\x83\x83\x83\x83"

@@ -513,11 +513,21 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         # block are HGLOBAL slots, kept NULL by zeros.
         self.assertEqual(chunk[0x44:], b"\x00" * 60)
 
-    def test_empty_text_rejected(self):
-        # FUN_7e891810's skip-empty pre-test fires if first text byte
-        # is NUL — we'd never emit slot tag 1.
-        with self.assertRaises(ValueError):
-            build_case1_bf_chunk("", title_byte=0x01, key=0, name_size=0x40, initial_font_style=None)
+    def test_empty_text_skip_row_chunk(self):
+        # Empty text is intentional for the no-content fallback:
+        # `FUN_7e891810`'s pre-test treats first text byte == NUL with
+        # end-of-TLV byte == 0xFF as "skip this row" → return 5 → no
+        # slot emitted, but HfcNear's per-title cache is still populated
+        # (so `fMVSetAddress` completes and the client clears its
+        # hourglass). Verify the chunk has the exact byte pattern the
+        # pre-test matches.
+        chunk = build_case1_bf_chunk(
+            "", title_byte=0x01, key=0, name_size=0x40, initial_font_style=None,
+        )
+        # name_size=0x40 → name_buf occupies chunk[4..0x44].
+        # chunk[0x33] = end-of-TLV byte (control_stream); chunk[0x34] = first text byte.
+        self.assertEqual(chunk[0x33], 0xFF, "end-of-TLV must be 0xFF for skip-row")
+        self.assertEqual(chunk[0x34], 0x00, "first text byte must be NUL for skip-row")
 
     def test_text_too_long_for_in_name_buf_form_rejected(self):
         # 13 bytes of text + NUL = 14 bytes, exceeds 13-byte budget at name_size=0x40.

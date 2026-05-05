@@ -135,7 +135,7 @@ def resolve_handle(handle_index: dict[int, dict], ref: dict | None, expected_cla
 def validate_supported_subset(model: dict) -> None:
     counts = model["class_counts"]
     require(counts.get("CTitle", 0) == 1, "expected exactly one CTitle")
-    require(counts.get("CSection", 0) == 1, "expected exactly one CSection")
+    require(counts.get("CSection", 0) <= 1, "expected at most one CSection (inline-section titles ship 0)")
     require(counts.get("CStyleSheet", 0) == 1, "expected exactly one CStyleSheet")
     require(counts.get("CBFrame", 0) == 1, "expected exactly one CBFrame")
     require(counts.get("CBForm", 0) == 1, "expected exactly one CBForm")
@@ -148,27 +148,35 @@ def validate_supported_subset(model: dict) -> None:
     section = model["section"]
     form = model["form"]
     resource_folder = model["resource_folder"]
+    inline_section = model["inline_section"]
 
-    require(len(title["base_section"]["sections"]) == 1, "expected one top-level section")
-    require(not title["base_section"]["magnets"], "title magnets are unsupported")
-    require(not title["base_section"]["forms"], "title-level forms are unsupported")
-    require(not title["base_section"]["contents"], "title-level contents are unsupported")
-    require(not title["base_section"]["styles"], "title-level styles are unsupported")
-    require(not title["base_section"]["frames"], "title-level frames are unsupported")
+    # Two structural models accepted:
+    #  - "outer wrapper" (4.ttl original / showcase): CTitle.base_section
+    #    holds a list of nested CSection refs. The wrapper has NO inline
+    #    forms/contents/styles/frames itself — those live in the
+    #    referenced CSection object.
+    #  - "inline section" (Test Title.ttl): CTitle.base_section IS the
+    #    content section directly — its forms/contents/styles fields are
+    #    the title's content. No separate CSection object exists.
+    if inline_section:
+        require(not title["base_section"]["sections"], "inline-section title cannot have nested sections")
+        require(not title["base_section"]["magnets"], "title magnets are unsupported")
+    else:
+        require(len(title["base_section"]["sections"]) == 1, "expected one top-level section")
+        require(not title["base_section"]["magnets"], "title magnets are unsupported")
+        require(not title["base_section"]["forms"], "title-level forms are unsupported")
+        require(not title["base_section"]["contents"], "title-level contents are unsupported")
+        require(not title["base_section"]["styles"], "title-level styles are unsupported")
+        require(not title["base_section"]["frames"], "title-level frames are unsupported")
     require(title["shortcut_count"] == 0, "shortcuts are unsupported")
 
     require(not section["sections"], "nested sections are unsupported")
     require(not section["magnets"], "section magnets are unsupported")
     require(len(section["forms"]) == 1, "expected exactly one section form")
-    require(section["contents"], "expected at least one top-level content proxy")
-    require(not section["styles"], "section-specific styles are unsupported")
     require(not section["frames"], "section-specific frames are unsupported")
 
     require(form["embedded_vform_present"] == 1, "expected one embedded CVForm")
     require(resource_folder["base_folder"]["trailing_byte"] == 0, "unsupported resource folder trailer")
-
-    topic_source_entries = model["topic_source_entries"]
-    require(topic_source_entries, "expected at least one supported topic-source entry")
 
     supported_types = {"TextTree", "TextRuns", "WaveletImage"}
     content_types = {
@@ -202,7 +210,6 @@ def build_source_model(ttl_path: Path) -> dict:
         return matches[0]
 
     title_record = first_record("CTitle")
-    section_record = first_record("CSection")
     form_record = first_record("CBForm")
     frame_record = first_record("CBFrame")
     stylesheet_record = first_record("CStyleSheet")
@@ -210,25 +217,40 @@ def build_source_model(ttl_path: Path) -> dict:
     vform_record = first_record("CVForm")
 
     title_info = title_record["parsed"]
-    section_info = section_record["parsed"]
     form_info = form_record["parsed"]
     frame_info = frame_record["parsed"]
     stylesheet_info = stylesheet_record["parsed"]
     resource_folder_info = resource_folder_record["parsed"]
     require(title_info is not None, "unable to decode CTitle payload")
-    require(section_info is not None, "unable to decode CSection payload")
     require(form_info is not None, "unable to decode CBForm payload")
     require(frame_info is not None, "unable to decode CBFrame payload")
     require(stylesheet_info is not None, "unable to decode CStyleSheet payload")
     require(resource_folder_info is not None, "unable to decode CResourceFolder payload")
 
-    section_ref = title_info["base_section"]["sections"][0]
-    resolved_section = resolve_handle(handle_index, section_ref, "CSection")
-    require(
-        resolved_section["object_root"] == section_record["object_root"],
-        "title does not reference the single top-level section object",
-    )
+    # Two structural models for the title's content section:
+    #   - "outer wrapper" (4.ttl original): CSection lives as a separate
+    #     object referenced by `title.base_section.sections[0]`.
+    #   - "inline section" (Test Title.ttl): no CSection object; the
+    #     `title.base_section` payload IS the content section.
+    section_count = class_counts.get("CSection", 0)
+    inline_section = section_count == 0
+    if inline_section:
+        section_record = None
+        section_info = title_info["base_section"]
+        section_name = ""
+    else:
+        section_record = first_record("CSection")
+        section_info = section_record["parsed"]
+        require(section_info is not None, "unable to decode CSection payload")
+        section_name = path_prop(section_record, "name")
+        section_ref = title_info["base_section"]["sections"][0]
+        resolved_section = resolve_handle(handle_index, section_ref, "CSection")
+        require(
+            resolved_section["object_root"] == section_record["object_root"],
+            "title does not reference the single top-level section object",
+        )
 
+    require(section_info["forms"], "section has no form reference")
     resolved_form = resolve_handle(handle_index, section_info["forms"][0], "CBForm")
     require(
         resolved_form["object_root"] == form_record["object_root"],
@@ -349,9 +371,10 @@ def build_source_model(ttl_path: Path) -> dict:
             "localname": inspection["title_prop_map"].get("localname", {}).get("value", ""),
         },
         "section": {
-            "name": path_prop(section_record, "name"),
+            "name": section_name,
             **section_info,
         },
+        "inline_section": inline_section,
         "form": {
             "name": path_prop(form_record, "name"),
             **form_info,
@@ -371,7 +394,21 @@ def build_source_model(ttl_path: Path) -> dict:
         "vform": {
             "object_root": vform_record["object_root"],
             "payload_size": len(vform_record["payload"]),
+            "sites": (vform_record.get("parsed") or {}).get("sites", []),
         },
+        "captions": [
+            {
+                "name": s["name"],
+                "rect_twips": s["data"]["rect_twips"],
+                "font_name": s["data"]["font_name"],
+                "font_weight": s["data"]["font_weight"],
+                "font_size_pt": s["data"]["font_size_pt"],
+                "text": s["data"]["caption_text"],
+            }
+            for s in (vform_record.get("parsed") or {}).get("sites", [])
+            if s.get("kind") == "Caption" and isinstance(s.get("data"), dict)
+            and "caption_text" in s["data"]
+        ],
         "topic_source_entries": topic_source_entries,
         "content_records": content_records,
         "class_counts": class_counts,
@@ -422,7 +459,7 @@ def build_section_strings(model: dict) -> list[str]:
         model["title"]["name"],
         model["section"]["name"],
         model["form"]["form_name"],
-        model["frame"]["name_1"],
+        model["frame"]["caption"],
         model["stylesheet"]["name"],
         model["resource_folder"]["name"],
     ]
@@ -700,7 +737,7 @@ def synthesize_payload(model: dict, mosview_open_path: str) -> tuple[bytes, dict
 def synthesize_metadata(model: dict, payload: bytes, mosview_open_path: str) -> tuple[dict, list[dict]]:
     topic_source_entries = build_topic_source_metadata(model)
     parser_title_path = build_stock_parser_title_path(mosview_open_path)
-    va_get_contents = topic_source_entries[0]["address"]
+    va_get_contents = topic_source_entries[0]["address"] if topic_source_entries else 0
     addr_get_contents = va_get_contents
     title_info_0b = len(topic_source_entries)
     header0 = synthetic_crc(payload)

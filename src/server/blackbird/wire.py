@@ -711,11 +711,14 @@ def build_case1_bf_chunk(
       - paint loop's `FUN_7e893010` calls `ExtTextOutA(hdc, x, y, …,
         text, len, …)` with the bytes shipped here.
     """
-    if not text:
-        # FUN_7e891810's pre-test treats first text byte == 0 (with
-        # end-of-TLV byte == 0xFF) as "skip this row" → return 5 →
-        # caller's do-while loop terminates without emitting tag 1.
-        raise ValueError("case-1 chunk requires non-empty text")
+    # Empty text is intentional for the "no authored content" fallback:
+    # `FUN_7e891810`'s pre-test treats first text byte == 0 (with
+    # end-of-TLV byte == 0xFF) as "skip this row" → return 5 → caller's
+    # do-while loop terminates without emitting tag 1. The chunk still
+    # populates HfcNear's per-title cache (so `fMVSetAddress` completes
+    # and the client clears its hourglass) without producing a visible
+    # slot. Used by `services/medview._push_case1_text` when the title
+    # has no topic-source entries.
 
     if not (0x40 <= name_size <= 0xFFFF):
         raise ValueError(
