@@ -85,6 +85,13 @@ title path, or deid-derived selector.
 
 ## 3. How It Is Called
 
+For the branch-by-branch enumeration of the DID-launch path
+(`MOSVIEW.EXE -MOS:6:<deid_lo>:<deid_hi>:<tail>`) from PE entry to the
+first `BitBlt`/`PlayMetaFile`, see
+[`re-passes/MOSVIEW-STARTUP.md`](re-passes/MOSVIEW-STARTUP.md). The
+sub-sections below summarise the contract; the deep-dive doc owns
+the per-branch detail.
+
 ## 3.1 Standard MSN launch path
 
 `MosViewMain @ 0x7F3C1053` starts by calling:

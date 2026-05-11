@@ -5,26 +5,26 @@ selectors `0x1A`/`0x1B`/`0x1C` and the type-0 `0xBF` cache push.
 
 Format derived from RE of `MVCL14N.DLL`:
 
-- Container preamble: `FUN_7e887a40` is the kind=5/6/8 bitmap parser;
+- Container preamble: `MVDecodeBitmapBaggage` is the kind=5/6/8 bitmap parser;
   the multi-bitmap container that wraps it is `[u16 reserved][u16
   bitmap_count][u32 offset_to_bitmap[0]]`.
 - Kind=5/6 raster header: 2 byte-narrow varints (planes, bpp), 6
   ushort-narrow-or-u32-wide varints (width, height, palette_count,
   reserved, pixel_byte_count, trailer_size), 2 u32 offsets
   (pixel_data_offset, trailer_offset).
-- Trailer (`FUN_7e886820` → `FUN_7e886de0`): `[u8 reserved=0][u16
+- Trailer (`MVCloneBaggageBytes` → `MVScaleBaggageHotspots`): `[u8 reserved=0][u16
   child_count][u32 tail_size][child_count*15B][tail_size B]`.
 - Child record (15 B): `[u8 tag][u8 tag2][u8 flags][i16 x][i16 y][i16
   w][i16 h][u32 va]`. Tag `0x8A` (-0x76) is the text/link path
   (slot tag 7); other tags route to slot tag 4 with `(slot+0x39, +0x3a)
   = (tag, tag2)` keying into the tail.
 - Type-0 `0xBF` chunk case-1 path (text slot) — preamble parser is
-  `FUN_7e897ed0` (1-byte type tag + signed-int varint), TLV parser is
-  `FUN_7e897ad0` (signed-int length + u32 presence bitmap + conditional
+  `MVDecodeTopicItemPrefix` (1-byte type tag + signed-int varint), TLV parser is
+  `MVDecodePackedTextHeader` (signed-int length + u32 presence bitmap + conditional
   sub-fields + variable trailing pair list). The case-1 dispatch
-  (`FUN_7e894c50` switch on byte 0 of preamble) emits a tag-1 slot via
-  `FUN_7e8915d0` → `FUN_7e891810` → `FUN_7e891f50` → `FUN_7e892200` →
-  `FUN_7e8925d0` → `FUN_7e892d30`. Slot fields driving paint:
+  (`MVWalkLayoutSlots` switch on byte 0 of preamble) emits a tag-1 slot via
+  `MVBuildTextItem` → `MVTextLayoutFSM` → `MVLayoutTextLine` → `MVLayoutTextRunStream` →
+  `MVFitPlainTextRun` → `MVEmitTextRunSlot`. Slot fields driving paint:
     slot+0x39 (int) = TLV[0x00] (length field, treated as text byte
                                  offset into chunk content base)
     slot+0x3D (short) = walked text length (NUL- or chunk_end-terminated)
@@ -42,7 +42,7 @@ _WIDE_U32_MAX = 0x7FFFFFFF
 
 def encode_byte_or_ushort_varint(value: int) -> bytes:
     """Variable-length encoding for the planes/bpp slots in a kind=5
-    header. Reader (`FUN_7e887a40` byte-narrow path) peeks the first byte:
+    header. Reader (`MVDecodeBitmapBaggage` byte-narrow path) peeks the first byte:
     LSB clear → 1-byte form (value <= 127, encoded `value << 1`); LSB
     set → 2-byte form (value <= 32767, encoded as little-endian u16
     `(value << 1) | 1`).
@@ -84,8 +84,8 @@ def build_child_record(
 ) -> bytes:
     """Build a 15-byte trailer child record (see docs/MEDVIEW.md §10.3).
 
-    `FUN_7e886de0` reads each record in this layout, applies DPI scaling
-    to x/y/w/h, then `FUN_7e894560` materialises it into a `0x47`-byte
+    `MVScaleBaggageHotspots` reads each record in this layout, applies DPI scaling
+    to x/y/w/h, then `MVBuildLayoutLine` materialises it into a `0x47`-byte
     slot at `title+0xf6 + (parent_idx + 1 + child_idx) * 0x47`.
     """
     return struct.pack(
@@ -102,8 +102,8 @@ def build_child_record(
 
 
 def build_trailer(children: list[bytes], tail: bytes) -> bytes:
-    """Build the trailer bytes consumed by `FUN_7e886820` →
-    `FUN_7e886de0`.
+    """Build the trailer bytes consumed by `MVCloneBaggageBytes` →
+    `MVScaleBaggageHotspots`.
 
     Layout: `[u8 reserved=0][u16 child_count][u32 tail_size][child_count
     * 15B][tail_size bytes]`. `tail_size` is the byte length of `tail`,
@@ -136,7 +136,7 @@ def build_kind5_raster(
 ) -> bytes:
     """Build a kind=5 raster bitmap.
 
-    Layout (assembled in input order — `FUN_7e887a40` parses through
+    Layout (assembled in input order — `MVDecodeBitmapBaggage` parses through
     these positionally):
 
         +0x00  u8 kind=5
@@ -197,8 +197,8 @@ def build_kind5_raster(
 def build_baggage_container(bitmap: bytes) -> bytes:
     """Wrap a single bitmap in the multi-bitmap container preamble.
 
-    `FUN_7e886310` reads the container's `+0x04` u32 to find the bitmap
-    header start, then forwards the slice to `FUN_7e887a40`. Single-
+    `MVResolveBitmapForRun` reads the container's `+0x04` u32 to find the bitmap
+    header start, then forwards the slice to `MVDecodeBitmapBaggage`. Single-
     bitmap form: `[u16 reserved=0][u16 count=1][u32 offset=8] + bitmap`.
     """
     return struct.pack("<HHI", 0, 1, 8) + bitmap
@@ -208,9 +208,9 @@ def build_baggage_container(bitmap: bytes) -> bytes:
 # Win32 metafile (.WMF) — kind=8 baggage carries arbitrary GDI records
 # (TextOut, font select, etc.) that PlayMetaFile renders at the parent
 # slot's origin. This is the wire primitive for absolute-positioned text:
-# `MOSVIEW.EXE!FUN_7e887180` SetViewportOrgEx → SetMapMode → PlayMetaFile;
-# `MVCL14N!FUN_7e8870a0` calls SetMetaFileBitsEx on the bytes at
-# parsed_baggage+0x1e.
+# `MVCL14N!MVPaintBitmapRecord @ 0x7E887180` SetViewportOrgEx → SetMapMode
+# → PlayMetaFile; `MVCL14N!MVCreateHmetafileFromBaggage @ 0x7E8870A0` calls
+# SetMetaFileBitsEx on the bytes at parsed_baggage+0x1e.
 # --------------------------------------------------------------------------
 
 # WMF function codes (META_*) used by `build_text_metafile`.
@@ -365,7 +365,7 @@ def build_kind8_baggage(
 ) -> bytes:
     """Wrap a Win32 metafile in a kind=8 baggage container.
 
-    Layout consumed by `MVCL14N!FUN_7e887a40` (kind=8 branch):
+    Layout consumed by `MVCL14N!MVDecodeBitmapBaggage` (kind=8 branch):
       +0      u8     kind = 0x08
       +1      u8     compression (0 = raw)
       +2..    varint mapmode (narrow byte if mapmode <= 0x7F)
@@ -416,7 +416,7 @@ def build_case3_bf_chunk(
 ) -> bytes:
     """Build a type-0 0xBF chunk that drives the case-3 bitmap cell path.
 
-    Case 3 (`FUN_7e894560`) materialises a parent cell whose bitmap is
+    Case 3 (`MVBuildLayoutLine`) materialises a parent cell whose bitmap is
     loaded from baggage (`bm0` for the current zeroed descriptor fields).
     This is the plain bitmap/background path, complementary to
     `build_case1_bf_chunk`'s text-row path.
@@ -438,9 +438,9 @@ def build_case3_bf_chunk(
 # --------------------------------------------------------------------------
 # Type-0 0xBF cache chunk — case-1 (text slot) wire format.
 #
-# The case-1 chunk drives `FUN_7e890fd0` → `FUN_7e894c50` (case 1) →
-# `FUN_7e8915d0` to emit a slot-tag-1 row that paints via `ExtTextOutA`
-# at `FUN_7e893010`. Three byte-encodings show up in this path:
+# The case-1 chunk drives `MVParseLayoutChunk` → `MVWalkLayoutSlots` (case 1) →
+# `MVBuildTextItem` to emit a slot-tag-1 row that paints via `ExtTextOutA`
+# at `DrawTextSlot`. Three byte-encodings show up in this path:
 #
 #   1. Preamble signed-int varint: narrow 2 B `(value+0x4000)<<1`,
 #      wide 4 B `((value+0x40000000)<<1)|1`.
@@ -452,11 +452,11 @@ def build_case3_bf_chunk(
 # --------------------------------------------------------------------------
 
 
-_PREAMBLE_NARROW_TYPE_TAG_MAX = 0x10  # `FUN_7e897ed0` reads an extra ushort only when type tag > 0x10
+_PREAMBLE_NARROW_TYPE_TAG_MAX = 0x10  # `MVDecodeTopicItemPrefix` reads an extra ushort only when type tag > 0x10
 
 
 def encode_signed_int_varint(value: int) -> bytes:
-    """Encode a `FUN_7e897ad0` length-form varint (signed int).
+    """Encode a `MVDecodePackedTextHeader` length-form varint (signed int).
 
     Reader paths:
       - narrow (1-bit LSB clear): 2-byte little-endian word, decoded
@@ -475,7 +475,7 @@ def encode_signed_int_varint(value: int) -> bytes:
 
 
 def encode_signed_short_varint(value: int) -> bytes:
-    """Encode a `FUN_7e897ad0` short-form varint (signed short).
+    """Encode a `MVDecodePackedTextHeader` short-form varint (signed short).
 
     Reader paths:
       - narrow (1-bit LSB clear): 1-byte, decoded `(raw>>1) - 0x40`.
@@ -495,12 +495,12 @@ def encode_signed_short_varint(value: int) -> bytes:
 def encode_case1_preamble(length_value: int, type_tag: int = 0x01) -> bytes:
     """Encode the per-chunk preamble that prefixes the TLV+text region.
 
-    `FUN_7e897ed0` reads:
-      byte 0:    type tag (switched on by `FUN_7e894c50`)
+    `MVDecodeTopicItemPrefix` reads:
+      byte 0:    type tag (switched on by `MVWalkLayoutSlots`)
       bytes 1+:  signed-int varint, decoded as `length_value`
 
     `length_value` is added to `entry+0x26+preamble_size` to compute
-    the TEXT BASE pointer (`local_c` in `FUN_7e890fd0`). The TLV is
+    the TEXT BASE pointer (`local_c` in `MVParseLayoutChunk`). The TLV is
     consumed at `entry+0x26+preamble_size`, so setting
     `length_value = TLV_size` places the text immediately after the
     TLV. Type tag 0x01 dispatches to the case-1 (text) branch.
@@ -508,7 +508,7 @@ def encode_case1_preamble(length_value: int, type_tag: int = 0x01) -> bytes:
     if not (0 <= type_tag <= 0xFF):
         raise ValueError(f"preamble tag out of byte range: {type_tag}")
     if type_tag > _PREAMBLE_NARROW_TYPE_TAG_MAX:
-        # `FUN_7e897ed0` reads an additional byte/ushort varint after
+        # `MVDecodeTopicItemPrefix` reads an additional byte/ushort varint after
         # the length field for tags > 0x10 — not exercised yet.
         raise NotImplementedError(
             f"preamble tag > 0x10 has extra varint field: {type_tag}"
@@ -570,7 +570,7 @@ def build_type3_op4_frame(title_byte: int, kind: int, key: int, va: int, addr: i
 def encode_null_tlv() -> bytes:
     """Encode the minimum-viable TLV: length=0, presence bitmap=0.
 
-    `FUN_7e897ad0` consumes 6 bytes total (2-byte narrow length +
+    `MVDecodePackedTextHeader` consumes 6 bytes total (2-byte narrow length +
     4-byte u32 bitmap) and leaves the output struct zeroed except
     for `[0]=0` (length) and the formula default at `[0x22]=0x0048`.
 
@@ -602,7 +602,7 @@ _TLV_OPTIONAL_SHORT_FIELDS = (
 
 
 def encode_text_item_tlv(fields: dict[int, int] | None = None) -> bytes:
-    """Encode a `FUN_7e897ad0`-shaped TLV from a field dict.
+    """Encode a `MVDecodePackedTextHeader`-shaped TLV from a field dict.
 
     Inverse of `decode_case1_tlv`. Field semantics per
     `docs/mosview-authored-text-and-font-re.md` §"Text Header Grammar":
@@ -687,9 +687,9 @@ def encode_text_item_tlv(fields: dict[int, int] | None = None) -> bytes:
 
 def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
     """Decode bytes produced by `encode_null_tlv` (or any TLV form
-    `FUN_7e897ad0` accepts) and report (struct_dict, bytes_consumed).
+    `MVDecodePackedTextHeader` accepts) and report (struct_dict, bytes_consumed).
 
-    Mirrors `FUN_7e897ad0`'s exact control flow so test cases can
+    Mirrors `MVDecodePackedTextHeader`'s exact control flow so test cases can
     pin the encoder against the decompiled paths.
     """
     pos = 0
@@ -855,13 +855,13 @@ def case1_text_budget(
     Within the chunk, name_buf starts at offset +0x04 and the case-1
     dispatch byte sits at name_buf+0x26 = chunk+0x2A. The 0xFF byte
     sits at end_of_TLV (= name_buf[0x29 + tlv_size]) so the control
-    walker (`template[+0x14]` in FUN_7e891810, initialised to end_of_TLV
-    by FUN_7e8915d0) finds an end-of-chunk marker once the text
-    walker hits the NUL terminator. Without it, FUN_7e894ec0's
+    walker (`template[+0x14]` in MVTextLayoutFSM, initialised to end_of_TLV
+    by MVBuildTextItem) finds an end-of-chunk marker once the text
+    walker hits the NUL terminator. Without it, MVDispatchControlRun's
     default case treats the first text byte as a link tag and reads
     `*(ushort *)(first+1)`, advancing the walker out of bounds and
     triggering the "service is not available" dialog. Live SoftIce
-    trace 2026-04-29 at FUN_7e892d30 confirmed.
+    trace 2026-04-29 at MVEmitTextRunSlot confirmed.
     """
     control_len = 1 if initial_font_style is None else 4
     text_prefix_len = 0 if initial_font_style is None else 1
@@ -892,7 +892,7 @@ def build_case1_bf_chunk(
         +0x01  title_byte                          per-title routing
         +0x02  name_size = 0x40 (LE u16)           memcpy length into entry
         +0x04..0x0B  zero padding                  name_buf[0..7]
-        +0x0C  key (LE u32)                        FUN_7e8452d3 reads here
+        +0x0C  key (LE u32)                        HfcCache_DispatchContentNotification reads here
         +0x10..0x29  zero padding                  name_buf[12..0x25]
         +0x2A  0x01                                name_buf[0x26] — case-1 dispatch
         +0x2B..0x2C  preamble length raw           narrow varint, decoded = 10 by default
@@ -906,17 +906,17 @@ def build_case1_bf_chunk(
     With the default font-control stream:
       - control walker starts at end_of_TLV and reads 0x80, style 0, then 0xFF
       - text base starts after the control stream
-      - text_base[0] is NUL so `FUN_7e894ec0` applies style 0 before the first
+      - text_base[0] is NUL so `MVDispatchControlRun` applies style 0 before the first
         printable run
       - text walk then reads from text_base[1] until NUL and emits slot tag 1
-      - next loop iteration: text byte at idx N is NUL → `FUN_7e892200`
-        calls `FUN_7e894ec0`, which reads 0xFF at control walker → case
+      - next loop iteration: text byte at idx N is NUL → `MVLayoutTextRunStream`
+        calls `MVDispatchControlRun`, which reads 0xFF at control walker → case
         0xFF → return 5 → loop exits cleanly
-      - paint loop's `FUN_7e893010` calls `ExtTextOutA(hdc, x, y, …,
+      - paint loop's `DrawTextSlot` calls `ExtTextOutA(hdc, x, y, …,
         text, len, …)` with the bytes shipped here.
     """
     # Empty text is intentional for the "no authored content" fallback:
-    # `FUN_7e891810`'s pre-test treats first text byte == 0 (with
+    # `MVTextLayoutFSM`'s pre-test treats first text byte == 0 (with
     # end-of-TLV byte == 0xFF) as "skip this row" → return 5 → caller's
     # do-while loop terminates without emitting tag 1. The chunk still
     # populates HfcNear's per-title cache (so `fMVSetAddress` completes
@@ -977,7 +977,7 @@ def build_case1_bf_chunk(
 
     chunk[case_offset + 3:case_offset + 3 + len(tlv)] = tlv
 
-    # Control stream at end_of_TLV — read by FUN_7e894ec0 when the text
+    # Control stream at end_of_TLV — read by MVDispatchControlRun when the text
     # walker sees NUL. The default stream selects style 0 before text.
     control_offset = case_offset + 3 + len(tlv)
     chunk[control_offset:control_offset + len(control_stream)] = control_stream

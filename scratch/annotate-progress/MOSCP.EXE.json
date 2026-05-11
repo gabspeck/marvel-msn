@@ -1,0 +1,21 @@
+{
+  "binary": "MOSCP.EXE",
+  "image_base": "0x7f450000",
+  "lastUpdated": "2026-05-06",
+  "bulk_plate_status": "complete (276/302)",
+  "deep_line_comments": "1222 PRE + 106 EOL across 287 functions",
+  "deep_annotated": [
+    {"addr": "7f451000", "name": "MoscpWinMain", "session": 2},
+    {"addr": "7f4597f4", "name": "MoscpInitServer", "session": 2},
+    {"addr": "7f45112d", "name": "MoscpRegisterClass", "session": 2},
+    {"addr": "7f45119c", "name": "MoscpRunPump", "session": 2},
+    {"addr": "7f4596b6", "name": "MoscpShutdown", "session": 2}
+  ],
+  "remaining_FUN_": 243,
+  "next_priorities": [
+    {"addr": "?", "hint": "Pipe accept dispatcher under MoscpInitServer"},
+    {"addr": "?", "hint": "MoscpRunPump WindowProc"},
+    {"addr": "?", "hint": "Per-app dispatch table populator"},
+    {"addr": "?", "hint": "MEDVIEW selector router on the server side"}
+  ]
+}

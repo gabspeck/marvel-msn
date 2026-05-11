@@ -1,0 +1,13 @@
+{
+  "binary": "MOSCOMP.DLL",
+  "image_base": "0x7f470000",
+  "lastUpdated": "2026-05-06",
+  "bulk_plate_status": "complete (169/188; 144 auto + 24 named-no-plate + 1 thunk plated, 19 hand plates preserved)",
+  "deep_annotated": [],
+  "skipped": [],
+  "remaining_FUN_": 144,
+  "next_priorities": [
+    {"addr": "?", "hint": "ProgCreate / ProgPaint / ProgClose — progress dialog"},
+    {"addr": "?", "hint": "Palette resolution helpers"}
+  ]
+}

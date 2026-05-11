@@ -21,6 +21,73 @@ Companions:
 
 ---
 
+## 0. Selector matrix
+
+42-row IID-bound selector table plus the IID-less `0x00` ValidateTitle.
+
+Status legend:
+- `full` — byte layout + per-field purpose + value space + per-value
+  effect all pinned in this doc, with Ghidra cite. `client-opaque
+  (verified at <addr>)` sub-fields are allowed when the client demonstrably
+  never inspects a byte.
+- `dead` — confirmed zero client call sites in MVTTL14C (cite xref count).
+
+| Sel    | IID idx | Name                          | MVTTL14C entry / immediate site                                  | Status   | §             | Notes |
+|--------|--------:|-------------------------------|------------------------------------------------------------------|----------|---------------|-------|
+| `0x00` | — (IID-less) | `ValidateTitle`           | `TitleValid @ 0x7E8423AD` passes immediate `0` to vtable+0xC      | full     | §2.1.1        | One-byte titleSlot in / one-byte isValid out |
+| `0x01` |       0 | `TitleOpen` / `OpenTitle`     | `TitleOpenEx @ 0x7E842D4E`                                       | full     | §4            | Cache-tuple + dynamic body; reply DWORDs gate render |
+| `0x02` |       1 | `CloseTitle`                  | `TitleClose @ 0x7E842C3A`                                        | full     | §6d.2         | titleSlot byte; sent only on last refcount |
+| `0x03` |       2 | `TitleGetInfo` / `GetTitleInfoRemote` | `TitleGetInfo @ 0x7E842558` (local + remote dispatch)    | full     | §5            | 9-section body + remote info_kinds |
+| `0x04` |       3 | `QueryTopics`                 | `TitleQuery @ 0x7E841653`                                        | full     | §6d.3         | Variable-shape request driven by queryFlags |
+| `0x05` |       4 | `ConvertAddressToVa`          | `vaConvertAddr @ 0x7E841D64`                                     | full     | §6d.4         | Reply via NotificationType3 subtype 4 (kind=2) |
+| `0x06` |       5 | `vaConvertHash` / `ConvertHashToVa` | `vaConvertHash @ 0x7E841E9A`                               | full     | §6b           | Reply via NotificationType3 subtype 4 |
+| `0x07` |       6 | `vaConvertTopicNumber` / `ConvertTopicToVa` | `vaConvertTopicNumber @ 0x7E841FCF`                | full     | §6b           | Reply via NotificationType3 subtype 4 |
+| `0x08` |       7 | `QueryWordWheel`              | `WordWheelQuery @ 0x7E849E99`                                    | full     | §6d.5.1       | u16 status |
+| `0x09` |       8 | `OpenWordWheel`               | `WordWheelOpenTitle @ 0x7E849328`                                | full     | §6d.5.2       | wordWheelId + itemCount |
+| `0x0A` |       9 | `CloseWordWheel`              | `WordWheelClose @ 0x7E8495B1`                                    | full     | §6d.5.3       | ack |
+| `0x0B` |      10 | `ResolveWordWheelPrefix`      | `WordWheelPrefix @ 0x7E849935`                                   | full     | §6d.5.4       | u32 prefix result |
+| `0x0C` |      11 | `LookupWordWheelEntry`        | `WordWheelLookup @ 0x7E849658`                                   | full     | §6d.5.5       | Result via NotificationType1 |
+| `0x0D` |      12 | `CountKeyMatches`             | `KeyIndexGetCount @ 0x7E849A27`                                  | full     | §6d.5.6       | u16 count |
+| `0x0E` |      13 | `ReadKeyAddresses`            | `KeyIndexGetAddrs @ 0x7E849B6E`                                  | full     | §6d.5.7       | Packed u32 array (byte count) |
+| `0x0F` |      14 | `SetKeyCountHint`             | `fKeyIndexSetCount @ 0x7E849D8A`                                 | full     | §6d.5.8       | u8 success |
+| `0x10` |      15 | `LoadTopicHighlights` / `HighlightsInTopic` | `HighlightsInTopic @ 0x7E841526`                   | full     | §6b           | Highlight blob with 8-byte header + repeated 13-byte entries |
+| `0x11` |      16 | `FindHighlightAddress`        | `addrSearchHighlight @ 0x7E8413FE`                               | full     | §6d.6.1       | u32 addressToken |
+| `0x12` |      17 | `ReleaseHighlightContext`     | `HighlightDestroy @ 0x7E841180`                                  | full     | §6d.6.2       | ack |
+| `0x13` |      18 | `RefreshHighlightAddress`     | `HighlightLookup @ 0x7E841235`                                   | full     | §6d.6.3       | Result via NotificationType2 |
+| `0x14` |      19 | (none — dead)                 | no caller                                                        | dead     | §6e           | Zero `CALL [EAX+0xc]` immediate-14 sites |
+| `0x15` |      20 | `vaResolve` / `FetchNearbyTopic` | `HfcNear @ 0x7E84589F` (immediate `0x15` at `0x7E845973`)     | full     | §6b.1         | Topic body via NotificationType0 |
+| `0x16` |      21 | `FetchAdjacentTopic`          | `HfcNextPrevHfc @ 0x7E845ABB`                                    | full     | §6d.7         | Topic body via NotificationType0 |
+| `0x17` |      22 | `SubscribeNotifications`      | `MVAsyncSubscriberSubscribe @ 0x7E844EE6` (called 5× by `hrAttachToService`) | full | §6a   | Reply must be `0x87 0x88` (stream-end iterator); see B1 |
+| `0x18` |      23 | `UnsubscribeNotifications`    | `MVAsyncSubscriberUnsubscribe @ 0x7E844FE3`                       | full     | §6d.1         | ack |
+| `0x19` |      24 | (none — dead)                 | no caller                                                        | dead     | §6e           | Zero `CALL [EAX+0xc]` immediate-19 sites |
+| `0x1A` |      25 | `HfOpenHfs` / `BaggageOpen`   | `HfOpenHfs @ 0x7E847656`, `BaggageOpen @ 0x7E848205`             | full     | §6c           | hfs_vol + ASCIIZ name + mode → handle byte + size |
+| `0x1B` |      26 | `LcbReadHf` / `BaggageRead`   | `LcbReadHf @ 0x7E847C45`, `LcbReadHfProgressive @ 0x7E847DF6`, `BaggageRead @ 0x7E84818E` | full | §6c | handle + count + pos → status byte + bytes |
+| `0x1C` |      27 | `RcCloseHf` / `BaggageClose`  | `RcCloseHf @ 0x7E847BAD`, `HfsCloseRemoteHandle @ 0x7E847BD8`, `BaggageClose @ 0x7E848023` | full | §6c | handle → ack |
+| `0x1D` |      28 | `GetRemoteFsError`            | `RcGetFSError @ 0x7E847F2B`                                      | full     | §6d.8         | u16 fsError |
+| `0x1E` |      29 | `TitlePreNotify`              | `TitlePreNotify @ 0x7E843941`                                    | full     | §6            | Local + wire opcode dispatch |
+| `0x1F` |      30 | `Handshake` / `AttachSession` | `hrAttachToService @ 0x7E844114` (immediate `0x1F` in attach path) | full   | §3            | clientVersion + 12B caps → validation u32 |
+| `0x20` |      31 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x21` |      32 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x22` |      33 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x23` |      34 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x24` |      35 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x25` |      36 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x26` |      37 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x27` |      38 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x28` |      39 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x29` |      40 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+| `0x2A` |      41 | (none — dead)                 | no caller                                                        | dead     | §6e           | |
+
+Tally: `full` = 30 (29 IID-bound + 1 IID-less `0x00`), `dead` = 13 = `0x14, 0x19, 0x20`–`0x2A`. Total 42 IID-bound + 1 IID-less = 43 wire selectors.
+
+Notification streams (out-of-band; carried by selector `0x17` subscription
+slots) catalogued in `docs/medview-service-contract.md` `NotificationType`
+family: type 0 (TopicCacheStream, records 0x37 / 0xA5 / 0xBF), type 1
+(WordWheelLookupStream), type 2 (HighlightLookupStream), type 3
+(MixedAsyncStream — subtypes 1, 2, 4, 5), type 4 (TransferChunkStream).
+
+---
+
 ## 1. Service identity
 
 | Field | Value | Source |
@@ -35,6 +102,74 @@ Companions:
 ordinal `10`) — it falls back to `"MEDVIEW"` when the caller passes NULL /
 empty. `MVCL14N!MVTitleConnection` (ordinal 36) calls it via
 `hrAttachToService`.
+
+### 1.1 Per-service wire class byte (wire byte 0)
+
+Every host block MEDVIEW emits carries two routing bytes in front of
+the request-id VLI: a **class byte** (byte 0) and a **per-call
+selector** (byte 1). The class byte is the same for every MEDVIEW
+request; the per-call selector is what selects e.g. handshake vs.
+TitleOpen vs. ConvertHashToVa.
+
+For MEDVIEW the class byte is **`0x01`** — the server-assigned selector
+for IID `00028B71` (TitleOpen), which is the first IID in the client's
+IID table (§2.1) and thus the IID the proxy wrapper is bound to. Under
+the index+1 selector-assignment rule the client expects (§2.1), the
+first IID resolves to selector `0x01`, and that byte propagates as the
+class byte for every subsequent MEDVIEW request.
+
+Mechanism (entry: `MVTTL14C!hrAttachToService @ 0x7E844114`):
+
+1. `hrAttachToService` calls `(*marshal)->vtable[0x24](marshal,
+   serviceName, &DAT_7E84C1B0, &DAT_7E84E2F8, 0x1400800A, 0)`.
+   Slot `0x24` of the marshal vtable is implemented by
+   `MPCCL!OpenOrCreateNamedService @ 0x04601F75`. `&DAT_7E84C1B0` is
+   the client IID table (42 × 16-byte IIDs); the call treats its first
+   16 bytes as the requested IID.
+2. `OpenOrCreateNamedService` constructs the opened-service container
+   via `MPCCL!ConstructOpenedService @ 0x0460253D`, initialises the MOS
+   pipe / session via `MPCCL!InitializeLoginServiceSession @ 0x0460263F`
+   (sends discovery selector `0x00` and waits for the per-service IID→
+   selector reply), then invokes vtable slot 0 of the opened service
+   (`MPCCL!QueryOpenedServiceInterface @ 0x04602EBB`) with the IID
+   table pointer treated as the requested IID.
+3. `QueryOpenedServiceInterface` short-circuits when the requested IID
+   is `IID_IUnknown` (`{00000000-…-46}` at `DAT_0460CE80`); otherwise
+   calls `MPCCL!ResolveServiceSelectorForInterface @ 0x046073DB`. This
+   waits up to 20 s for the discovery map and looks the IID up through
+   the binary-tree at `state[+0x10][+0x4C]` (`MPCCL!ServiceInterfaceMap_FindByIid
+   @ 0x046086B6`). Tree-node layout:
+   `+0x00 u32 iid_ptr`, `+0x04 u8 selector`, `+0x0C comparator`,
+   `+0x14 left`, `+0x18 right`. The lookup returns
+   `*(byte *)(node+4)` — the **server-assigned selector byte** for the
+   queried IID.
+4. With the resolved selector byte in `local_5`,
+   `QueryOpenedServiceInterface` allocates a `0x54`-byte wrapper via
+   `MPCCL!ConstructServiceSelectorWrapper @ 0x0460320E`. The constructor
+   stores the byte at `wrapper+0x10`. Wrapper vtable is at
+   `PTR_WrapperQueryInterface_0460CD48`.
+5. Each call to wrapper-slot `0x0c`
+   (`MPCCL!CreateServiceRequestBuilderInterface @ 0x04603331`) builds a
+   `0x11C`-byte request via `MPCCL!ConstructServiceRequestBuilder @
+   0x046036C8`. The constructor copies `wrapper+0x10 → builder+0x14`
+   (class byte) and writes the caller's per-call selector at
+   `builder+0x15` (the immediate `0x1F` for handshake, `0x01` for
+   TitleOpen, etc.).
+6. On send, `MPCCL!AppendRequestIdHeaderToWireBuilder @ 0x046064E4`
+   memcpys `builder+0x14` into the wire `ByteBuffer`. Source pointer
+   is `builder+0x14`, length = `*(byte *)(builder+0x1A) + 2` — so the
+   first two bytes copied are exactly `class_byte`, `per_call_selector`,
+   followed by `N` VLI request-id bytes.
+
+Discovery is the sole exception: its wire bytes are `class=0x00,
+selector=0x00, request_id=0` — sent before any wrapper exists, from
+inside `InitializeLoginServiceSession`'s pipe-open sequence.
+
+The IID table only ever produces ONE bound wrapper (for IID idx 0 =
+TitleOpen). The other 41 IIDs do not get their own wrappers; their
+selectors are resolved to per-call bytes that the client hard-codes as
+immediates (`TitleOpenEx` passes `0x01`, `TitleClose` passes `0x02`,
+…). The class byte is fixed at attach time and never re-evaluated.
 
 ---
 
@@ -100,6 +235,19 @@ client hard-codes selectors as immediates in the MVTTL14C call sites; the
 server side is free to advertise any mapping that puts the right selectors
 in front of the client's IID lookup.
 
+### 2.1.1 IID-less selector 0x00 — `ValidateTitle`
+
+Wire selector `0x00` in the **proxy class** (distinct from the
+discovery class — see §2.2) is `ValidateTitle`. `MVTTL14C!TitleValid
+@ 0x7E8423AD` calls `(**(*DAT_7e84e2f8 + 0xc))(DAT_7e84e2f8, 0,
+&requestObj)` with the immediate `0` as the selector byte — same
+vtable slot used by `TitleOpenEx` (immediate `1` for selector
+`0x01`). The proxy treats `0x00` as a regular synchronous request:
+one-byte argument `titleSlot`, one-byte reply `isValid`. No IID is
+required because the operation is a probe of an already-open title
+slot. The IID array enumerates only the 42 IID-bound operations
+(selectors `0x01`–`0x2A`); ValidateTitle sits outside that array.
+
 ### 2.2 Discovery block
 
 Standard PROTOCOL.md §5.3 — first message on the pipe carries
@@ -136,7 +284,7 @@ overridden by `HKCU\...\Preferences\BrowseLanguage` (via
 | `0x83` | 4 LE | `validation_result` — **must be nonzero** (any nonzero value accepted; 1 is the minimum success indicator) |
 | `0x87` | 0 | End of static section |
 
-No dynamic section. The client's wait uses `FUN_7e843dcb` with a 30-second
+No dynamic section. The client's wait uses `MVAwaitWireReply` with a 30-second
 timeout.
 
 ### 3.3 Post-handshake behaviour
@@ -148,7 +296,7 @@ After a good handshake, `hrAttachToService` also:
    `DAT_7e851808` (observed zero). Server can reply with empty static +
    `0x87`.
 2. Allocates five async callback slots (per-notification-type,
-   `FUN_7e84485f` @ `0x7E84485F`). These are client-side listeners; they
+   `MVAsyncNotifyDispatch` @ `0x7E84485F`). These are client-side listeners; they
    do not require the server to initiate any traffic.
 
 ---
@@ -159,13 +307,55 @@ Called by `MVTTL14C!TitleOpenEx @ 0x7E842D4E` (export ordinal 41) to open
 one title. Invoked from `MVCL14N!hMVTitleOpenEx`, itself called by
 `MOSVIEW!OpenMediaTitleSession @ 0x7F3C61CE` once per open.
 
-### 4.1 Cache hint
+### 4.1 MVCache_<title>.tmp on-disk schema
 
-Before opening, `TitleOpenEx` tries to read
-`HKLM\SOFTWARE\Microsoft\MOS\Directories\MOSBin\MVCache\<title>.tmp`. The
-first 8 bytes of that file are two LE DWORDs (prior checksum pair). If the
-cache file exists and has those 8 bytes, they are sent as the two `0x03`
-request DWORDs below; otherwise both DWORDs are zero.
+`TitleOpenEx @ 0x7E842D4E` materializes the title body by either
+reusing a cached on-disk copy or pulling it from the live reply
+stream. The on-disk cache file lives under
+`HKLM\SOFTWARE\Microsoft\MOS\Directories\MOSBin\MVCache_<title>.tmp`.
+The leaf name is `wsprintfA("MVCache_%s.tmp", titleSpec)` with the
+characters `:` / `[` / `\\` / `]` mapped to `_` and leading
+underscores stripped after the substitution.
+
+On-disk byte layout:
+
+| Offset | Width | Field | Notes |
+|-------:|------:|-------|-------|
+| `+0x00` | u32 | `cacheTuple0` | client-opaque (memcmp only); server-controlled validation token |
+| `+0x04` | u32 | `cacheTuple1` | client-opaque (memcmp only); server-controlled validation token |
+| `+0x08..end` | bytes | `bodyBytes` | identical bytes to the live reply's dynamic body — `title+0xA4` allocation, `title+0xA8` byte count |
+
+**Read path:**
+
+1. `CreateFileA(GENERIC_READ, OPEN_EXISTING)`. Missing file → both
+   request DWORDs sent as zero.
+2. `ReadFile(8 bytes)` into `{cacheTuple0, cacheTuple1}`.
+3. If file size > 8, `ReadFile(file_size - 8)` into a heap buffer.
+
+**Send + validate:**
+
+1. Request DWORDs 2 and 3 (selector `0x01` request below) are
+   `cacheTuple0` / `cacheTuple1`.
+2. Reply binds `liveTuple0` / `liveTuple1` (the last two DWORD reply
+   bindings) from the server.
+3. **8-byte `memcmp(cacheTuple, liveTuple)`** decides cache validity.
+   Match → reuse cached buffer as `title+0xA4..0xA8`. Mismatch →
+   discard cached buffer and pull bytes from the reply's dynamic
+   stream.
+
+**Write path (live stream):**
+
+1. `CreateFileA(GENERIC_WRITE, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN |
+   FILE_ATTRIBUTE_SYSTEM)`.
+2. `WriteFile(liveTuple0/liveTuple1, 8)` — always the **live**
+   tuple, not the stale `cacheTuple` (the file always ends up
+   containing the most recent server-validated tuple).
+3. `WriteFile(payloadBuffer, payloadByteCount)`.
+4. Skipped entirely when `DAT_7e84e2F1 != 0` (the cache-disabled
+   flag set by some MOSMISC paths).
+
+The `scripts/inspect_mediaview_cache.py` utility parses the above
+schema for offline analysis.
 
 ### 4.2 Request
 
@@ -195,7 +385,7 @@ Static section (exactly these tags, in order):
 | `0x81` | 1 | `title_id` — any nonzero byte. Must NOT be zero; a zero byte routes to `LAB_7e8432d4` and title open returns NULL (viewer fails). |
 | `0x81` | 1 | `hfs_volume` — low byte of `*(u32 *)(title+0x88)`. Served locally via `TitleGetInfo(info_kind=0x69)`; passed into baggage as the HFS mode byte (`HfOpenHfs`, §6c). |
 | `0x83` | 4 LE | DWORD → `title+0x8c` = **contents va**. Served locally via `vaGetContents @ 0x7E841D48`. This is the entry-point virtual address navigation hands to the MedView engine (`NavigateViewerSelection` → `vaMVGetContents` → paint). `0xFFFFFFFF` / `0` both route `NavigateViewerSelection` into the "hideOnFailure" branch — **nothing paints**. |
-| `0x83` | 4 LE | DWORD → `title+0x90` — purpose unresolved on MSN Today's path. Observed unread by local `TitleGetInfo` paths; possibly a notification-epoch token consumed by the async-subscription pump. |
+| `0x83` | 4 LE | DWORD → `title+0x90` = **contents addr**. Served locally via `addrGetContents @ 0x7E841D07`; the MVCL14N export `addrMVGetContents @ 0x7E8854D0` wraps it. Address-space companion to `title+0x8c` (contents va); used by highlight / next-prev navigation paths that index into the addr-keyed cache list (§6b kind-2). MSN Today's first-paint chain (`vaMVGetContents` only) doesn't read it, so a zero is harmless on the welcome-screen path. |
 | `0x83` | 4 LE | DWORD → `title+0x94` = **topic count**. Served locally via `TitleGetInfo(info_kind=0x0B)`. `hMVTopicListFromTopicNo(title, N)` uses this as the upper bound; zero means no topic resolves. |
 | `0x83` | 4 LE | New checksum 1 |
 | `0x83` | 4 LE | New checksum 2 |
@@ -220,27 +410,28 @@ MOSVIEW!CreateMediaViewWindow  @ 0x7F3C4F26
        └─ MVCL14N!vaMVGetContents @ 0x7E885660    (returns title+0x8c)
             └─ MVTTL14C!vaGetContents @ 0x7E841D48
        …stored at session+0x60
-  └─ MOSVIEW!FUN_7f3c6790        @ 0x7F3C6790    (pane attach + nav)
-       └─ MOSVIEW!FUN_7f3c3670   @ 0x7F3C3670    (pane.SetAddress)
+  └─ MOSVIEW!CreateMosViewWindowHierarchy        @ 0x7F3C6790    (pane attach + nav)
+       └─ MOSVIEW!NavigateMosViewPane   @ 0x7F3C3670    (pane.SetAddress)
             └─ MVCL14N!fMVSetAddress @ 0x7E883600
-                 └─ MVCL14N!FUN_7e885fc0 @ 0x7E885FC0
+                 └─ MVCL14N!MVHfcNear @ 0x7E885FC0
                       └─ GetProcAddress(per_title_module, "HfcNear")
                            └─ MVTTL14C!HfcNear @ 0x7E84589F   ← gate
 ```
 
 `HfcNear` walks a **per-title cache** (binary tree at `title+4`,
 recent-cache array at `title+0x10..0x34`; entries store 60-byte
-content chunks at `entry+0x18`) via `FUN_7e845efa`. On miss, it fires
+content chunks at `entry+0x18`) via `HfcCache_FindEntryAndPromote`. On miss, it fires
 selector `0x15` (§6b.1) up to 6 times in a retry loop with ~300 ms
 spacing before returning NULL. If `HfcNear` returns NULL,
-`fMVSetAddress` returns 0, `FUN_7f3c3670` sets the pane FAIL flag at
+`fMVSetAddress` returns 0, `NavigateMosViewPane` sets the pane FAIL flag at
 `pane+0x84` and skips paint.
 
 `MVCL14N!vaMVGetContents` itself does NOT read memory at the va — it
-calls `MVTTL14C!vaGetContents` via per-title GetProcAddress, which
-just returns `title+0x8c` verbatim. The va is therefore an **opaque
-token** the engine threads through to `HfcNear`'s cache lookup; the
-cache is what knows how to render it.
+calls `MVTTL14C!vaGetContents @ 0x7E841D48` via per-title
+GetProcAddress, which just returns `title+0x8c` verbatim. The va is
+therefore a `client-opaque` token (verified at `vaGetContents @
+0x7E841D48`) the engine threads through to `HfcNear`'s cache lookup;
+the cache is what knows how to render it.
 
 ### 4.4 Title body layout
 
@@ -260,19 +451,30 @@ stream**. Ground-truth from the `MVTTL14C!TitleOpenEx @ 0x7E842D4E` and
      built-in faces it has, but custom fonts for the title are absent.
      This is the empty-section-0 safe path.
    - `b0 != 0` → `GlobalAlloc(GPTR=0x40, b0)`, `MOVSD.REP` the `b0`
-     bytes from `B+2`, then:
-     - Read `i16` at copy+0x00 as **font count** (sign-extended; zero
-       swapped to 1 for the zero-loop's bound).
-     - Read `i16` at copy+0x10 as **slots_offset** (signed, relative to
-       copy base).
-     - Zero `count` dwords starting at `copy + slots_offset`. These are
-       the HFONT slots the engine fills at runtime as fonts get loaded.
-     Raw-instruction source: `MOVSX ECX, [EAX]` at `0x7E843291` and
-     `MOVSX ESI, [EAX+0x10]` at `0x7E8432A9`. The 14 bytes between the
-     two signed halfwords carry the font descriptors (face name /
-     charset / size index) the runtime consumes to populate slots —
-     exact field layout is not yet RE'd and is not required for the
-     empty-table path.
+     bytes from `B+2`, then read `*(i16)(copy+0x00)` as the HFONT-slot
+     count, `*(i16)(copy+0x10)` as the slot-array offset, and zero
+     `count` dwords starting at `copy + slots_offset`. Raw-instruction
+     source: `MOVSX ECX, [EAX]` at `0x7E843291` and
+     `MOVSX ESI, [EAX+0x10]` at `0x7E8432A9`. The 18-byte header (offsets
+     `+0x00..+0x11`) is consumed by `MVCL14N!ResolveTextStyleFromViewer
+     @ 0x7E896610`, `CopyResolvedTextStyleRecord @ 0x7E896590`, and
+     `MergeInheritedTextStyle @ 0x7E8963B0` as follows:
+
+     | Offset | Width  | Field                       | Consumer cite |
+     |-------:|-------:|-----------------------------|---------------|
+     | `+0x00`| i16    | hfontSlotCount              | `TitleOpenEx @ 0x7E843291`; sized zero-loop for the runtime-allocated HFONT slot array. |
+     | `+0x02`| i16    | styleRecordCount            | `ResolveTextStyleFromViewer @ 0x7E89661C`; bound check on the requested `style_id` (`<=` triggers fallback to descriptor 0). |
+     | `+0x04`| i16    | faceNameArrayOffset         | `CopyResolvedTextStyleRecord @ 0x7E8965B5`; base for the `0x20`-byte face-name strings indexed by the resolved face id at `resolved_style[0]`. |
+     | `+0x06`| i16    | styleRecordsOffset          | `CopyResolvedTextStyleRecord @ 0x7E8965A4`; base for the `0x2A`-byte style records indexed by `style_id`. |
+     | `+0x08`| i16    | inheritanceRecordCount      | `CopyResolvedTextStyleRecord @ 0x7E8965E7`; passed as the `style_count` argument to `MergeInheritedTextStyle`. |
+     | `+0x0A`| i16    | inheritanceArrayOffset      | same — base for the parent-style-chain entries (stride `0x92` bytes; up to 20 levels of recursion). |
+     | `+0x0C`| i16    | reserved (client-opaque, verified across `ResolveTextStyleFromViewer`/`CopyResolvedTextStyleRecord`/`MergeInheritedTextStyle`) | — |
+     | `+0x0E`| i16    | reserved (client-opaque, same verification) | — |
+     | `+0x10`| i16    | hfontSlotArrayOffset        | `ResolveTextStyleFromViewer @ 0x7E896650`; base for the `u32[hfontSlotCount]` HFONT-wrapper pointer array. Slot lookup: `*(u32*)(base + hfontSlotArrayOffset + resolved_style[0] * 4)`. Slot+`0x16` dword is cached into `viewer+0xB4` for the layout engine. |
+
+     The on-disk authoring source (`Blackbird.gpr / BBVIEW.EXE`) is
+     `CFontTable` / `CFontDescriptor`; cross-reference is queued in
+     §13 of `docs/BLACKBIRD.md` (Phase 5 cross-ref pass).
 3. `TitleGetInfo` walks the remaining 8 sections on demand to answer
    field queries. Its `param_2` argument is the **selector kind**, not
    a section index — the dispatch table maps selector → section.
@@ -281,14 +483,14 @@ Section-by-section (`u16` = little-endian 16-bit):
 
 | # | `TitleGetInfo` selector(s) | Header | Payload | Role |
 |--:|---------------------------|--------|---------|------|
-| 0 | `0x6F` (returns `title+0x08`, the copy handle) | `[u16 size]` | Font table — `i16 count @ +0x00`, `i16 slots_offset @ +0x10`, engine zeros `count` dwords at `base+slots_offset` at load time. 14 bytes of font descriptors in the gap (unresolved). | font table |
+| 0 | `0x6F` (returns `title+0x08`, the copy handle) | `[u16 size]` | Font table — 18-byte header (`hfontSlotCount @ +0x00`, `styleRecordCount @ +0x02`, `faceNameArrayOffset @ +0x04`, `styleRecordsOffset @ +0x06`, `inheritanceRecordCount @ +0x08`, `inheritanceArrayOffset @ +0x0A`, two reserved i16 @ +0x0C/+0x0E, `hfontSlotArrayOffset @ +0x10`); engine zeros `hfontSlotCount` dwords at `base + hfontSlotArrayOffset` at load time. Style records: `0x2A` bytes each; face names: `0x20` bytes each; parent-style entries: `0x92` bytes each. Consumers in MVCL14N: `ResolveTextStyleFromViewer @ 0x7E896610` → `CopyResolvedTextStyleRecord @ 0x7E896590` → `MergeInheritedTextStyle @ 0x7E8963B0` → `CreateHfontFromResolvedTextStyle @ 0x7E896BA0`. | font table |
 | 1 | `7` | `[u16 size]` | array of fixed **43-byte** records (10 u32 + u16 + byte) | extra child-pane descriptors |
 | 2 | `8` | `[u16 size]` | array of fixed **31-byte** records (7 u32 + u16 + byte) | popup descriptors |
 | 3 | `6` | `[u16 size]` | array of fixed **152-byte** records (38 u32) | outer-container / pane scaffold descriptors |
 | 4 | `1` | `[u16 size]` | raw blob | title caption (ASCII) |
 | 5 | `2` | `[u16 size]` | raw blob | second string (subtitle / copyright) |
-| 6 | `0x6A` | `[u16 size]` | raw blob | "title string" — `fMVSetTitle` allocates it to `view+0x1c` when called with NULL path; purpose beyond cache key not yet pinned |
-| 7 | `0x13` | `[u16 size][u16 count]` | `count × [u16 len][bytes]` (length-prefixed records) | context / hash records (unresolved) |
+| 6 | `0x6A` | `[u16 size]` | raw blob | default viewer-window title string — `fMVSetTitle @ 0x7E882910` stores the `GlobalAlloc` copy at `view+0x1c`; surfaced by the `hMVGetTitle @ 0x7E882A50` export (consumed by MOSVIEW for window-title display) |
+| 7 | `0x13` | `[u16 sectionBytes][u16 count]` | `count × [u16 entryLen][entryBytes]` | indexed length-prefixed entry table; `TitleGetInfo @ 0x7E842558` returns the entry selected by `bufCtl>>0x10` (NUL-terminated, truncated to `bufCtl & 0xFFFF`). Entry payload is client-opaque to MVTTL14C/MVCL14N — handed verbatim to the external caller. |
 | 8 | `4` (fallthrough for `4`/`0x6B`/`0x6D`/`0x6E`) | `[u16 count]` | `count × ASCIIZ` — **the string table** | strings referenced by the record arrays |
 
 Section 7's empty form is just `[u16 size=0]` (the walker uses
@@ -308,10 +510,12 @@ Blackbird class. Current RE no longer supports flattening raw
 `CSection` bodies into section 1: the sampled `CSection` serialization
 is authored section membership data (form refs + top-level content/proxy
 refs), while selectors `7` / `8` / `6` are consumed as separate
-child-pane / popup / scaffold tables by MOSVIEW. The authored source for
-extra child panes and popups remains unresolved, so the current live
-server emits empty selector-7/8 tables and one code-proven selector-6
-scaffold for the supported subset.
+child-pane / popup / scaffold tables by MOSVIEW. The wire-side field
+layouts of selectors `7`/`8`/`6` are fully pinned via
+`MOSVIEW!CreateMosViewWindowHierarchy @ 0x7F3C6790` (see contract
+`ChildPaneRecord`, `PopupPaneRecord`, `WindowScaffoldRecord`); the
+on-disk BDF → wire compilation in `PUBLISH.DLL` is BDF-format work
+out of scope for the protocol docs.
 
 **Empty-but-valid body** (18 bytes): `00 00 × 8` (sections 0-7 all
 empty) followed by `00 00` (section 8 count=0). The first `u16 == 0`
@@ -383,13 +587,13 @@ class (`docs/BLACKBIRD.md` §3.1.3 and §7).
 
 ### 4.6 Layout walker dispatch byte is engine-internal, not on-disk
 
-`MVCL14N!FUN_7e890fd0 @ 0x7E890FFE` reads `name_buf[0x26]` from a
-type-0 cache buffer and dispatches `FUN_7e894c50 @ 0x7E894C50` on
+`MVCL14N!MVParseLayoutChunk @ 0x7E890FD0` reads `name_buf[0x26]` from a
+type-0 cache buffer and dispatches `MVWalkLayoutSlots @ 0x7E894C50` on
 that byte. The byte at `+0x26` looks like a class-version tag —
 `VIEWDLL!CSection::Serialize @ 0x4070E6AF` writes `bVar3 = 3` as its
 on-disk version — but the resemblance is coincidental. Evidence:
 
-1. `FUN_7e894560 @ 0x7E894560` (the case-3 handler) writes the
+1. `MVBuildLayoutLine @ 0x7E894560` (the case-3 handler) writes the
    layout-row tag itself: `*puVar10 = 3` at `+0xfd`, `*puVar9 = 7`
    at `+0x1d4`, `*puVar9 = 4` at `+0x21f`, into freshly-`GlobalAlloc`'d
    0x47-byte slots. The walker dispatches on bytes the engine
@@ -402,7 +606,7 @@ on-disk version — but the resemblance is coincidental. Evidence:
    `CContent::CContent(CFile*) @ 0x4073A07F`) and copies them
    verbatim into the CArchive. CContent on disk is opaque blob —
    raw HTML/GIF/text — not a layout descriptor.
-3. `MVCL14N!FUN_7e886310 @ 0x7E886310`, called by case 3 with the
+3. `MVCL14N!MVResolveBitmapForRun @ 0x7E886310`, called by case 3 with the
    u16 key `*(short *)(param_3 + (short)pbVar4)` at `name_buf+0x26+3`,
    is a font/bitmap/HMETAFILE resource loader. It calls
    `GetDeviceCaps`, `GlobalAlloc(0x40, …)`, builds an HBITMAP. A
@@ -514,8 +718,8 @@ served locally from the body bytes (§5.1); no extra RPC.
 
 Immediately after the handshake ack, `MVTTL14C!hrAttachToService`
 allocates **5** async-notification subscriber objects via
-`FUN_7e84485f @ 0x7E84485F` — one per notification type. Each
-subscriber's constructor calls `FUN_7e844ee6 @ 0x7E844EE6` which
+`MVAsyncNotifyDispatch @ 0x7E84485F` — one per notification type. Each
+subscriber's constructor calls `MVAsyncSubscriberSubscribe @ 0x7E844EE6` which
 invokes selector `0x17` on the service proxy with a single tagged byte
 (the notification-type index, observed `0..4`) and waits on slot `0x48`
 for an async-iterator handle.
@@ -528,7 +732,7 @@ Request (3 bytes), wire-observed `01 <type> 85`:
 | `0x85` | 0 | Recv descriptor: dynamic-recv (single-shot blob, NOT iterator) |
 
 Reply semantics: if the server hands back a non-NULL iterator handle,
-the subscriber starts a `CreateThread(FUN_7e844c7c, …)` pump that waits
+the subscriber starts a `CreateThread(MVAsyncSubscriberWorkerPump, …)` pump that waits
 on that handle for push notifications (title invalidation, cache
 flush, etc.). If the handle is NULL or slot-0x48 returns an error, the
 subscriber leaves `param_1[2].LockCount == 0`, never starts a thread,
@@ -556,7 +760,7 @@ per spinning request × 3 (types 1/2/4) ⇒ ~90 % MOSVIEW.EXE CPU.
 
 Server-initiated push of cache-update frames (op-code 4 kind-2
 va→addr per project memory) flows through the type-3 subscription's
-notification-pump thread `FUN_7e844c7c`, not the initial reply —
+notification-pump thread `MVAsyncSubscriberWorkerPump`, not the initial reply —
 which is why an empty-body iterator reply is sufficient.
 
 ### Master-flag gate (`DAT_7e84e2fc`)
@@ -574,7 +778,7 @@ if ((DAT_7e84e308 != 0 && *(int *)(DAT_7e84e308 + 0x44) != 0) &&
 }
 ```
 
-`FUN_7e8440ab @ 0x7E8440AB` (the "service ready" check called from
+`MVCheckMasterFlag @ 0x7E8440AB` (the "service ready" check called from
 every cache-miss retry loop) returns `0` when `DAT_7e84e2fc == 0`.
 That kills `HfcNear`'s retry loop on its first iteration —
 `if (iVar2 == 0) return 0;` — so selectors `0x06` / `0x07` / `0x10`
@@ -596,7 +800,7 @@ non-3 types can stay un-pushed indefinitely.
 
 `MVTTL14C!HfcNear @ 0x7E84589F` is the per-title cache lookup the
 engine calls via `MVCL14N!fMVSetAddress @ 0x7E883600` →
-`MVCL14N!FUN_7e885fc0 @ 0x7E885FC0` → `GetProcAddress(module,
+`MVCL14N!MVHfcNear @ 0x7E885FC0` → `GetProcAddress(module,
 "HfcNear")`. On cache miss it fires this selector. Sole caller in
 MVTTL14C; `PUSH 0x15` at `0x7E845973`.
 
@@ -605,7 +809,7 @@ Request:
 | Tag | Bytes | Meaning |
 |-----|-------|---------|
 | `0x01` | 1 | `title_byte` (= `*(title+0x02)`, echoed across all per-title RPCs) |
-| `0x03` | 4 LE | `va` (the unresolved virtual address; engine wants the matching content chunk) |
+| `0x03` | 4 LE | `va` (the virtual address the engine wants the matching content chunk for) |
 | `0x88` | 0 | Recv: dynamic-iterator handle (immediately released by HfcNear, never read) |
 
 Reply: static `0x87` only, no dynamic. The reply iface is acquired
@@ -620,37 +824,119 @@ Pattern matches selector `0x07` (`vaConvertTopicNumber`) exactly:
 ack-only, with the actual answer expected through the
 selector-`0x17` type-3 async-push channel. The server must populate
 the per-title 60-byte content cache (binary tree at `title+4`)
-before HfcNear's next iteration of `FUN_7e845efa` (~300 ms later).
+before HfcNear's next iteration of `HfcCache_FindEntryAndPromote` (~300 ms later).
 
 ### Cache structure (per-title, distinct from MVTTL14C global cache)
 
-The cache HfcNear consults is stored **inside the title struct**:
+The cache HfcNear consults is stored **inside the title struct** and
+the underlying entries are populated by `HfcCache_DispatchContentNotification
+@ 0x7E8452D3` (type-0 callback). Three layered structures share the same
+title state — a sorted entry list, a primary MRU, and a paired
+companion MRU.
 
-- `title+0x04` — root of a binary tree keyed by va. Each entry has
-  `[next, va, ?, va_max?, ?, ?, payload_ptr, ...]` (offsets in
-  4-byte words). Lookup compares `entry[1] == request_va`.
-- `title+0x10..0x34` — 10-slot recent-access cache (array of pointers
-  into the tree). Hot entries get promoted via memcpy.
-- `title+0x38..0x5c` — secondary lookup cache (parallel structure,
-  semantics partially RE'd).
-- `title+0x60..0x84` — title-byte side-cache (per-title-byte index).
+#### Entry record layout (`HfcCache_InsertOrdered @ 0x7E8460DF`)
 
-Each cache entry's payload is **60 bytes** (`for iVar2 = 0xf` at
-`HfcNear+0x???`, i.e. `0xf × 4 = 0x3c`). Field layout is unresolved;
-`HfcNear` memcpy's the 60 bytes into the caller-provided buffer
-(`fMVSetAddress`'s `param_1+0x1c`, the pane's content-record slot).
+Each cache entry is `0x20 + payloadBytes` bytes, allocated by
+`MVAllocScratchBytesWithRetry`:
 
-Frame format on the selector-`0x17` type-3 push channel that
-populates this cache is unresolved (likely op-code 5,
-`FUN_7e8424f5`, marked "secondary cache, unresolved" in
-project memory).
+| Offset | Width | Field | Source |
+|-------:|------:|-------|--------|
+| `+0x00` | u32 | `next`              | next-pointer in the sorted list at `title+0x04` |
+| `+0x04` | u32 | `va`                | cache key (ordering key for the list) |
+| `+0x08` | u32 | `prev_va`           | payload\[1\] from the 0xbf wire frame; `-1` for sentinel |
+| `+0x0C` | u32 | `next_va`           | payload\[3\] from the 0xbf wire frame; `-1` for sentinel |
+| `+0x10` | u32 | `payloadPtr`        | always `entry + 0x20` — inline trailing array |
+| `+0x14` | u32 | `payloadBytes`      | bytes copied from the wire payload |
+| `+0x18` | u32 | `extraScratchPtr`   | pointer to the 60-byte content companion (or NULL) |
+| `+0x1C` | u32 | `flags`             | zero-init by the inserter; not touched on lookup |
+| `+0x20..` | bytes | inline `payload`  | `payloadBytes` bytes copied verbatim from the wire 0xbf payload |
+
+After an insert, neighbour links are fixed up so `prev->next_va` and
+`next->prev_va` stay coherent for range walks.
+
+#### Sorted list (`title+0x04`)
+
+Singly-linked, ordered ascending by `entry+0x04` (`va`). Walked by
+`HfcCache_InsertOrdered` to find the insertion point and by
+`HfcCache_FindEntryAndPromote @ 0x7E845EFA` as the fallback when the
+MRU misses. `va` is the only field consulted for ordering; the
+"key < head" branch returns NULL on probe.
+
+#### Primary MRU (`title+0x10 .. title+0x34`)
+
+10-slot pointer array (40 bytes) used by the **NULL-companion**
+lookup path (passed `outCompanionBlock == NULL` to
+`HfcCache_FindEntryAndPromote`). Slot 0 is the most-recently-used
+entry; slots 1..9 are previous hits in ascending age.
+
+Lookup probes the head pointer first (fast path), then scans slots
+0..9 sequentially. On a hit at slot `N`:
+
+```
+memcpy(title+0x14, title+0x10, N*4);  // shift slots 0..N-1 down
+*(int*)(title+0x10) = hit;            // install hit at slot 0
+```
+
+On a sorted-list hit (MRU miss), the full 10-slot array is shifted by
+one (`memcpy(title+0x14, title+0x10, 0x24)`) and the hit is installed
+at slot 0.
+
+#### Companion MRU (`title+0x38 .. title+0x5C` paired with `title+0x60 .. title+0x84`)
+
+10-slot **entry pointer** array at `title+0x38` (40 bytes), paired
+with a 10-slot **companion-block pointer** array at `title+0x60` (40
+bytes). Used when `HfcCache_FindEntryAndPromote` is called with a
+non-NULL `outCompanionBlock` — i.e., the `HfcNear` path that needs
+the 60-byte content companion. Slot index is shared between both
+arrays; `title+0x60 + idx*4` is the companion-block pointer for
+`title+0x38 + idx*4`'s entry.
+
+LRU promotion is identical to the primary MRU (slide on hit), and
+the secondary array is mirrored — `memcpy(title+0x64, title+0x60,
+shiftBytes)` keeps the companion slot aligned with its entry slot.
+
+#### 60-byte content companion (`entry+0x18` pointer; `0x3C` bytes)
+
+Allocated by `HfcCache_DispatchContentNotification` for type-0
+`0xBF` (rich topic record) notifications via
+`MVAllocScratchBytesWithRetry(0x3C)`. Bytes 0..0x2B are copied
+verbatim from the wire's 0xbf-record metadata block (the 60 bytes
+sitting at `notifyBuf + payloadSize + 4`). The two 4-byte "present"
+markers at wire offsets `+0x2C` and `+0x34` are replaced in-memory
+with HGLOBAL handles that wrap the variable-length **body** and
+**name** buffers extracted from the same wire frame:
+
+| Offset | Width | Field | Source |
+|-------:|------:|-------|--------|
+| `+0x00..+0x2B` | 44 bytes | wire-metadata header | raw-copied from notifyBuf; client-opaque to MVTTL14C (consumed by the picture/glyph rendering path that reads the companion via `param_3+0x2C / +0x34`) |
+| `+0x2C` | HGLOBAL | `bodyHandle` | `GlobalAlloc(GMEM_FIXED, bodyByteCount+1)`, locked, filled from notifyBuf body region, NUL-terminated |
+| `+0x30` | u32 | `bodyByteCount` | raw-copied from wire (drives the GlobalAlloc size) |
+| `+0x34` | HGLOBAL | `nameHandle` | `GlobalAlloc(GMEM_FIXED, nameLen)`, locked, filled from the trailing ASCIIZ name in notifyBuf |
+| `+0x38..+0x3B` | 4 bytes | wire-tail metadata | raw-copied from notifyBuf; client-opaque |
+
+`HfcNear @ 0x7E84589F` consumes the companion as follows:
+
+```
+memcpy(param_3, companion, 0x3C);
+param_3[0x2C] = MVCloneGlobalBlock(companion[0x2C]);  // bodyHandle clone
+param_3[0x34] = MVCloneGlobalBlock(companion[0x34]);  // nameHandle clone
+```
+
+The destination `param_3` is `fMVSetAddress`'s `lp+0x40 / lp+0x68`
+pane content-record slot.
+
+Frame format that drives the companion fill is the type-0 callback
+chain: kind `0xBF` records carry `[u16 payloadSize][...payload...][60-byte metadata]
+[body bytes][ASCIIZ name]`. Kind `0xA5` records update only the
+metadata token at `entry+0x18` status path; kind `0x37` records carry
+incremental trailers for a previously-started `0xBF` entry.
 
 ## 6b. Content selectors (va / addr / highlight resolution)
 
 MVCL14N's render path pulls most content off a local 3-list cache at
 `MVTTL14C.DLL:PTR_DAT_7e84e130`, keyed by `(title_byte, topic_no)`
 (list 0), `(title_byte, hash)` (list 1), `(title_byte, va)` (list 2).
-The primary consumers walk the cache via `FUN_7e841ac9` / `FUN_7e841b21`:
+The primary consumers walk the cache via `MVGlobalVaAddrCache_Find` / `MVGlobalVaAddrCache_FindValue8ByValue4`:
 
 - `vaGetContents(title) @ 0x7E841D48` — returns `*(u32 *)(title+0x8c)`
   (TitleOpen reply DWORD 1). No RPC.
@@ -663,13 +949,13 @@ The primary consumers walk the cache via `FUN_7e841ac9` / `FUN_7e841b21`:
   are thin wrappers that feed the same two fallback selectors.
 - `HighlightsInTopic(title, topic) @ 0x7E841526` — wire **selector
   `0x10`**; dynamic-iterator reply (slot `0x14` + slot `0x48` wait).
-  Reply bytes are consumed by `FUN_7e844738`.
+  Reply bytes are consumed by `MVCopyDynamicReplyStreamBytes`.
 
 The selectors `0x06` / `0x07` do NOT themselves return a va in the
 reply — the client waits on `slot 0x48`, releases immediately, and
 re-checks the cache. The actual answer arrives **through the async
 subscription channel** (selector `0x17`, one iterator per notification
-type; see §6a). `FUN_7e844c7c @ 0x7E844C7C` is the pump thread that
+type; see §6a). `MVAsyncSubscriberWorkerPump @ 0x7E844C7C` is the pump thread that
 reads chunks via `piVar1->m0x1c(iter, &chunk)` and hands them to the
 per-type callback registered in the subscriber struct at `+0x20`.
 
@@ -678,17 +964,17 @@ per-type callback registered in the subscriber struct at `+0x20`.
 `hrAttachToService @ 0x7E844114` installs 5 subscribers, one per
 notification type index sent on selector `0x17`:
 
-| Type | Callback | Purpose (inferred) |
-|-----:|----------|--------------------|
-| 0 | `FUN_7e8452d3` | Topic metadata / string attachments (opcodes `0xBF`, `0xA5`, `0x37`) — **opcode 0xBF inserts into HfcNear's per-title cache** at `title+4` via `FUN_7e8460df`. Driven by HfcNear's own retry loop (`FUN_7e845875` → `FUN_7e8451bf(idx=0, …)` → `FUN_7e8450d5` → `FUN_7e844a3b` → `FUN_7e8452d3`), no pump thread required (`param_3 = 0` to `FUN_7e84485f`). |
-| 1 | `LAB_7e849251` | Picture / download status |
-| 2 | `FUN_7e841109` | Context-string / global-state updates (writes `DAT_7e84d02c`-family tables) |
-| 3 | `FUN_7e8451ec` | **va / addr cache pushes** (populates `PTR_DAT_7e84e130` global kind-0/1/2 cache via op-code 4 → `FUN_7e8420f6`). **Different cache from HfcNear's `title+4` tree.** |
-| 4 | `FUN_7e8468d5` | WordWheel / key-index refresh |
+| Type | Callback | Purpose |
+|-----:|----------|---------|
+| 0 | `HfcCache_DispatchContentNotification` | Topic metadata / string attachments (opcodes `0xBF`, `0xA5`, `0x37`) — **opcode 0xBF inserts into HfcNear's per-title cache** at `title+4` via `HfcCache_InsertOrdered`. Driven by HfcNear's own retry loop (`MVPumpHfcContentNotifications` → `MVPumpNotificationType(idx=0, …)` → `MVAsyncSubscriberPumpNotifications` → `MVAsyncSubscriberDispatchChunk` → `HfcCache_DispatchContentNotification`), no pump thread required (`param_3 = 0` to `MVAsyncNotifyDispatch`). |
+| 1 | `WordWheelCache_DispatchNotification @ 0x7E849251` | **Word-wheel result records.** Each record header is 11 bytes (u16 recordSize, u8 wordWheelId, u8 pendingFlag, u32 ordinal, u8 reserved, u16 payloadCount) followed by `payloadCount × u32` payload DWORDs and an optional ASCIIZ name. Per-record side-effect: writes `ordinal` and `pendingFlag` into the per-wordwheel slot at `DAT_7e84e668[DAT_7e850258[wordWheelId] × 0x1c]`, then prepends a 0x24-byte cache record via `WordWheelCache_InsertEntry`. `pendingFlag==0xFF` is a synthetic "request-done" sentinel (slot+9 zeroed, probe-match forced). Caller can pass `{u8 wordWheelId; u8[3] pad; u32 ordinal}` via the subscriber context to break the dispatch loop on the matching record (OR 0x80000000 into the consume count). |
+| 2 | `HighlightCache_DeserializeAndRegister` | Context-string / global-state updates (writes `DAT_7e84d02c`-family tables) |
+| 3 | `NotificationType3_DispatchRecord` | **va / addr cache pushes** (populates `PTR_DAT_7e84e130` global kind-0/1/2 cache via op-code 4 → `NotificationType3_ApplyAddressConversionResult`). **Different cache from HfcNear's `title+4` tree.** |
+| 4 | `NotificationType4_ApplyChunkedBuffer @ 0x7E8468D5` | **Picture / media transfer chunks.** Opcode-3 frames carry `{u16 op=3, u16 frameBytes, u32 transferId, u32 chunkOffset, u8 data[frameBytes-0xc]}`. The callback resolves `transferId` against the active media-transfer list at `PTR_DAT_7e84e628+0x1c`, lazily allocates / grows the `+0x30` buffer to `chunkOffset + payloadBytes`, copies the chunk in, advances the committed byte cursor `+0x38`, and posts `WM_USER+0x0e` (0x40e) to each attached sink HWND (or the global notify window `DAT_7e84e330` for the marker-buffer case). Other opcodes 1, 2, 4, 5 are accepted but discarded; opcode 0 or >5 returns frameBytes without inspection. |
 
 ### Type-3 frame format (cache push)
 
-`FUN_7e8451ec @ 0x7E8451EC` is the callback. Each chunk the pump
+`NotificationType3_DispatchRecord @ 0x7E8451EC` is the callback. Each chunk the pump
 delivers is a sequence of framed messages:
 
 ```
@@ -701,10 +987,10 @@ Op-code dispatch inside type-3:
 
 | op_code | Dispatch | Handles |
 |--------:|----------|---------|
-| 1, 2 | `FUN_7e846bb1` | Topic / hash invalidation |
+| 1, 2 | `NotificationType3_ApplyObjectStatus` | Topic / hash invalidation |
 | 3 | — (silently skipped, length still consumed) | Reserved |
-| **4** | `FUN_7e8420f6` | **va / addr cache insert** |
-| 5 | `FUN_7e8424f5` | Secondary cache (unresolved) |
+| **4** | `NotificationType3_ApplyAddressConversionResult` | **va / addr cache insert** |
+| 5 | `NotificationType3_ApplyInfo6eCacheRecord @ 0x7E8424F5` | **MVTTL info-kind 0x6e string cache push.** 17-byte header `{u8 titleId, u24+u8 infoKind, u24+u8 resultLength, u24+u8 bufCtl, u24+u8 payloadBytes}` followed by `payloadBytes` of value bytes (or the inline 4-byte value at offset +13 when `payloadBytes==0`). Routes to `MVCacheInfo6eString @ 0x7E842267` only when the title-byte resolves an attached title state and `infoKind == 0x6e`. Other infoKinds are accepted on the wire but discarded. |
 
 ### Op-code 4 payload (14 bytes)
 
@@ -719,22 +1005,22 @@ Op-code dispatch inside type-3:
 Total framed message = 18 bytes. Kinds 0/1/2 route into the three
 parallel lists at `PTR_DAT_7e84e130[0..2]`. Lookups:
 
-- Kind 0: `FUN_7e841ac9` matches `(title_byte, topic_no@+0xC)` →
+- Kind 0: `MVGlobalVaAddrCache_Find` matches `(title_byte, topic_no@+0xC)` →
   returns `(va, addr)` from `(+4, +8)`.
-- Kind 1: `FUN_7e841b21(list=1)` matches `(title_byte, hash@+4)` →
+- Kind 1: `MVGlobalVaAddrCache_FindValue8ByValue4(list=1)` matches `(title_byte, hash@+4)` →
   returns `va` from `+8`.
-- Kind 2: `FUN_7e841b21(list=2)` matches `(title_byte, va@+4)` →
+- Kind 2: `MVGlobalVaAddrCache_FindValue8ByValue4(list=2)` matches `(title_byte, va@+4)` →
   returns `addr` from `+8`.
 
 ### HfcNear's per-title cache (`title+4` tree)
 
 `MVTTL14C!HfcNear @ 0x7E84589F` is the gate `fMVSetAddress` calls
-during initial pane attach (via `FUN_7e885fc0` →
+during initial pane attach (via `MVHfcNear` →
 `GetProcAddress("HfcNear")`). It walks `*(int **)(title + 4)` (binary
 tree of cache entries, 32-byte node + name buffer) via
-`FUN_7e845efa`. On miss, it fires selector `0x15` and waits for the
+`HfcCache_FindEntryAndPromote`. On miss, it fires selector `0x15` and waits for the
 cache to fill. **The only function that inserts into this tree is
-`FUN_7e8460df`** (sole caller: type-0 callback `FUN_7e8452d3` when
+`HfcCache_InsertOrdered`** (sole caller: type-0 callback `HfcCache_DispatchContentNotification` when
 parsing opcode `0xBF`). Op-code 4 on type-3 writes to
 `PTR_DAT_7e84e130` (global kind-0/1/2 cache for `vaConvertHash` /
 `vaConvertTopicNumber`) — **not the same cache** as HfcNear walks.
@@ -743,28 +1029,30 @@ Wire layout for opcode 0xBF push (size=8 form, 72 bytes):
 
 ```
 +0x00  u8   opcode = 0xBF
-+0x01  u8   title_byte (matched in FUN_7e845eb7's title list)
-+0x02  u16  name_size (must be > 0; FUN_7e845cd4 returns NULL when
++0x01  u8   title_byte (matched in MVFindTitleStateByTitleByte's title list)
++0x02  u16  name_size (must be > 0; HfcCopyCacheRecordPayloadToGlobal returns NULL when
                        entry+0x14 = name_len = 0, killing HfcNear's
                        success path)
 +0x04..0x0B  8-byte name buffer (memcpy'd into entry+0x20)
 +0x0C  u32  key (the va HfcNear looks up; stored at entry+4 and
-                 matched at `entry[1] == key` in FUN_7e845efa)
+                 matched at `entry[1] == key` in HfcCache_FindEntryAndPromote)
 +0x10..0x47  56 bytes of 60-byte content block (key field at +0xC
               doubles as content[0..3] for size=8 because
-              FUN_7e8452d3 reads key at fixed offset 0xC and copies
+              HfcCache_DispatchContentNotification reads key at fixed offset 0xC and copies
               60 bytes starting at offset (size + 4) = 0xC).
 ```
 
-**Open: 60-byte content block field layout.** Two of the 60 bytes
-ARE pinned: bytes `0x2C` and `0x34` are HGLOBAL handles (HfcNear's
-success path passes them to `FUN_7e84a1d0` and stores results at
-`lp+0x64` / `lp+0x6C`). The remaining 56 bytes are unmapped.
+**60-byte content companion** — Resolved (Phase 6, 2026-05-11). Full
+layout pinned via `HfcCache_DispatchContentNotification @ 0x7E8452D3`
+producer and `HfcNear @ 0x7E84589F` consumer; see §6b.1's
+"60-byte content companion" subsection. Bytes 0..0x2B + 0x38..0x3B
+are raw-copied wire-metadata bytes (client-opaque to MVTTL14C), and
+the HGLOBAL slots at `+0x2C` / `+0x34` wrap body / name buffers.
 
 **Layout-walker AV (root cause for "service is not available" dialog).**
 Pushing a 0xBF chunk with zero name buffer (any size 0x08..0x40 tested)
 unblocks HfcNear successfully, but the buffer flows downstream into
-`MVCL14N!FUN_7e890fd0 → FUN_7e894c50` (called from `FUN_7e88e440`'s
+`MVCL14N!MVParseLayoutChunk → MVWalkLayoutSlots` (called from `MVRealizeView`'s
 section walker) and trips an AV at `0x7E894D4C`:
 
 ```
@@ -776,21 +1064,21 @@ section walker) and trips an AV at `0x7E894D4C`:
 
 Mechanism (Ghidra-traced 2026-04-28):
 
-1. `FUN_7e890fd0` declares `local_30..local_24` and explicitly inits
+1. `MVParseLayoutChunk` declares `local_30..local_24` and explicitly inits
    `local_30 = 0`, `local_2c = 0`, `local_2a = 0`, `local_24 = 0` —
    but **leaves `local_2e` uninitialized** (stack frame `SUB ESP,
    0x2c` allocates the space, no MOV zeroes it).
-2. `FUN_7e890fd0` calls `FUN_7e894c50(lp, &puVar2[6], name_buf+0x26,
+2. `MVParseLayoutChunk` calls `MVWalkLayoutSlots(lp, &puVar2[6], name_buf+0x26,
    ..., &local_30)`. `param_6 = &local_30`, so `param_6[0] = 0` and
    `param_6[1] = local_2e = garbage`.
-3. `FUN_7e894c50` calls `FUN_7e897ed0(local_c, name_buf+0x26)` to
+3. `MVWalkLayoutSlots` calls `MVDecodeTopicItemPrefix(local_c, name_buf+0x26)` to
    decode the first record. With our zero-filled name buffer, byte
    `0x26` = 0 → `local_c[0] = 0`.
 4. `switch(local_c[0])` matches no case (cases are 1, 3, 4, 5, 0x20,
    0x22, 0x23, 0x24) → default → break, **no record added, no
    `param_6[1]` update**.
 5. Post-switch loop `if (param_6[4] == 0 && param_6[5] == 0 && *param_6
-   < param_6[1])` — guards on 4/5 forced to 0 by FUN_7e894c50 itself.
+   < param_6[1])` — guards on 4/5 forced to 0 by MVWalkLayoutSlots itself.
    `*param_6 = 0`, `param_6[1] = local_2e = garbage`. Loop walks
    garbage records → AV.
 
@@ -802,12 +1090,12 @@ Parameters=2`). Graceful degradation — MOSVIEW stays alive.
 **Avoidance requires byte 0x26 of name_buf to land on a switch case
 (1/3/4/5/0x20/0x22/0x23/0x24) AND the case handler must complete
 without itself AV'ing.** Each handler depends on chunk content
-populating internal state via `FUN_7e897ad0`'s schema decoder:
+populating internal state via `MVDecodePackedTextHeader`'s schema decoder:
 
-- Case 1 (`FUN_7e8915d0`): do-while loop `while (FUN_7e891810 < 5)`.
-  Early-exit at `FUN_7e891810` entry checks
+- Case 1 (`MVBuildTextItem`): do-while loop `while (MVTextLayoutFSM < 5)`.
+  Early-exit at `MVTextLayoutFSM` entry checks
   `*(char *)(local_120[2] + local_120[0x10]) == 0` — both fields are
-  populated by `FUN_7e897ad0` from the chunk's 32-bit "presence
+  populated by `MVDecodePackedTextHeader` from the chunk's 32-bit "presence
   bitmap" header.  Zero-fill chunk → `local_120[2] = 0`,
   `local_120[0x10] = 0` (uninitialised local stack), deref vaddr 0
   AVs immediately.  To pass cleanly: encode chunk with bitmap bits
@@ -816,46 +1104,58 @@ populating internal state via `FUN_7e897ad0`'s schema decoder:
   past byte 0x40 (= int index 0x10) with values that sum back to a
   readable NUL byte.  Plus several `lp+0x102 / 0xf6 / 0x80 / 0x10a`
   state fields that have to be primed.
-- Case 3 (`FUN_7e894560`): calls `FUN_7e886310(lp, fontspec)` which
+- Case 3 (`MVBuildLayoutLine`): calls `MVResolveBitmapForRun(lp, fontspec)` which
   always returns a non-NULL HGLOBAL (alloc'd inside) → no early exit
   → continues into `lp+0xee/+0xf6` table reallocations with
   case-3-specific schema fields.
-- Cases 4/5 (`FUN_7e8938c0`, `FUN_7e893600`): similar lp dependencies
+- Cases 4/5 (`MVBuildColumnLayoutItem`, `MVBuildEmbeddedWindowItem`): similar lp dependencies
   plus their own chunk-content schemas.
 
-### `FUN_7e897ad0` schema decoder (chunk → local_120)
+### `MVDecodePackedTextHeader` schema decoder (chunk → local_120)
 
-`FUN_7e8915d0` parses chunk content right after `FUN_7e897ed0`
+`MVBuildTextItem` parses chunk content right after `MVDecodeTopicItemPrefix`
 consumed the opcode byte.  Entry chunk pointer = `chunk + 0x26 +
 opcode_consumed_bytes` (3 for compact opcodes).  First u32
 (`*chunk_content`) is the **presence bitmap**:
 
-```
-byte 0           bit 0:           length encoding (0 = compact
-                                  u8 → param_2[0] = (u16>>1)-0x4000;
-                                  1 = extended u32 → param_2[0] =
-                                  (u32>>1)+0xC0000000)
-high u16 of *uVar1:
-    bit 16 (uVar1 & 0x10000)      gates +0x12 (extended u32)
-    bit 17 (uVar1 & 0x20000)      gates +0x16 (length-encoded u16)
-    bit 18 (uVar1 & 0x40000)      gates +0x18 (length-encoded u16)
-    bit 19 (uVar1 & 0x80000)      gates +0x1a
-    bit 20 (uVar1 & 0x100000)     gates +0x1c
-    bit 21 (uVar1 & 0x200000)     gates +0x1e
-    bit 22 (uVar1 & 0x400000)     gates +0x20
-    bit 23 (uVar1 & 0x800000)     gates +0x22 (special init from +0x12 bit)
-    bit 24 (uVar1 & 0x1000000)    gates +0x24 (3-byte read)
-    bit 25 (uVar1 & 0x2000000)    gates +0x27 (record count for trailing loop)
-```
+**Always-written inline scalars** (extracted from `uVar1` bits 0-15):
 
-Bits in the LOW u16 of the presence bitmap fan out to `param_2[1]`,
-`param_2[2]`, `+10`, `param_2[3]`, `+0xe` (single-bit / 2-bit / 4-bit
-extracts).  These ARE always written, regardless of upper bits.
+| local_120 offset | Width | Field                          | Source bits (in uVar1 low halfword) |
+|-----------------:|------:|--------------------------------|-------------------------------------|
+| `+0x00`          | i32   | `text_start_index`             | Sign-magnitude varint preceding uVar1; low bit selects byte vs word form |
+| `+0x04`          | u16   | `text_base_present`            | bit 0 of low byte (`uVar1 & 1`) |
+| `+0x08`          | u16   | `header_flag_16_0`             | bit 0 of high byte of low halfword (`(uVar1 >> 16) & 1`, treated as `uStack_6 & 1`) |
+| `+0x0A`          | u16   | `edge_metrics_enabled`         | `(uStack_6 & 0x100) >> 8` |
+| `+0x0C`          | u16   | `alignment_mode` (0=left, 1=right, 2=center) | `(uStack_6 & 0xC00) >> 10` |
+| `+0x0E`          | u16   | `header_flag_28`               | `(uStack_6 & 0x1000) >> 12` |
 
-The trailing records loop (`if (0 < *(short *)(param_2 + 0x27))`)
-writes to bytes `0x29 + 4*N` in 4-byte strides; with N=6, the 6th
-write hits byte 0x40 (= int index 0x10).  Each entry is a length-
-encoded u16 + optional second u16.
+**Presence bits and gated fields** (bits 16-25 of `uVar1`):
+
+| Bit | Gates field                   | Offset | Width | Default if absent |
+|----:|-------------------------------|-------:|------:|-------------------|
+| 16 (`0x10000`)   | `text_base_or_mode`        | `+0x12` | i32 | 0 |
+| 17 (`0x20000`)   | `space_before`             | `+0x16` | i16 | 0 |
+| 18 (`0x40000`)   | `space_after`              | `+0x18` | i16 | 0 |
+| 19 (`0x80000`)   | `min_line_extent`          | `+0x1A` | i16 | 0 |
+| 20 (`0x100000`)  | `left_indent`              | `+0x1C` | i16 | 0 |
+| 21 (`0x200000`)  | `right_indent`             | `+0x1E` | i16 | 0 |
+| 22 (`0x400000`)  | `first_line_indent`        | `+0x20` | i16 | 0 |
+| 23 (`0x800000`)  | `tab_interval`             | `+0x22` | i16 | `0x48` when `text_base_or_mode & 1 == 0`; `0x2C6` when set |
+| 24 (`0x1000000`) | `edge_metric_flags` (3-byte raw read) | `+0x24` | u16 | 0 |
+| 25 (`0x2000000`) | `inline_run_count`         | `+0x27` | i16 | 0 |
+
+Every gated value (except `edge_metric_flags`) is a self-describing
+length-encoded varint: low bit 0 → byte form (`(b>>1) - 0x40`),
+low bit 1 → word form (`(w>>1) + 0xC000`). `text_base_or_mode`
+follows the same scheme as `text_start_index` (4-byte form when the
+selector bit is set).
+
+**Inline runs** (after the header): if `inline_run_count > 0`, the
+trailing loop writes `inline_run_count × 4-byte` entries at
+`local_120 + 0x29 + 4*N` (stride 4). Each entry is
+`[offset_flags: varint u16][aux: varint u16 only when bit 0x4000 of
+offset_flags is set]`. The high bit `0x4000` of `offset_flags` is
+cleared after the aux read.
 
 **Until either a known-good chunk capture or RE of all 50+ derived
 fields lands**, pushing 0xBF chunks creates more harm than good.
@@ -865,10 +1165,10 @@ stays blank, no error dialog.
 
 **Next-step RE targets** (when work resumes):
 
-1. Map `FUN_7e8915d0`'s prep block (lines after `FUN_7e892b90` call):
+1. Map `MVBuildTextItem`'s prep block (lines after `MVScaleTextMetrics` call):
    what does each `local_38..local_2a` capture from chunk content?
    These directly drive the do-while loop's exit conditions.
-2. Trace `FUN_7e891810`'s state machine — the loop body sets
+2. Trace `MVTextLayoutFSM`'s state machine — the loop body sets
    `local_4c` to 1..5 based on lp + chunk state.  Find the path that
    returns 5 from chunk content alone (without lp state from a real
    prior title body).
@@ -878,15 +1178,15 @@ stays blank, no error dialog.
 
 ### lp table descriptors
 
-`lpMVNew` allocates four record tables for the lp via
-`FUN_7e889990 @ 0x7E889990` (called from `0x7E882512`):
+`lpMVNew` initializes four layout-pool descriptors for the viewer via
+`MVInitViewerLayoutPools @ 0x7E889990` (called from `0x7E882597`):
 
 | Offset | Record size | Purpose | Init function |
 |-------:|-----------:|---------|---------------|
-| `lp+0xd8` | 0x26 (38 B) | Topic display records (referenced by `FUN_7e890fd0`'s `param_2 = HGLOBAL` argument) | `FUN_7e890cb0` (with free-list) |
-| `lp+0xee` | 0x47 (71 B) | Layout records (the `FUN_7e894c50` walk target) | `FUN_7e890b80` |
-| `lp+0xfe` | 0x1e (30 B) | Unknown — third table | `FUN_7e890b80` |
-| `lp+0x10e` | 0x14 (20 B) | Unknown — fourth table | `FUN_7e890b80` |
+| `lp+0xd8` | 0x26 (38 B) | Linked layout-slot table | `MVPoolInit` (with free-list) |
+| `lp+0xee` | 0x47 (71 B) | Item-record pool | `MVPoolAllocBuffer` |
+| `lp+0xfe` | 0x1e (30 B) | Auxiliary layout-record pool | `MVPoolAllocBuffer` |
+| `lp+0x10e` | 0x14 (20 B) | Run/rectangle pool | `MVPoolAllocBuffer` |
 
 Each descriptor is 0x16 bytes:
 - `+0x00` to `+0x03`: ?
@@ -894,28 +1194,139 @@ Each descriptor is 0x16 bytes:
 - `+0x08`: locked pointer (`*(LPVOID *)(table + 8)`)
 - `+0x0c`: u16 count
 - `+0x0e`: u16 capacity
-- `+0x10`: u16 free-list head (-1 if empty; `FUN_7e890d60`'s entry point)
+- `+0x10`: u16 free-list head (-1 if empty; `MVPoolAcquireEntry`'s entry point)
 - `+0x12`: u16 list link
 - `+0x14`: u16 list link
 
-`FUN_7e890b80(table, record_size)` sets `table+4 = GlobalAlloc(GMEM_MOVEABLE
+`MVPoolAllocBuffer(table, record_size)` sets `table+4 = GlobalAlloc(GMEM_MOVEABLE
 | GMEM_ZEROINIT, record_size * 4)` and `table+0xc = 0`, `table+0xe = 4`.
-`FUN_7e890c20` is the GlobalReAlloc-based expander.
+`MVPoolEnsureCapacity` is the GlobalReAlloc-based expander.
 
 ### Server implications
 
 - Selector `0x15` (HfcNear) — push opcode `0xBF` chunk on the type-0
   subscription. HfcNear's retry loop drives consumption synchronously
-  via `FUN_7e845875`; no pump thread needed for type 0 even though
-  `param_3 = 0` to `FUN_7e84485f` skips the threaded pump.
+  via `MVPumpHfcContentNotifications`; no pump thread needed for type 0 even though
+  `param_3 = 0` to `MVAsyncNotifyDispatch` skips the threaded pump.
 - Selectors `0x06` / `0x07` — push op-code 4 frame on the type-3
-  subscription. Type 3 has a real pump thread (`FUN_7e844c7c`) that
-  reads chunks asynchronously and dispatches via `FUN_7e8451ec`.
+  subscription. Type 3 has a real pump thread (`MVAsyncSubscriberWorkerPump`) that
+  reads chunks asynchronously and dispatches via `NotificationType3_DispatchRecord`.
 - All five subscribe calls need their `+0x44` slot non-zero for the
   master flag (§6a).
 - Type-0 reply must be `0x87 0x88` (iterator) so MPC's Execute hands
   back a readable iface that chunk-pushes can attach to. Same for
   type-3.
+
+### 6b.2. ConvertHashToVa (selector `0x06`)
+
+`MVTTL14C!vaConvertHash @ 0x7E841E9A` (export ordinal 58). Cache-miss
+fallback issued by `vaConvertHash` itself — the function loops on the
+kind-1 cache, fires selector `0x06` every 4000 ms while waiting up
+to 30 000 ms for the answer to land via NotificationType3 op-code 4.
+
+#### Request
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x01` | 1 | `titleSlot` — `titleState[2]` |
+| `0x03` | 4 LE | `contextHash` — caller-supplied hash key (`0` is rejected client-side, never reaches the wire) |
+
+#### Reply
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x87` | 0 | End of static section |
+
+No dynamic. The client submits the request, immediately releases the
+reply object without binding any recv slot, and re-checks the kind-1
+cache. The server's actual answer lands on the type-3 subscription
+iterator as an op-code 4 frame (kind=1) — see `Op-code 4 payload`
+above.
+
+#### Server obligations
+
+1. Acknowledge selector `0x06` with `0x87` (any timing).
+2. Push a NotificationType3 op-code 4 frame on the type-3 subscription
+   iterator with `kind=1`, `title_byte`, `hash`, `va`. The cache pump
+   re-runs the kind-1 lookup `(title_byte, hash@+4)` and returns
+   `va@+8` to the calling `vaConvertHash`. With a real va the engine
+   resumes its render path; without one, `vaConvertHash` times out
+   after 30 s and returns `0xFFFFFFFF`.
+
+### 6b.3. ConvertTopicToVa (selector `0x07`)
+
+`MVTTL14C!vaConvertTopicNumber @ 0x7E841FCF` (export ordinal 59).
+Identical request/reply shape to `0x06`; the cache, kind, and
+notification dispatch differ.
+
+#### Request
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x01` | 1 | `titleSlot` — `titleState[2]` |
+| `0x03` | 4 LE | `topicNumber` — topic ordinal in the title's topic space |
+
+#### Reply
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x87` | 0 | End of static section |
+
+#### Server obligations
+
+1. Acknowledge selector `0x07` with `0x87`.
+2. Push NotificationType3 op-code 4 with `kind=0`, `title_byte`,
+   `topic_no`, `va`, `addr`. The kind-0 cache lookup
+   `(title_byte, topic_no@+0xC)` returns `(va@+4, addr@+8)`; the
+   client returns the va to its caller (typically
+   `MVCL14N!fMVSetAddress` resolving an authored topic reference).
+
+`addrConvertTopicNumber @ 0x7E841CC9` and `addrConvertContextString @
+0x7E841CE8` are thin wrappers that share the same selector `0x07` /
+`0x06` request path; their callers consume the cached `addr` field
+instead of the `va` field.
+
+### 6b.4. LoadTopicHighlights (selector `0x10`)
+
+`MVTTL14C!HighlightsInTopic @ 0x7E841526` (export ordinal 28). Unlike
+`0x06` / `0x07`, this selector is synchronous — the client binds a
+dynamic-iterator reply slot and waits up to 30 000 ms via
+`MVAwaitWireReply`.
+
+#### Request
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x01` | 1 | `highlightContext` — low byte of the active highlight session id (`param_1 == 0` is rejected client-side) |
+| `0x03` | 4 LE | `topicOrAddress` — topic token or address token, depending on caller |
+| `0x88` | 0 | Recv: dynamic-iterator handle (consumed by `MVCopyDynamicReplyStreamBytes` after the wait) |
+
+#### Reply
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x87` | 0 | End of static section |
+| `0x88` | var | Dynamic stream — highlight blob (see below) |
+
+#### Highlight blob layout
+
+`MVCopyDynamicReplyStreamBytes` returns a 32-bit-aligned movable
+HGLOBAL with the iterator's bytes verbatim. Per
+`docs/medview-service-contract.md`:
+
+```
++0x00  bytes[8]                    opaque header (ignored on stock paths)
++0x08  u32 highlightCount
++0x0C  highlightCount * 13 B       repeated entry:
+                                     +0  u32 anchorToken
+                                     +4  u32 aux0
+                                     +8  u32 aux1
+                                     +12 u8  spanOrCount
+```
+
+Empty result is a zero-byte stream (or `highlightCount=0`); the
+client returns NULL and the engine renders the topic without
+highlights.
 
 ## 6c. Baggage (HFS file access, selectors `0x1A` / `0x1B` / `0x1C`)
 
@@ -928,7 +1339,7 @@ routes to either a local Win16 `_lopen` file handle or an HFS
 | `BaggageOpen` | `0x7E848205` | only when `param_3 != 0` (HFS mode) | delegates to `HfOpenHfs` |
 | `HfOpenHfs` | `0x7E847656` | yes | **`0x1A`** |
 | `BaggageRead` / `LcbReadHf` / `LcbReadHfProgressive` | `0x7E84818E` / `0x7E847C45` / `0x7E847DF6` | HFS mode only | **`0x1B`** |
-| `BaggageClose` / `RcCloseHf` / `FUN_7e847bd8` | `0x7E848023` / `0x7E847BAD` / `0x7E847BD8` | HFS mode only | **`0x1C`** |
+| `BaggageClose` / `RcCloseHf` / `HfsCloseRemoteHandle` | `0x7E848023` / `0x7E847BAD` / `0x7E847BD8` | HFS mode only | **`0x1C`** |
 | `BaggageSize` / `LcbSizeHf` | `0x7E848084` / `0x7E847F1E` | no (size cached at open) | — |
 | `BaggageSeek` / `LSeekHf` / `LTellHf` | `0x7E848123` / `0x7E847ED1` / `0x7E848015` | no (position in-process) | — |
 | `BaggageSeekRead` / `BaggageGetFile` | `0x7E80ED` / `0x7E82B8` | via Open+Seek+Read+Close | — |
@@ -988,7 +1399,7 @@ Reply: static ack. Client immediately frees the local tracking struct.
 ### Bitmap baggage names: engine-synthesised `|bm%d`
 
 Filenames the case-3 layout walker requests are not on disk — they
-are synthesised at `MVCL14N!FUN_7e886980 @ 0x7E886980` via
+are synthesised at `MVCL14N!MVRequestBaggageBitmap @ 0x7E886980` via
 `wsprintfA(&local_1c, "|bm%d", index)` (format string at
 `0x7E8997E0`). The bitmap index comes from the engine's layout
 descriptor (zero-fills out of our synthetic `0xBF` chunk content,
@@ -1011,22 +1422,22 @@ state machine.
 ### Synthetic kind=5 minimum-viable bm0 container
 
 A 1-byte `kind=0` read reply fails graceful (parser returns -2,
-NULL slot) but `FUN_7e887180 @ 0x7E887180` re-fires `FUN_7e886980`
+NULL slot) but `MVPaintBitmapRecord @ 0x7E887180` re-fires `MVRequestBaggageBitmap`
 on the next windows-repaint heartbeat — the engine retries `bm0`
 every ~2 minutes until the bitmap slot is non-NULL. To break the
 loop without authored bitmap bytes, ship a minimum-viable kind=5
-container that survives `FUN_7e887a40 @ 0x7E887A40`'s parser and
-`FUN_7e886fb0 @ 0x7E886FB0`'s `CreateBitmap(1, 1, 1, 1, ...)` call.
+container that survives `MVDecodeBitmapBaggage @ 0x7E887A40`'s parser and
+`MVCreateHbitmapFromBaggage @ 0x7E886FB0`'s `CreateBitmap(1, 1, 1, 1, ...)` call.
 
 38-byte payload (open-size = 38, single read at offset 0):
 
 | Offset | Bytes | Field |
 |--------|-------|-------|
-| 0x00 | `00 00` | container reserved (unread by `FUN_7e886d40`) |
-| 0x02 | `01 00` | bitmap count = 1 (single-bitmap path; skips DPI scoring `FUN_7e886c60`) |
+| 0x00 | `00 00` | container reserved (unread by `MVPickBestBitmapVariant`) |
+| 0x02 | `01 00` | bitmap count = 1 (single-bitmap path; skips DPI scoring `MVScoreBitmapVariant`) |
 | 0x04 | `08 00 00 00` | offset to bitmap[0] header = 8 |
 | 0x08 | `05` | kind = 5 (clears `local_50 < 5` gate) |
-| 0x09 | `00` | compression = raw (no `FUN_7e887ff0` RLE / `FUN_7e8970b0`) |
+| 0x09 | `00` | compression = raw (no `MVDecodeRleStream` RLE / `MVDecodeLzssBitmapPayload`) |
 | 0x0a | `00 00` | skip-int #1 (low-bit-clear narrow form) |
 | 0x0c | `00 00` | skip-int #2 (low-bit-clear narrow form) |
 | 0x0e | `02` | byte-narrow varint: planes = 1 |
@@ -1051,18 +1462,18 @@ The varint encoding has two widths inside the kind=5 branch:
 - Wide form (low bit set) consumes one extra byte/word and shifts
   the full value right 1 — not used here since all values fit narrow.
 
-`FUN_7e887a40` allocates `palette_count*4 + trailer_size + 0x3a +
+`MVDecodeBitmapBaggage` allocates `palette_count*4 + trailer_size + 0x3a +
 pixel_byte_count = 0 + 0 + 58 + 2 = 60 bytes` for its parsed output
 struct, copies a 0x3a-byte snapshot of stack locals (width at +0x16,
 height at +0x1a, planes at +0x1e, bpp at +0x20), memcpys palette
 (0 bytes when palette_count=0), then memcpys 2 pixel bytes at
-+0x3a. `FUN_7e886fb0` then resolves to `CreateBitmap(1, 1, 1, 1,
-&output[0x3a])`. With a valid HBITMAP, `FUN_7e887180`'s paint
-stops re-firing `FUN_7e886980` and the 2-minute retry pattern
++0x3a. `MVCreateHbitmapFromBaggage` then resolves to `CreateBitmap(1, 1, 1, 1,
+&output[0x3a])`. With a valid HBITMAP, `MVPaintBitmapRecord`'s paint
+stops re-firing `MVRequestBaggageBitmap` and the 2-minute retry pattern
 breaks.
 
 Authored bitmaps would override this — Blackbird's import dialog
-runs the `FUN_7e887ff0` / `FUN_7e8970b0` compressor at ingestion
+runs the `MVDecodeRleStream` / `MVDecodeLzssBitmapPayload` compressor at ingestion
 time to emit kind=5/6 wire-ready bytes inline in the .ttl
 storage, but the on-disk form retains a `BM`-prefixed file header
 that the release-time PUBLISH.DLL strips before shipping. Until
@@ -1075,11 +1486,267 @@ Empirically, post-`33a0746` (case-3 cache push lands and the layout
 walker survives) MSN Today fires `hfs_open` for `bm0` immediately
 after the `0x06` / `0x15` cache pushes complete — see the bitmap
 provenance subsection above. The two earlier callers `MVGroupLoad`
-(ordinal 15) and `FUN_7e883c50 / 7e886980 / 7e886b80` in MVCL14N
+(ordinal 15) and `MVFileIOProcOpen / 7e886980 / 7e886b80` in MVCL14N
 trigger from authored content referencing baggage by filename during
 render. Until the engine has a non-empty layout cache it never reaches
 those callers, which is why a caption-only body never received
 `0x1A/0x1B/0x1C`.
+
+## 6d. Contract-named selectors (byte-level framing)
+
+Per-selector wire layouts for the selectors named in
+`docs/medview-service-contract.md` and resolved against the MVTTL14C
+stubs. Tag widths follow the request-builder vtable convention
+established in §3 / §4 / §5:
+
+| vtable slot | Operation | Wire tag |
+|------------:|-----------|---------:|
+| `+0x18` | bind recv-DWORD | `0x83` |
+| `+0x1c` | bind recv-WORD | `0x82` |
+| `+0x20` | bind recv-BYTE | `0x81` |
+| `+0x14` | bind dynamic-iterator recv | `0x84` (handle) |
+| `+0x24` | send variable-length data | `0x04` |
+| `+0x28` | send DWORD | `0x03` |
+| `+0x2c` | send WORD | `0x02` |
+| `+0x30` | send BYTE | `0x01` |
+| `+0x40` | enable dynamic-stream recv | `0x88` (or `0x86` for single-shot) |
+| `+0x48` | submit | — |
+| `+0x08` | release | — |
+| `+0x0c` | (proxy vtable) create selector-N request builder | — |
+
+Reply tags: server emits the recv tags above plus `0x87` end-static
+and (when a dynamic body is bound) `0x86` for single-shot completion
+or `0x88` for stream-end iterator (same rule as §6a).
+
+### 6d.1. UnsubscribeNotifications (selector `0x18`)
+
+`MVTTL14C!MVAsyncSubscriberUnsubscribe @ 0x7E844FE3` (called from
+subscriber teardown when `skipWireUnsubscribe == 0`).
+
+Request: `0x01 notificationType` (1 byte, value `0`–`4` matching the
+type set up by §6a). Reply: `0x87` only — no static or dynamic body.
+The client immediately releases the ack handle.
+
+### 6d.2. CloseTitle (selector `0x02`)
+
+`MVTTL14C!TitleClose @ 0x7E842C3A`. Sent only when the local title
+refcount drops to 1; the function is otherwise local-only (decrements
+the refcount and runs `MVReleaseTitleState`).
+
+Request: `0x01 titleSlot` (1 byte, low byte of `titleState[1]`).
+Reply: `0x87`. Client waits 30 s via `MVAwaitWireReply`.
+
+### 6d.3. QueryTopics (selector `0x04`)
+
+`MVTTL14C!TitleQuery @ 0x7E841653`. Variable-shape request driven by
+`queryFlags`; reply binds two synchronous DWORDs plus optional
+dynamic streams.
+
+Request:
+
+| Tag | Bytes | Meaning |
+|-----|-------|---------|
+| `0x01` | 1 | `titleSlot` (`titleState[2]`) |
+| `0x02` | 2 | `queryClass` (caller-supplied) |
+| `0x04` | var | `primaryText` ASCIIZ |
+| `0x01` | 1 | `queryFlags` — bit `0x01` HasSecondaryText, `0x02` HasSourceGroup, `0x04` HasAuxRequest40 (forced when `param_7 != 0`) |
+| `0x04` | var | `secondaryText` (only if flag `0x01`) |
+| `0x04` | 0x40 | `sourceGroupBlob` (when flag `0x02`; encoded as `(ptr, 0x40)` plus a follow-on `(ptr+0x1e, *(u32 *)(ptr+4))` chunk) |
+| `0x02` | 2 | `queryMode` (caller-supplied) |
+| `0x04` | 0x40 | `auxRequest40` (when flag `0x04`) |
+| `0x81` | 0 | recv: `highlightContext` byte |
+| `0x83` | 0 | recv: `logicalCount` DWORD |
+| `0x83` | 0 | recv: `secondaryResult` DWORD |
+| `0x84` | 0 | recv dynamic-iterator: `auxReply` (only when flag `0x04`) |
+| `0x84` | 0 | recv dynamic-iterator: `sideband12` (always; client copies first 12 bytes) |
+
+Reply:
+
+| Tag | Bytes | Role |
+|-----|-------|------|
+| `0x81` | 1 | `highlightContext` — nonzero opens a highlight-aware session |
+| `0x83` | 4 LE | `logicalCount` |
+| `0x83` | 4 LE | `secondaryResult` (often 0) |
+| `0x87` | 0 | End of static |
+| `0x84` | var | (optional) `auxReply` iterator for the `auxRequest40` flag path |
+| `0x84` | 12 | `sideband12` (verbatim 12 bytes copied to caller) |
+
+### 6d.4. ConvertAddressToVa (selector `0x05`)
+
+`MVTTL14C!vaConvertAddr @ 0x7E841D64`. Same poll-loop pattern as
+§6b.2 / §6b.3: cache-miss fallback on the kind-2 cache, fires every
+4000 ms, totals 30 000 ms, real answer arrives via NotificationType3
+op-code 4 with `kind=2`.
+
+Request: `0x01 titleSlot` (1 byte) + `0x03 addrToken` (4 LE; client
+rejects `0xFFFFFFFF` before fire). Reply: `0x87`.
+
+### 6d.5. WordWheelService (selectors `0x08`–`0x0F`)
+
+#### 6d.5.1. QueryWordWheel (selector `0x08`)
+
+`MVTTL14C!WordWheelQuery @ 0x7E849E99`.
+
+Request: `0x01 titleSlot` (1 B) + `0x02 queryMode` (2 LE) +
+`0x04 queryText` (ASCIIZ) + `0x82 (recv-word) status` + `+0x40`
+enable dynamic.
+
+Reply: `0x82 status` + `0x87` + `0x86`/`0x88` (single-shot complete or
+stream end). Client acquires the iterator handle then releases
+without consuming bytes.
+
+#### 6d.5.2. OpenWordWheel (selector `0x09`)
+
+`MVTTL14C!WordWheelOpenTitle @ 0x7E849328`.
+
+Request: `0x01 titleSlot` (1 B) + `0x04 titleName` (ASCIIZ) +
+`0x81 (recv-byte) wordWheelId` + `0x83 (recv-dword) itemCount`.
+
+Reply: `0x81 wordWheelId` (nonzero) + `0x83 itemCount` + `0x87`.
+Client caches `wordWheelId` keyed by `(titleByte, titleName)` and
+treats `wordWheelId=0` as failure.
+
+#### 6d.5.3. CloseWordWheel (selector `0x0A`)
+
+`MVTTL14C!WordWheelClose @ 0x7E8495B1`.
+
+Request: `0x01 wordWheelId` (1 B). Reply: `0x87` ack only.
+
+#### 6d.5.4. ResolveWordWheelPrefix (selector `0x0B`)
+
+`MVTTL14C!WordWheelPrefix @ 0x7E849935`.
+
+Request: `0x01 wordWheelId` + `0x04 prefixText` (ASCIIZ) +
+`0x83 (recv-dword) prefixResult`. Reply: `0x83 prefixResult` +
+`0x87`. Client returns the DWORD synchronously.
+
+#### 6d.5.5. LookupWordWheelEntry (selector `0x0C`)
+
+`MVTTL14C!WordWheelLookup @ 0x7E849658`. Synchronous request that
+re-fires every 20 outer loop iterations while polling
+NotificationType1 cache.
+
+Request: `0x01 wordWheelId` + `0x03 ordinal` + `0x03 outputLimit`.
+Reply: `0x87` ack only — actual string arrives on the
+NotificationType1 stream and is consumed by `WordWheelCache_FindEntry`.
+
+#### 6d.5.6. CountKeyMatches (selector `0x0D`)
+
+`MVTTL14C!KeyIndexGetCount @ 0x7E849A27`.
+
+Request: `0x01 wordWheelId` + `0x04 keyText` (ASCIIZ) +
+`0x82 (recv-word) matchCount`. Reply: `0x82 matchCount` + `0x87`.
+
+#### 6d.5.7. ReadKeyAddresses (selector `0x0E`)
+
+`MVTTL14C!KeyIndexGetAddrs @ 0x7E849B6E`. Returns up to
+`maxCount` u32 addresses through a dynamic-stream iterator.
+
+Request: `0x01 wordWheelId` + `0x04 keyText` (ASCIIZ) +
+`0x02 startIndex` + `0x02 maxCount` + `+0x40` enable dynamic.
+
+Reply: `0x87` + dynamic stream. Client uses iterator `+0x10`
+(byte size) and `+0x0c` (data ptr) to copy `min(streamSize,
+maxCount * 4)` bytes into the caller buffer. Returns the byte count
+copied (NOT element count).
+
+#### 6d.5.8. SetKeyCountHint (selector `0x0F`)
+
+`MVTTL14C!fKeyIndexSetCount @ 0x7E849D8A`.
+
+Request: `0x01 wordWheelId` + `0x04 keyText` (ASCIIZ) +
+`0x02 countHint` + `0x81 (recv-byte) success`. Reply:
+`0x81 success` + `0x87`.
+
+### 6d.6. AddressHighlight cluster (selectors `0x11`–`0x13`)
+
+#### 6d.6.1. FindHighlightAddress (selector `0x11`)
+
+`MVTTL14C!addrSearchHighlight @ 0x7E8413FE`. Synchronous DWORD
+return after a `MVAwaitWireReply` (30 s).
+
+Request: `0x01 highlightContext` + `0x03 searchKey0` +
+`0x03 searchKey1` + `0x83 (recv-dword) addressToken`.
+Reply: `0x83 addressToken` + `0x87`. The client also runs an
+internal fallback through `HighlightLookup` (selector `0x13`) when
+`addressToken` comes back negative.
+
+#### 6d.6.2. ReleaseHighlightContext (selector `0x12`)
+
+`MVTTL14C!HighlightDestroy @ 0x7E841180`. Sent only when the local
+highlight-context refcount drops to 0.
+
+Request: `0x01 highlightContext` (1 B). Reply: `0x87` ack only.
+
+#### 6d.6.3. RefreshHighlightAddress (selector `0x13`)
+
+`MVTTL14C!HighlightLookup @ 0x7E841235`. Re-fires every 20 outer
+loop iterations while polling NotificationType2 via
+`HighlightCache_FindResult`. Total wait 0x40 iterations × pump
+window.
+
+Request: `0x01 highlightContext` + `0x03 highlightId`. Reply:
+`0x87` ack only — answer arrives on NotificationType2.
+
+### 6d.7. FetchAdjacentTopic (selector `0x16`)
+
+`MVTTL14C!HfcNextPrevHfc @ 0x7E845ABB`. Sibling of `vaResolve`
+(§6b.1) for next/previous topic navigation against the per-title
+HfcNear cache; pumps `MVPumpHfcContentNotifications` between fires.
+
+Request: `0x01 titleSlot` (`titleState[2]`) +
+`0x03 currentToken` (the va of the current topic) +
+`0x01 direction` (`1` = next, `0` = previous; encoded as
+`'\x01' - (param_2 == 0)`).
+
+Reply: `0x87` ack only — the actual topic body arrives as a
+NotificationType0 record (`0xBF` / `0xA5` / `0x37` opcodes; same
+inserter as §6b.1).
+
+### 6d.8. GetRemoteFsError (selector `0x1D`)
+
+`MVTTL14C!RcGetFSError @ 0x7E847F2B`. Cheapest selector — single
+WORD recv.
+
+Request: `0x82 (recv-word) fsError` only (no send tags, no
+`titleSlot`). Client-side default of `8` is left in place on any
+failure path. Reply: `0x82 fsError` + `0x87`. Client returns the
+WORD as the last MEDVIEW filesystem error.
+
+## 6e. Dead selectors
+
+The following IID-bound selectors have **zero client call sites**
+in `MVTTL14C.DLL` (the only binary that holds the discovered MEDVIEW
+proxy `DAT_7e84e2f8`). Verified by walking every `CALL [EAX + 0xc]`
+instance whose `EAX` was loaded from `DAT_7e84e2f8` — 30 unique
+selectors fire on the wire (`0x00`–`0x13`, `0x15`–`0x18`,
+`0x1A`–`0x1F`); the rest are dead.
+
+| Selector | IID idx | XX | Status |
+|----------|--------:|---:|--------|
+| `0x14`   |      19 | `91` | dead — no caller |
+| `0x19`   |      24 | `B2` | dead — no caller |
+| `0x20`   |      31 | `C0` | dead — no caller |
+| `0x21`   |      32 | `C1` | dead — no caller |
+| `0x22`   |      33 | `C2` | dead — no caller |
+| `0x23`   |      34 | `C3` | dead — no caller |
+| `0x24`   |      35 | `C4` | dead — no caller |
+| `0x25`   |      36 | `C5` | dead — no caller |
+| `0x26`   |      37 | `C6` | dead — no caller |
+| `0x27`   |      38 | `C7` | dead — no caller |
+| `0x28`   |      39 | `C8` | dead — no caller |
+| `0x29`   |      40 | `C9` | dead — no caller |
+| `0x2A`   |      41 | `CA` | dead — no caller |
+
+The IIDs still appear in `DAT_7E84C1B0` (MEDVIEW pre-allocates 42
+slots for forward compatibility), so server discovery must still
+return all 42 records — just nothing routes through them.
+
+A server is free to advertise these selectors with any handler or to
+respond `0x87` if accidentally reached; the stock client never sends
+them.
+
+---
 
 ## 7. Post-TitleOpen calls made by MOSVIEW
 
@@ -1116,11 +1783,11 @@ NavigateViewerSelection @ 0x7F3C4528
   vaMVGetContents() / vaMVConvertHash()  → iVar6 = va
   if iVar6 == -1 AND hideOnFailure: ShowWindow(0); return
   Allocate 0x40-byte selector descriptor: [va, session_id, ...]
-  → FUN_7f3c3670(pane_state, descriptor)
+  → NavigateMosViewPane(pane_state, descriptor)
     Copies descriptor into per-pane state (offsets 0..0x40)
     MVCL14N!fMVSetAddress(title_ctx, va, ...)
       ↓ triggers HfcNear cache lookup → wire 0x06/0x15 cache pushes
-      ↓ engine receives 0xBF chunk for va → FUN_7e890fd0 walker
+      ↓ engine receives 0xBF chunk for va → MVParseLayoutChunk walker
     Performs SetWindowPos / InvalidateRect / UpdateWindow
 ```
 
@@ -1132,12 +1799,12 @@ currently ship `0`, which passes the gate; the engine then fires
 
 ### 7.2 What populates a visible pane
 
-The case-3 walker (`MVCL14N!FUN_7e894560`) creates a CSection cell from
+The case-3 walker (`MVCL14N!MVBuildLayoutLine`) creates a CSection cell from
 the 0xBF chunk's bitmap reference. **The cell only renders content if
 its bitmap has a non-empty trailer** — the trailer carries `N × 15-byte`
 records describing the section's children (heading, body text, lists,
 embedded sub-bitmaps). Each child becomes a child cell with tag 4
-(CElementData) or 7 (text/link), and case-4 / case-7 / FUN_7e887180
+(CElementData) or 7 (text/link), and case-4 / case-7 / MVPaintBitmapRecord
 paint the actual visible content.
 
 With our current `_BM0_CONTAINER` (kind=5, 1×1 mono, **trailer_size=0**),
@@ -1204,63 +1871,69 @@ static decompilation of `MVCL14N.DLL` 2026-04-29.
 
 ```
 fMVSetAddress(title, va, ...)         (sets title+0xc2 = va, drives HfcNear)
-  └─> HfcNear (FUN_7e84589F)          (per-title cache lookup; type-0 0xBF
-                                       cache-fill via FUN_7e8460df → title+4 tree)
+  └─> HfcNear (HfcNear)          (per-title cache lookup; type-0 0xBF
+                                       cache-fill via HfcCache_InsertOrdered → title+4 tree)
 fMVRealize(title, rect, perr)         (page layout entry; @0x7E883890)
   ├─ guard: title+0xc2 != -1          (va must be set)
   ├─ guard: InterlockedExchange(title+0xce, 1) == 0  (re-entry)
-  ├─ FUN_7e88e440(title, hdc, 0, perr)
-  │   ├─ FUN_7e885fc0(hdc, va, ...)   (cache lookup → BF chunk HGLOBAL)
-  │   ├─ FUN_7e890fd0(title, BF_chunk, 0, 1, 0)
-  │   │   ├─ FUN_7e890d60(...)        (allocates row index in title+0xd8 table)
+  ├─ MVRealizeView(title, hdc, 0, perr)
+  │   ├─ MVHfcNear(hdc, va, ...)      (cache lookup → BF chunk HGLOBAL)
+  │   ├─ MVParseLayoutChunk(title, BF_chunk, 0, 1, 0)
+  │   │   ├─ MVPoolAcquireEntry(...)        (allocates row index in title+0xd8 table)
   │   │   ├─ row record at title+0xe0[+4 + row_idx*0x2a]:
   │   │   │     +0x00 HGLOBAL slot table (set later)
   │   │   │     +0x06 HGLOBAL name buffer (= BF chunk)
-  │   │   │     +0x0a u32 va_key (FUN_7e890f10)
+  │   │   │     +0x0a u32 va_key (MVChunkHandleGetField08)
   │   │   │     +0x0e u16 y-offset
-  │   │   │     +0x12 / +0x14 layout extents (set after FUN_7e894c50 returns)
+  │   │   │     +0x12 / +0x14 layout extents (set after MVWalkLayoutSlots returns)
   │   │   │     +0x16 u16 slot count
   │   │   │     +0x1e u32 ascender
   │   │   │     +0x22 u32 descender
-  │   │   ├─ varint at name_buf[+0x26] decoded as chunk_tag (FUN_7e897ed0)
-  │   │   ├─ FUN_7e894c50(title, row_record, name_buf+0x26, ...)
+  │   │   ├─ varint at name_buf[+0x26] decoded as chunk_tag (MVDecodeTopicItemPrefix)
+  │   │   ├─ MVWalkLayoutSlots(title, row_record, name_buf+0x26, ...)
   │   │   │     switch chunk_tag:
-  │   │   │       case 1, 0x20 → FUN_7e8915d0 (text-row chunk; produces slot tag 1)
-  │   │   │       case 3, 0x22 → FUN_7e894560 (cell+children; bm0 baggage)
-  │   │   │       case 4, 0x23 → FUN_7e8938c0
-  │   │   │       case 5, 0x24 → FUN_7e893600
+  │   │   │       case 1, 0x20 → MVBuildTextItem (text-row chunk; produces slot tag 1)
+  │   │   │       case 3, 0x22 → MVBuildLayoutLine (cell+children; bm0 baggage)
+  │   │   │       case 4, 0x23 → MVBuildColumnLayoutItem
+  │   │   │       case 5, 0x24 → MVBuildEmbeddedWindowItem
   │   │   ├─ allocates HGLOBAL of (slot_count*0x47+1) bytes
   │   │   ├─ memcpy slot scratch (title+0xf6) → row's HGLOBAL
   │   │   └─ returns row_idx
-  │   └─ FUN_7e88eb10(title, hdc, ...)  recursively fetch prev/next chunks
-  │                                      via FUN_7e886010 → fill page rows
+  │   └─ MVSeekVerticalLayoutSlots(...)  recursively fetch prev/next chunks
+  │                                      via MVDispatchHfcNextPrevHfc → fill page rows
   └─ MVTitleNotifyLayout(...)         (notify host; window invalidates)
 
 WM_PAINT:
-fMVPaint → FUN_7e889b70(title, hdc)   (paint walker; @0x7E889B70)
+fMVPaint → MVPaneOnPaint(title, hdc)   (paint walker; @0x7E889B70)
   ├─ guard: title+0x48 < title+0x58   (viewport y range valid)
   ├─ guard: title+0xea != -1          (head row idx; -1 means no rows)
   ├─ row chain: title+0xea → row[+2 ushort next_idx] → ... → -1 sentinel
   └─ for each row:
-       FUN_7e891220(title, row_idx, x_origin, y_top, …)
+       MVDispatchSlotPaint(title, row_idx, x_origin, y_top, …)
          (per-row dispatch; @0x7E891220)
          pcVar5 = row_slots + slot_idx*0x47
          switch (slot[0]):
-           1 → FUN_7e893010(title, name_buf+0x26+after_varint, slot, x, y, …)
+           1 -> DrawTextSlot(title, name_buf+0x26+after_varint, slot, x, y, ...)
                  text drawer; reads BF chunk content past varint
-           3 → FUN_7e894910(title, slot, x+slot[5], y+slot[7])
-                 cell-with-bitmap+children; sole reader of slot+0x13 va
-                 (used for highlight, NOT a paint gate);
-                 → FUN_7e887180(slot+0x39 HGLOBAL, title, x, y, hilight)
+           3 → MVPaintBitmapSlot(title, slot, x, y)
+                 applies slot+0x41 style, computes x/y from slot deltas,
+                 and uses slot+0x13 only for selection highlight
+                 → MVPaintBitmapRecord(slot+0x39 HGLOBAL, title, x, y, highlight)
                        BitBlt/StretchBlt of parsed kind-5/6 bitmap, or
                        PlayMetaFile for kind=8 (mapmode 7/8 vector)
-           4 → FUN_7e8949f0(title, slot, x, y, …)
-                 rectangle drawer; only paints when slot[+0x39]&0xd4 == 0xc0
-           5 → FUN_7e893d60
-           6 → FUN_7e893860 (HWND-hosted child window)
-           7 → FUN_7e889340(title, slot, x, y)
+           4 → MVPaintRectangleSlot(title, slot, x, y, selectionHint)
+                 outline pass only paints when slot[+0x39]&0xd4 == 0xc0;
+                 selected/caller-hint pass fills a one-pixel-inset interior
+           5 → MVPaintBorderSlot(title, slot, x, y)
+                 border/rectangle drawer; slot+0x39 bit0 selects rectangle
+                 mode, bits 1/2/3/4 select top/left/bottom/right sides,
+                 bits 5..7 select style
+           6 → MVPaintEmbeddedMediaSlot(title, slot, x, y)
+                 forwards slot+0x39 HWND, slot+0x3d mediaKind, and
+                 slot+0x41 HGLOBAL to MVRenderEmbeddedMedia
+           7 → MVInvertRunHighlightLines(title, slot, x, y)
                  reads slot+0x1b HGLOBAL (run array), iterates 0x14-byte
-                 entries from slot[+0x29]..slot[+0x2b] to FUN_7e8892f0
+                 entries from slot[+0x29]..slot[+0x2b] to MVInvertHighlightRect
 ```
 
 ### 10.1. Slot layout (0x47 bytes)
@@ -1268,27 +1941,64 @@ fMVPaint → FUN_7e889b70(title, hdc)   (paint walker; @0x7E889B70)
 | Offset | Size | Purpose |
 |-------:|-----:|---------|
 | 0x00 | u8 | slot tag (1/3/4/5/6/7) — paint dispatch key |
-| 0x01 | u32 | flags / state (low bits via FUN_7e894560) |
+| 0x01 | u32 | flags / state (low bits via MVBuildLayoutLine) |
 | 0x05 | i16 | delta_x (cell-relative) |
 | 0x07 | i16 | delta_y (cell-relative) |
 | 0x09 | i16 | (parent-cell only) inherited y_top from trailer header |
 | 0x0b | i16 | extent_x |
 | 0x0d | i16 | extent_y |
 | 0x0f | u32 | per-cell highlight key (`title+0x130` increments) |
-| 0x13 | u32 | va — `0xFFFFFFFF` sentinel for tag-0x8A children; for non-0x8A children copied from trailer record bytes 11..14. **Used only by FUN_7e894910 to compute highlight flag.** Not a wire-cache key. |
-| 0x1b | HGLOBAL | (tag-7 only) run-array HGLOBAL for FUN_7e889340 |
+| 0x13 | u32 | va — `0xFFFFFFFF` sentinel for tag-0x8A children; for non-0x8A children copied from trailer record bytes 11..14. **Used only by MVPaintBitmapSlot to compute highlight flag.** Not a wire-cache key. |
+| 0x1b | HGLOBAL | (tag-7 only) run-array HGLOBAL for MVInvertRunHighlightLines |
 | 0x29..0x2b | i16,i16 | (tag-7) run-array start/end indices |
 | 0x2d | u32 | x_left (mapped to col / page coord) |
 | 0x31 | u32 | y_top |
 | 0x35 | u32 | x_right |
-| 0x39 | HGLOBAL or u32 | parent (tag 3): HGLOBAL of FUN_7e886310's bitmap render record (slot+0x39 = `pvVar5`); child (tag 4): bytes 0..1 = trailer record's tag word; child (tag 6): HWND |
-| 0x3b | HGLOBAL | (tag-4 child) shared trailer-tail HGLOBAL allocated in FUN_7e894560: `[u16 nonbar_count][tail_size bytes]` |
-| 0x3d | byte* | (tag 3) name_buf offset for caption / case 1 child rendering |
-| 0x41 | i16 | parent cell-id passed to FUN_7e896760 |
+| 0x39 | HGLOBAL or u32 | parent (tag 3): HGLOBAL of MVResolveBitmapForRun's bitmap render record (slot+0x39 = `pvVar5`); child (tag 4): bytes 0..1 = trailer record's tag word; child (tag 5): border flags; child (tag 6): HWND |
+| 0x3b | HGLOBAL | (tag-4 child) shared trailer-tail HGLOBAL allocated in MVBuildLayoutLine: `[u16 nonbar_count][tail_size bytes]` |
+| 0x3d | byte* / u32 | (tag 3) name_buf offset for caption / case 1 child rendering; (tag 6) mediaKind |
+| 0x41 | i16 / HGLOBAL | parent cell-id passed to ApplyTextStyleToHdc; (tag 6) textHandle |
 | 0x43 | i16 | first child slot idx |
 | 0x45 | i16 | last child slot idx (exclusive) |
 
-### 10.2. Bitmap container trailer (parsed by FUN_7e886820 → FUN_7e886de0)
+### 10.2. Bitmap kind byte enumeration (`MVDecodeBitmapBaggage @ 0x7E887A40`)
+
+The first byte of the baggage blob is the `kind` discriminator; the
+second byte is the `compression_mode`. The client dispatches:
+
+| kind  | Effect | Notes |
+|------:|--------|-------|
+| 0..4  | Returns `-2` (caller maps to NULL slot → blank pane) | Sentinel for "unsupported kind". |
+| 5     | Raster bitmap parse path | 9 sequential varints decode header + palette/data offsets, then DIB-shaped allocation of `palette_count*4 + trailer_size + 0x3A + pixel_bytes`. |
+| 6     | Same path as kind 5 | Identical decoder branch (`5 ≤ kind < 7`). |
+| 7     | Returns `-2` | Not handled. |
+| 8     | Alternate bitmap path | Reads `lookup_count:varint`, two raw u16s, three more varints, two raw u32s; allocates a `0x42 + metadata_bytes` head + a separate `compressed_payload_bytes` HGLOBAL. |
+| ≥ 9   | Returns `-2` | Not handled. |
+
+The `compression_mode` byte (offset `+0x01`) only affects how pixel
+bytes (kinds 5/6) or the compressed payload (kind 8) are decoded:
+
+| compression_mode | Decoder | Source |
+|-----------------:|---------|--------|
+| 0 | Raw `MV_memcpy` of `pixel_byte_count` bytes | kind 5/6/8 |
+| 1 | `MVDecodeRleStream @ 0x7E887FF0` | kind 5/6/8 |
+| 2 | `MVDecodeLzssBitmapPayload @ 0x7E8970B0` | kind 5/6/8 |
+
+All multi-byte varints in this decoder share the same self-describing
+length-encoding scheme:
+
+| Low bit of first byte | Form | Value |
+|----------------------:|------|-------|
+| 0 | `u7` byte | `(byte >> 1)` (no sign offset for the dimension/offset varints) — note the byte form does **not** apply the `-0x40` sign offset that `MVDecodePackedTextHeader` uses; here `(byte >> 1)` is the raw value |
+| 1 | `u15` word | `(word >> 1)` (no sign offset) |
+
+The discrepancy with `MVDecodePackedTextHeader`'s `(byte >> 1) - 0x40`
+form is real — `MVDecodeBitmapBaggage`'s varints are unsigned. See
+the inline branch at `0x7E887AC0..0x7E887B30` for the canonical
+unsigned form, and `MVDecodePackedTextHeader @ 0x7E897AD0` for the
+signed form.
+
+### 10.2.1. Bitmap container trailer (parsed by MVCloneBaggageBytes → MVScaleBaggageHotspots)
 
 The kind=5/6/8 raster's trailer bytes (the `trailer_size` block at the end
 of the kind-5 header) decode as:
@@ -1308,7 +2018,7 @@ of the kind-5 header) decode as:
 | 0x00 | u8 | tag (`0x8A` text/link, `0x01` CElementData, `0x07` other) |
 | 0x01 | u8 | tag2 (used as second byte of slot+0x39 for tag-4 children) |
 | 0x02 | u8 | flags |
-| 0x03 | i16 | x_offset (DPI-scaled from src→dest in FUN_7e886de0) |
+| 0x03 | i16 | x_offset (DPI-scaled from src→dest in MVScaleBaggageHotspots) |
 | 0x05 | i16 | y_offset |
 | 0x07 | i16 | x_extent |
 | 0x09 | i16 | y_extent |
@@ -1321,7 +2031,7 @@ fixed for visible output:
 
 1. **bm0 container is 1×1 monochrome.** `_build_bm0_container` produces a
    38-byte kind=5 raster with `width=1 height=1 trailer_size=0`. At paint
-   time `FUN_7e887180` calls `BitBlt(hdc, x, y, 1, 1, …)` — one pixel.
+   time `MVPaintBitmapRecord` calls `BitBlt(hdc, x, y, 1, 1, …)` — one pixel.
    Invisible.
 2. **trailer_size=0 → child records have no tail content.** Even with a
    real-sized bitmap and a child trailer, each non-0x8A child looks up its
@@ -1336,8 +2046,8 @@ each child's `[tag, tag2]` pair.
 ### 10.5. Rendering text via slot tag 1 (case-1 BF chunk)
 
 For chunks whose `name_buf[0x26]` decodes to chunk_tag = 1 / 0x20,
-`FUN_7e8915d0` (case 1) creates slot tag 1 entries that paint via
-`FUN_7e893010` reading text bytes **directly from the BF chunk content**.
+`MVBuildTextItem` (case 1) creates slot tag 1 entries that paint via
+`DrawTextSlot` reading text bytes **directly from the BF chunk content**.
 This is the plain-text row path; complementary to case-3 (which paints
 backdrop bitmaps).
 
@@ -1348,7 +2058,7 @@ backdrop bitmaps).
 +0x01  title_byte                          per-title routing
 +0x02  name_size = 0x40 (LE u16)           memcpy length into entry
 +0x04..0x0B  zero padding                  name_buf[0..7]
-+0x0C  key (LE u32)                        FUN_7e8452d3 reads here
++0x0C  key (LE u32)                        HfcCache_DispatchContentNotification reads here
 +0x10..0x29  zero padding                  name_buf[12..0x25]
 +0x2A  0x01                                name_buf[0x26] — case-1 dispatch
 +0x2B..0x2C  preamble length raw           narrow varint, decoded = 7
@@ -1363,10 +2073,10 @@ After the cache strips the 4-byte wire header, the entry stores
 chunk[4..0x7F] at entry[0..0x7B]. So `entry+0x26` = `name_buf[0x26]`
 = the case-dispatch byte, and the walker reads from there.
 
-#### Preamble parser (`FUN_7e897ed0`)
+#### Preamble parser (`MVDecodeTopicItemPrefix`)
 
 Reads from `entry+0x26`:
-- byte 0: type tag (switched on by `FUN_7e894c50`)
+- byte 0: type tag (switched on by `MVWalkLayoutSlots`)
 - bytes 1..2 (narrow) or 1..4 (wide): signed-int length value
   - narrow form (1-bit LSB clear): 2-byte LE u16, decoded `(raw>>1) - 0x4000`
   - wide form (LSB set): 4-byte LE u32, decoded `(raw>>1) - 0x40000000`
@@ -1379,10 +2089,10 @@ preamble length = 7 and TLV size = 6, TEXT_BASE = `entry+0x26+3+7` =
 `entry+0x30`, so the 0xFF byte at `entry+0x2F` (= end_of_TLV) sits
 between the TLV and the text bytes.
 
-#### TLV parser (`FUN_7e897ad0`)
+#### TLV parser (`MVDecodePackedTextHeader`)
 
 Reads from `entry+0x26 + preamble_size` and writes to a 168-byte
-zero-initialised local struct (`local_120` in `FUN_7e8915d0`):
+zero-initialised local struct (`local_120` in `MVBuildTextItem`):
 
 | TLV offset | Field | Source | Bias |
 |-----------|-------|--------|------|
@@ -1408,26 +2118,26 @@ Encoded by `src/server/blackbird/wire.py`'s `encode_signed_int_varint`,
 `encode_signed_short_varint`, `encode_null_tlv`, and `decode_case1_tlv`
 (round-trip verifier).
 
-The DPI scale pass (`FUN_7e892b90`) immediately after parse rescales
+The DPI scale pass (`MVScaleTextMetrics`) immediately after parse rescales
 `+0x16..+0x22` and each pair entry's first ushort by
 `(devCaps × field × dpi_scale) / (base × 100)`, where `base = 144`
 when `TLV[0x12] & 1 == 0` else `1440`. Suggests fields are
 sub-pixel layout values in points×10 / twips.
 
-#### Slot tag-1 emission (`FUN_7e891810` / `FUN_7e892d30`)
+#### Slot tag-1 emission (`MVTextLayoutFSM` / `MVEmitTextRunSlot`)
 
-`FUN_7e8915d0` initialises a 42-byte working template (`local_5c`)
-copied from `local_74 + 0x36`, then calls `FUN_7e891810` repeatedly
-until it returns ≥ 5. Inside `FUN_7e891810`:
+`MVBuildTextItem` initialises a 42-byte working template (`local_5c`)
+copied from `local_74 + 0x36`, then calls `MVTextLayoutFSM` repeatedly
+until it returns ≥ 5. Inside `MVTextLayoutFSM`:
 
 - Pre-test: `chunk_content_base[TLV[0x00]] == 0` AND
   `*end_of_TLV == 0xFF` → "skip empty row," return 5. Both must be
   true; the encoder picks layouts where one or both fail.
-- Main loop: dispatches via `FUN_7e891f50 → FUN_7e892200` →
-  - text byte at current idx ≠ NUL: `FUN_7e8925d0` walks ASCII
+- Main loop: dispatches via `MVLayoutTextLine → MVLayoutTextRunStream` →
+  - text byte at current idx ≠ NUL: `MVFitPlainTextRun` walks ASCII
     classifying NUL=0 / space=2 / letter=1, breaks on word
-    boundaries, emits slot via `FUN_7e892d30`.
-  - text byte at current idx == NUL: `FUN_7e894ec0` reads byte at
+    boundaries, emits slot via `MVEmitTextRunSlot`.
+  - text byte at current idx == NUL: `MVDispatchControlRun` reads byte at
     control walker (`template[+0x14]` = end_of_TLV). 0xFF → return 5,
     advance walker +1. Other bytes dispatch to font-change /
     paragraph / nested-chunk handlers. Default: treat byte as a link
@@ -1436,7 +2146,7 @@ until it returns ≥ 5. Inside `FUN_7e891810`:
     end_of_TLV, the default case mis-reads ASCII text as link tags
     and walks out of bounds → "service is not available" dialog.**
 
-Slot fields written by `FUN_7e892d30` (slot at
+Slot fields written by `MVEmitTextRunSlot` (slot at
 `title+0xf6 + slot_idx*0x47`):
 
 | Slot offset | Source | Notes |
@@ -1450,11 +2160,11 @@ Slot fields written by `FUN_7e892d30` (slot at
 | `+0x0D` | title line height metric | computed |
 | `+0x0F` | `template[+0x18]` u32 | (4-byte field) |
 | `+0x13` | `template[+0x0E]` u32 | (4-byte field) |
-| `+0x39` | `template[+0x18]` int | **text byte offset** within `chunk_content_base`. Set to `TLV[0x00]` (= 0 for null TLV) on `FUN_7e8925d0` entry. |
+| `+0x39` | `template[+0x18]` int | **text byte offset** within `chunk_content_base`. Set to `TLV[0x00]` (= 0 for null TLV) on `MVFitPlainTextRun` entry. |
 | `+0x3D` | `template[+0x1A]` short | **text length** — computed by walk, terminates at NUL or chunk_end (= initial offset + 32) |
-| `+0x3F` | `template[+0]` short | **font index** — inherited from `puVar2[+0x18]` (initialised to 0xFFFF in `FUN_7e890fd0`) |
+| `+0x3F` | `template[+0]` short | **font index** — inherited from `puVar2[+0x18]` (initialised to 0xFFFF in `MVParseLayoutChunk`) |
 
-Paint-time `FUN_7e893010` reads `slot+0x39`, `+0x3D`, `+0x3F` and
+Paint-time `DrawTextSlot` reads `slot+0x39`, `+0x3D`, `+0x3F` and
 calls `ExtTextOutA(hdc, x, y, …, content_base + slot+0x39,
 slot+0x3D, …)`.
 
@@ -1464,10 +2174,10 @@ Encoder shipped behind env var `MSN_MEDVIEW_CASE1_TEXT`
 (`build_case1_bf_chunk` in `src/server/blackbird/wire.py`). Live
 SoftIce trace confirms:
 
-- Chunk delivered byte-perfect to `FUN_7e890fd0` at the cache buffer
+- Chunk delivered byte-perfect to `MVParseLayoutChunk` at the cache buffer
   (verified at 0x0040539C; bytes match wire encoding exactly).
-- Layout pass dispatches case 1 → `FUN_7e8915d0` → `FUN_7e891810` →
-  `FUN_7e891f50` → `FUN_7e892200` → `FUN_7e8925d0` → `FUN_7e892d30`
+- Layout pass dispatches case 1 → `MVBuildTextItem` → `MVTextLayoutFSM` →
+  `MVLayoutTextLine` → `MVLayoutTextRunStream` → `MVFitPlainTextRun` → `MVEmitTextRunSlot`
   (slot tag-1 emit reached, text length = 9 for "MSN Today").
 - Connection stays alive; "service is not available" dialog gone
   after the 0xFF fix.
@@ -1530,89 +2240,149 @@ modem activity in the VM as the engine probes for adjacent pages.
 
 ```
 fMVSetAddress(va)
-  → HfcNear retry (FUN_7e84589F) consults title+4 tree
+  → HfcNear retry (HfcNear) consults title+4 tree
 fMVRealize (@0x7E883890)
-  → FUN_7e88e440 → FUN_7e885fc0(va) → FUN_7e890fd0
+  → MVRealizeView → MVHfcNear(va) → MVParseLayoutChunk
        → row at title+0xe0[+4 + idx*0x2a] populated
-       → FUN_7e894c50 case-3 (name_buf[0x26]=0x03)
-       → FUN_7e894560
-            → FUN_7e886310 opens bm0 baggage
-                → FUN_7e886820 extracts trailer HGLOBAL
-                → FUN_7e887a40 parses kind=5 raster
-                → FUN_7e886fb0 → CreateBitmap(640, 480, 1, 1, ...)
+       → MVWalkLayoutSlots case-3 (name_buf[0x26]=0x03)
+       → MVBuildLayoutLine
+            → MVResolveBitmapForRun opens bm0 baggage
+                → MVCloneBaggageBytes extracts trailer HGLOBAL
+                → MVDecodeBitmapBaggage parses kind=5 raster
+                → MVCreateHbitmapFromBaggage → CreateBitmap(640, 480, 1, 1, ...)
             → parent slot+0x39 = HGLOBAL of bitmap render record
 WM_PAINT
-  → FUN_7e889b70 walks row chain title+0xea
-  → FUN_7e891220 dispatches slot[0]=3 → FUN_7e894910
-  → FUN_7e887180 BitBlt(hdc, x, y, 640, 480, src_dc, 0, 0, SRCCOPY)
+  → MVPaneOnPaint walks row chain title+0xea
+  → MVDispatchSlotPaint dispatches slot[0]=3 → MVPaintBitmapSlot
+  → MVPaintBitmapRecord BitBlt(hdc, x, y, 640, 480, src_dc, 0, 0, SRCCOPY)
 ```
 
 Empty trailer means no overlaid text/glyph children. Next-step RE
-target: slot-tag-1 / FUN_7e893010 text drawer + case-1 BF chunk
+target: slot-tag-1 / DrawTextSlot text drawer + case-1 BF chunk
 schema (see §10.5).
 
 ## 12. Open questions
 
-- **Info_kind dialect on the wire path**. `TitleGetInfo`'s wire
-  dispatch serves constants the local path doesn't
-  (`0x03/0x05/0x0A/0x0C`..`0x10/0x0E/0x66-0x6E`). The
-  local-path catalogue is now pinned: `0x6F` → font table handle
-  (`title+0x08`), `0x69` → HFS volume byte (`title+0x88`), `0x0B` →
-  topic count (`title+0x94`). Everything else is a body-section read.
-- **TitleOpen reply DWORD 2** (`title+0x90`). Not read by any
-  currently-catalogued `TitleGetInfo` local path; possibly a
-  notification-epoch / session cookie consumed by the subscription
-  pump (`FUN_7e844c7c`). Unverified.
-- **Font table field layout** (section 0, bytes 2-15 and trailing
-  descriptor block). The count + slot-offset pair is pinned but the
-  font descriptor format the engine reads to populate HFONT slots is
-  not. Safe today because the empty body path (`u16 size=0`) skips the
-  decode entirely; MedView renders with its built-in default font.
-- **152-byte record field layout** (section 3). Largest of the fixed
-  records and the least documented in the MedView literature. MVTTL14C
-  exposes no setters — the engine is the sole consumer. Blocks any
-  attempt to synthesise layout/style from `4.ttl` content.
-- **Cache notification format** (selectors `0x06` / `0x07` push
-  answers). The wire payload shape used by the 1996 server to populate
-  `PTR_DAT_7e84e130` via the subscription iterators is not yet RE'd —
-  trace `FUN_7e844a3b @ 0x7E841A75` (third reference to the cache
-  head) to recover it. Until then, va conversions fall through.
-- **Per-title content cache** (`title+4` tree). Push channel is
-  type-0 opcode `0xBF` via `FUN_7e8452d3 → FUN_7e8460df`. Current
-  state (post-`33a0746`): `name_buf[0x26]=0x03` steers the layout
-  walker `FUN_7e890fd0 → FUN_7e894c50` into case 3, which exits
-  cleanly through the empty-children short-circuit at
-  `FUN_7e894560 + 0x88` (`param_4[1] = *param_4`). Two empty pane
-  rectangles paint top-left. The 0x03 dispatch is a layout-table-row
-  tag the engine writes itself (§4.6), not the on-disk CSection
-  version byte; the case-3 selection works because case 3 is the
-  least-AV path for empty layout state. Two real forward steps from
-  here, each requires its own scoped plan:
-  1. **CSection CElementData children**. To populate the empty
-     rectangles, the cached CSection must carry a non-empty
-     children list. Requires pinning `VIEWDLL!CElementData::Serialize
-     @ 0x40702E4C` and the case-4 / case-7 walker handlers.
-  2. **Baggage delivery for CContent**. The actual content payload
-     (HTML / image bytes from `Title.objects[8][sub]`) flows through
-     selectors `0x1A` / `0x1B` / `0x1C`, which `medview.py` currently
-     declines (ack-only / status=0). Requires a name → bytes resolver
-     against `Title.objects` and a fragmenting reader honouring the
-     1024-B client recv buffer.
-- **Checksum semantics**. The new checksums returned in the TitleOpen
-  reply are written back into `MVCache\<title>.tmp`. Whether the server
-  treats them as (a) a content hash, (b) a version stamp, or (c) a
-  client-opaque token is not yet nailed down; for the MVP they can be any
-  stable non-zero pair.
-- **Case-1 paint pass**. With `MSN_MEDVIEW_CASE1_TEXT=1`, the case-1
-  chunk (§10.5) clears layout end-to-end and the connection stays
-  alive (no "service is not available" dialog), but `ExtTextOutA` does
-  not visibly produce text — pane goes blank after hourglass clears.
-  Two suspects: (a) `slot+0x3F` = 0xFFFF (font index inherited from
-  `puVar2[+0x18]` sentinel set in `FUN_7e890fd0`), so the
-  `FUN_7e896760` paint-time font select either fails or maps to an
-  invisible HFONT; (b) `slot+0x05` / `+0x07` (X, Y) values come from
-  uninitialised template positions and may land outside the pane.
-  Resolution requires either a font-control byte in the chunk
-  (`FUN_7e894ec0` case 0x80, length 3 = byte tag + ushort font index)
-  or populating section 0 of the title body so the engine resolves
-  0xFFFF to font 0.
+This section is intentionally short. Each entry below is a layout/value
+hole still waiting for a dedicated RE pass; the wider catalogue of
+known gaps with phase assignments lives in
+`scratch/medview-gap-worksheet.md`.
+
+- **Section 0 font-table header** — Resolved §4.4 (Phase 5, 2026-05-11).
+  18-byte header pinned via `ResolveTextStyleFromViewer @ 0x7E896610`,
+  `CopyResolvedTextStyleRecord @ 0x7E896590`, and `MergeInheritedTextStyle
+  @ 0x7E8963B0`. Empty-section-0 path (`u16 size=0`) skips the decode
+  entirely and MedView falls back to its built-in faces. Authoring-side
+  reverse engineering of the BBDESIGN.EXE font-table classes is BDF
+  format work and is out of scope for the MEDVIEW protocol docs.
+- **Section 3 `WindowScaffoldRecord`** — Resolved (Phase 5 follow-up,
+  2026-05-11). Full 152-byte / `0x98` wire-side layout pinned by
+  consumer-side RE of `MOSVIEW!CreateMosViewWindowHierarchy
+  @ 0x7F3C6790` (see `docs/medview-service-contract.md`
+  `WindowScaffoldRecord`). Authoring-side cross-reference: the
+  in-memory data model is the `CSection` MFC class in `BBDESIGN.EXE`
+  (`?classCSection@CSection@@2UCRuntimeClass@@A` at
+  `BBDESIGN.EXE:0x0047A4F2`; member functions including
+  `AddSectionAt`/`AddContentAt`/`AddFormAt`/`AddFrameAt`/`AddStyleSheetAt`/
+  `AddMagnetAt` at `0x0047A8DA..0x0047B6DA`; `CSectionProperties` at
+  `0x00476838`). The on-disk-to-wire compilation runs through
+  `PUBLISH.DLL` (per `project_blackbird_release_wire`). Field-by-field
+  mapping from in-memory `CSection` → on-disk `.bdf` →
+  wire `WindowScaffoldRecord` is BDF-format reverse engineering and
+  is out of scope for the MEDVIEW protocol docs — only the wire side
+  needs to be pinned for protocol compatibility, and it is.
+- **Section 6 `info_kind=0x6A`** — Resolved (Phase 5, 2026-05-11).
+  Raw blob carrying the title's default display title string.
+  `fMVSetTitle @ 0x7E882910` pulls it via `lMVTitleGetInfo(t, 0x6A, …)`
+  when the caller passes a NULL explicit title, stores the
+  `GlobalAlloc(GMEM_FIXED, len)` handle at `view+0x1c`, and surfaces
+  it through the `hMVGetTitle @ 0x7E882A50` export (consumed by
+  MOSVIEW for the viewer window title and "back" navigation labels).
+- **Section 7 `info_kind=0x13`** — Resolved (Phase 5, 2026-05-11).
+  Indexed length-prefixed entry table: `[u16 sectionBytes][u16 count]
+  { [u16 entryLen][entryBytes] } × count`. `TitleGetInfo @ 0x7E842558`
+  dispatch for `0x13` reads `bufCtl >> 0x10` as the entry index,
+  copies the matching entry into the caller's buffer (truncated to
+  `bufCtl & 0xFFFF`), and forces a trailing NUL at the last byte
+  before returning the entry length. The entry payload itself is
+  client-opaque to MVTTL14C / MVCL14N — bytes are handed verbatim
+  to the external caller (typically a MOSVIEW context-lookup path).
+- **HfcNear 60-byte content block** — Resolved (Phase 6, 2026-05-11).
+  Allocated by `HfcCache_DispatchContentNotification @ 0x7E8452D3` for
+  `0xBF` records; bytes 0..0x2B raw-copied from the wire 0xbf-metadata
+  block (client-opaque to MVTTL14C — consumed by the picture/glyph
+  paint path through `param_3+0x2C / +0x34`), HGLOBAL slots at
+  `+0x2C` / `+0x34` wrap body / name buffers, u32 byte count at
+  `+0x30`, last 4 bytes at `+0x38` raw-copied from wire. See §6b.1.
+- **Case-1 paint pass** — Resolved (Phase 7 follow-up, 2026-05-11).
+  Case `0x80` schema is `[byte tag=0x80][u16 style_id]`. Handler at
+  `MVDispatchControlRun @ 0x7E894EC0 case 0x80` calls
+  `ApplyTextStyleToHdc(viewer, style_id)` which resolves the style via
+  the section-0 font table. With an empty section-0 (size=0) the style
+  lookup fails and `slot+0x3F` stays at `0xFFFF` (font index sentinel) —
+  `ExtTextOutA` then produces no visible glyphs. A real section-0 font
+  table (or a SoftIce trace under a synthesized fixture) is required to
+  drive the case-1 paint pass to visible output.
+- **Case-3 trailer-tail beyond the 15-byte child records** — Resolved
+  (Phase 7 follow-up, 2026-05-11). `MVScaleBaggageHotspots @ 0x7E886DE0`
+  copies the variable-length tail bytes via `MV_memcpy(dst[13+15*count],
+  src[7+15*count], byteCount)` (`byteCount` is the u32 at source `+0x3`).
+  The scaled output is consumed by `MVBuildLayoutLine` which stores the
+  tail HGLOBAL at each tag-4 child slot's `slot+0x3B`. Tail content is
+  per-child-record payload (CElementData strings, link offsets) keyed
+  by each child's `[tag, tag2]` pair (§10.4).
+- **Layout-walker `0xBF` paint dispatch for tags 4/7** — Resolved
+  (Phase 7 follow-up, 2026-05-11). `MVDispatchSlotPaint @ 0x7E891220`
+  per-tag enumeration: `tag 1` → `DrawTextSlot` / `DrawSlotRunArray`;
+  `tag 3` → `MVPaintBitmapSlot`; `tag 4` → `MVPaintRectangleSlot`;
+  `tag 5` → `MVPaintBorderSlot`; `tag 6` → `MVPaintEmbeddedMediaSlot`;
+  `tag 7` → `MVInvertRunHighlightLines`. Other tags are skipped.
+- **`lp` pool descriptors** — Resolved (Phase 7 follow-up, 2026-05-11).
+  `MVInitViewerLayoutPools @ 0x7E889990` pins three viewer-level pool
+  record sizes (`viewer+0xEE` = `0x47` slot record, `viewer+0xFE` =
+  `0x1E` aux record, `viewer+0x10E` = `0x14` run/rect record). Each
+  slot record additionally carries an **inline per-slot highlight pool**
+  whose descriptor lives at `slot+0x17`, initialized lazily by
+  `MVApplyHighlightsToSlot @ 0x7E888BE0` via
+  `MVPoolInit(slot+0x17, payloadBytes=0x10)`. The `0x14`-byte stride is
+  `payloadBytes(0x10) + 4` because `MVPoolInit @ 0x7E890CB0` prepends a
+  4-byte doubly-linked-list header to every pool entry. Full
+  per-entry layout (consumers in `DrawSlotRunArray @ 0x7E889170`,
+  `MVInvertRunHighlightLines @ 0x7E889340`,
+  `MVCarryHighlightRectToTrailingRuns @ 0x7E888B60`):
+  - `+0x00..+0x01` i16 `prev_index` — pool's doubly-linked in-use list
+  - `+0x02..+0x03` i16 `next_index` — same list (also "next free" while
+    on freelist; `0xFFFF` sentinel)
+  - `+0x04..+0x07` i32 `left` (highlight rect)
+  - `+0x08..+0x0B` i32 `top`
+  - `+0x0C..+0x0F` i32 `right`
+  - `+0x10..+0x13` i32 `bottom`
+
+  Pool descriptor (at `slot+0x17`, ending at `slot+0x2C`):
+  - `slot+0x1B` HGLOBAL of the slot pool buffer
+  - `slot+0x1F` locked base pointer (`GlobalLock` result)
+  - `slot+0x23..+0x25` i16 count / capacity
+  - `slot+0x27..+0x29` i16 freeHead / inUseHead
+  - `slot+0x2B` i16 inUseTail
+
+  Slot consumers walk `slot+0x29..slot+0x2B` (`inUseHead..inUseTail`,
+  inclusive) and dereference each entry as `pool_base + idx * 0x14 + 4`
+  to skip the link header and land at the rect's `left` field. The
+  original gap-53 phrasing "`lp+0x02:u16` / `lp+0x13:u16` (?)" was a
+  misread: `+0x02` is `next_index` (pool list link), and `+0x13:u16`
+  spans the high half of `bottom` plus the start of the next entry —
+  not a separate field.
+- **Extra child panes (`ChildPaneRecord`) and popups (`PopupPaneRecord`)**
+  — Resolved (Phase 5 follow-up, 2026-05-11). Full 43-byte / `0x2B`
+  `ChildPaneRecord` and 31-byte / `0x1F` `PopupPaneRecord` wire-side
+  layouts pinned via consumer-side RE of
+  `MOSVIEW!CreateMosViewWindowHierarchy @ 0x7F3C6790` (additional-pane
+  + popup loops; see `docs/medview-service-contract.md`). Authoring-side
+  cross-reference: the in-memory data model is the `CFrame` MFC class
+  family in `BBDESIGN.EXE` (`CFrameListElem` at `0x00474878`,
+  `CFrameProperties` at `0x00476094`,
+  `?GetTranslateMessageFedFrame@@YAPAVCFrameWnd@@H@Z` runtime helper
+  at `0x0047A42A`). Edit→wire compilation runs through `PUBLISH.DLL`.
+  Field-by-field mapping from in-memory `CFrame` → on-disk `.bdf` →
+  wire `ChildPaneRecord`/`PopupPaneRecord` is BDF-format reverse
+  engineering and is out of scope for the MEDVIEW protocol docs.

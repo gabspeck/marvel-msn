@@ -305,23 +305,23 @@ MEDVIEW_SELECTOR_TITLE_GET_INFO = MEDVIEW_GET_TITLE_INFO_REMOTE
 # treats it as an RPC error, and bails the retry loop on the first
 # iteration.  Empirically (live SoftIce trace 2026-04-27),
 # vaConvertHash fires for the initial-selector navigation in
-# `MOSVIEW!FUN_7f3c6790` once the lp's title-handle slot is wired.
+# `MOSVIEW!CreateMosViewWindowHierarchy` once the lp's title-handle slot is wired.
 MEDVIEW_SELECTOR_VA_CONVERT_HASH = MEDVIEW_CONVERT_HASH_TO_VA
 MEDVIEW_SELECTOR_VA_CONVERT_TOPIC = MEDVIEW_CONVERT_TOPIC_TO_VA
 MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC = MEDVIEW_LOAD_TOPIC_HIGHLIGHTS
 # va→content-chunk fallback fired by `MVTTL14C!HfcNear @ 0x7E84589F` when
-# the per-title cache (`FUN_7e845efa`, tree at `title+4`, recent at
+# the per-title cache (`HfcCache_FindEntryAndPromote`, tree at `title+4`, recent at
 # `title+0x10..0x34`) misses.  Wire shape mirrors selector 0x07
 # (`vaConvertTopicNumber`): `0x01 <title_byte> 0x03 <va:dword>`, ack-only
 # reply.  The real answer is expected via selector 0x17 type-3 async push
-# (op-code unknown — likely op-code 5 `FUN_7e8424f5`, marked "secondary
+# (op-code unknown — likely op-code 5 `NotificationType3_ApplyInfo6eCacheRecord`, marked "secondary
 # cache, unresolved" in project memory).  Without this handler the
 # request would log "unhandled selector=0x15" and the client's RPC
 # returns -1, killing the retry loop.  fMVSetAddress in MVCL14N gates
-# initial paint on this — `FUN_7f3c3670` (MOSVIEW pane.SetAddress)
+# initial paint on this — `NavigateMosViewPane` (MOSVIEW pane.SetAddress)
 # checks fMVSetAddress's return and sets the pane FAIL flag at +0x84
 # on zero, blocking paint of the inner content panes.  Reached from
-# MOSVIEW!FUN_7f3c6790 (CreateMediaViewWindow's pane attach) at
+# MOSVIEW!CreateMosViewWindowHierarchy (CreateMediaViewWindow's pane attach) at
 # initial open, NOT from NavigateViewerSelection (which is the
 # click-handler path the original docs/MEDVIEW.md §6b assumed).
 MEDVIEW_SELECTOR_VA_RESOLVE = MEDVIEW_FETCH_NEARBY_TOPIC
@@ -333,7 +333,7 @@ MEDVIEW_SELECTOR_VA_RESOLVE = MEDVIEW_FETCH_NEARBY_TOPIC
 # cached from our 0x15 push, it falls back to local cache.
 MEDVIEW_SELECTOR_HFC_NEXT_PREV = MEDVIEW_FETCH_ADJACENT_TOPIC
 # Async-notification subscribe: `hrAttachToService` allocates 5 callback
-# slots via `FUN_7e84485f`, each of which fires `FUN_7e844ee6` to call
+# slots via `MVAsyncNotifyDispatch`, each of which fires `MVAsyncSubscriberSubscribe` to call
 # selector 0x17 with a single byte (the notification-type index, 0-7).
 # The reply is expected to carry an async-iterator handle; an empty
 # static-only reply tells the client "subscribe declined" so it stops

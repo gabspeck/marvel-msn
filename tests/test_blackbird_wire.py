@@ -3,10 +3,10 @@ container encoders.
 
 Pin every byte against the format derived from RE of `MVCL14N.DLL`:
 
-- Container preamble: `FUN_7e886310` reads `+0x04` u32 to find the
+- Container preamble: `MVResolveBitmapForRun` reads `+0x04` u32 to find the
   bitmap start.
-- Kind=5 header: `FUN_7e887a40` parses through the positional varints.
-- Trailer: `FUN_7e886820` extracts `[u8 reserved][u16 count][u32
+- Kind=5 header: `MVDecodeBitmapBaggage` parses through the positional varints.
+- Trailer: `MVCloneBaggageBytes` extracts `[u8 reserved][u16 count][u32
   tail_size][N*15B children][tail bytes]`.
 """
 
@@ -134,7 +134,7 @@ class TestKind5Raster(unittest.TestCase):
     def test_minimum_viable_1x1_monochrome(self):
         # 1×1 mono with empty trailer. Pixel data starts at offset 28
         # (right after the all-narrow header). Trailer offset points to
-        # the byte after pixel data (30) — `FUN_7e887a40` reads the
+        # the byte after pixel data (30) — `MVDecodeBitmapBaggage` reads the
         # field but performs a 0-byte memcpy when trailer_size=0, so
         # any value is acceptable; the encoder picks `pixel_offset +
         # len(pixel_data)` for self-consistency.
@@ -225,7 +225,7 @@ class TestBaggageContainer(unittest.TestCase):
 
 
 class TestSignedIntVarint(unittest.TestCase):
-    """Length-form varint used by `FUN_7e897ad0` / `FUN_7e897ed0`.
+    """Length-form varint used by `MVDecodePackedTextHeader` / `MVDecodeTopicItemPrefix`.
 
     Narrow form: 2 B, low bit clear, decoded `(raw>>1) - 0x4000`.
     Wide form:   4 B, low bit set,   decoded `(raw>>1) - 0x40000000`.
@@ -256,7 +256,7 @@ class TestSignedIntVarint(unittest.TestCase):
 
 
 class TestSignedShortVarint(unittest.TestCase):
-    """Short-form varint used by `FUN_7e897ad0` for fields TLV+0x16..+0x22.
+    """Short-form varint used by `MVDecodePackedTextHeader` for fields TLV+0x16..+0x22.
 
     Narrow form: 1 B, low bit clear, decoded `(raw>>1) - 0x40`.
     Wide form:   2 B, low bit set,   decoded `(raw>>1) - 0x4000`.
@@ -283,7 +283,7 @@ class TestSignedShortVarint(unittest.TestCase):
 
 
 class TestCase1Preamble(unittest.TestCase):
-    """Per-chunk preamble (`FUN_7e897ed0`).
+    """Per-chunk preamble (`MVDecodeTopicItemPrefix`).
 
     Layout for type tag in [0x03..0x10]: `[tag][signed-int varint]`.
     The varint value is added to `entry+0x26 + preamble_size` to find
@@ -301,7 +301,7 @@ class TestCase1Preamble(unittest.TestCase):
         self.assertEqual(encode_case1_preamble(7, 0x01), bytes.fromhex("010e80"))
 
     def test_tag_above_0x10_rejected(self):
-        # FUN_7e897ed0's `if (0x10 < bVar1)` branch reads an extra
+        # MVDecodeTopicItemPrefix's `if (0x10 < bVar1)` branch reads an extra
         # varint we don't yet generate.
         with self.assertRaises(NotImplementedError):
             encode_case1_preamble(0, 0x11)
@@ -312,7 +312,7 @@ class TestCase1Preamble(unittest.TestCase):
 
 
 class TestCase1Tlv(unittest.TestCase):
-    """TLV produced by `FUN_7e897ad0` — the case-1 layout descriptor."""
+    """TLV produced by `MVDecodePackedTextHeader` — the case-1 layout descriptor."""
 
     def test_null_tlv_is_six_bytes(self):
         # Length=0 narrow (`00 80`) + bitmap u32 = 0 (`00 00 00 00`).
@@ -461,7 +461,7 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
 
     def test_chunk_dispatch_byte_is_case1(self):
         chunk = self._chunk()
-        # name_buf[0x26] = 0x01 → case-1 dispatch in FUN_7e894c50.
+        # name_buf[0x26] = 0x01 → case-1 dispatch in MVWalkLayoutSlots.
         self.assertEqual(chunk[4 + 0x26], 0x01)
 
     def test_chunk_preamble_drives_text_base_to_entry_0x30(self):
@@ -478,7 +478,7 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         self.assertEqual(chunk[4 + 0x29:4 + 0x2F], bytes.fromhex("008000000000"))
 
     def test_chunk_end_of_chunk_marker_at_end_of_tlv(self):
-        # 0xFF at name_buf[0x2F] = end_of_TLV. Read by FUN_7e894ec0
+        # 0xFF at name_buf[0x2F] = end_of_TLV. Read by MVDispatchControlRun
         # via control walker (template[+0x14]) when text walker hits NUL.
         chunk = self._chunk()
         self.assertEqual(chunk[4 + 0x2F], 0xFF)
@@ -515,7 +515,7 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
 
     def test_empty_text_skip_row_chunk(self):
         # Empty text is intentional for the no-content fallback:
-        # `FUN_7e891810`'s pre-test treats first text byte == NUL with
+        # `MVTextLayoutFSM`'s pre-test treats first text byte == NUL with
         # end-of-TLV byte == 0xFF as "skip this row" → return 5 → no
         # slot emitted, but HfcNear's per-title cache is still populated
         # (so `fMVSetAddress` completes and the client clears its

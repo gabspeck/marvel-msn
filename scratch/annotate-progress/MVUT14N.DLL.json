@@ -1,0 +1,21 @@
+{
+  "binary": "MVUT14N.DLL",
+  "image_base": "0x7e830000",
+  "lastUpdated": "2026-05-09",
+  "bulk_plate_status": "complete (42/43 plated, 1 hand plate preserved)",
+  "deep_annotated": [
+    {"addr": "7e8310f0", "name": "DllProcessAttach", "session": "deep-pass-2026-05-09"},
+    {"addr": "7e831100", "name": "DllProcessDetach", "session": "deep-pass-2026-05-09"},
+    {"addr": "7e831150", "name": "BlockChainFreeList", "session": "deep-pass-2026-05-09"},
+    {"addr": "7e831250", "name": "BlockSetActiveChunk", "session": "deep-pass-2026-05-09"},
+    {"addr": "7e8315a0", "name": "BitMsbInByte", "session": "deep-pass-2026-05-09"},
+    {"addr": "7e8315c0", "name": "BitLsbInByte", "session": "deep-pass-2026-05-09"},
+    {"addr": "7e8315e0", "name": "FInvalidGroup", "session": "deep-pass-2026-05-09"},
+    {"addr": "7e831e10", "name": "GroupCreateForPair", "session": "deep-pass-2026-05-09"}
+  ],
+  "skipped": [
+    {"addr": "7e83198e", "reason": "2-byte MOV EDI,EDI alignment NOP preceding GroupTrimmed; auto-analysis mis-flagged as function. Plated; rename withheld so it doesn't read as callable."}
+  ],
+  "remaining_FUN_": 1,
+  "notes": "Tiny block-memory utility DLL. Exports: BlockInitiate, BlockCopy, BlockFree, BlockGrowth, BlockReset. Auto-analysis populated 43 functions (mostly thunks to KERNEL32 mem APIs). Deep pass complete: 8 hand-named, 1 documented skip (orphan alignment NOP)."
+}

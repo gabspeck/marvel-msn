@@ -4,7 +4,7 @@ install:
 	uv sync --all-extras
 
 run:
-	uv run python -m server
+	uv run python -m server | tee /tmp/marvel-server.log
 
 test:
 	uv run python -m unittest discover -s tests -v

@@ -429,7 +429,7 @@ first-order consumer dependency on the main client path.
 ### `MVCL14N` Topic-List Handle Layout
 
 `MVCL14N` wraps query/topic results in a small movable global block created by
-`FUN_7e883e80`:
+`MVTopicListAllocEmpty`:
 
 ```text
 MVTopicListHandle   ; 0x1e bytes, GMEM_MOVEABLE | GMEM_ZEROINIT

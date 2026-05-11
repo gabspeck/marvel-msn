@@ -2,12 +2,7 @@
 
 import struct
 import unittest
-from pathlib import Path
-from unittest import mock
 
-from server.blackbird.m14_parse import parse_payload
-from server.blackbird.m14_payload import build_m14_payload_for_deid
-from server.blackbird.m14_synth import build_source_model
 from server.config import (
     DIRSRV_INTERFACE_GUIDS,
     LOGSRV_INTERFACE_GUIDS,
@@ -64,6 +59,7 @@ from server.services.logsrv import (
     build_logsrv_service_map_payload,
 )
 from server.services.medview import MEDVIEWHandler
+from server.services.medview.payload import BM0_BAGGAGE, TITLE_OPEN_BODY
 from server.services.olregsrv import (
     OLREGSRVHandler,
     build_olregsrv_service_map_payload,
@@ -1668,274 +1664,21 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # Dynamic-complete
         self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
-    def test_title_open_handler_caches_test_title_topics(self):
-        # OpenTitle on deid="4" now resolves to the simple inline-section
-        # `Test Title` fixture (`resources/titles/4.ttl`). It has zero
-        # content proxies — only an embedded Caption control inside the
-        # Page's CVForm, which is invisible to the wire — so `topics` is
-        # empty after OpenTitle. Wire-byte content pins for the rich
-        # `msn_today.ttl` fixture live in
-        # `test_blackbird_payload_builder_preserved`.
+    def test_title_open_handler_sets_caption(self):
+        # The empty-MSN-Today rewrite ships a hardcoded title body — every
+        # OpenTitle resolves to the same caption regardless of incoming
+        # token.
         handler, _reply = self._open_handler()
-        self.assertEqual(handler.title_caption, "Test Title")
-        self.assertEqual(handler.topics, ())
+        self.assertEqual(handler.title_caption, "MSN Today")
 
-    def test_blackbird_payload_builder_preserved(self):
-        # `resources/titles/msn_today.ttl` is the reference Blackbird
-        # `msn today.ttl` (sha256 4a6e884f…). The preserved Blackbird-
-        # backed builder lowers it to: 3 supported top-level topic-source
-        # entries (2 text + 1 image) → 3 topics, 1 real sec06 scaffold
-        # record, empty sec07/sec08. CStringTable (sec04) carries 9
-        # strings (title/section/form/frame/stylesheet/resource_folder +
-        # 3 proxy names). Asserting against the body-builder output
-        # directly (the wire path fragments at the 1024-byte boundary).
-        result = build_m14_payload_for_deid("msn_today")
-        self.assertEqual(result.caption, "MSN Today")
-        parsed = parse_payload(result.payload)
-        # Section-0 is now a multi-face / multi-descriptor blob lowered
-        # from `model["stylesheet"]` per
-        # `docs/mosview-authored-text-and-font-re.md`. The reference TTL
-        # has 7 fonts (keys 0–6) and 54 styles (CSTYLE_NAME_DICTIONARY
-        # indices 0..0x35), so the layout is:
-        #   header     0x12
-        #   face table 7 * 0x20 = 0xE0
-        #   descriptor 54 * 0x2A = 0x8DC
-        #   overrides  0
-        #   pointer    7 * 0x04 = 0x1C   (one entry per face slot —
-        #                                  `MVCL14N!FUN_7e896661` indexes
-        #                                  by face_slot_index and AVs on
-        #                                  out-of-bounds reads)
-        #   total      0x9EA = 2538 bytes
-        self.assertEqual(parsed.font_blob.length, 0x9EA)
-        # Header: descriptor_count=54 (no clamp needed — every authored
-        # style_id has a real descriptor), face_off=0x12,
-        # descriptor_off=0xF2, override_count=0, override_off=0x9CE,
-        # header_word_0c=0, pointer_table_off=0x9CE
-        self.assertEqual(
-            struct.unpack_from("<HHHHHH", parsed.font_blob.data, 0x02),
-            (54, 0x12, 0xF2, 0, 0x9CE, 0),
-        )
-        self.assertEqual(
-            struct.unpack_from("<H", parsed.font_blob.data, 0x10)[0],
-            0x9CE,
-        )
-        # Face slot 0 is the "inherit"/empty slot reserved by font key 0;
-        # slot 1 = Times New Roman, slot 2 = Arial, slot 3 = Courier New
-        # (used by Preformatted/Code/Fixed Width per CSTYLE_DEFAULT_PROPS).
-        self.assertEqual(parsed.font_blob.data[0x12:0x32], b"\x00" * 0x20)
-        self.assertEqual(
-            parsed.font_blob.data[0x32:0x52].rstrip(b"\x00"),
-            b"Times New Roman",
-        )
-        self.assertEqual(
-            parsed.font_blob.data[0x52:0x72].rstrip(b"\x00"),
-            b"Arial",
-        )
-        self.assertEqual(
-            parsed.font_blob.data[0x72:0x92].rstrip(b"\x00"),
-            b"Courier New",
-        )
-        # Descriptor[0] = Normal: face_slot=1 (Times New Roman), lfHeight
-        # -14 (= -MulDiv(11pt, 96, 72) = -11 * 4 // 3), lfWeight 400,
-        # text_color black, back_color white — pinned in
-        # CSTYLE_DEFAULT_PROPS[0]. lfHeight uses standard Win32 pt-to-px
-        # at 96 DPI; consumed unmodified by `CreateFontIndirectA` in
-        # MOSVIEW's MM_TEXT DC.
-        desc0_off = 0xF2
-        self.assertEqual(
-            struct.unpack_from("<H", parsed.font_blob.data, desc0_off)[0],
-            1,
-        )
-        self.assertEqual(
-            parsed.font_blob.data[desc0_off + 0x06:desc0_off + 0x09],
-            b"\x00\x00\x00",
-        )
-        self.assertEqual(
-            parsed.font_blob.data[desc0_off + 0x09:desc0_off + 0x0C],
-            b"\xFF\xFF\xFF",
-        )
-        self.assertEqual(
-            struct.unpack_from("<i", parsed.font_blob.data, desc0_off + 0x0C)[0],
-            -14,
-        )
-        self.assertEqual(
-            struct.unpack_from("<i", parsed.font_blob.data, desc0_off + 0x1C)[0],
-            400,
-        )
-        # Descriptor[1] = Heading 1: face_slot=2 (Arial), lfHeight -29
-        # (= -MulDiv(22pt, 96, 72)), lfWeight 700 (bold), text_color
-        # authored = 0x80 (dark red).
-        desc1_off = desc0_off + 0x2A
-        self.assertEqual(
-            struct.unpack_from("<H", parsed.font_blob.data, desc1_off)[0],
-            2,
-        )
-        self.assertEqual(
-            parsed.font_blob.data[desc1_off + 0x06:desc1_off + 0x09],
-            b"\x80\x00\x00",
-        )
-        self.assertEqual(
-            struct.unpack_from("<i", parsed.font_blob.data, desc1_off + 0x0C)[0],
-            -29,
-        )
-        self.assertEqual(
-            struct.unpack_from("<i", parsed.font_blob.data, desc1_off + 0x1C)[0],
-            700,
-        )
-        # Descriptor[0x1e] = Hyperlink: face=1, text_color=blue,
-        # lfUnderline=1.
-        desc_hyper = desc0_off + 0x1E * 0x2A
-        self.assertEqual(
-            parsed.font_blob.data[desc_hyper + 0x06:desc_hyper + 0x09],
-            b"\x00\x00\xFF",
-        )
-        self.assertEqual(parsed.font_blob.data[desc_hyper + 0x21], 1)
-        # Descriptor[0x22] = Strikethrough: lfStrikeOut=1 (name-tagged
-        # special-case; flags_word matches Hyperlink/Underline so
-        # lfUnderline is also set).
-        desc_strike = desc0_off + 0x22 * 0x2A
-        self.assertEqual(parsed.font_blob.data[desc_strike + 0x22], 1)
-        self.assertEqual(parsed.font_blob.data[desc_strike + 0x21], 1)
-        # Descriptor[0x23] = Preformatted: face_slot=3 (Courier).
-        desc_pre = desc0_off + 0x23 * 0x2A
-        self.assertEqual(
-            struct.unpack_from("<H", parsed.font_blob.data, desc_pre)[0],
-            3,
-        )
-        # sec07/sec08 records are dropped at wire boundary (BB-magic +
-        # child-pane/popup source not recovered for the supported subset.
-        self.assertEqual(parsed.sec07.record_count, 0)
-        self.assertEqual(parsed.sec08.record_count, 0)
-        # sec06 carries one window scaffold record lowered from
-        # `model["frame"]` + `model["form"]` per
-        # `docs/cbframe-cbform-sec06-mapping.md`:
-        #   caption (+0x15) ← CBFrame.caption = "MSN Today"
-        #   flags  (+0x48) = 0x08 (outer rect absolute pixels)
-        #   outer rect (+0x49..+0x58) ← CBFrame.rect_left/top/right/bottom
-        #     = (0, 0, 640, 480)
-        #   all three COLORREFs (+0x5B / +0x78 / +0x7C) ←
-        #     CBForm.background_color = 0x009098A8 (light tan;
-        #     RGB(168,152,144); BBDESIGN Page Background color picker
-        #     value confirmed via showcase TTL where setting picker
-        #     to yellow produced 0x0000FFFF in this same slot).
-        #   top-band rect (+0x80..+0x8F) = -1 sentinels → use full
-        #     client area
-        self.assertEqual(parsed.sec06.record_count, 1)
-        self.assertEqual(
-            parsed.sec06.data[0x15:0x15 + len(b"MSN Today\x00")],
-            b"MSN Today\x00",
-        )
-        self.assertEqual(parsed.sec06.data[0x48], 0x08)
-        self.assertEqual(
-            struct.unpack_from("<iiii", parsed.sec06.data, 0x49),
-            (0, 0, 640, 480),
-        )
-        self.assertEqual(
-            struct.unpack_from("<I", parsed.sec06.data, 0x5B)[0],
-            0x009098A8,
-        )
-        self.assertEqual(
-            struct.unpack_from("<II", parsed.sec06.data, 0x78),
-            (0x009098A8, 0x009098A8),
-        )
-        self.assertEqual(
-            struct.unpack_from("<iiii", parsed.sec06.data, 0x80),
-            (-1, -1, -1, -1),
-        )
-        self.assertEqual(parsed.sec04.count, 9)
-        self.assertEqual(parsed.sec13.count, 2)
-        self.assertEqual(parsed.sec01.data, b"MSN Today\x00")
-        # sec02 is "Copyright information" (MOSVIEW message 0x406); empty
-        # because no TTL we synthesize today carries a copyright property.
-        self.assertEqual(parsed.sec02.data, b"")
-        # sec6a carries the bare deid (Marvel HRMOSExec path, not a
-        # Windows path — see `m14_payload` module docstring).
-        self.assertEqual(parsed.sec6a.data, b"msn_today\x00")
-        self.assertEqual(parsed.trailing, b"")
-        # Real metadata threaded through: 3 topic-source entries
-        # → topic_count=3,
-        # va_get_contents=0x1000 (synthesizer's first_address), CRC32 cache
-        # headers non-zero.
-        self.assertEqual(result.metadata.topic_count, 3)
-        self.assertEqual(result.metadata.va_get_contents, 0x1000)
-        self.assertEqual(result.metadata.addr_get_contents, 0x1000)
-        self.assertNotEqual(result.metadata.cache_header0, 0)
-        self.assertNotEqual(result.metadata.cache_header1, 0)
-        # Per-topic mapping: 3 entries (2 text + 1 image) with the
-        # synthesizer's address/topic_number/context_hash assignments.
-        # Homepage.bdf TextRuns has 2 `'#'`-separated paragraphs;
-        # heuristic style assignment puts the first as Heading 1 and
-        # the rest as Normal. Calendar of Events.bdf's TextRuns is
-        # `00 00` (empty body, 0 paragraphs); image entries don't
-        # contribute paragraphs either. Topic numbers are 1-based per
-        # `m14_synth.build_topic_source_metadata`.
-        self.assertEqual(len(result.topics), 3)
-        topic1 = result.topic_by_number(1)
-        self.assertIsNotNone(topic1)
-        self.assertEqual(topic1.address, 0x1000)
-        self.assertEqual(topic1.kind, "text")
-        self.assertEqual(len(topic1.paragraphs), 2)
-        self.assertEqual(topic1.paragraphs[0].style_id, 1)  # Heading 1
-        self.assertTrue(topic1.paragraphs[0].text.startswith("This is an example"))
-        self.assertEqual(topic1.paragraphs[1].style_id, 0)  # Normal
-        self.assertTrue(topic1.paragraphs[1].text.startswith("Ordered list"))
-        topic2 = result.topic_by_number(2)
-        self.assertIsNotNone(topic2)
-        self.assertEqual(topic2.address, 0x1100)
-        self.assertEqual(topic2.kind, "text")
-        self.assertEqual(topic2.paragraphs, ())  # empty TextRuns → no paragraphs
-        topic3 = result.topic_by_number(3)
-        self.assertIsNotNone(topic3)
-        self.assertEqual(topic3.kind, "image")
-
-    def test_title_open_body_allows_more_topic_sources_without_more_window_records(self):
-        ttl_path = Path(__file__).resolve().parents[1] / "resources" / "titles" / "msn_today.ttl"
-        model = build_source_model(ttl_path)
-        extra_entry = dict(model["topic_source_entries"][0])
-        extra_entry["entry_index"] = len(model["topic_source_entries"])
-        extra_entry["proxy_name"] = "Homepage Copy"
-        model["topic_source_entries"].append(extra_entry)
-        model["section"]["contents"].append(model["section"]["contents"][0])
-        with mock.patch("server.blackbird.m14_payload.build_source_model", return_value=model):
-            result = build_m14_payload_for_deid("msn_today")
-        parsed = parse_payload(result.payload)
-        self.assertEqual(result.metadata.topic_count, 4)
-        self.assertEqual(len(result.topics), 4)
-        topic4 = result.topic_by_number(4)
-        self.assertIsNotNone(topic4)
-        self.assertEqual(topic4.address, 0x1300)
-        self.assertEqual(parsed.sec07.record_count, 0)
-        self.assertEqual(parsed.sec08.record_count, 0)
-        self.assertEqual(parsed.sec06.record_count, 1)
-
-    def test_title_open_body_falls_back_to_deid_for_unknown(self):
-        # deid "42" has no .ttl fixture — the handler emits an empty
-        # payload with caption "Title 42\0" in sec01/sec6a so the viewer
-        # still shows something informative.
-        result = build_m14_payload_for_deid("42")
-        self.assertEqual(result.caption, "Title 42")
-        parsed = parse_payload(result.payload)
-        # Empty fallback ships the same minimal section-0 (96 B) as the
-        # real-content path — keeps the engine on a fully-validated branch
-        # even when no text items reference a style.
-        self.assertEqual(parsed.font_blob.length, 0x60)
-        self.assertEqual(parsed.sec07.record_count, 0)
-        self.assertEqual(parsed.sec08.record_count, 0)
-        self.assertEqual(parsed.sec06.record_count, 0)
-        self.assertEqual(parsed.sec01.data, b"Title 42\x00")
-        self.assertEqual(parsed.sec02.length, 0)
-        self.assertEqual(parsed.sec6a.data, b"Title 42\x00")
-        self.assertEqual(parsed.sec13.count, 0)
-        self.assertEqual(parsed.sec04.count, 0)
-        self.assertEqual(parsed.trailing, b"")
-        # Empty fallback metadata: zero dwords + only header0 non-zero
-        # (CRC32 of the empty payload). topics tuple is empty.
-        self.assertEqual(result.metadata.topic_count, 0)
-        self.assertEqual(result.metadata.va_get_contents, 0)
-        self.assertEqual(result.metadata.addr_get_contents, 0)
-        self.assertNotEqual(result.metadata.cache_header0, 0)
-        self.assertEqual(result.metadata.cache_header1, 0)
-        self.assertEqual(result.topics, ())
+    def test_title_open_body_is_hardcoded_constant(self):
+        _handler, reply = self._open_handler()
+        # Body follows the static prefix at offset 31 (2×0x81 + 5×0x83 +
+        # 0x87 + 0x86 = 31 bytes).
+        body_with_padding = reply[31:]
+        # Pipe-frame payload may be padded by the transport — body bytes
+        # match the prefix of TITLE_OPEN_BODY exactly.
+        self.assertEqual(body_with_padding[: len(TITLE_OPEN_BODY)], TITLE_OPEN_BODY)
 
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
@@ -1966,26 +1709,15 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
 
 
 class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
-    # Open the rich `msn_today.ttl` fixture (3 topics) so the cache-push
-    # tests have a topic mapping to look up against. The TitleOpen spec
-    # is `:%d[%s]%d` per `docs/MOSVIEW.md` §5.3 — svcid=2, deid=msn_today,
-    # serial=0; ASCIIZ string length 15 → length-prefix byte 0x8F.
-    _OPEN_TITLE_REQ = (
-        b"\x04\x8f:2[msn_today]0\x00"
-        b"\x03\x00\x00\x00\x00"
-        b"\x03\x00\x00\x00\x00"
-        b"\x81\x81\x83\x83\x83\x83\x83"
-    )
+    """Selectors 0x05 / 0x06 / 0x07 / 0x15 / 0x16 ack synchronously and
+    push the resolved entry on the matching notification iterator. With
+    no on-disk topic catalog, type-3 frames carry va=addr=0 and type-0
+    pushes are 0xA5 status records — both safe for the empty MSN Today
+    path."""
 
-    def _open_title(self, handler):
-        pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, self._OPEN_TITLE_REQ, 5, 5,
-        )
-        self.assertIsNotNone(pkts)
-        return pkts
-
-    def _subscribe(self, handler, notification_type, request_id):
-        pkts = handler.handle_request(
+    @staticmethod
+    def _subscribe(handler, notification_type, request_id):
+        return handler.handle_request(
             0x01,
             MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
             request_id,
@@ -1993,18 +1725,10 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             5,
             5,
         )
-        self.assertIsNotNone(pkts)
-        return pkts
 
-    def test_async_cache_miss_selectors_ack_then_push(self):
-        # Selectors 0x06 (ConvertHashToVa) / 0x07 (ConvertTopicToVa) /
-        # 0x15 (FetchNearbyTopic) share the ack-only synchronous reply
-        # contract per `docs/medview-service-contract.md`. The real
-        # answer arrives later through the matching subscription's
-        # async push (type-3 op-4 frame for 0x06/0x07; type-0 0xBF
-        # chunk for 0x15) — but only when a subscription has been
-        # opened. With no subscription state on a fresh handler, the
-        # synchronous reply is bare `0x87`.
+    def test_async_cache_miss_selectors_bare_ack_when_no_subscription(self):
+        # Without a matching subscription the handler ships only the
+        # synchronous bare ack — the push has no iterator to ride.
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         for selector in (
@@ -2014,100 +1738,78 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         ):
             pkts = handler.handle_request(0x01, selector, 9, req_payload, 5, 5)
             self.assertIsNotNone(pkts, f"selector 0x{selector:02x} returned None")
-            parsed = parse_packet(pkts[0][:-1])
-            self.assertTrue(parsed.crc_ok)
-            reply = parsed.payload[8:]
-            self.assertEqual(reply, bytes([TAG_END_STATIC]),
-                             f"selector 0x{selector:02x} ack mismatch")
+            self.assertEqual(len(pkts), 1)
+            reply = parse_packet(pkts[0][:-1]).payload[8:]
+            self.assertEqual(
+                reply, bytes([TAG_END_STATIC]),
+                f"selector 0x{selector:02x} ack mismatch",
+            )
 
-    def test_async_cache_pushes_match_blackbird_topic_mappings(self):
+    def test_convert_hash_pushes_type3_frame_with_va_zero(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        self._open_title(handler)
         self._subscribe(handler, 3, 2)
-        self._subscribe(handler, 0, 3)
-
-        topic1 = next(topic for topic in handler.topics if topic.topic_number == 1)
-
-        hash_req = b"\x01\x01\x03" + struct.pack("<I", topic1.context_hash)
-        hash_pkts = handler.handle_request(
+        key = 0xCAFEBABE
+        hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
+        pkts = handler.handle_request(
             0x01, MEDVIEW_SELECTOR_VA_CONVERT_HASH, 9, hash_req, 5, 5,
         )
-        self.assertIsNotNone(hash_pkts)
-        self.assertGreaterEqual(len(hash_pkts), 2)
-        hash_push = parse_packet(hash_pkts[1][:-1]).payload[8:]
-        self.assertEqual(hash_push[0], 0x85)
+        self.assertGreaterEqual(len(pkts), 2)
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push[0], 0x85)
+        # type-3 op-code 4 frame: u16 op=4, u16 len=18, u8 title, u8 kind,
+        # u32 key, u32 va, u32 addr.
         self.assertEqual(
-            struct.unpack("<HHBBIII", hash_push[1:19]),
-            (4, 18, 0x01, 1, topic1.context_hash, 0x1000, 0x1000),
+            struct.unpack("<HHBBIII", push[1:19]),
+            (4, 18, 0x01, 1, key, 0, 0),
         )
 
-        topic_req = b"\x01\x01\x03" + struct.pack("<I", topic1.topic_number)
-        topic_pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC, 10, topic_req, 5, 5,
-        )
-        self.assertIsNotNone(topic_pkts)
-        self.assertGreaterEqual(len(topic_pkts), 2)
-        topic_push = parse_packet(topic_pkts[1][:-1]).payload[8:]
-        self.assertEqual(topic_push[0], 0x85)
-        self.assertEqual(
-            struct.unpack("<HHBBIII", topic_push[1:19]),
-            (4, 18, 0x01, 0, topic1.topic_number, 0x1000, 0x1000),
-        )
-
-        # Selector 0x15 (VA_RESOLVE) now pushes a case-1 0xBF text chunk
-        # carrying the topic's first authored paragraph + chosen style.
-        # See `_PUSH_DISPATCH` in `services/medview.py` — `MEDVIEW_FETCH_NEARBY_TOPIC`
-        # bound to `_push_case1_text`. Synthetic title has one paragraph
-        # (style_id 0); 4.ttl topics use heuristic style assignment.
-        text_req = b"\x01\x01\x03" + struct.pack("<I", topic1.address)
-        text_pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, text_req, 5, 5,
-        )
-        self.assertIsNotNone(text_pkts)
-        self.assertGreaterEqual(len(text_pkts), 2)
-        text_push = parse_packet(text_pkts[1][:-1]).payload[8:]
-        self.assertEqual(text_push[0], 0x85)
-        self.assertEqual(text_push[1], 0xBF)
-        self.assertEqual(text_push[2], 0x01)
-        self.assertEqual(struct.unpack("<I", text_push[13:17])[0], topic1.address)
-        # case-1 dispatch byte at name_buf[0x26] = chunk[0x2A] = push[0x2B]
-        self.assertEqual(text_push[1 + 4 + 0x26], 0x01)
-
-    def test_fetch_adjacent_topic_acks_then_pushes_a5_status(self):
-        # Spec §0x16 (post-update): selector 0x16 is async-refresh —
-        # synchronous reply is just an ack, the actual content arrives
-        # via notification type 0. We push a 0xA5 HfcStatusRecord
-        # keyed by (title_slot, current_token) so the engine's 30 s
-        # wait loop short-circuits via cache match.
-        from server.config import (
-            MEDVIEW_FETCH_ADJACENT_TOPIC,
-            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
-        )
+    def test_convert_topic_pushes_type3_kind_0(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        # Open a type-0 subscription so the push has a destination.
-        handler.handle_request(
-            0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 1, bytes.fromhex("01 00 85"), 5, 5,
+        self._subscribe(handler, 3, 2)
+        key = 0x00000005
+        req = b"\x01\x01\x03" + struct.pack("<I", key)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC, 10, req, 5, 5,
         )
-        # FetchAdjacentTopic request: title_slot=1, current_token=0,
-        # direction=0.
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(
+            struct.unpack("<HHBBIII", push[1:19]),
+            (4, 18, 0x01, 0, key, 0, 0),
+        )
+
+    def test_va_resolve_pushes_empty_case1_bf_chunk(self):
+        # Selector 0x15 must push opcode 0xBF on the type-0 iterator —
+        # that's the record HfcCache_InsertOrdered writes into HfcNear's
+        # per-title cache at title+4, unblocking the 30-s retry loop.
+        # Empty text → layout walker hits the "skip empty row" return-5
+        # path so the cache fills without emitting a visible slot.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._subscribe(handler, 0, 3)
+        key = 0x12345678
+        req = b"\x01\x01\x03" + struct.pack("<I", key)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push[0], 0x85)
+        self.assertEqual(push[1], 0xBF)
+        self.assertEqual(push[2], 0x01)  # title_byte at chunk +0x01
+        self.assertEqual(struct.unpack("<I", push[13:17])[0], key)
+
+    def test_fetch_adjacent_topic_pushes_type0_a5(self):
+        from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._subscribe(handler, 0, 1)
         req_payload = bytes.fromhex("01 01 03 00 00 00 00 01 00")
         pkts = handler.handle_request(
             0x01, MEDVIEW_FETCH_ADJACENT_TOPIC, 11, req_payload, 5, 5,
         )
-        self.assertIsNotNone(pkts)
-        # Two packets: ack reply + async push frame.
         self.assertGreaterEqual(len(pkts), 2)
-        # First packet: bare ack.
-        sync_reply = parse_packet(pkts[0][:-1]).payload[8:]
-        self.assertEqual(sync_reply, bytes([TAG_END_STATIC]))
-        # Second packet: type-0 push carrying 0x85 + 0xA5 record.
-        push_payload = parse_packet(pkts[1][:-1]).payload[8:]
-        self.assertEqual(push_payload[0], 0x85)  # MPCCL chunk tag
-        # 0xA5 HfcStatusRecord layout: u8 0xA5, u8 title_byte, u16 status, u32 contents_token
-        self.assertEqual(push_payload[1], 0xA5)
-        self.assertEqual(push_payload[2], 0x01)  # title_byte = title_slot
-        self.assertEqual(struct.unpack("<H", push_payload[3:5])[0], 0)         # status
-        self.assertEqual(struct.unpack("<I", push_payload[5:9])[0], 0)         # contents_token
+        sync = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(sync, bytes([TAG_END_STATIC]))
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push[0], 0x85)
+        self.assertEqual(push[1], 0xA5)
 
     def test_load_topic_highlights_returns_empty_dynbytes(self):
         # Selector 0x10 (LoadTopicHighlights) returns synchronous
@@ -2208,13 +1910,11 @@ class TestMEDVIEWTitleService(unittest.TestCase):
     test classes above)."""
 
     def _open_title(self, handler):
-        # Drives the handler through a successful OpenTitle so the slot
-        # is registered for ValidateTitle / CloseTitle assertions. Use
-        # the rich `msn_today` fixture so the handler caches non-empty
-        # topics — `test_close_title_drops_per_title_state` checks that
-        # CloseTitle then clears them.
+        # OpenTitle registers the (single) title slot so subsequent
+        # ValidateTitle and CloseTitle assertions pass. Title token bytes
+        # are ignored — the handler always ships the same hardcoded body.
         req = (
-            b"\x04\x8f:2[msn_today]0\x00"
+            b"\x04\x84:2[]0\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x81\x81\x83\x83\x83\x83\x83"
@@ -2257,10 +1957,9 @@ class TestMEDVIEWTitleService(unittest.TestCase):
         from server.config import MEDVIEW_CLOSE_TITLE
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._open_title(handler)
-        self.assertGreater(len(handler.topics), 0)
+        self.assertEqual(handler.title_caption, "MSN Today")
         req_payload = bytes.fromhex("01 01")
         handler.handle_request(0x01, MEDVIEW_CLOSE_TITLE, 3, req_payload, 5, 5)
-        self.assertEqual(handler.topics, ())
         self.assertEqual(handler.title_caption, "")
 
     def test_query_topics_returns_empty_session(self):
@@ -2410,26 +2109,24 @@ class TestMEDVIEWRemoteFsError(unittest.TestCase):
 
 
 class TestMEDVIEWBaggageBm0(unittest.TestCase):
-    """bm0 baggage delivery — small kind=5 raster for the bitmap probe.
+    """bm0 baggage delivery — kind=5 raster sized to the CBFrame.
 
-    See `docs/MEDVIEW.md` §10 for the paint-loop trace and §6c for the
-    baggage selector wire layout. The container is now a 64×64 24bpp
-    raster (12331 B total) with an empty trailer — produced by
-    `src.server.blackbird.wire.build_baggage_container` over a
-    `build_kind5_raster` body. These tests pin the open-size
-    declaration and the structural shape (preamble, kind byte, pixel
-    data dimensions) without freezing the entire payload byte sequence.
-    """
+    Container layout: 8 B preamble + 30 B kind=5 header (wide-form
+    pixel_byte_count) + 38400 B all-FF pixels (640×480 1bpp) + 7 B
+    empty trailer = 38445 B total. See `docs/MEDVIEW.md` §10."""
 
-    _BM0_PREAMBLE_LEN = 8        # container header
-    _BM0_KIND5_HEADER_LEN = 28
-    _BM0_PIXEL_BYTES = 12288     # 64×64 24bpp packed
-    _BM0_TRAILER_LEN = 7         # empty trailer = 1B reserved + 2B count + 4B size
+    _BM0_PREAMBLE_LEN = 8
+    _BM0_KIND5_HEADER_LEN = 30  # wide pixel_byte_count varint
+    _BM0_PIXEL_BYTES = 38400    # 640 × 480 / 8 for 1bpp
+    _BM0_TRAILER_LEN = 7
     _BM0_CONTAINER_LEN = (
         _BM0_PREAMBLE_LEN + _BM0_KIND5_HEADER_LEN
         + _BM0_PIXEL_BYTES + _BM0_TRAILER_LEN
     )
-    _OPEN_REQ = bytes.fromhex("01 01 04 84 62 6d 30 00 01 02 81 83")  # bm0 retry form
+    # bm0 retry form: tag=0x04 var "bm0\0" (4 B, length-prefix 0x84).
+    _OPEN_REQ_BM0 = bytes.fromhex("01 01 04 84 62 6d 30 00 01 02 81 83")
+    # First-probe form: tag=0x04 var "|bm0\0" (5 B, length-prefix 0x85).
+    _OPEN_REQ_PIPE_BM0 = bytes.fromhex("01 01 04 85 7c 62 6d 30 00 01 02 81 83")
 
     def _decode_reply(self, selector, req_id, payload):
         handler = MEDVIEWHandler(5, "MEDVIEW")
@@ -2437,67 +2134,90 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
-        # header(1) + size(2) + routing(2) + class(1) + selector(1) + vli(1) = 8
         return parsed.payload[8:]
 
+    def test_container_size_matches_constant(self):
+        self.assertEqual(self._BM0_CONTAINER_LEN, 38445)
+        self.assertEqual(len(BM0_BAGGAGE), 38445)
+
+    def test_hfs_open_pipe_bm0_is_rejected(self):
+        # MVTTL14C's first probe is `|bm0` (`wsprintfA("|bm%d", idx)`);
+        # rejection causes the wrapper to retry with the canonical name.
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_OPEN, 10, self._OPEN_REQ_PIPE_BM0)
+        self.assertEqual(reply[0], TAG_END_STATIC)
+        self.assertEqual(reply[1], 0x81)
+        self.assertEqual(reply[2], 0x00)  # handle = 0 → reject
+        self.assertEqual(reply[3], 0x83)
+        self.assertEqual(struct.unpack("<I", reply[4:8])[0], 0)
+
     def test_hfs_open_bm0_declares_container_size(self):
-        # 0x87 end-static, 0x81 <handle=0x42>, 0x83 <size=12331>
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_OPEN, 11, self._OPEN_REQ)
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_OPEN, 11, self._OPEN_REQ_BM0)
         self.assertEqual(reply[0], TAG_END_STATIC)
         self.assertEqual(reply[1], 0x81)
         self.assertEqual(reply[2], 0x42)
         self.assertEqual(reply[3], 0x83)
-        size = struct.unpack("<I", reply[4:8])[0]
-        self.assertEqual(size, self._BM0_CONTAINER_LEN)
+        self.assertEqual(
+            struct.unpack("<I", reply[4:8])[0], self._BM0_CONTAINER_LEN,
+        )
 
     def test_hfs_read_bm0_kind_byte_passes_parser_gate(self):
-        # Read first 64 bytes — covers preamble + kind5 header. Bitmap
-        # starts at offset 8; first byte must be 5 to clear
-        # FUN_7e887a40's `kind < 5` gate.
+        # First read of 64 B starting at offset 0 — covers preamble +
+        # kind5 header. Bitmap begins at offset 8; first byte must be 5
+        # to clear MVDecodeBitmapBaggage's `kind < 5` gate.
         read_req = bytes.fromhex("01 42 03 40 00 00 00 03 00 00 00 00 81 85")
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
-        # 0x81 <status=0> 0x87 0x86 <chunk>
         self.assertEqual(reply[0], 0x81)
         self.assertEqual(reply[1], 0x00)
         self.assertEqual(reply[2], TAG_END_STATIC)
         self.assertEqual(reply[3], TAG_DYNAMIC_COMPLETE_SIGNAL)
         chunk = reply[4 : 4 + 64]
-        self.assertEqual(chunk[8], 0x05)  # kind byte at bitmap-header offset 0
+        self.assertEqual(chunk[8], 0x05)
 
     def test_hfs_read_bm0_preamble_and_header_byte_sequence(self):
-        # Pin the preamble + 30-byte kind=5 header so the layout encoder
-        # in `blackbird.wire` can't drift unchecked. Pixel content (900KB)
-        # not byte-pinned — covered structurally by the kind5_raster
-        # tests in `test_blackbird_wire.TestKind5Raster`.
-        read_req = bytes.fromhex("01 42 03 24 00 00 00 03 00 00 00 00 81 85")
+        # 38B = 8 preamble + 30 kind=5 header (wide-form pixel_byte_count).
+        read_req = bytes.fromhex("01 42 03 26 00 00 00 03 00 00 00 00 81 85")
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
-        chunk = reply[4 : 4 + 36]
+        chunk = reply[4 : 4 + 38]
         expected_header = bytes.fromhex(
             "00 00"                  # container reserved
             "01 00"                  # bitmap count = 1
             "08 00 00 00"            # offset to bitmap[0]
             "05 00"                  # kind=5, compression=raw
             "00 00 00 00"            # 2x skip-int (narrow form)
-            "02 30"                  # byte-narrow varints: planes=1, bpp=24
-            "80 00 80 00"            # ushort-narrow: width=64, height=64
+            "02 02"                  # byte-narrow: planes=1, bpp=1
+            "00 05 c0 03"            # ushort-narrow: width=640, height=480
             "00 00 00 00"            # palette_count=0, reserved=0
-            "0060"                    # ushort-narrow pixel_byte_count = 12288
+            "01 2c 01 00"            # u32-wide pixel_byte_count = 38400
             "0e 00"                  # ushort-narrow trailer_size = 7
-            "1c 00 00 00"            # pixel_data_offset = 28
-            "1c 30 00 00"            # trailer_offset = 28 + 12288 = 12316
+            "1e 00 00 00"            # pixel_data_offset = 30
+            "1e 96 00 00"            # trailer_offset = 30 + 38400 = 38430
         )
         self.assertEqual(chunk, expected_header)
 
     def test_hfs_read_bm0_pixel_data_is_solid_white(self):
-        # Read 27 bytes from offset 36 (start of pixel data). Bm0 ships
-        # a solid-white 24bpp raster as the neutral backdrop until
-        # authored CBFrame bitmap lowering exists.
-        read_req = bytes.fromhex("01 42 03 1b 00 00 00 03 24 00 00 00 81 85")
+        # Pixel data starts at container-offset 38 (= 8 preamble + 30 header).
+        read_req = bytes.fromhex("01 42 03 20 00 00 00 03 26 00 00 00 81 85")
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 13, read_req)
-        chunk = reply[4 : 4 + 27]
-        self.assertEqual(chunk, b"\xFF" * 27)
+        chunk = reply[4 : 4 + 32]
+        self.assertEqual(chunk, b"\xFF" * 32)
+
+    def test_hfs_read_bm0_trailer_is_empty(self):
+        # Trailer at container-offset 38 + 38400 = 38438. Read 7 B.
+        offset = self._BM0_PREAMBLE_LEN + self._BM0_KIND5_HEADER_LEN + self._BM0_PIXEL_BYTES
+        read_req = (
+            b"\x01\x42"
+            + b"\x03\x07\x00\x00\x00"
+            + b"\x03" + struct.pack("<I", offset)
+            + b"\x81\x85"
+        )
+        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 14, read_req)
+        chunk = reply[4 : 4 + 7]
+        self.assertEqual(chunk, b"\x00" * 7)
 
     def test_hfs_read_bm0_full_request_is_pipe_safe(self):
+        # Single read for the full container exceeds the 0xF000 chunk
+        # cap; the handler returns up to 0xF000 in one reply. Subsequent
+        # reads from the engine fetch the remainder.
         read_req = (
             b"\x01\x42"
             + b"\x03" + struct.pack("<I", self._BM0_CONTAINER_LEN)
@@ -2505,22 +2225,10 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
             + b"\x81\x85"
         )
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        reply = handler._handle_read_remote_hfs_file(12, read_req)
-        self.assertEqual(reply[:4], bytes([0x81, 0x00, TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]))
-        self.assertEqual(len(reply) - 4, self._BM0_CONTAINER_LEN)
-
         pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_HFS_READ, 12, read_req, 5, 5)
         self.assertIsNotNone(pkts)
         self.assertGreater(len(pkts), 1)
         self.assertTrue(all(len(pkt) <= 1024 for pkt in pkts))
-
-    def test_hfs_read_bm0_trailer_is_empty(self):
-        # Trailer at container offset 8 + 28 + 12288 = 12324. Read 7 B.
-        # Layout: 1B reserved=0, 2B count=0, 4B tail_size=0.
-        read_req = bytes.fromhex("01 42 03 07 00 00 00 03 24 30 00 00 81 85")
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 14, read_req)
-        chunk = reply[4 : 4 + 7]
-        self.assertEqual(chunk, b"\x00" * 7)
 
 
 if __name__ == "__main__":

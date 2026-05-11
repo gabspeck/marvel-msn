@@ -1,0 +1,20 @@
+{
+  "binary": "MPCCL.DLL",
+  "image_base": "0x04600000",
+  "lastUpdated": "2026-05-11 (synthetic-waddling-quill Phase 1)",
+  "bulk_plate_status": "complete (271/294; 164 auto + 80 named-no-plate + 27 thunks plated, 23 hand plates preserved)",
+  "deep_annotated": [
+    {"addr": "0x04602ebb", "name": "QueryOpenedServiceInterface", "pass": "phase1-class-byte", "notes": "IID→selector resolution; binds wrapper to first IID."},
+    {"addr": "0x0460320e", "name": "ConstructServiceSelectorWrapper", "pass": "phase1-class-byte", "notes": "param_4 = IID-resolved selector → wrapper+0x10 → class byte source."},
+    {"addr": "0x046036c8", "name": "ConstructServiceRequestBuilder", "pass": "phase1-class-byte", "notes": "Copies wrapper+0x10 → builder+0x14; per-call sel → builder+0x15."},
+    {"addr": "0x046064e4", "name": "AppendRequestIdHeaderToWireBuilder", "pass": "phase1-class-byte", "notes": "Memcpy emits builder+0x14/+0x15 as wire bytes 0/1."},
+    {"addr": "0x046073db", "name": "ResolveServiceSelectorForInterface", "pass": "phase1-class-byte", "notes": "Tree lookup IID→selector; node+4 = u8 selector."},
+    {"addr": "0x046086b6", "name": "ServiceInterfaceMap_FindByIid", "pass": "phase1-class-byte", "notes": "Renamed; was FUN_046086b6."}
+  ],
+  "skipped": [],
+  "remaining_FUN_": 158,
+  "next_priorities": [
+    {"addr": "0x04601f75", "hint": "OpenOrCreateNamedService — slot 0x24 of marvel factory; calls QueryOpenedServiceInterface for first IID"},
+    {"addr": "?", "hint": "SignalRequestCompletion / 0x86 spin invariant"}
+  ]
+}

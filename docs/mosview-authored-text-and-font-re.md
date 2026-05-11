@@ -6,15 +6,15 @@ section-0 font table.
 
 Related consumer paths in `MVCL14N.DLL`:
 
-- `FUN_7e897ed0`
+- `MVDecodeTopicItemPrefix`
   - normalized topic-item prefix decode
-- `FUN_7e897ad0`
+- `MVDecodePackedTextHeader`
   - packed text-item header decode
-- `FUN_7e8915d0`
+- `MVBuildTextItem`
   - top-level text item builder
-- `FUN_7e891810`
+- `MVTextLayoutFSM`
   - text layout state machine
-- `FUN_7e893010`
+- `DrawTextSlot`
   - final text draw path
 - `hMVSetFontTable`
 - `FUN_7e896590`
@@ -28,8 +28,8 @@ placeholder. It does not implement the real section-0 schema below.
 
 ## Text Item Prefix
 
-`FUN_7e897ed0` normalizes the leading topic-item prefix before
-`FUN_7e897ad0` sees the packed text header.
+`MVDecodeTopicItemPrefix` normalizes the leading topic-item prefix before
+`MVDecodePackedTextHeader` sees the packed text header.
 
 ```text
 TopicItemPrefix
@@ -42,7 +42,7 @@ TopicItemPrefix
 Notes:
 
 - Use `0x01` for the narrow text form and `0x20` for the widened text form.
-- `FUN_7e897ed0` preserves the semantic item family while hiding the narrow vs
+- `MVDecodeTopicItemPrefix` preserves the semantic item family while hiding the narrow vs
   widened integer encoding from later code.
 - For first plain text emission, the narrow `0x01` form is sufficient.
 
@@ -60,7 +60,7 @@ Packed integer forms used by the text path:
 
 ## Text Header Grammar
 
-`FUN_7e897ad0` expands the packed text-item header into a normalized local
+`MVDecodePackedTextHeader` expands the packed text-item header into a normalized local
 buffer. The names below are consumer-derived. Some provenance on the authored
 side is still open, but all fields required by the first text-paint path are
 named.
@@ -109,7 +109,7 @@ block.
 
 ### Metric Scaling
 
-`FUN_7e892b90` proves that the header is still in authored/logical units when
+`MVScaleTextMetrics` proves that the header is still in authored/logical units when
 decoded:
 
 - `0x16`, `0x18`, `0x1a` scale with `LOGPIXELSY`
@@ -117,21 +117,21 @@ decoded:
   `LOGPIXELSX`
 - both axes also multiply by the title scale factor at `title + 0x7c`
 
-If `tab_interval` is omitted, `FUN_7e897ad0` synthesizes a default from
+If `tab_interval` is omitted, `MVDecodePackedTextHeader` synthesizes a default from
 `text_base_or_mode & 1`:
 
 - low bit clear -> default becomes `0x0048`
 - low bit set -> default becomes `0x02c6`
 
-## `FUN_7e8915d0`: Item Builder Mapping
+## `MVBuildTextItem`: Item Builder Mapping
 
-`FUN_7e8915d0` does not draw directly. It:
+`MVBuildTextItem` does not draw directly. It:
 
-1. decodes the topic-item prefix with `FUN_7e897ed0`
-2. decodes the packed header with `FUN_7e897ad0`
-3. scales header metrics with `FUN_7e892b90`
+1. decodes the topic-item prefix with `MVDecodeTopicItemPrefix`
+2. decodes the packed header with `MVDecodePackedTextHeader`
+3. scales header metrics with `MVScaleTextMetrics`
 4. seeds a transient layout state block
-5. loops `FUN_7e891810` until the item finishes or allocation fails
+5. loops `MVTextLayoutFSM` until the item finishes or allocation fails
 6. post-adjusts emitted viewer records and writes extents back to the caller
 
 The important state projections are:
@@ -158,9 +158,9 @@ The builder writes the caller output block as:
 - `*(u32 *)(item_out + 8)`
   - caller-carried trailing source/context dword propagated through the item
 
-## `FUN_7e891810`: Layout Return Codes
+## `MVTextLayoutFSM`: Layout Return Codes
 
-`FUN_7e891810` is the caller-visible layout state machine for one text item.
+`MVTextLayoutFSM` is the caller-visible layout state machine for one text item.
 The exact symbolic names are not present in the binary, but caller behavior
 pins the classes below:
 
@@ -169,8 +169,8 @@ pins the classes below:
 - `1`
   - non-terminal progress after an internal retry / rewind path
 - `2`, `3`, `4`
-  - normal line-finalization states returned through `FUN_7e892200`
-  - `FUN_7e891f50` still post-processes alignment and baseline after these
+  - normal line-finalization states returned through `MVLayoutTextRunStream`
+  - `MVLayoutTextLine` still post-processes alignment and baseline after these
 - `5`
   - caller-visible line/item boundary ready now
   - used for blank-line sentinel emission and other successful no-more-work
@@ -184,7 +184,7 @@ events, but they are all normal progress states, not fatal states.
 
 ## `0x47` Viewer Record Fields Used By Text Paint
 
-`FUN_7e893010` proves the minimum text-draw contract for a viewer record:
+`DrawTextSlot` proves the minimum text-draw contract for a viewer record:
 
 | offset | size | meaning | consumer |
 | --- | --- | --- | --- |
@@ -532,7 +532,7 @@ ScaledImageChildTrailer
 
 ### Tail HGLOBAL Shared By Type-`4` Children
 
-`FUN_7e894560` allocates a second HGLOBAL for type-`4` children only:
+`MVBuildLayoutLine` allocates a second HGLOBAL for type-`4` children only:
 
 ```text
 ImageChildTailHandle
