@@ -88,6 +88,11 @@ Returns:
 - `notificationStream`. A pending streamed reply handle that yields notification
   records until unsubscribed or detached.
 
+On subscriber destroy the client also ships an MPCCL iterator-cancel
+control frame on the same `(class, selector, req_id)` triple — see
+`docs/MEDVIEW.md` §6d.0. The framing-layer cancel always fires;
+selector `0x18` below is only sent when `skipWireUnsubscribe == 0`.
+
 ### `0x18` `UnsubscribeNotifications`
 
 Purpose: stop one notification stream.

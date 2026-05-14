@@ -1664,21 +1664,33 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # Dynamic-complete
         self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
-    def test_title_open_handler_sets_caption(self):
-        # The empty-MSN-Today rewrite ships a hardcoded title body — every
-        # OpenTitle resolves to the same caption regardless of incoming
-        # token.
+    def test_title_open_loads_ttl_when_deid_has_fixture(self):
+        # `:2[4]0` deid resolves to resources/titles/4.ttl (BBDESIGN
+        # path). CBFrame caption = "Default Window".
         handler, _reply = self._open_handler()
-        self.assertEqual(handler.title_caption, "MSN Today")
+        self.assertIsNotNone(handler.loaded_title)
+        self.assertIsNone(handler.loaded_mvb)
+        self.assertEqual(handler.loaded_title.caption, "Default Window")
 
-    def test_title_open_body_is_hardcoded_constant(self):
+    def test_title_open_body_carries_ttl_caption(self):
         _handler, reply = self._open_handler()
-        # Body follows the static prefix at offset 31 (2×0x81 + 5×0x83 +
-        # 0x87 + 0x86 = 31 bytes).
-        body_with_padding = reply[31:]
-        # Pipe-frame payload may be padded by the transport — body bytes
-        # match the prefix of TITLE_OPEN_BODY exactly.
-        self.assertEqual(body_with_padding[: len(TITLE_OPEN_BODY)], TITLE_OPEN_BODY)
+        body = reply[31:]
+        # sec01 + sec06 both carry "Default Window" ASCIIZ in the TTL
+        # lowered title body.
+        self.assertIn(b"Default Window\x00", body)
+
+    def test_title_open_unknown_deid_falls_back_to_mvb(self):
+        # Deid with no `.ttl` on disk → MVB fallback loads NO_NSR.MVB.
+        unknown_req = (
+            b"\x04\x90:2[__no_ttl__]0\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x81\x81\x83\x83\x83\x83\x83"
+        )
+        handler, _reply = self._open_handler(req_payload=unknown_req)
+        self.assertIsNone(handler.loaded_title)
+        self.assertIsNotNone(handler.loaded_mvb)
+        self.assertEqual(handler.loaded_mvb.caption, "Untitled")
 
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
@@ -1778,11 +1790,10 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         )
 
     def test_va_resolve_pushes_empty_case1_bf_chunk(self):
-        # Selector 0x15 must push opcode 0xBF on the type-0 iterator —
+        # Selector 0x15 pushes opcode 0xBF on the type-0 iterator —
         # that's the record HfcCache_InsertOrdered writes into HfcNear's
         # per-title cache at title+4, unblocking the 30-s retry loop.
-        # Empty text → layout walker hits the "skip empty row" return-5
-        # path so the cache fills without emitting a visible slot.
+        # No loaded title with captions → empty case-1 ("skip empty row").
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._subscribe(handler, 0, 3)
         key = 0x12345678
@@ -1793,8 +1804,56 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[0], 0x85)
         self.assertEqual(push[1], 0xBF)
-        self.assertEqual(push[2], 0x01)  # title_byte at chunk +0x01
+        self.assertEqual(push[2], 0x01)
         self.assertEqual(struct.unpack("<I", push[13:17])[0], key)
+        self.assertEqual(push[1 + 0x2A], 0x01)
+
+    def test_va_resolve_pushes_case3_when_ttl_captions_present(self):
+        # OpenTitle with `:2[4]0` loads 4.ttl (a TTL with 1 caption) →
+        # 0x15 push uses case-3 (bitmap cell). bm0 baggage carries the
+        # caption TextOut.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        open_req = (
+            b"\x04\x87:2[4]0\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x81\x81\x83\x83\x83\x83\x83"
+        )
+        handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5)
+        self._subscribe(handler, 0, 3)
+        key = 0xCAFE0001
+        req = b"\x01\x01\x03" + struct.pack("<I", key)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push[0], 0x85)
+        self.assertEqual(push[1], 0xBF)
+        self.assertEqual(push[1 + 0x2A], 0x03)
+
+    def test_va_resolve_pushes_case1_with_mvb_paragraph_text(self):
+        # OpenTitle with an unknown deid falls back to NO_NSR.MVB; first
+        # selector 0x15 cache-miss pushes a case-1 BF chunk carrying the
+        # MVB's first paragraph text.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        open_req = (
+            b"\x04\x90:2[__no_ttl__]0\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x81\x81\x83\x83\x83\x83\x83"
+        )
+        handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5)
+        self._subscribe(handler, 0, 3)
+        key = 0xCAFE0001
+        req = b"\x01\x01\x03" + struct.pack("<I", key)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push[0], 0x85)
+        self.assertEqual(push[1], 0xBF)
+        self.assertEqual(push[1 + 0x2A], 0x01)
+        self.assertIn(b"No NSR topic", push)
 
     def test_fetch_adjacent_topic_pushes_type0_a5(self):
         from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
@@ -1957,10 +2016,13 @@ class TestMEDVIEWTitleService(unittest.TestCase):
         from server.config import MEDVIEW_CLOSE_TITLE
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._open_title(handler)
-        self.assertEqual(handler.title_caption, "MSN Today")
+        # `_open_title` issues `:2[]0` (empty deid) so neither TTL nor
+        # MVB-by-deid matches — MVB fallback path loads NO_NSR.MVB.
+        self.assertIsNotNone(handler.loaded_mvb)
         req_payload = bytes.fromhex("01 01")
         handler.handle_request(0x01, MEDVIEW_CLOSE_TITLE, 3, req_payload, 5, 5)
-        self.assertEqual(handler.title_caption, "")
+        self.assertIsNone(handler.loaded_title)
+        self.assertIsNone(handler.loaded_mvb)
 
     def test_query_topics_returns_empty_session(self):
         from server.config import MEDVIEW_QUERY_TOPICS
@@ -2092,6 +2154,149 @@ class TestMEDVIEWSessionService(unittest.TestCase):
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
         self.assertNotIn(0, handler._subscriptions)
+
+    def test_iterator_cancel_clears_subscription_state(self):
+        """`handle_iterator_cancel(class, sel, req_id)` drops the one
+        subscription whose `(class, req_id)` matches and leaves the rest."""
+        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # Subscribe types 0..4 with distinct req_ids 1..5.
+        for n_type, req_id in enumerate(range(1, 6)):
+            sub_payload = bytes([0x01, n_type, 0x85])
+            handler.handle_request(
+                0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, req_id, sub_payload, 5, 5,
+            )
+        self.assertEqual(set(handler._subscriptions.keys()), {0, 1, 2, 3, 4})
+
+        # Cancel the type=2 iterator (req_id=3).
+        handler.handle_iterator_cancel(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 3)
+        self.assertNotIn(2, handler._subscriptions)
+        self.assertEqual(set(handler._subscriptions.keys()), {0, 1, 3, 4})
+
+    def test_iterator_cancel_with_no_subscription_is_idempotent(self):
+        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        # No state, no exception.
+        handler.handle_iterator_cancel(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 42)
+        self.assertEqual(handler._subscriptions, {})
+
+
+class TestConnectionIteratorCancelDispatch(unittest.TestCase):
+    """Connection-layer routing of the MPCCL iterator-cancel frame.
+
+    Drives `ConnectionState._handle_service_data` directly with a fake
+    socket so the cancel branch is exercised end-to-end: detect → handler
+    hook → wire ack.  See `docs/MEDVIEW.md` §6d.0.
+    """
+
+    PIPE_IDX = 4
+
+    class _FakeSocket:
+        def __init__(self):
+            self.sent = bytearray()
+
+        def sendall(self, data):
+            self.sent.extend(data)
+
+        def close(self):
+            pass
+
+    def _make_conn(self):
+        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        from server.connection import ConnectionState
+        sock = self._FakeSocket()
+        conn = ConnectionState(sock)
+        handler = MEDVIEWHandler(self.PIPE_IDX, "MEDVIEW")
+        # Seed 5 subscriptions matching the engine's `MVAsyncNotifyDispatch`
+        # slot allocation: types 0..4 with req_ids 1..5.
+        for n_type, req_id in enumerate(range(1, 6)):
+            sub_payload = bytes([0x01, n_type, 0x85])
+            handler.handle_request(
+                0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, req_id, sub_payload, 5, 5,
+            )
+        conn.services[self.PIPE_IDX] = handler
+        return conn, handler, sock
+
+    def _build_cancel_frame(self, msg_class, selector, req_id):
+        """Build the raw host-block bytes the connection layer receives."""
+        from server.mpc import build_host_block
+        return build_host_block(msg_class, selector, req_id, b"\x0F")
+
+    def _parse_wire(self, raw):
+        """Strip the leading ACK packet and return the host-block payload
+        of the first DATA packet (without pipe-routing prefix or VLI)."""
+        from server.config import PACKET_TERMINATOR
+        from server.mpc import parse_host_block
+        from server.pipe import parse_pipe_frames
+        packets = []
+        buf = bytearray()
+        for b in raw:
+            if b == PACKET_TERMINATOR:
+                packets.append(parse_packet(bytes(buf)))
+                buf.clear()
+            else:
+                buf.append(b)
+        data_pkts = [p for p in packets if p is not None and p.type == "DATA"]
+        self.assertTrue(data_pkts, "no DATA packet produced")
+        frames = parse_pipe_frames(data_pkts[0].payload)
+        self.assertEqual(len(frames), 1)
+        # frame.content = pipe_idx(u16) + host_block
+        hb = parse_host_block(frames[0].content[2:])
+        self.assertIsNotNone(hb)
+        return hb
+
+    def test_cancel_frame_emits_canonical_ack_and_clears_state(self):
+        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        from server.mpc import ITERATOR_CANCEL_ACK
+        conn, handler, sock = self._make_conn()
+        # Cancel the type=2 iterator (req_id=3 from the seed loop).
+        frame = self._build_cancel_frame(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 3)
+
+        with self.assertLogs("server.services.medview.handler", level="INFO") as medview_logs:
+            with self.assertLogs("server.connection", level="INFO") as conn_logs:
+                conn._handle_service_data(self.PIPE_IDX, frame)
+
+        # (a) Reply payload is the canonical iterator-cancel ack.
+        hb = self._parse_wire(bytes(sock.sent))
+        self.assertEqual(hb.msg_class, 0x01)
+        self.assertEqual(hb.selector, MEDVIEW_SUBSCRIBE_NOTIFICATIONS)
+        self.assertEqual(hb.request_id, 3)
+        self.assertEqual(hb.payload, ITERATOR_CANCEL_ACK)
+
+        # (b) Matching subscription is gone; others remain.
+        self.assertNotIn(2, handler._subscriptions)
+        self.assertEqual(set(handler._subscriptions.keys()), {0, 1, 3, 4})
+
+        # (c) svc_iterator_cancel is logged at the connection layer.
+        self.assertTrue(
+            any("svc_iterator_cancel" in m for m in conn_logs.output),
+            f"missing svc_iterator_cancel log: {conn_logs.output}",
+        )
+
+        # (d) subscribe_notifications is NOT logged for the cancel frame —
+        # the cancel branch must come before the `handle_request` dispatch.
+        cancel_phase = [
+            m for m in medview_logs.output
+            if "subscribe_notifications req_id=3" in m
+        ]
+        self.assertEqual(
+            cancel_phase, [], "cancel frame leaked into subscribe handler",
+        )
+
+    def test_cancel_frame_on_pipe_without_handler_is_ignored(self):
+        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        conn, _handler, sock = self._make_conn()
+        bare_pipe = self.PIPE_IDX + 1  # not registered
+        frame = self._build_cancel_frame(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 99)
+
+        with self.assertLogs("server.connection", level="INFO") as conn_logs:
+            conn._handle_service_data(bare_pipe, frame)
+
+        self.assertTrue(
+            any("no_handler" in m for m in conn_logs.output),
+            f"missing no_handler log: {conn_logs.output}",
+        )
+        self.assertEqual(bytes(sock.sent), b"")
 
 
 class TestMEDVIEWRemoteFsError(unittest.TestCase):

@@ -9,6 +9,7 @@ from server.mpc import (
     build_tagged_reply_dword,
     build_tagged_reply_var,
     encode_reply_var_length,
+    is_iterator_cancel,
     parse_host_block,
     parse_request_params,
 )
@@ -225,6 +226,33 @@ class TestTaggedReply(unittest.TestCase):
         self.assertEqual(len(encoded), 2)
         reconstructed = (encoded[0] & 0x7F) << 8 | encoded[1]
         self.assertEqual(reconstructed, 200)
+
+
+class TestIteratorCancel(unittest.TestCase):
+    """MPCCL iterator-cancel control frame predicate (`docs/MEDVIEW.md` §6d.0).
+
+    The frame is a single `0x0F` byte in the host-block payload, shipped on
+    the same `(class, selector, req_id)` as the original stream-iterator
+    subscribe.  The predicate must not false-positive on subscribe payloads
+    or any other tagged-param shape.
+    """
+
+    def test_is_iterator_cancel_recognizes_single_0f(self):
+        self.assertTrue(is_iterator_cancel(b"\x0F"))
+
+    def test_is_iterator_cancel_rejects_empty(self):
+        self.assertFalse(is_iterator_cancel(b""))
+
+    def test_is_iterator_cancel_rejects_subscribe_shape(self):
+        # `0x01 <type> 0x85` is the §6a subscribe payload.
+        self.assertFalse(is_iterator_cancel(b"\x01\x00\x85"))
+
+    def test_is_iterator_cancel_rejects_two_byte_0f(self):
+        self.assertFalse(is_iterator_cancel(b"\x0F\x00"))
+
+    def test_is_iterator_cancel_rejects_other_single_byte(self):
+        for b in (b"\x01", b"\xFF", b"\x87", b"\x00", b"\x10"):
+            self.assertFalse(is_iterator_cancel(b), msg=f"false-positive on {b!r}")
 
 
 if __name__ == "__main__":

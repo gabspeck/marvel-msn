@@ -20,8 +20,12 @@ from .config import (
 )
 from .models import ControlMessage, PipeData, PipeOpenRequest
 from .mpc import (
+    ITERATOR_CANCEL_ACK,
     build_control_type1_ack,
+    build_host_block,
     build_pipe_open_result,
+    build_service_packet,
+    is_iterator_cancel,
     parse_host_block,
 )
 from .pipe import parse_pipe0_content, parse_pipe_frames
@@ -290,6 +294,10 @@ class ConnectionState:
             self.warning("unparseable_host_block pipe=%d", pipe_idx)
             return
 
+        if is_iterator_cancel(hb.payload):
+            self._handle_iterator_cancel_frame(hb, handler, pipe_idx)
+            return
+
         self.info(
             "svc_request pipe=%d svc=%s class=0x%02x selector=0x%02x req_id=%d payload_len=%d",
             pipe_idx,
@@ -327,6 +335,39 @@ class ConnectionState:
                 self.advance_seq()
         else:
             self.info("svc_no_reply pipe=%d selector=0x%02x", pipe_idx, hb.selector)
+
+    def _handle_iterator_cancel_frame(self, hb, handler, pipe_idx):
+        """Acknowledge an MPCCL iterator-cancel and invoke the handler hook.
+
+        Framing-level concern, not selector-specific: the cancel arrives on
+        the same `(class, selector, req_id)` as the original subscribe.
+        Reply is the canonical `0x87 0x88` stream-end ack.  `handle_iterator_cancel`
+        is optional on handlers — services that opened no stream iterators
+        still get the ack but skip cleanup.
+        """
+        self.info(
+            "svc_iterator_cancel pipe=%d svc=%s class=0x%02x selector=0x%02x req_id=%d",
+            pipe_idx, handler.svc_name, hb.msg_class, hb.selector, hb.request_id,
+        )
+        cancel_hook = getattr(handler, "handle_iterator_cancel", None)
+        if cancel_hook is not None:
+            cancel_hook(hb.msg_class, hb.selector, hb.request_id)
+        host_block = build_host_block(
+            hb.msg_class, hb.selector, hb.request_id, ITERATOR_CANCEL_ACK,
+        )
+        pkts = build_service_packet(
+            pipe_idx, host_block, self.server_seq, self.client_ack,
+        )
+        total = len(pkts)
+        for i, pkt in enumerate(pkts, 1):
+            self._send(
+                pkt, logging.INFO,
+                "tx_iterator_cancel_ack n=%d pipe=%d svc=%s class=0x%02x "
+                "selector=0x%02x req_id=%d frag=%d/%d len=%d",
+                pipe_idx, handler.svc_name, hb.msg_class, hb.selector,
+                hb.request_id, i, total, len(pkt),
+            )
+            self.advance_seq()
 
     def _all_service_pipes_closed(self):
         if not self.services:

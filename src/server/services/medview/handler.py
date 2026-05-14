@@ -12,17 +12,25 @@ state needed by selectors that don't have a static answer:
 
 Cache-miss group (`0x05`/`0x06`/`0x07`/`0x15`/`0x16`) emits a bare-ack
 synchronous reply followed by an async push frame on the matching
-notification iterator. With no on-disk topic catalog the pushes resolve
-to zero (va=addr=0 for type-3, status=0 for type-0) — enough to release
-the engine's 30s wait without surfacing real content.
+notification iterator. Type-3 (va resolution) pushes resolve to zero
+(va=addr=0); selector 0x15 HfcNear pushes either a case-3 BF chunk
+(BBDESIGN-authored TTL with captions, bm0 carries the kind=8 WMF) or
+a case-1 BF chunk carrying the loaded MVB's first paragraph text.
+
+OpenTitle resolves the title by deid: `{deid}.ttl` under
+`resources/titles/` wins when present; otherwise `NO_NSR.MVB` is the
+fallback. Both branches fall through to the empty
+`TITLE_OPEN_BODY` / `BM0_BAGGAGE` if the file is missing or malformed.
 """
 
 from __future__ import annotations
 
 import logging
+import pathlib
 
 from ...blackbird.wire import (
     build_case1_bf_chunk,
+    build_case3_bf_chunk,
     build_type0_status_record,
     build_type3_op4_frame,
 )
@@ -76,7 +84,18 @@ from ...mpc import (
 )
 from .._dispatch import log_unhandled_selector
 from . import replies
-from .payload import TITLE_CAPTION, TITLE_OPEN_BODY, TITLE_OPEN_METADATA
+from .mvb_loader import (
+    LoadedMVB,
+    build_mvb_bm0_baggage,
+    build_mvb_first_paragraph_chunk,
+    load_mvb,
+    lower_mvb_to_payload,
+)
+from .payload import BM0_BAGGAGE, TITLE_OPEN_BODY, TITLE_OPEN_METADATA
+from .ttl_loader import LoadedTitle, build_bm0_baggage, load_title, lower_to_payload
+
+_TITLES_DIR = pathlib.Path(__file__).resolve().parents[4] / "resources" / "titles"
+_MVB_FALLBACK_PATH = _TITLES_DIR / "NO_NSR.MVB"
 
 log = logging.getLogger(__name__)
 
@@ -320,6 +339,56 @@ def _format_payload_hex(data: bytes) -> str:
     return f"len={len(data)} hex={head}{suffix}"
 
 
+_TYPE3_KIND_NAMES = {0: "topic→va+addr", 1: "hash→va", 2: "va→addr"}
+
+
+def _format_push_chunk(chunk: bytes) -> str:
+    """Decode the post-`0x85` push chunk into named fields."""
+    if not chunk:
+        return "(empty)"
+
+    if len(chunk) >= 18 and int.from_bytes(chunk[0:2], "little") == 4:
+        length = int.from_bytes(chunk[2:4], "little")
+        title = chunk[4]
+        kind = chunk[5]
+        key = int.from_bytes(chunk[6:10], "little")
+        va = int.from_bytes(chunk[10:14], "little")
+        addr = int.from_bytes(chunk[14:18], "little")
+        kind_name = _TYPE3_KIND_NAMES.get(kind, "?")
+        return (
+            f"type3_op4{{op_code=4, length={length}, title=0x{title:02x}, "
+            f"kind={kind}({kind_name}), key=0x{key:08x}, "
+            f"va=0x{va:08x}, addr=0x{addr:08x}}}"
+        )
+
+    if chunk[0] == 0xA5 and len(chunk) >= 8:
+        title = chunk[1]
+        status = int.from_bytes(chunk[2:4], "little")
+        token = int.from_bytes(chunk[4:8], "little")
+        return (
+            f"type0_a5{{title=0x{title:02x}, status=0x{status:04x}, "
+            f"contents_token=0x{token:08x}}}"
+        )
+
+    if chunk[0] == 0xBF and len(chunk) >= 16:
+        title = chunk[1]
+        name_size = int.from_bytes(chunk[2:4], "little")
+        key = int.from_bytes(chunk[12:16], "little")
+        return (
+            f"case1_bf{{title=0x{title:02x}, name_size=0x{name_size:04x}, "
+            f"key=0x{key:08x}, chunk_len={len(chunk)}}}"
+        )
+
+    return _format_payload_hex(chunk)
+
+
+def _format_push_payload(payload: bytes) -> str:
+    """Decode the full `0x85 <chunk>` subscription push payload."""
+    if not payload or payload[0] != 0x85:
+        return _format_payload_hex(payload)
+    return f"len={len(payload)} 0x85 {_format_push_chunk(payload[1:])}"
+
+
 # Selectors that ack synchronously and push on the matching notification
 # iterator. Maps selector → (notification type, push-frame builder).
 # Builder signature: `(handler, title_slot, key) -> bytes`.
@@ -340,15 +409,27 @@ def _push_type3_op4(selector: int):
     return build
 
 
-def _push_empty_case1_bf(_handler, title_slot: int, key: int) -> bytes:
-    """Empty case-1 0xBF chunk for 0x15 (HfcNear) cache fill.
+def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
+    """0xBF chunk for 0x15 (HfcNear) cache fill.
 
-    `HfcCache_DispatchContentNotification` (type-0 callback) routes 0xBF
-    into the per-title cache at `title+4` via `HfcCache_InsertOrdered` —
-    that's what unblocks `HfcNear`'s 30-s polling loop. Empty text +
-    `initial_font_style=None` produces a chunk that decodes cleanly and
-    triggers the layout walker's "skip empty row" pre-test (returns 5),
-    populating the cache without emitting a visible slot."""
+    TTL loaded with captions → case-3 (bitmap cell) so the engine paints
+    `bm0` baggage at the slot origin and `PlayMetaFile` lowers the kind=8
+    metafile carrying caption TextOuts.
+
+    MVB loaded → push the first paragraph's case-1 chunk **once** per
+    session; subsequent cache-misses fall through to the empty case-1.
+
+    Empty case-1 (skip-row) is the layout walker's "return-5" fast path:
+    used when no title is loaded, or once the MVB's single content push
+    has already fired. Without that one-shot gate the engine paints the
+    cached chunk into many rows to fill the pane (~13 stacked rows from
+    a single push, screenshot 2026-05-14).
+    """
+    if handler.loaded_title is not None and handler.loaded_title.captions:
+        return build_case3_bf_chunk(title_slot, key)
+    if handler.loaded_mvb is not None and not handler._served_first_paragraph:
+        handler._served_first_paragraph = True
+        return build_mvb_first_paragraph_chunk(handler.loaded_mvb, title_slot, key)
     return build_case1_bf_chunk(
         text="", title_byte=title_slot, key=key, initial_font_style=None,
     )
@@ -367,7 +448,7 @@ _PUSH_DISPATCH: dict[int, tuple[int, callable]] = {
     MEDVIEW_CONVERT_ADDRESS_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_ADDRESS_TO_VA)),
     MEDVIEW_CONVERT_HASH_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_HASH_TO_VA)),
     MEDVIEW_CONVERT_TOPIC_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_TOPIC_TO_VA)),
-    MEDVIEW_FETCH_NEARBY_TOPIC: (0, _push_empty_case1_bf),
+    MEDVIEW_FETCH_NEARBY_TOPIC: (0, _push_va_resolve),
     MEDVIEW_FETCH_ADJACENT_TOPIC: (0, _push_type0_a5_status),
 }
 
@@ -393,6 +474,29 @@ def _extract_baggage_name(payload: bytes) -> str:
         if getattr(p, "tag", None) == 0x04:
             data = getattr(p, "data", b"") or b""
             return data.rstrip(b"\x00").decode("ascii", errors="replace")
+    return ""
+
+
+def _extract_title_token(payload: bytes) -> str:
+    """Pull the ASCIIZ `titleToken` out of an `OpenTitle` request."""
+    send_params, _ = parse_request_params(payload)
+    for p in send_params:
+        if getattr(p, "tag", None) == 0x04:
+            data = getattr(p, "data", b"") or b""
+            data = data.rstrip(b"\x00")
+            try:
+                return data.decode("ascii")
+            except UnicodeDecodeError:
+                return data.hex()
+    return ""
+
+
+def _deid_from_title_token(token: str) -> str:
+    """Extract `<deid>` from a `:<svcid>[<deid>]<serial>` title token."""
+    lb = token.find("[")
+    rb = token.rfind("]")
+    if lb >= 0 and rb > lb:
+        return token[lb + 1:rb]
     return ""
 
 
@@ -432,7 +536,11 @@ class MEDVIEWHandler:
         self._subscriptions: dict[int, tuple[int, int]] = {}
         self._open_title_slots: set[int] = set()
         self._baggage_handles: set[int] = set()
-        self.title_caption: str = ""
+        self.loaded_title: LoadedTitle | None = None
+        self.loaded_mvb: LoadedMVB | None = None
+        self.title_body: bytes = TITLE_OPEN_BODY
+        self.bm0_container: bytes = BM0_BAGGAGE
+        self._served_first_paragraph: bool = False
 
     # --- BootstrapDiscovery ----------------------------------------
 
@@ -564,6 +672,27 @@ class MEDVIEWHandler:
             self._subscriptions.pop(notification_type, None)
         return replies.ack()
 
+    def handle_iterator_cancel(self, msg_class, selector, request_id):
+        """Clear the subscription matching the cancelled stream iterator.
+
+        Connection layer dispatches this on `<class, sel, req_id, 0x0F>` —
+        the MPCCL stream-stop frame sent by `MVAsyncSubscriberUnsubscribe`'s
+        vtable[+0xc] hook on subscriber teardown.  `(msg_class, request_id)`
+        is the unique key from the original `0x17` subscribe.
+        """
+        for n_type, (cls, rid) in list(self._subscriptions.items()):
+            if cls == msg_class and rid == request_id:
+                del self._subscriptions[n_type]
+                log.info(
+                    "iterator_cancel cleared subscription type=%d class=0x%02x req_id=%d",
+                    n_type, msg_class, request_id,
+                )
+                return
+        log.info(
+            "iterator_cancel no_subscription class=0x%02x selector=0x%02x req_id=%d",
+            msg_class, selector, request_id,
+        )
+
     # --- TitleService ----------------------------------------------
 
     def _handle_validate_title(self, request_id, payload) -> bytes:
@@ -580,14 +709,48 @@ class MEDVIEWHandler:
         return replies.validate_title(is_valid)
 
     def _handle_open_title(self, request_id, payload) -> bytes:
+        token = _extract_title_token(payload)
+        deid = _deid_from_title_token(token).strip()
         slot = TITLE_OPEN_METADATA.title_slot
         self._open_title_slots.add(slot)
-        self.title_caption = TITLE_CAPTION
+
+        # Resolve the title body: `{deid}.ttl` (BBDESIGN) takes priority
+        # when present; otherwise fall back to `NO_NSR.MVB` (MMV 2.0).
+        # Both branches degrade to the empty MSN Today scaffold on load
+        # failure so the client never sees a missing-title crash.
+        title = load_title(_TITLES_DIR / f"{deid}.ttl") if deid else None
+        mvb = None
+        if title is not None:
+            self.loaded_title = title
+            self.loaded_mvb = None
+            self.title_body = lower_to_payload(title)
+            self.bm0_container = build_bm0_baggage(title)
+            caption = title.caption or title.title_name
+            source = "ttl"
+        else:
+            mvb = load_mvb(_MVB_FALLBACK_PATH)
+            if mvb is not None:
+                self.loaded_title = None
+                self.loaded_mvb = mvb
+                self.title_body = lower_mvb_to_payload(mvb)
+                self.bm0_container = build_mvb_bm0_baggage(mvb)
+                caption = mvb.caption
+                source = "mvb"
+            else:
+                self.loaded_title = None
+                self.loaded_mvb = None
+                self.title_body = TITLE_OPEN_BODY
+                self.bm0_container = BM0_BAGGAGE
+                caption = None
+                source = "empty"
+
         log.info(
-            "open_title req_id=%d slot=0x%02x caption=%r body_len=%d",
-            request_id, slot, self.title_caption, len(TITLE_OPEN_BODY),
+            "open_title req_id=%d slot=0x%02x token=%r deid=%r source=%s "
+            "caption=%r body_len=%d bm0_len=%d",
+            request_id, slot, token, deid, source, caption,
+            len(self.title_body), len(self.bm0_container),
         )
-        return replies.open_title()
+        return replies.open_title(self.title_body)
 
     def _handle_close_title(self, request_id, payload) -> bytes:
         send_params, _ = parse_request_params(payload)
@@ -599,7 +762,11 @@ class MEDVIEWHandler:
         if slot is not None:
             self._open_title_slots.discard(slot)
             if not self._open_title_slots:
-                self.title_caption = ""
+                self.loaded_title = None
+                self.loaded_mvb = None
+                self.title_body = TITLE_OPEN_BODY
+                self.bm0_container = BM0_BAGGAGE
+                self._served_first_paragraph = False
         return replies.close_title()
 
     def _handle_get_title_info_remote(self, request_id, payload) -> bytes:
@@ -615,7 +782,7 @@ class MEDVIEWHandler:
     def _handle_open_remote_hfs_file(self, request_id, payload) -> bytes:
         name = _extract_baggage_name(payload)
         canonical = name.lstrip("|")  # `wsprintfA("|bm%d", idx)` form
-        size = replies.baggage_size(canonical)
+        size = replies.baggage_size(canonical, container_len=len(self.bm0_container))
         log.info(
             "open_remote_hfs_file req_id=%d name=%r canonical=%r accept=%r",
             request_id, name, canonical, size is not None,
@@ -634,7 +801,9 @@ class MEDVIEWHandler:
                 request_id, handle, count, offset,
             )
             return replies.read_remote_hfs_file_error()
-        chunk = replies.baggage_chunk(offset, count, _HFS_READ_CHUNK_MAX)
+        chunk = replies.baggage_chunk(
+            offset, count, _HFS_READ_CHUNK_MAX, container=self.bm0_container,
+        )
         log.info(
             "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d returned=%d",
             request_id, handle, count, offset, len(chunk),
@@ -689,6 +858,11 @@ class MEDVIEWHandler:
             return None
         sub = self._subscriptions.get(sub_type)
         if sub is None:
+            log.info(
+                "cache_push_dropped selector=%s(0x%02x) title_slot=0x%02x "
+                "key=0x%08x sub_type=%d reason=no_subscriber",
+                _selector_name(selector), selector, title_slot, key, sub_type,
+            )
             return None
         sub_class, sub_req_id = sub
         chunk = builder(self, title_slot, key)
@@ -697,7 +871,9 @@ class MEDVIEWHandler:
             sub_class, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, sub_req_id, push_payload,
         )
         log.info(
-            "cache_push selector=0x%02x title_slot=0x%02x key=0x%08x %s",
-            selector, title_slot, key, _format_payload_hex(push_payload),
+            "cache_push selector=%s(0x%02x) title_slot=0x%02x key=0x%08x "
+            "sub_type=%d sub_req_id=%d %s",
+            _selector_name(selector), selector, title_slot, key,
+            sub_type, sub_req_id, _format_push_payload(push_payload),
         )
         return build_service_packet(self.pipe_idx, push_host, server_seq, client_ack)

@@ -1518,10 +1518,48 @@ Reply tags: server emits the recv tags above plus `0x87` end-static
 and (when a dynamic body is bound) `0x86` for single-shot completion
 or `0x88` for stream-end iterator (same rule as §6a).
 
+### 6d.0. Iterator-cancel control frame (MPCCL framing layer)
+
+Not a MEDVIEW selector — an MPCCL framing-level control frame that any
+selector which opened a stream iterator can receive. Sent unconditionally
+by `MVTTL14C!MVAsyncSubscriberUnsubscribe @ 0x7E844FE3` on subscriber
+teardown via its `pendingReply->vtable[+0xc]` call (resolves to
+`MPCCL!FUN_046046e7`); the `skipWireUnsubscribe` flag only suppresses
+the explicit selector-`0x18` send (§6d.1), not this one.
+
+Wire shape on the host block:
+
+```
+<class> <selector> <req_id_vli> 0x0F
+```
+
+The `(class, selector, req_id)` triple mirrors the descriptor used by
+the original subscribe so the peer can identify which iterator is
+being cancelled. The single payload byte `0x0F` is appended by
+`MPCCL!AppendRequestTagByte @ 0x0460699E` (from `FUN_046046e7 →
+FUN_046047f4 → AppendRequestTagByte(0x0F)`) and is the canonical
+iterator-cancel opcode at the MPCCL framing layer — not a tagged
+parameter.
+
+Two paths terminate a stream subscription:
+
+| Path | Trigger | Wire |
+|------|---------|------|
+| Explicit (§6d.1) | `skipWireUnsubscribe == 0` | `0x18` with `0x01 type` |
+| Implicit (§6d.0) | always, on every subscriber destroy | original selector + `0x0F` |
+
+Server: detection happens at the connection layer (`is_iterator_cancel`
+in `src/server/mpc.py`) before the per-handler dispatch, since the
+framing is generic. Reply is the canonical `0x87 0x88` stream-end ack.
+Handlers may expose an optional `handle_iterator_cancel(class, selector,
+request_id)` method for state cleanup — MEDVIEW uses it to drop the
+matching `_subscriptions` entry by `(class, req_id)`.
+
 ### 6d.1. UnsubscribeNotifications (selector `0x18`)
 
 `MVTTL14C!MVAsyncSubscriberUnsubscribe @ 0x7E844FE3` (called from
-subscriber teardown when `skipWireUnsubscribe == 0`).
+subscriber teardown when `skipWireUnsubscribe == 0`). Always preceded
+by the §6d.0 implicit cancel on the same subscriber.
 
 Request: `0x01 notificationType` (1 byte, value `0`–`4` matching the
 type set up by §6a). Reply: `0x87` only — no static or dynamic body.

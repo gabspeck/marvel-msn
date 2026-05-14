@@ -69,9 +69,9 @@ def pre_notify_title() -> bytes:
 # --------------------------------------------------------------------------
 
 
-def open_title() -> bytes:
+def open_title(body: bytes = TITLE_OPEN_BODY) -> bytes:
     """`0x01` — TitleOpen. Static fields per spec §0x01 then `0x86` +
-    9-section title body (hardcoded in `payload.py`)."""
+    9-section title body. Caller may inject a per-session body."""
     md = TITLE_OPEN_METADATA
     static = (
         build_tagged_reply_byte(md.title_slot)
@@ -82,7 +82,7 @@ def open_title() -> bytes:
         + build_tagged_reply_dword(md.cache_header0)
         + build_tagged_reply_dword(md.cache_header1)
     )
-    return _dynamic_complete(static, TITLE_OPEN_BODY)
+    return _dynamic_complete(static, body)
 
 
 def validate_title(is_valid: bool) -> bytes:
@@ -240,14 +240,23 @@ def get_remote_fs_error() -> bytes:
 _BM0_NAMES = frozenset({"bm0"})
 
 
-def baggage_size(canonical_name: str) -> int | None:
-    """Return baggage byte count for a canonical name, or None to reject."""
+def baggage_size(canonical_name: str, container_len: int = len(BM0_BAGGAGE)) -> int | None:
+    """Return baggage byte count for a canonical name, or None to reject.
+
+    `container_len` defaults to the hardcoded MSN Today bm0; caller may
+    pass a per-session container length.
+    """
     if canonical_name in _BM0_NAMES:
-        return len(BM0_BAGGAGE)
+        return container_len
     return None
 
 
-def baggage_chunk(offset: int, count: int, max_chunk: int) -> bytes:
-    """Slice `BM0_BAGGAGE[offset : offset + min(count, max_chunk)]`."""
-    end = min(offset + min(count, max_chunk), len(BM0_BAGGAGE))
-    return BM0_BAGGAGE[offset:end]
+def baggage_chunk(
+    offset: int,
+    count: int,
+    max_chunk: int,
+    container: bytes = BM0_BAGGAGE,
+) -> bytes:
+    """Slice `container[offset : offset + min(count, max_chunk)]`."""
+    end = min(offset + min(count, max_chunk), len(container))
+    return container[offset:end]

@@ -432,6 +432,89 @@ def build_case3_bf_chunk(
     chunk[2:4] = struct.pack("<H", name_size)
     chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
     chunk[4 + 0x26] = 0x03
+    _stamp_no_nsr(chunk, name_size)
+    return bytes(chunk)
+
+
+def _stamp_no_nsr(chunk: bytearray, name_size: int) -> None:
+    """Write the "no NSR" sentinel into a 0xBF chunk's trailing 60-byte
+    content block.
+
+    `MVTTL14C!HfcCache_DispatchContentNotification @ 0x7e8452d3` copies
+    `chunk[4 + name_size : ... + 60]` into a per-record companion buffer
+    at `cache_record + 0x18`. `MVTTL14C!HfcNear @ 0x7e84589f` then
+    memcpy's that buffer to `viewer + 0x38 .. viewer + 0x73` on every
+    cache hit (gated by `hfcRecord[5] != 0` — slot-count or row-height
+    non-zero, true for any non-empty case-1/case-3 chunk).
+    `MVCL14N!fMVHasNSR @ 0x7e8835b0` returns `1 - (viewer+0x4c == -1)`,
+    so companion offset 0x14 (= viewer+0x4c on copy) set to 0xFFFFFFFF
+    makes `MOSVIEW!NavigateMosViewPane @ 0x7f3c3670` call
+    `ShowWindow(NSR_HWND, SW_HIDE)`.
+
+    Blackbird-authored titles never carry an NSR region, so every wire
+    chunk stamps this unconditionally.
+    """
+    nsr_off = 4 + name_size + 0x14
+    chunk[nsr_off:nsr_off + 4] = b"\xFF\xFF\xFF\xFF"
+
+
+def build_case2_topic_header_chunk(
+    title_byte: int,
+    key: int,
+    *,
+    non_scroll: int = 0xFFFFFFFF,
+    scroll: int = 0,
+    topic_num: int = 0,
+    browse_back: int = 0xFFFFFFFF,
+    browse_forward: int = 0xFFFFFFFF,
+    next_topic: int = 0xFFFFFFFF,
+    name_size: int = 0x80,
+) -> bytes:
+    """Build a type-0 0xBF chunk with dispatch byte 2 carrying TOPICHEADER bytes.
+
+    EXPERIMENTAL: untested wire path. Parallel to WinHelp/MV |TOPIC stream's
+    RecordType==2 TOPICLINK whose LinkData1 is the TOPICHEADER struct (28 B):
+
+        +0x00 long BlockSize
+        +0x04 TOPICOFFSET BrowseBck   (0xFFFFFFFF = first/only topic)
+        +0x08 TOPICOFFSET BrowseFor   (0xFFFFFFFF = last/only topic)
+        +0x0C long TopicNum
+        +0x10 TOPICPOS NonScroll      (0xFFFFFFFF = no NSR)
+        +0x14 TOPICPOS Scroll
+        +0x18 TOPICPOS NextTopic
+
+    Goal: make MSN MOSVIEW honor `NonScroll = -1` and collapse NSR per-topic,
+    matching native MV behaviour seen in `/var/share/drop/NO_NSR.MVB`. Whether
+    MVCL14N's MSN-side cache reader recognises this chunk format is unknown
+    until tried in the VM.
+    """
+    if not (0x40 <= name_size <= 0xFFFF):
+        raise ValueError(
+            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
+        )
+
+    chunk = bytearray(4 + name_size + 60)
+    chunk[0] = 0xBF
+    chunk[1] = title_byte & 0xFF
+    chunk[2:4] = struct.pack("<H", name_size)
+    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
+
+    case_off = 4 + 0x26
+    chunk[case_off] = 0x02
+
+    # Pack TOPICHEADER bytes immediately after the case dispatch byte.
+    topic_header = struct.pack(
+        "<IIIIIII",
+        28,                              # BlockSize
+        browse_back & 0xFFFFFFFF,
+        browse_forward & 0xFFFFFFFF,
+        topic_num & 0xFFFFFFFF,
+        non_scroll & 0xFFFFFFFF,
+        scroll & 0xFFFFFFFF,
+        next_topic & 0xFFFFFFFF,
+    )
+    chunk[case_off + 1:case_off + 1 + len(topic_header)] = topic_header
+    _stamp_no_nsr(chunk, name_size)
     return bytes(chunk)
 
 
@@ -985,4 +1068,5 @@ def build_case1_bf_chunk(
     text_offset = case_offset + 3 + len(tlv) + len(control_stream)
     chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
 
+    _stamp_no_nsr(chunk, name_size)
     return bytes(chunk)

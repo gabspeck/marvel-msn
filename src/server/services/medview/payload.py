@@ -113,10 +113,27 @@ def _build_section0() -> bytes:
 # --------------------------------------------------------------------------
 #
 # Single CBFrame at (0, 0, 640, 480), caption "MSN Today", inherit-color
-# panes. Field semantics per `docs/cbframe-cbform-sec06-mapping.md`.
+# panes. Field semantics per `docs/cbframe-cbform-sec06-mapping.md` and
+# `docs/medview-service-contract.md` §WindowScaffoldRecord.
+#
+# NSR sizing note: `MOSVIEW!NavigateMosViewPane @ 0x7F3C3670` caps NSR at
+# min(layout_h, 40% of union_h) where union_h derives from the inner-pane
+# rect at +0x80..+0x8F. No per-pane sizing field exists on the wire —
+# both panes are created at the same rect by CreateMosViewWindowHierarchy,
+# then split inside NavigateMosViewPane. `lpMVDuplicate` ties NSR's
+# viewer to the same title cache as SR so `fMVSetAddress` cannot be made
+# to fail on NSR alone, and `fMVHasNSR @ 0x7E8835B0` (which gates the
+# single-pane path) reads `viewer+0x4c == -1` — exhaustive search across
+# MVCL14N/MVTTL14C/MOSVIEW finds zero writers of that field. Single-pane
+# mode is structurally unreachable from the wire; the NSR pane is always
+# created and always claims its 40% slice of the union.
 
 _SEC06_RECORD_SIZE = 0x98
-_SEC06_FLAG_OUTER_RECT_ABSOLUTE = 0x08
+# Bit 0x01 = outer-rect mode (set = absolute, clear = per-mille).
+# Bit 0x08 = inner-pane rect mode (set = absolute pixels at +0x80..+0x8F,
+#            clear = per-mille via ScalePerMilleRectToWindow).
+# Bit 0x40 = forces NSR's `MosPaneState+0x9C` no-scroll flag to 1.
+_SEC06_FLAG_INNER_RECT_ABSOLUTE = 0x08
 _SEC06_COLOR_INHERIT = 0xFFFFFFFF
 _SEC06_RECT_INHERIT = (-1, -1, -1, -1)
 
@@ -125,7 +142,7 @@ def _build_sec06_record() -> bytes:
     record = bytearray(_SEC06_RECORD_SIZE)
     caption = b"MSN Today\x00"
     record[0x15:0x15 + len(caption)] = caption
-    record[0x48] = _SEC06_FLAG_OUTER_RECT_ABSOLUTE
+    record[0x48] = _SEC06_FLAG_INNER_RECT_ABSOLUTE
     struct.pack_into("<iiii", record, 0x49, 0, 0, 640, 480)
     struct.pack_into("<I", record, 0x5B, _SEC06_COLOR_INHERIT)
     struct.pack_into("<II", record, 0x78, _SEC06_COLOR_INHERIT, _SEC06_COLOR_INHERIT)

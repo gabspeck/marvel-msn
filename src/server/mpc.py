@@ -11,6 +11,8 @@ from .config import (
     PIPE_CONTINUATION,
     PIPE_INDEX_MASK,
     PIPE_LAST_DATA,
+    TAG_DYNAMIC_STREAM_END,
+    TAG_END_STATIC,
 )
 from .models import (
     ByteParam,
@@ -90,6 +92,29 @@ def parse_host_block(data):
         request_id=req_id,
         payload=data[pos:],
     )
+
+
+# --- MPCCL iterator-cancel control frame ---
+
+# Single-byte payload appended by `MPCCL!AppendRequestTagByte @ 0x0460699E`
+# from `MPCCL!FUN_046046e7`, the vtable[+0xc] hook invoked by
+# `MVTTL14C!MVAsyncSubscriberUnsubscribe @ 0x7E844FE3` on subscriber teardown
+# regardless of the `skipWireUnsubscribe` flag.  Framing layer concern: any
+# selector that opened a stream iterator can receive this cancel.
+MPCCL_ITERATOR_CANCEL_TAG = 0x0F
+ITERATOR_CANCEL_ACK = bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+
+
+def is_iterator_cancel(payload):
+    """True iff payload is the MPCCL iterator-cancel control frame.
+
+    Sent on the same `(class, selector, req_id)` triple as the original
+    stream-iterator subscribe.  No legitimate tagged-param wire encoding
+    produces a bare 1-byte `0x0F` payload — every send-side primitive
+    tag (`0x01`–`0x05`) carries data after it, and every receive-side
+    descriptor has bit 7 set.  See `docs/MEDVIEW.md` §6d.0.
+    """
+    return payload == bytes([MPCCL_ITERATOR_CANCEL_TAG])
 
 
 # --- Tagged Parameter Parsing ---
