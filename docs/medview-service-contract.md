@@ -1082,7 +1082,12 @@ Record kinds:
   `topicBlob:dynbytes`.
 - `0xbf` `HfcRichTopicRecord`. Fields: `titleSlot:u8`, `payloadBytes:u16`,
   `topicBlob:dynbytes`, plus rich companion metadata used by navigation and
-  export paths.
+  export paths. The 60-byte companion block at `topicBlob + payloadBytes`
+  is copied to `viewer+0x38..+0x73` on every cache hit; byte 0x14 of the
+  block lands on `viewer+0x4c` and gates `fMVHasNSR` (`0xFFFFFFFF` →
+  MOSVIEW `SW_HIDE`s the NSR pane). See `docs/MEDVIEW.md` §6b.1.4.1.
+  Blackbird stamps `0xFFFFFFFF` unconditionally — see
+  `src/server/blackbird/wire.py:_stamp_no_nsr`.
 
 ### Type `1` `WordWheelLookupStream`
 

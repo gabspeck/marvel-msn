@@ -908,7 +908,9 @@ with HGLOBAL handles that wrap the variable-length **body** and
 
 | Offset | Width | Field | Source |
 |-------:|------:|-------|--------|
-| `+0x00..+0x2B` | 44 bytes | wire-metadata header | raw-copied from notifyBuf; client-opaque to MVTTL14C (consumed by the picture/glyph rendering path that reads the companion via `param_3+0x2C / +0x34`) |
+| `+0x00..+0x13` | 20 bytes | wire-metadata head | raw-copied from notifyBuf; consumed by the picture/glyph rendering path via `viewer+0x38..+0x4B` |
+| **`+0x14`** | **u32** | **nsr-low-va (`viewer+0x4c` mirror)** | **`0xFFFFFFFF` = no NSR region; any other value = NSR present at that va. See §6b.1.4.1.** |
+| `+0x18..+0x2B` | 20 bytes | wire-metadata tail | raw-copied from notifyBuf; client-opaque to MVTTL14C |
 | `+0x2C` | HGLOBAL | `bodyHandle` | `GlobalAlloc(GMEM_FIXED, bodyByteCount+1)`, locked, filled from notifyBuf body region, NUL-terminated |
 | `+0x30` | u32 | `bodyByteCount` | raw-copied from wire (drives the GlobalAlloc size) |
 | `+0x34` | HGLOBAL | `nameHandle` | `GlobalAlloc(GMEM_FIXED, nameLen)`, locked, filled from the trailing ASCIIZ name in notifyBuf |
@@ -922,14 +924,60 @@ param_3[0x2C] = MVCloneGlobalBlock(companion[0x2C]);  // bodyHandle clone
 param_3[0x34] = MVCloneGlobalBlock(companion[0x34]);  // nameHandle clone
 ```
 
-The destination `param_3` is `fMVSetAddress`'s `lp+0x40 / lp+0x68`
-pane content-record slot.
+The destination `param_3` is `fMVSetAddress`'s `viewer+0x38` content-record
+slot, so companion offset N lands at viewer offset `0x38 + N`. The copy is
+gated by `entry[5] != 0` (slot-count or row-height non-zero — true for
+any non-empty case-1/case-3 chunk).
 
 Frame format that drives the companion fill is the type-0 callback
 chain: kind `0xBF` records carry `[u16 payloadSize][...payload...][60-byte metadata]
 [body bytes][ASCIIZ name]`. Kind `0xA5` records update only the
 metadata token at `entry+0x18` status path; kind `0x37` records carry
 incremental trailers for a previously-started `0xBF` entry.
+
+##### 6b.1.4.1 NSR-collapse signal (`companion+0x14` → `viewer+0x4c`)
+
+`MVCL14N!fMVHasNSR @ 0x7E8835B0` is one line:
+
+```c
+bool fMVHasNSR(int viewer) {
+    return (bool)(1 - (*(int *)(viewer + 0x4c) == -1));
+}
+```
+
+`MOSVIEW!NavigateMosViewPane @ 0x7F3C3670` calls `fMVHasNSR` after each
+pane realize, caches the result at `pane+0x90`, and at the end of the
+function uses it to drive the NSR child window's `ShowWindow` state:
+
+```c
+if (pane[0x7c] != 0) {                  // NSR HWND exists
+    iVar6 = 5;                          // SW_SHOW default
+    if (pane[0x90] == 0 || sibling[0x84] != 0)
+        iVar6 = 0;                      // SW_HIDE on no-NSR or sibling-unrealized
+    ShowWindow(pane[0x7c], iVar6);
+}
+```
+
+Nothing in MVCL14N / MVTTL14C / MOSVIEW writes `viewer+0x4c` directly
+(exhaustive disassembly search). The **only** writer is `HfcNear`'s
+`memcpy(viewer+0x38, companion, 0x3C)` — companion offset `+0x14` lands
+at `viewer+0x4c` on every cache hit.
+
+Native MV's authoring pipeline propagates `TOPICHEADER.NonScroll` from
+`|TOPIC` into companion+0x14: `0xFFFFFFFF` means "no NSR region", any
+other value is the TOPICPOS where NSR starts. MSN MOSVIEW doesn't read
+TOPICHEADER bytes from the wire — the 60-byte companion is the
+authoring-side signal carried verbatim through `HfcCache_*` into the
+viewer.
+
+**Blackbird-authored titles never carry an NSR region**, so the
+server-side encoder (`src/server/blackbird/wire.py:_stamp_no_nsr`)
+unconditionally writes `FF FF FF FF` at `chunk[4 + name_size + 0x14]`
+on every 0xBF builder (`build_case1_bf_chunk` /
+`build_case2_topic_header_chunk` / `build_case3_bf_chunk`). The
+empty case-1 skip-row fallback still carries the stamp but the HfcNear
+copy is suppressed there (no slots → `entry[5] == 0`); the first
+slot-emitting push propagates it.
 
 ## 6b. Content selectors (va / addr / highlight resolution)
 
