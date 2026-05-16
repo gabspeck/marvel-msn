@@ -334,6 +334,40 @@ class TestLoadedTitleBackcompatShims(unittest.TestCase):
         self.assertEqual(t.captions, page0.captions)
 
 
+class TestBbctlClsidDispatch(unittest.TestCase):
+    """CLSID-first dispatch:
+
+    - msn_today's Story1R / Shortcut1=R sit at class_index 0 / 1 in the
+      CVForm preamble class table; both CLSIDs (CQtxtCtrl / CBblinkCtrl)
+      are in `_BBCTL_CLSIDS` and dispatch correctly to
+      `StoryControl` / `ShortcutControl`.
+    - 4.ttl's three pages each have one Caption (class_index 0,
+      CLSID = CLabelCtrl) and dispatch to `CaptionControl` via the
+      CLSID table.
+    """
+
+    def test_msn_today_clsids_pinned_per_descriptor(self):
+        from server.services.medview.ttl_loader import _BBCTL_CLSIDS
+        # 6 BBCTL site classes pinned in code.
+        names = sorted(_BBCTL_CLSIDS.values())
+        self.assertEqual(names, [
+            "Audio", "Caption", "CaptionButton",
+            "Outline", "Shortcut", "Story",
+        ])
+
+    def test_4ttl_caption_dispatched_via_clsid(self):
+        t = load_title(_TITLE_4)
+        cap = t.pages[0].controls[0]
+        self.assertIsInstance(cap, CaptionControl)
+        self.assertEqual(cap.name, "Caption1")
+
+    def test_msn_today_dispatches_both_classes(self):
+        t = load_title(_TITLE_MSN_TODAY)
+        controls = t.pages[0].controls
+        self.assertIsInstance(controls[0], StoryControl)
+        self.assertIsInstance(controls[1], ShortcutControl)
+
+
 @unittest.skipUnless(
     _TITLE_SHOWCASE.exists(),
     f"Showcase TTL not available at {_TITLE_SHOWCASE}",

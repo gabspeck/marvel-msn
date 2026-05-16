@@ -81,39 +81,48 @@ class _CompoundControl(Control):
 
 @dataclass(frozen=True)
 class StoryControl(_CompoundControl):
-    """Story control. `content_proxy_ref` is the proxy_key (e.g.
+    """Story control (BBCTL.OCX class `CQtxtCtrl`, ProgID
+    `QTXT.QtxtCtrl.1`). `content_proxy_ref` is the proxy_key (e.g.
     0x00001500) selected for this Story's text body; `content` is the
     decoded TextRuns payload. Both are None when the chase failed
     (logged at INFO). PR1 uses a heuristic Pascal-string → CProxyTable
-    name match; PR2 will replace with the RE'd persist-stream offset."""
+    name match — content_proxy_ref is sourced from the matched proxy
+    entry rather than RE'd from the persist stream; deeper per-field
+    decoding remains TODO (see `docs/re-passes/BBCTL.OCX.md`)."""
     content_proxy_ref: int | None = None
     content: TextRunsContent | None = None
 
 
 @dataclass(frozen=True)
 class CaptionButtonControl(_CompoundControl):
-    pass
+    """CaptionButton (BBCTL.OCX class `CLabelBtnCtrl`, ProgID
+    `LABELBTN.LabelBtnCtrl.1`)."""
 
 
 @dataclass(frozen=True)
 class AudioControl(_CompoundControl):
-    pass
+    """Audio (BBCTL.OCX class `CAudioCtrl`, ProgID
+    `AUDIO.AudioCtrl.1`)."""
 
 
 @dataclass(frozen=True)
 class OutlineControl(_CompoundControl):
-    pass
+    """Outline (BBCTL.OCX class `CInfomapCtrl`, ProgID
+    `INFOMAP.InfomapCtrl.1`)."""
 
 
 @dataclass(frozen=True)
 class ShortcutControl(_CompoundControl):
-    pass
+    """Shortcut (BBCTL.OCX class `CBblinkCtrl`, ProgID
+    `BBLINK.BblinkCtrl.1`)."""
 
 
 @dataclass(frozen=True)
 class UnknownControl(Control):
-    """Fallback when the site name doesn't match any known BBCTL kind."""
+    """Fallback when neither CLSID nor name prefix matches a known BBCTL
+    kind. Carries `raw_block` + `clsid` for offline inspection."""
     raw_block: bytes
+    clsid: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -285,6 +294,11 @@ class _SiteDescriptor:
     block. For compound controls (Story/Audio/CaptionButton/Outline/
     Shortcut) it contains a small preamble — further property data lives
     further down the post-descriptor region.
+
+    `class_index` is the low byte of `flags`, indexing into the CVForm
+    preamble's class table (see `_parse_cvform_class_table`).
+    `clsid` is the looked-up 16-B class CLSID (or None when the form
+    has no matching slot).
     """
     seq: int
     flags: int
@@ -293,6 +307,8 @@ class _SiteDescriptor:
     descriptor_off: int
     name_end: int                            # offset of trailing NUL
     inline_tail: bytes
+    class_index: int                         # `flags & 0xFF`
+    clsid: bytes | None                      # `class_table[class_index]` or None
 
 
 # `0e f1 28 57` = first 4 bytes of MS Forms 1.0 Form CLSID
@@ -304,14 +320,71 @@ _FORM_CLSID_PREFIX = bytes.fromhex("0ef12857")
 _FORM_PREAMBLE_END = 0x28
 _BBCTL_SITE_MARKER_U32 = 0x00030073
 
+# CVForm preamble carries a class-CLSID table. Layout pinned across
+# 4.ttl / msn_today / showcase: 16-B CLSIDs at offset 0x9A (154), each
+# stride 40 B. Each site descriptor's `flags & 0xFF` indexes into this
+# table to select the BBCTL control class.
+_CVFORM_CLASS_TABLE_OFF = 0x9A
+_CVFORM_CLASS_TABLE_STRIDE = 40
+
+
+# BBCTL.OCX CLSIDs extracted from `Register_C{Class}Ctrl_*` MFC factory
+# initializers (DllRegisterServer → Ordinal_403 chain). 6 CLSIDs map to
+# the 6 site-class names emitted by BBDESIGN's CVForm authoring tool
+# (Story / Caption / Audio / CaptionButton / Outline / Shortcut); the
+# remaining 4 are BBCTL controls not exercised by any current TTL
+# fixture (PictureButton / PrintPsf / Picture / Psf).
+#
+# Annotated in Ghidra (MSN95 project, BBCTL.OCX):
+# - CLSID_CQtxtCtrl_QTXT_BBCTL_STORY              @ 0x40023fd8
+# - CLSID_CLabelCtrl_LABEL_BBCTL_CAPTION          @ 0x40021c50
+# - CLSID_CAudioCtrl_AUDIO_BBCTL_AUDIO            @ 0x4001fe90
+# - CLSID_CLabelBtnCtrl_LABELBTN_BBCTL_CAPTIONBUTTON @ 0x4001f888
+# - CLSID_CInfomapCtrl_INFOMAP_BBCTL_OUTLINE      @ 0x40022d58
+# - CLSID_CBblinkCtrl_BBLINK_BBCTL_SHORTCUT       @ 0x400210b0
+_BBCTL_CLSIDS: dict[bytes, str] = {
+    bytes.fromhex("00ae8392bf6ace11b94200aa004a7abf"): "Story",
+    bytes.fromhex("d0096f1a7465ce11a25f00aa003e4475"): "Caption",
+    bytes.fromhex("60359058eb57ce11a68500aa005f54d7"): "Audio",
+    bytes.fromhex("8bf178b684871b10bd5200aa003e4475"): "CaptionButton",
+    bytes.fromhex("e053d2dee2f4cd11ab6d00aa003e4475"): "Outline",
+    bytes.fromhex("a066f706094fce119a0000aa006b1e42"): "Shortcut",
+}
+
+
+def _parse_cvform_class_table(raw: bytes) -> tuple[bytes, ...]:
+    """Walk the CVForm preamble's class CLSID table.
+
+    Empirical: each entry is 16 B at +154 / +194 / +234 / ..., stride
+    40. Continue while the next slot bytes match a known BBCTL CLSID;
+    stop on first non-match or buffer end. Returns the in-order list of
+    class CLSIDs (one per distinct class referenced by sites in the
+    form). Tested against 4.ttl (1 CLSID per page), msn_today (2),
+    showcase 7/0 (5), showcase 7/1 (1)."""
+    out: list[bytes] = []
+    pos = _CVFORM_CLASS_TABLE_OFF
+    while pos + 16 <= len(raw):
+        candidate = bytes(raw[pos:pos + 16])
+        if candidate not in _BBCTL_CLSIDS:
+            break
+        out.append(candidate)
+        pos += _CVFORM_CLASS_TABLE_STRIDE
+    return tuple(out)
+
 
 def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
     """Walk site descriptors in a CVForm (Form preamble at +0x00, sites
     starting at +0x28). Each descriptor produces a `_SiteDescriptor`
     with `inline_tail` carrying bytes up to the next site (or to the
-    trailing form CLSID at end of file)."""
+    trailing form CLSID at end of file).
+
+    Each descriptor's `flags & 0xFF` indexes into the CVForm preamble's
+    class table (parsed via `_parse_cvform_class_table`) to resolve a
+    16-B BBCTL class CLSID. CLSID-first dispatch + name-prefix fallback
+    happens in `_decode_descriptor`."""
     trailer_off = raw.find(_FORM_CLSID_PREFIX, _FORM_PREAMBLE_END + 4)
     end_of_list = trailer_off if trailer_off >= 0 else len(raw)
+    class_table = _parse_cvform_class_table(raw)
 
     records: list[tuple[int, int, int, str, int, int]] = []
     pos = _FORM_PREAMBLE_END
@@ -340,6 +413,12 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
         next_start = (
             records[idx + 1][4] if idx + 1 < len(records) else end_of_list
         )
+        class_index = flags & 0xFF
+        clsid = (
+            class_table[class_index]
+            if 0 <= class_index < len(class_table)
+            else None
+        )
         # inline_tail spans name_end..next_start. Names ≤ 7 chars carry a
         # trailing NUL pad; 8-char names (e.g. "Caption1") sit flush against
         # the inline data with no separator. Decoders that depend on the
@@ -352,6 +431,8 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
             descriptor_off=seq_off,
             name_end=name_end,
             inline_tail=raw[name_end:next_start],
+            class_index=class_index,
+            clsid=clsid,
         ))
     return tuple(descriptors)
 
@@ -456,19 +537,26 @@ def _decode_unknown(desc: _SiteDescriptor, property_block: bytes) -> UnknownCont
         flags=desc.flags,
         name=desc.name,
         raw_block=bytes(property_block) or bytes(desc.inline_tail),
+        clsid=desc.clsid,
     )
 
 
-# Dispatch order is significant: CaptionButton must be tested before
-# Caption (the latter would otherwise swallow the former), and the
-# trailing `R` / `=R` variants are accepted by the prefix check.
-_CONTROL_DISPATCH: tuple[tuple[str, type[_CompoundControl] | None], ...] = (
-    ("CaptionButton", CaptionButtonControl),
-    ("Caption", None),                                     # handled by _decode_caption
-    ("Story", StoryControl),
-    ("Audio", AudioControl),
-    ("Outline", OutlineControl),
-    ("Shortcut", ShortcutControl),
+# Site-class name → compound-control ctor (None = Caption, dispatched
+# via `_decode_caption`). Used both for CLSID-anchored dispatch (via
+# `_BBCTL_CLSIDS` → site-class name → this map) and name-prefix
+# fallback. Prefix dispatch is order-sensitive: CaptionButton must be
+# checked before Caption.
+_BBCTL_CTOR: dict[str, type[_CompoundControl] | None] = {
+    "Story": StoryControl,
+    "Caption": None,                                       # handled by _decode_caption
+    "Audio": AudioControl,
+    "CaptionButton": CaptionButtonControl,
+    "Outline": OutlineControl,
+    "Shortcut": ShortcutControl,
+}
+
+_NAME_PREFIX_ORDER: tuple[str, ...] = (
+    "CaptionButton", "Caption", "Story", "Audio", "Outline", "Shortcut",
 )
 
 
@@ -496,13 +584,29 @@ def _slice_property_region(
     return blocks
 
 
-def _decode_descriptor(desc: _SiteDescriptor, property_block: bytes) -> Control:
-    for prefix, ctor in _CONTROL_DISPATCH:
+def _dispatch_class(desc: _SiteDescriptor) -> str | None:
+    """Resolve a site to a BBCTL class name. CLSID lookup wins
+    (authoritative — pinned in BBCTL.OCX); name-prefix fallback is for
+    descriptors where the form's class table is missing or the CLSID
+    isn't recognised (e.g. non-BBCTL embeds)."""
+    if desc.clsid is not None:
+        cls = _BBCTL_CLSIDS.get(desc.clsid)
+        if cls is not None:
+            return cls
+    for prefix in _NAME_PREFIX_ORDER:
         if desc.name.startswith(prefix):
-            if ctor is None:
-                return _decode_caption(desc, property_block)
-            return _decode_compound(desc, ctor, property_block)
-    return _decode_unknown(desc, property_block)
+            return prefix
+    return None
+
+
+def _decode_descriptor(desc: _SiteDescriptor, property_block: bytes) -> Control:
+    cls = _dispatch_class(desc)
+    if cls is None:
+        return _decode_unknown(desc, property_block)
+    ctor = _BBCTL_CTOR[cls]
+    if ctor is None:
+        return _decode_caption(desc, property_block)
+    return _decode_compound(desc, ctor, property_block)
 
 
 def _decode_controls(raw: bytes) -> tuple[Control, ...]:

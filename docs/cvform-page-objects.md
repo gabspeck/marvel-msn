@@ -356,6 +356,36 @@ Authored to differentiate the three pages by their scrollbar-config
 dropdown only; everything else (Caption text, geometry, font) is
 identical.
 
+## CLSID-first dispatch (BBCTL classes pinned)
+
+`_BBCTL_CLSIDS` in `ttl_loader.py` pins the 6 BBCTL.OCX site-class
+CLSIDs to their site-class names. Each CVForm body's preamble carries
+a class-CLSID table at offset `+0x9A` (154), stride 40 B; each site
+descriptor's `flags & 0xFF` indexes into it. Dispatch is CLSID-first
+with a name-prefix fallback for descriptors that lack a matching
+table entry (or for non-BBCTL embeds, which keep dispatching as
+`UnknownControl`).
+
+CLSID → site class name map (pinned from
+`docs/re-passes/BBCTL.OCX.md`):
+
+| Site class | BBCTL.OCX class | ProgID | CLSID |
+|---|---|---|---|
+| Story | CQtxtCtrl | QTXT.QtxtCtrl.1 | `{9283AE00-6ABF-11CE-B942-00AA004A7ABF}` |
+| Caption | CLabelCtrl | LABEL.LabelCtrl.1 | `{1A6F09D0-6574-11CE-A25F-00AA003E4475}` |
+| Audio | CAudioCtrl | AUDIO.AudioCtrl.1 | `{58903560-57EB-11CE-A685-00AA005F54D7}` |
+| CaptionButton | CLabelBtnCtrl | LABELBTN.LabelBtnCtrl.1 | `{B678F18B-8784-101B-BD52-00AA003E4475}` |
+| Outline | CInfomapCtrl | INFOMAP.InfomapCtrl.1 | `{DED253E0-F4E2-11CD-AB6D-00AA003E4475}` |
+| Shortcut | CBblinkCtrl | BBLINK.BblinkCtrl.1 | `{06F766A0-4F09-11CE-9A00-00AA006B1E42}` |
+
+The `_SiteDescriptor` dataclass gains `class_index` and
+`clsid: bytes | None`; the `UnknownControl` dataclass also carries
+`clsid` for offline inspection. Per-control compound decoders
+(StoryControl etc.) currently surface only what PR1 already extracted
+(xy_twips + raw_block + Story content chase). Deep persist-stream
+field decoding per control is a follow-up pass documented in
+`docs/re-passes/BBCTL.OCX.md` §IPersistStreamInit::Save per class.
+
 ## Story content_proxy_ref chase (PR1 heuristic)
 
 `StoryControl.content_proxy_ref: int | None` and
