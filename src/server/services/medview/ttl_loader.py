@@ -22,6 +22,7 @@ from ...blackbird.wire import (
     build_baggage_container,
     build_kind5_raster,
     build_kind8_baggage,
+    TextItem,
     build_text_metafile,
     build_trailer,
 )
@@ -60,12 +61,20 @@ class Control:
 class CaptionControl(Control):
     """Caption1: read-only static text. Rect/font/size pulled inline
     from the descriptor; pinned via `docs/cvform-page-objects.md`
-    §Caption1 against 4.ttl + showcase Caption1."""
+    §Caption1 against 4.ttl + showcase Caption1.
+
+    `italic` reads the StdFont flags byte at `font_off + 0x13` bit 0x02.
+    `color_rgb` is the COLORREF dword stored 9 bytes *before* the StdFont
+    CLSID landmark — black (0) by default, e.g. 0x000000FF for red. Both
+    fields default to inert values so the lowering path can fall back to
+    black/non-italic without special-casing pre-PR4 captions."""
     text: str
     font_name: str
     size_pt: int                             # font_size_cy_lo // 10000
     weight: int                              # 400 = FW_NORMAL
     rect_himetric: tuple[int, int, int, int] # (L, T, R, B) HIMETRIC (0.01mm)
+    italic: bool = False
+    color_rgb: int = 0                       # COLORREF (DWORD LE BGR0), 0 = black
 
 
 @dataclass(frozen=True)
@@ -412,17 +421,29 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
     return tuple(descriptors)
 
 
-def _decode_caption(desc: _SiteDescriptor, property_block: bytes) -> CaptionControl:
+def _decode_caption(
+    desc: _SiteDescriptor,
+    property_block: bytes,
+    shared_record_buf: bytes | None = None,
+    shared_record_off: int | None = None,
+) -> CaptionControl:
     """Caption1 decoder. Rect read from `inline_tail[0..16]`; font/text
     parsed from the StdFont CLSID landmark forward.
 
-    Collapsed format (e.g. 4.ttl, single-Caption pages): everything is
-    inline — `property_block` is empty and the StdFont CLSID lives
-    inside `inline_tail`. Separate format (showcase: Caption alongside
-    Story/Audio/etc.): only the 28-B inline "small tail" carries rect +
-    site metadata; font/text live in `property_block`. Decoder scans
-    both buffers for the CLSID and parses font/text relative to its
-    position.
+    Collapsed format (single-Caption pages): `property_block` is empty
+    and the StdFont CLSID lives inside `inline_tail` at offset 60.
+    Separate format (Caption alongside Story/Audio/etc.): only the
+    28-B inline "small tail" carries rect + site metadata; font/text
+    live in `property_block`.
+
+    Multi-Caption pages: BBDESIGN concatenates per-caption font+text
+    records into the LAST descriptor's `inline_tail` after that
+    descriptor's own 60-byte preamble. `_decode_controls` finds the
+    StdFont CLSID anchors in the shared buffer and routes the Nth
+    caption (in seq order) to the Nth CLSID via `shared_record_buf` /
+    `shared_record_off`. When provided these win over the local
+    inline_tail scan, so each caption reads its own font/text record
+    instead of every caption hitting the first CLSID.
 
     When CLSID is absent (block truncated / format not yet RE'd), the
     Control falls back to rect-only with empty font/text — the lowering
@@ -436,28 +457,40 @@ def _decode_caption(desc: _SiteDescriptor, property_block: bytes) -> CaptionCont
         )
     rect = struct.unpack_from("<iiii", buf, 0x00)
 
-    for src in (buf, property_block):
-        off = src.find(_STDFONT_CLSID)
-        if off >= 0:
-            font_buf = src
-            font_off = off
-            break
+    if shared_record_buf is not None and shared_record_off is not None:
+        font_buf = shared_record_buf
+        font_off = shared_record_off
     else:
-        return CaptionControl(
-            seq=desc.seq, flags=desc.flags, name=desc.name,
-            text="", font_name="", size_pt=0, weight=0,
-            rect_himetric=rect,
-        )
+        for src in (buf, property_block):
+            off = src.find(_STDFONT_CLSID)
+            if off >= 0:
+                font_buf = src
+                font_off = off
+                break
+        else:
+            return CaptionControl(
+                seq=desc.seq, flags=desc.flags, name=desc.name,
+                text="", font_name="", size_pt=0, weight=0,
+                rect_himetric=rect,
+            )
 
     # font_off points at the 16-B StdFont CLSID; layout from there is
     # `[16 CLSID][1 version][3 charset/flags][2 weight][4 size_cy_lo]
     # [1 namelen][N namebytes][2 pad][22 trailer_constants][1 textlen]
-    # [M textbytes][1 NUL]`. Separate-format Caption blocks (showcase)
-    # truncate at the trailer_constants — text lives further into the
-    # property region than `size_i` advertises; text decoding is best-
-    # effort with bounds checks.
+    # [M textbytes][1 NUL]`. The italic flag rides in the 3 charset/flags
+    # bytes (bit 0x02 of `font_off + 0x13`). The text COLORREF lives 9
+    # bytes BEFORE the CLSID landmark — black (0) on default-styled
+    # captions, RGB(255,0,0) → BGR0 LE `ff 00 00 00` on a red caption.
+    # Separate-format Caption blocks (showcase) truncate at the
+    # trailer_constants — text lives further into the property region
+    # than `size_i` advertises; text decoding is best-effort with bounds
+    # checks.
     weight = struct.unpack_from("<H", font_buf, font_off + 0x14)[0]
     size_cy = struct.unpack_from("<I", font_buf, font_off + 0x16)[0]
+    italic = bool(font_buf[font_off + 0x13] & 0x02)
+    color_rgb = 0
+    if font_off >= 9:
+        color_rgb = struct.unpack_from("<I", font_buf, font_off - 9)[0]
     nlen = font_buf[font_off + 0x1A]
     font_name = font_buf[font_off + 0x1B:font_off + 0x1B + nlen].decode(
         "ascii", errors="replace",
@@ -478,6 +511,8 @@ def _decode_caption(desc: _SiteDescriptor, property_block: bytes) -> CaptionCont
         size_pt=size_cy // 10000,
         weight=weight,
         rect_himetric=rect,
+        italic=italic,
+        color_rgb=color_rgb,
     )
 
 
@@ -574,21 +609,63 @@ def _dispatch_class(desc: _SiteDescriptor) -> str | None:
     return None
 
 
-def _decode_descriptor(desc: _SiteDescriptor, property_block: bytes) -> Control:
+def _decode_descriptor(
+    desc: _SiteDescriptor,
+    property_block: bytes,
+    shared_record_buf: bytes | None = None,
+    shared_record_off: int | None = None,
+) -> Control:
     cls = _dispatch_class(desc)
     if cls is None:
         return _decode_unknown(desc, property_block)
     ctor = _BBCTL_CTOR[cls]
     if ctor is None:
-        return _decode_caption(desc, property_block)
+        return _decode_caption(
+            desc, property_block, shared_record_buf, shared_record_off,
+        )
     return _decode_compound(desc, ctor, property_block)
+
+
+def _caption_record_offsets(
+    descriptors: tuple[_SiteDescriptor, ...],
+) -> tuple[bytes | None, dict[int, int]]:
+    """Locate per-caption StdFont CLSID anchors in the multi-caption
+    shared record buffer.
+
+    BBDESIGN packs each caption's font + text record at offset 60 from
+    its record start, with records concatenated in seq order inside
+    the LAST descriptor's `inline_tail`. Mapping caption seq → CLSID
+    offset lets `_decode_caption` read each caption's own record
+    instead of every caption falling back to the first CLSID hit.
+
+    Returns `(shared_buf, {seq: clsid_offset})`. `shared_buf` is the
+    LAST descriptor's `inline_tail`; `clsid_offsets` is empty when
+    there's at most one caption (single-record pages use the existing
+    `_decode_caption` fallback)."""
+    caption_descs = [d for d in descriptors if _dispatch_class(d) == "Caption"]
+    if len(caption_descs) < 2 or not descriptors:
+        return (None, {})
+    shared_buf = descriptors[-1].inline_tail
+    offsets: dict[int, int] = {}
+    pos = 0
+    for desc in sorted(caption_descs, key=lambda d: d.seq):
+        hit = shared_buf.find(_STDFONT_CLSID, pos)
+        if hit < 0:
+            break
+        offsets[desc.seq] = hit
+        pos = hit + len(_STDFONT_CLSID)
+    return (shared_buf, offsets)
 
 
 def _decode_controls(raw: bytes) -> tuple[Control, ...]:
     descriptors = _walk_cbform(raw)
     blocks = _slice_property_region(descriptors)
+    shared_buf, clsid_offsets = _caption_record_offsets(descriptors)
     return tuple(
-        _decode_descriptor(d, blocks.get(d.seq, b""))
+        _decode_descriptor(
+            d, blocks.get(d.seq, b""),
+            shared_buf, clsid_offsets.get(d.seq),
+        )
         for d in descriptors
     )
 
@@ -1270,39 +1347,36 @@ def build_bm_baggage(page: LoadedPage, font_table: tuple[FaceEntry, ...]) -> byt
     `bm<idx>` is pinned via MVCL14N `wsprintfA("|bm%d", idx)` in
     HfcStartCacheFetch.
     """
-    items: list[tuple[int, int, str]] = []
-    font_face = ""
-    font_size_pt = 0
-    font_weight = 0
+    items: list[TextItem] = []
 
     for cap in page.captions:
-        x = _himetric_to_pixels(cap.rect_himetric[0])
-        y = _himetric_to_pixels(cap.rect_himetric[1])
-        items.append((x, y, cap.text))
-        if not font_face:
-            font_face = cap.font_name
-            font_size_pt = cap.size_pt
-            font_weight = cap.weight
+        items.append(TextItem(
+            x=_himetric_to_pixels(cap.rect_himetric[0]),
+            y=_himetric_to_pixels(cap.rect_himetric[1]),
+            text=cap.text,
+            font_face=cap.font_name or "Times New Roman",
+            font_height=-(cap.size_pt * 96 // 72) if cap.size_pt else -16,
+            font_weight=cap.weight or 400,
+            italic=cap.italic,
+            color_rgb=cap.color_rgb,
+        ))
 
     for c in page.controls:
         if isinstance(c, StoryControl) and c.content is not None and c.content.text:
-            x = _twips_to_pixels(c.xy_twips[0])
-            y = _twips_to_pixels(c.xy_twips[1])
-            items.append((x, y, c.content.text))
-            if not font_face and font_table:
-                font_face = font_table[0].face_name
-                font_size_pt = 12
-                font_weight = 400
+            face = font_table[0].face_name if font_table else "Times New Roman"
+            items.append(TextItem(
+                x=_twips_to_pixels(c.xy_twips[0]),
+                y=_twips_to_pixels(c.xy_twips[1]),
+                text=c.content.text,
+                font_face=face,
+                font_height=-16,
+                font_weight=400,
+            ))
 
     if not items:
         return _empty_kind5_raster(page.page_pixel_w, page.page_pixel_h)
 
-    metafile = build_text_metafile(
-        items,
-        font_face=font_face or "Times New Roman",
-        font_height=-(font_size_pt * 96 // 72) if font_size_pt else -16,
-        font_weight=font_weight or 400,
-    )
+    metafile = build_text_metafile(items)
     return build_baggage_container(
         build_kind8_baggage(
             metafile,

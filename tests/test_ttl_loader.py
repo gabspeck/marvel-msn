@@ -41,8 +41,12 @@ _TITLE_SHOWCASE = pathlib.Path("/var/share/drop/first title.ttl")
 
 
 class TestKnownTitleRegression(unittest.TestCase):
-    """4.ttl: 1 Caption page-0; existing field assertions preserved via
-    the `captions` property + new `controls` accessor."""
+    """4.ttl page-0 carries 2 Captions: the original "Test caption"
+    (MS Sans Serif 12pt) and "another caption!!" (Comic Sans MS 26pt).
+    Multi-caption parsing routes each descriptor (in seq order) to its
+    own StdFont CLSID anchor in the shared property region — see
+    `_caption_record_offsets` in `ttl_loader.py`. Page 0 also has both
+    scrollbars enabled (flags=3)."""
 
     def test_known_title_parses_all_fields(self):
         t = load_title(_TITLE_4)
@@ -62,27 +66,35 @@ class TestKnownTitleRegression(unittest.TestCase):
                 FaceEntry(slot=0, face_name="Times New Roman"),
             ),
         )
-        self.assertEqual(page.scrollbar_flags, 0)
+        self.assertEqual(page.scrollbar_flags, 3)
 
-    def test_controls_is_a_single_caption(self):
+    def test_controls_are_two_captions_each_with_own_record(self):
         t = load_title(_TITLE_4)
         controls = t.pages[0].controls
-        self.assertEqual(len(controls), 1)
-        cap = controls[0]
-        self.assertIsInstance(cap, CaptionControl)
-        self.assertEqual(cap.seq, 1)
-        self.assertEqual(cap.flags, 0x80000000)
-        self.assertEqual(cap.name, "Caption1")
-        self.assertEqual(cap.text, "Test caption")
-        self.assertEqual(cap.font_name, "MS Sans Serif")
-        self.assertEqual(cap.size_pt, 12)
-        self.assertEqual(cap.weight, 400)
-        self.assertEqual(cap.rect_himetric, (5291, 2963, 11641, 5926))
+        self.assertEqual(len(controls), 2)
+        cap1, cap2 = controls
+        self.assertIsInstance(cap1, CaptionControl)
+        self.assertEqual(cap1.seq, 1)
+        self.assertEqual(cap1.name, "Caption1")
+        self.assertEqual(cap1.text, "Test caption")
+        self.assertEqual(cap1.font_name, "MS Sans Serif")
+        self.assertEqual(cap1.size_pt, 12)
+        self.assertEqual(cap1.weight, 400)
+        self.assertEqual(cap1.rect_himetric, (5291, 2963, 11641, 5926))
+
+        self.assertIsInstance(cap2, CaptionControl)
+        self.assertEqual(cap2.seq, 2)
+        self.assertEqual(cap2.name, "Caption2")
+        self.assertEqual(cap2.text, "another caption!!")
+        self.assertEqual(cap2.font_name, "Comic Sans MS")
+        self.assertEqual(cap2.size_pt, 26)
+        self.assertEqual(cap2.weight, 400)
+        self.assertEqual(cap2.rect_himetric, (8890, 7408, 16298, 8890))
 
     def test_captions_property_filters_controls(self):
         t = load_title(_TITLE_4)
         page = t.pages[0]
-        self.assertEqual(page.captions, (page.controls[0],))
+        self.assertEqual(page.captions, tuple(page.controls))
 
     def test_missing_path_returns_none(self):
         self.assertIsNone(load_title(pathlib.Path("/tmp/__no_ttl__.ttl")))
@@ -285,13 +297,15 @@ class TestMultiPage4Ttl(unittest.TestCase):
 
     def test_per_page_scrollbar_flags(self):
         flags = [p.scrollbar_flags for p in self.title.pages]
-        # Page 0 = no scroll, page 1 = V (bit 1), page 2 = H (bit 0).
-        self.assertEqual(flags, [0, 2, 1])
+        # Page 0 = both scrollbars (bits 0+1), page 1 = V (bit 1), page 2 = H (bit 0).
+        self.assertEqual(flags, [3, 2, 1])
 
-    def test_each_page_has_one_caption(self):
+    def test_page_caption_counts(self):
+        counts = [len(p.controls) for p in self.title.pages]
+        self.assertEqual(counts, [2, 1, 1])
         for page in self.title.pages:
-            self.assertEqual(len(page.controls), 1)
-            self.assertIsInstance(page.controls[0], CaptionControl)
+            for c in page.controls:
+                self.assertIsInstance(c, CaptionControl)
 
 
 class TestMsnTodayStoryContentChase(unittest.TestCase):
@@ -357,17 +371,13 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
     def test_scrollbar_collapse_flag_per_page(self):
         from server.services.medview.ttl_loader import (
             _SEC06_FLAG_INNER_RECT_ABSOLUTE,
-            _SEC06_FLAG_NSR_ANCHOR_BOTTOM,
             _SEC06_RECORD_SIZE,
             _build_sec06_record,
         )
         t = load_title(_TITLE_4)
         records = [_build_sec06_record(p, t) for p in t.pages]
-        # Page 0 (Test Page, scrollbar=0): collapse set.
-        self.assertEqual(
-            records[0][0x48],
-            _SEC06_FLAG_INNER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM,
-        )
+        # Page 0 (Test Page, scrollbar=3 → both): collapse cleared.
+        self.assertEqual(records[0][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
         # Page 1 (Vertical scrollbar=2): collapse cleared, absolute set.
         self.assertEqual(records[1][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
         # Page 2 (Horizontal scrollbar=1): degrades to V, collapse cleared.

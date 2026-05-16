@@ -34,6 +34,7 @@ Format derived from RE of `MVCL14N.DLL`:
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 
 _NARROW_BYTE_MAX = 0x7F
 _NARROW_USHORT_MAX = 0x7FFF
@@ -216,12 +217,28 @@ def build_baggage_container(bitmap: bytes) -> bytes:
 # WMF function codes (META_*) used by `build_text_metafile`.
 _META_EOF = 0x0000
 _META_SETBKMODE = 0x0102
+_META_SETTEXTCOLOR = 0x0209
 _META_SELECTOBJECT = 0x012D
 _META_DELETEOBJECT = 0x01F0
 _META_TEXTOUT = 0x0521
 _META_CREATEFONTINDIRECT = 0x02FB
 
 _BKMODE_TRANSPARENT = 1
+
+
+@dataclass(frozen=True)
+class TextItem:
+    """One TextOut payload for `build_text_metafile`. Per-item font + color
+    fields let multi-caption pages render each caption with its own
+    Comic-Sans-MS-26pt-italic-red authoring."""
+    x: int
+    y: int
+    text: str
+    font_face: str = "MS Sans Serif"
+    font_height: int = -16          # negative = points, positive = device units
+    font_weight: int = 400          # 400 = FW_NORMAL, 700 = FW_BOLD
+    italic: bool = False
+    color_rgb: int = 0              # COLORREF (BGR0 little-endian DWORD)
 
 
 def _wmf_record(rd_function: int, params: bytes) -> bytes:
@@ -259,6 +276,11 @@ def _wmf_textout(x: int, y: int, text: str) -> bytes:
         text_bytes += b"\x00"  # pad to even
     params = struct.pack("<H", len(text)) + text_bytes + struct.pack("<hh", y, x)
     return _wmf_record(_META_TEXTOUT, params)
+
+
+def _wmf_settextcolor(color_rgb: int) -> bytes:
+    """META_SETTEXTCOLOR — COLORREF DWORD parameter (BGR0 little-endian)."""
+    return _wmf_record(_META_SETTEXTCOLOR, struct.pack("<I", color_rgb & 0xFFFFFFFF))
 
 
 def _wmf_createfontindirect(
@@ -299,37 +321,38 @@ def _wmf_createfontindirect(
     return _wmf_record(_META_CREATEFONTINDIRECT, logfont + face_bytes)
 
 
-def build_text_metafile(
-    items: list[tuple[int, int, str]],
-    *,
-    font_face: str = "MS Sans Serif",
-    font_height: int = -12,
-    font_weight: int = 400,
-) -> bytes:
-    """Build a Win32 .WMF rendering text strings at absolute (x, y).
+def build_text_metafile(items: list[TextItem]) -> bytes:
+    """Build a Win32 .WMF rendering text strings at absolute (x, y) with
+    per-item font + italic + color.
 
-    `items` is a list of `(x_pixels, y_pixels, text)` tuples in the
-    coordinate system MOSVIEW will set up before `PlayMetaFile`. Caller
-    chooses the mapping mode via the kind=8 baggage `mapmode` byte —
-    for MM_TEXT (=1), x/y are device pixels.
+    Each `TextItem` gets its own `CreateFontIndirect` (one font object
+    per slot index 0..N-1) and a `SetTextColor` before its `TextOut`,
+    so a page with mixed captions (e.g. MS Sans Serif 12pt black plus
+    Comic Sans MS 26pt italic red) renders both faithfully. Fonts stay
+    alive until the end of the metafile so `NumberOfObjects` in the
+    METAHEADER equals the item count.
 
-    All items share one font (created at start, deleted at end). Text
-    color and text alignment come from the engine's pre-PlayMetaFile
-    `SetTextColor` (= title+0x8c) — the metafile doesn't override.
-    BkMode is set TRANSPARENT so text doesn't fill its bounding box
-    with the system window color.
+    Coordinates are in whatever logical units MOSVIEW sets up before
+    `PlayMetaFile`. With the kind=8 baggage `mapmode=1` (MM_TEXT)
+    contract, x/y are device pixels and the metafile draws untransformed.
+    `BkMode = TRANSPARENT` keeps the engine's title background showing
+    through gaps between glyphs.
     """
     records = bytearray()
     records += _wmf_setbkmode(_BKMODE_TRANSPARENT)
-    records += _wmf_createfontindirect(
-        height=font_height,
-        weight=font_weight,
-        face_name=font_face,
-    )
-    records += _wmf_selectobject(0)
-    for x, y, text in items:
-        records += _wmf_textout(int(x), int(y), text)
-    records += _wmf_deleteobject(0)
+    for item in items:
+        records += _wmf_createfontindirect(
+            height=item.font_height,
+            weight=item.font_weight,
+            italic=item.italic,
+            face_name=item.font_face,
+        )
+    for idx, item in enumerate(items):
+        records += _wmf_settextcolor(item.color_rgb)
+        records += _wmf_selectobject(idx)
+        records += _wmf_textout(int(item.x), int(item.y), item.text)
+    for idx in range(len(items)):
+        records += _wmf_deleteobject(idx)
     records += _wmf_eof()
 
     # METAHEADER (18 bytes = 9 WORDs):
@@ -349,7 +372,7 @@ def build_text_metafile(
         9,                  # HeaderSize (WORDs)
         0x0300,             # Version
         total_words,        # Size (WORDs)
-        1,                  # NumberOfObjects (font slot)
+        max(1, len(items)), # NumberOfObjects (one font slot per item)
         max_record,         # MaxRecord (WORDs)
         0,                  # NumberOfMembers
     )
