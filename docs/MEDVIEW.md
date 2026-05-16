@@ -557,6 +557,45 @@ for the extra `u16` reads `TitleGetInfo` makes past the declared end.
 Prefer the 18-byte form — it exercises the same code paths without
 relying on allocator behaviour.
 
+### 4.4.1 Multi-page bodies (PR3)
+
+For BBDESIGN-authored TTLs with more than one CBForm reachable from
+`CTitle.base_forms` / `CSection.forms` (4.ttl: 3 pages; showcase:
+2 pages; msn_today: 1 page — see
+`docs/cvform-page-objects.md` §Multi-page enumeration), the server
+emits one **152-B sec06 record per page** concatenated into the title
+body's section 3. Each record sources caption / outer-rect from the
+title-level CBFrame and inner geometry / background / scrollbar flag
+from the page's CVForm Page block. See
+`docs/cbframe-cbform-sec06-mapping.md` §Multi-page lowering for the
+per-page field rules and scrollbar collapse table.
+
+The TitleOpen reply's `topicUpperBound` (formerly `topic_count` in
+this doc) is set to `max(1, len(pages))` —
+`docs/MEDVIEW.md:389` notes that `0` stalls the client.
+
+Per-page baggage is `bm0`, `bm1`, …, `bm<N-1>` (one per page) — the
+engine probes via `wsprintfA("|bm%d", idx)` and the handler dispatches
+by canonical name out of a `dict[str, bytes]` populated at OpenTitle
+time. Each page's baggage carries:
+- CaptionControl text drawn via the kind=8 WMF TextOut path (existing).
+- Story content (PR1's TextRuns chase) at the Story's
+  `xy_twips → pixels` top-left.
+- Pages without text → kind=5 1bpp white raster sized to the page.
+
+UNVERIFIED in PR3 (no 86Box round-trip):
+- Per-page sec06 stride / order is structural; MOSVIEW's expected
+  topic→page mapping isn't pinned.
+- Baggage handle allocation per page (`0x42` for bm0 stays for log
+  continuity; subsequent pages allocate `0x43`+).
+- `cache_header0/1` values are deterministic hashes of
+  `(title_name, page_count, page_pixel_w, page_pixel_h)` — they pass
+  the engine's nonzero check but the real
+  `MVCache_<title>.tmp` derivation is unconfirmed for
+  server-synthesised titles.
+- Topic-navigation push frames (`MEDVIEW_CONVERT_TOPIC_TO_VA` / 0x15
+  / 0x16) keep the page-0 va; per-page va dispatch was deferred.
+
 ### 4.5 Title spec format
 
 MOSVIEW builds the TitleOpen spec string via `wsprintfA(":%d[%s]%d",

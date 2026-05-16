@@ -146,43 +146,18 @@ class LoadedPage:
 
 @dataclass(frozen=True)
 class LoadedTitle:
-    """BBDESIGN-authored title. `pages` is in BBDESIGN tree order; PR1
-    callers can still treat the title as page-0 only via the backcompat
-    properties (delegating to `pages[0]`). PR3 removes the shims and
-    lifts `lower_to_payload` / `build_bm0_baggage` to per-page emission."""
+    """BBDESIGN-authored title. `pages` is in BBDESIGN tree order.
+
+    Page-0 backcompat properties were dropped in PR3 — callers must
+    address pages explicitly (`title.pages[0].controls`,
+    `title.pages[i].page_bg`, etc.). The two lowering helpers
+    (`lower_to_payload`, `build_all_bm_baggage`) emit per-page output.
+    """
     title_name: str                          # CTitle properties["name"]
     caption: str                             # CBFrame caption — host window title
     window_rect: tuple[int, int, int, int]   # CBFrame (left, top, width, height) pixels
     font_table: tuple[FaceEntry, ...]
     pages: tuple[LoadedPage, ...] = field(default_factory=tuple)
-
-    @property
-    def _page0(self) -> LoadedPage:
-        return self.pages[0]
-
-    @property
-    def page_bg(self) -> int:
-        return self._page0.page_bg
-
-    @property
-    def page_pixel_w(self) -> int:
-        return self._page0.page_pixel_w
-
-    @property
-    def page_pixel_h(self) -> int:
-        return self._page0.page_pixel_h
-
-    @property
-    def scrollbar_flags(self) -> int:
-        return self._page0.scrollbar_flags
-
-    @property
-    def controls(self) -> tuple[Control, ...]:
-        return self._page0.controls
-
-    @property
-    def captions(self) -> tuple[CaptionControl, ...]:
-        return self._page0.captions
 
 
 _STDFONT_CLSID = bytes.fromhex("0352e30b918fce119de300aa004bb851")
@@ -1085,6 +1060,8 @@ _SEC06_RECORD_SIZE = 0x98
 _SEC06_FLAG_INNER_RECT_ABSOLUTE = 0x08
 _SEC06_FLAG_NSR_ANCHOR_BOTTOM = 0x40
 _SEC06_RECT_INHERIT = (-1, -1, -1, -1)
+# u16 size field on section 3 caps total record count at this many.
+_SEC06_MAX_RECORDS = 0xFFFF // _SEC06_RECORD_SIZE
 
 
 def _length_prefixed(data: bytes) -> bytes:
@@ -1099,6 +1076,17 @@ def _resolve_face_slot(font_name: str, font_table: tuple[FaceEntry, ...]) -> int
     return 0
 
 
+def _title_captions(title: LoadedTitle) -> tuple[CaptionControl, ...]:
+    """All CaptionControls across every page, in page order. Used by
+    section 0 — the font/style table needs one descriptor per Caption
+    (regardless of which page it lives on)."""
+    return tuple(
+        cap
+        for page in title.pages
+        for cap in page.captions
+    )
+
+
 def _build_section0(title: LoadedTitle) -> bytes:
     face_count = max((f.slot for f in title.font_table), default=-1) + 1
     face_table = bytearray(face_count * _SEC0_FACE_ENTRY_SIZE)
@@ -1107,8 +1095,9 @@ def _build_section0(title: LoadedTitle) -> bytes:
         off = face.slot * _SEC0_FACE_ENTRY_SIZE
         face_table[off:off + len(encoded)] = encoded
 
+    captions = _title_captions(title)
     descriptors = bytearray()
-    for cap in title.captions:
+    for cap in captions:
         face_slot = _resolve_face_slot(cap.font_name, title.font_table)
         descriptor = bytearray(_SEC0_DESCRIPTOR_SIZE)
         struct.pack_into("<HHH", descriptor, 0x00, face_slot, 0, 0)
@@ -1132,7 +1121,7 @@ def _build_section0(title: LoadedTitle) -> bytes:
     descriptor_off = face_off + len(face_table)
     pointer_off = descriptor_off + len(descriptors)
 
-    descriptor_count = len(title.captions) if title.captions else 0xFFFF
+    descriptor_count = len(captions) if captions else 0xFFFF
 
     header = bytearray(_SEC0_HEADER_SIZE)
     struct.pack_into(
@@ -1151,22 +1140,46 @@ def _build_section0(title: LoadedTitle) -> bytes:
     return bytes(header) + bytes(face_table) + bytes(descriptors) + pointer_table
 
 
-def _build_sec06_record(title: LoadedTitle) -> bytes:
+def _scrollbar_flags_to_sec06_flag(scrollbar_flags: int) -> int:
+    """Map CVForm Page `scrollbar_flags` (bit0=H, bit1=V) to the sec06
+    `+0x48` byte. Empirical rules pinned via SoftIce on MOSVIEW
+    NavigateMosViewPane:
+
+    - `0` (no scrollbars): set INNER_RECT_ABSOLUTE | NSR_ANCHOR_BOTTOM
+      to suppress the scroll-region pane (NSR claims the full content).
+    - `2` (V): clear NSR_ANCHOR_BOTTOM — SR pane is sized normally so
+      the engine renders its vertical scrollbar.
+    - `3` (V|H): V dominates; MOSVIEW doesn't model H, treat as V.
+    - `1` (H only): MOSVIEW ignores H entirely; log + degrade to V-mode.
+    """
+    if scrollbar_flags == 0:
+        return _SEC06_FLAG_INNER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
+    if scrollbar_flags & 0x02:                             # V (or V|H)
+        return _SEC06_FLAG_INNER_RECT_ABSOLUTE
+    if scrollbar_flags & 0x01:                             # H only — degrade to V
+        log.info(
+            "scrollbar_flags=H_only is unmodeled by MOSVIEW; degrading to V",
+        )
+        return _SEC06_FLAG_INNER_RECT_ABSOLUTE
+    return _SEC06_FLAG_INNER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
+
+
+def _build_sec06_record(page: LoadedPage, title: LoadedTitle) -> bytes:
+    """One sec06 record per `LoadedPage`. Caption / window position come
+    from the title-level CBFrame; geometry / colors / scrollbar flag
+    come from the page. `outer_rect` (left, top) is the desktop window
+    position; (w, h) is the authored content size — chrome is added by
+    the engine's compensation helper."""
     record = bytearray(_SEC06_RECORD_SIZE)
     caption_bytes = title.caption.encode("ascii", errors="replace") + b"\x00"
     record[0x15:0x15 + len(caption_bytes)] = caption_bytes
-    record[0x48] = _SEC06_FLAG_INNER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
-    # sec06 outer_rect → CreateMosViewWindowHierarchy passes
-    # (left, top, w, h) through ComputeMosViewClientFromAuthoredRect then
-    # MoveWindow on the SHELL window; so (left, top) is the desktop
-    # position, (w, h) the authored content size (chrome added in by the
-    # compensation helper).
+    record[0x48] = _scrollbar_flags_to_sec06_flag(page.scrollbar_flags)
     left, top, _, _ = title.window_rect
     struct.pack_into(
-        "<iiii", record, 0x49, left, top, title.page_pixel_w, title.page_pixel_h,
+        "<iiii", record, 0x49, left, top, page.page_pixel_w, page.page_pixel_h,
     )
-    struct.pack_into("<I", record, 0x5B, title.page_bg)
-    struct.pack_into("<II", record, 0x78, title.page_bg, title.page_bg)
+    struct.pack_into("<I", record, 0x5B, page.page_bg)
+    struct.pack_into("<II", record, 0x78, page.page_bg, page.page_bg)
     struct.pack_into("<iiii", record, 0x80, *_SEC06_RECT_INHERIT)
     return bytes(record)
 
@@ -1177,11 +1190,17 @@ _TITLE_DEID_PLACEHOLDER = b"00000000-0000-0000-0000-000000000000\x00"
 def lower_to_payload(title: LoadedTitle) -> bytes:
     """Assemble the 9-section TitleOpen body for a LoadedTitle.
 
-    PR1 scope: page-0 only — `_build_sec06_record` reads `page_bg`,
-    `page_pixel_w`, `page_pixel_h` via the LoadedTitle backcompat shims
-    (`pages[0]`). PR3 emits one sec06 record per page."""
+    Section 3 carries one sec06 window-scaffold record per `LoadedPage`
+    (each 152 B). Caps at `_SEC06_MAX_RECORDS` (430) since section 3's
+    u16 length prefix bounds total bytes.
+    """
+    if len(title.pages) > _SEC06_MAX_RECORDS:
+        raise ValueError(
+            f"title has {len(title.pages)} pages; sec06 record table "
+            f"caps at {_SEC06_MAX_RECORDS}",
+        )
     section0 = _build_section0(title)
-    sec06 = _build_sec06_record(title)
+    sec06 = b"".join(_build_sec06_record(p, title) for p in title.pages)
     caption_text = (title.caption or title.title_name).encode(
         "ascii", errors="replace",
     ) + b"\x00"
@@ -1226,40 +1245,87 @@ def _empty_kind5_raster(width: int, height: int) -> bytes:
     return build_baggage_container(raster)
 
 
-def build_bm0_baggage(title: LoadedTitle) -> bytes:
-    """Build the bm0 baggage container for a LoadedTitle.
+def _twips_to_pixels(twips: int) -> int:
+    """Twips → pixels at 96 DPI: 1 inch = 1440 twips = 96 pixels."""
+    return (twips * 96) // 1440
 
-    With captions: kind=8 WMF with one TextOut per caption (MM_TEXT,
-    pixel coords). Without: kind=5 1bpp raster sized to the page.
 
-    Phase-2 kind=5 + authored trailer attempt rolled back 2026-05-13:
-    pushing a tag=0x8A child with va=0 caused the engine to hang post-
-    `MVBuildLayoutLine` waiting for slot-tag-7 text content we never
-    shipped. Reverting to the working kind=8 baseline; revisit once
-    MVCL14N is open in Ghidra and the slot-tag-7 text-source path is
-    traced.
+def build_bm_baggage(page: LoadedPage, font_table: tuple[FaceEntry, ...]) -> bytes:
+    """Per-page baggage container.
+
+    Sources:
+    - CaptionControl text: rect_himetric → pixel coords, drawn via the
+      kind=8 WMF TextOut path.
+    - StoryControl content (TextRuns body resolved by PR1's chase):
+      placed at the Story's `xy_twips → pixels` top-left, single string.
+
+    Pages without any caption or resolved Story text fall back to the
+    kind=5 1bpp white raster sized to the page. The kind=5 + authored
+    trailer attempt (rolled back 2026-05-13) caused the engine to hang
+    post-`MVBuildLayoutLine`; kind=8 stays the working baseline. PR3
+    extends kind=8 to carry per-page Story text alongside captions.
+
+    UNVERIFIED: per-page bm baggage emission is structural — 86Box
+    verification deferred to a follow-up pass. The naming convention
+    `bm<idx>` is pinned via MVCL14N `wsprintfA("|bm%d", idx)` in
+    HfcStartCacheFetch.
     """
-    if not title.captions:
-        return _empty_kind5_raster(title.page_pixel_w, title.page_pixel_h)
+    items: list[tuple[int, int, str]] = []
+    font_face = ""
+    font_size_pt = 0
+    font_weight = 0
 
-    first = title.captions[0]
-    items = []
-    for cap in title.captions:
+    for cap in page.captions:
         x = _himetric_to_pixels(cap.rect_himetric[0])
         y = _himetric_to_pixels(cap.rect_himetric[1])
         items.append((x, y, cap.text))
+        if not font_face:
+            font_face = cap.font_name
+            font_size_pt = cap.size_pt
+            font_weight = cap.weight
+
+    for c in page.controls:
+        if isinstance(c, StoryControl) and c.content is not None and c.content.text:
+            x = _twips_to_pixels(c.xy_twips[0])
+            y = _twips_to_pixels(c.xy_twips[1])
+            items.append((x, y, c.content.text))
+            if not font_face and font_table:
+                font_face = font_table[0].face_name
+                font_size_pt = 12
+                font_weight = 400
+
+    if not items:
+        return _empty_kind5_raster(page.page_pixel_w, page.page_pixel_h)
 
     metafile = build_text_metafile(
         items,
-        font_face=first.font_name,
-        font_height=-(first.size_pt * 96 // 72),
-        font_weight=first.weight,
+        font_face=font_face or "Times New Roman",
+        font_height=-(font_size_pt * 96 // 72) if font_size_pt else -16,
+        font_weight=font_weight or 400,
     )
     return build_baggage_container(
         build_kind8_baggage(
             metafile,
             mapmode=1,
-            viewport_w=title.page_pixel_w,
-            viewport_h=title.page_pixel_h,
+            viewport_w=page.page_pixel_w,
+            viewport_h=page.page_pixel_h,
         )
     )
+
+
+def build_all_bm_baggage(title: LoadedTitle) -> dict[str, bytes]:
+    """Per-title baggage map: `{f"bm{i}": baggage_bytes for i, page}`.
+    Handler keys baggage requests by the canonical name extracted from
+    the engine's `wsprintfA("|bm%d", idx)` probe."""
+    return {
+        f"bm{i}": build_bm_baggage(page, title.font_table)
+        for i, page in enumerate(title.pages)
+    }
+
+
+def build_bm0_baggage(title: LoadedTitle) -> bytes:
+    """Compatibility shim — page-0 baggage. Callers that need per-page
+    baggage should use `build_all_bm_baggage`. Retained for the empty-
+    title fallback path and existing handler bring-up code; PR3+1
+    follow-up will retire this entry point."""
+    return build_all_bm_baggage(title)["bm0"]

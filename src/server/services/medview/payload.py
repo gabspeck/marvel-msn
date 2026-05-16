@@ -54,6 +54,45 @@ TITLE_OPEN_METADATA = TitleOpenMetadata(
 )
 
 
+def derive_title_open_metadata(
+    page_count: int,
+    page_pixel_w: int,
+    page_pixel_h: int,
+    title_name: str,
+) -> TitleOpenMetadata:
+    """Per-title `TitleOpenMetadata` for a multi-page LoadedTitle.
+
+    `topic_count = max(1, page_count)` — `docs/MEDVIEW.md:389` notes that
+    `topic_count = 0` resolves no topic and stalls the client; we floor
+    at 1 even for empty titles.
+
+    `cache_header{0,1}` are deterministic hashes of
+    `(title_name, page_count, page_pixel_w, page_pixel_h)`. The real
+    cache key comes from `MVCache_<title>.tmp` and is unverified for
+    server-synthesised titles; the dwords must be nonzero (engine
+    nonzero check inside `HfcResolveCacheKey`) but their exact value
+    has no observed downstream consumer.
+
+    UNVERIFIED: real `MVCache_<title>.tmp` cache key derivation. The
+    deterministic-hash approach passes the engine's nonzero check and
+    survived `OpenMediaTitleSession` on the empty-title bring-up;
+    multi-page round-trip in 86Box is deferred to a follow-up.
+    """
+    base = (
+        f"{title_name}\x00{page_count}\x00{page_pixel_w}x{page_pixel_h}"
+    ).encode()
+    seed = sum(b * (i + 1) for i, b in enumerate(base)) or 0xC0FFEE01
+    return TitleOpenMetadata(
+        title_slot=0x01,
+        file_system_mode=0x01,
+        contents_va=0x00001000,
+        addr_base=0x00001000,
+        topic_count=max(1, page_count),
+        cache_header0=(seed * 0x9E3779B1) & 0xFFFFFFFF or 0xC0FFEE02,
+        cache_header1=(seed * 0x85EBCA6B) & 0xFFFFFFFF or 0xC0FFEE03,
+    )
+
+
 # --------------------------------------------------------------------------
 # Section 0 — minimal font table (96 bytes)
 # --------------------------------------------------------------------------

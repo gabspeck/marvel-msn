@@ -28,6 +28,7 @@ from server.services.medview.ttl_loader import (
     OutlineControl,
     ShortcutControl,
     StoryControl,
+    build_all_bm_baggage,
     build_bm0_baggage,
     load_title,
     lower_to_payload,
@@ -49,9 +50,10 @@ class TestKnownTitleRegression(unittest.TestCase):
         self.assertEqual(t.title_name, "Test Title")
         self.assertEqual(t.caption, "Default Window")
         self.assertEqual(t.window_rect, (200, 100, 640, 480))
-        self.assertEqual(t.page_pixel_w, 640)
-        self.assertEqual(t.page_pixel_h, 480)
-        self.assertEqual(t.page_bg, 0x009098A8)
+        page = t.pages[0]
+        self.assertEqual(page.page_pixel_w, 640)
+        self.assertEqual(page.page_pixel_h, 480)
+        self.assertEqual(page.page_bg, 0x009098A8)
         self.assertEqual(
             t.font_table,
             (
@@ -60,12 +62,13 @@ class TestKnownTitleRegression(unittest.TestCase):
                 FaceEntry(slot=0, face_name="Times New Roman"),
             ),
         )
-        self.assertEqual(t.scrollbar_flags, 0)
+        self.assertEqual(page.scrollbar_flags, 0)
 
     def test_controls_is_a_single_caption(self):
         t = load_title(_TITLE_4)
-        self.assertEqual(len(t.controls), 1)
-        cap = t.controls[0]
+        controls = t.pages[0].controls
+        self.assertEqual(len(controls), 1)
+        cap = controls[0]
         self.assertIsInstance(cap, CaptionControl)
         self.assertEqual(cap.seq, 1)
         self.assertEqual(cap.flags, 0x80000000)
@@ -78,7 +81,8 @@ class TestKnownTitleRegression(unittest.TestCase):
 
     def test_captions_property_filters_controls(self):
         t = load_title(_TITLE_4)
-        self.assertEqual(t.captions, (t.controls[0],))
+        page = t.pages[0]
+        self.assertEqual(page.captions, (page.controls[0],))
 
     def test_missing_path_returns_none(self):
         self.assertIsNone(load_title(pathlib.Path("/tmp/__no_ttl__.ttl")))
@@ -96,9 +100,10 @@ class TestMsnTodayDecodes(unittest.TestCase):
     def test_title_top_level(self):
         self.assertEqual(self.title.title_name, "MSN Today")
         self.assertEqual(self.title.caption, "MSN Today")
-        self.assertEqual(self.title.page_pixel_w, 640)
-        self.assertEqual(self.title.page_pixel_h, 480)
-        self.assertEqual(self.title.scrollbar_flags, 3)
+        page = self.title.pages[0]
+        self.assertEqual(page.page_pixel_w, 640)
+        self.assertEqual(page.page_pixel_h, 480)
+        self.assertEqual(page.scrollbar_flags, 3)
 
     def test_cstylesheet_ck_deflated(self):
         # CK-decompressed CStyleSheet exposes Courier/Arial/Times slots.
@@ -108,7 +113,7 @@ class TestMsnTodayDecodes(unittest.TestCase):
         self.assertIn("Times New Roman", names)
 
     def test_controls_are_story_and_shortcut(self):
-        controls = self.title.controls
+        controls = self.title.pages[0].controls
         self.assertEqual(len(controls), 2)
         self.assertIsInstance(controls[0], StoryControl)
         self.assertEqual(controls[0].name, "Story1R")
@@ -126,17 +131,16 @@ class TestMsnTodayDecodes(unittest.TestCase):
         # straddles the descriptor-claimed 91 B boundary — the visible
         # portion ends at "Events." — which documents that the `size`
         # field is not a perfect block extent for compound controls.
-        story = self.title.controls[0]
-        shortcut = self.title.controls[1]
+        controls = self.title.pages[0].controls
+        story, shortcut = controls[0], controls[1]
         self.assertEqual(len(story.raw_block), 142)
         self.assertEqual(len(shortcut.raw_block), 91)
         self.assertIn(b"\x0cHomepage.bdf", story.raw_block)
         self.assertIn(b"Calendar of Events", shortcut.raw_block)
 
     def test_captions_is_empty(self):
-        # Existing lower_to_payload path is exercised via the empty-page
-        # branch; no CaptionControls present in MSN Today.
-        self.assertEqual(self.title.captions, ())
+        # No CaptionControls present in MSN Today's single page.
+        self.assertEqual(self.title.pages[0].captions, ())
 
 
 @unittest.skipUnless(
@@ -155,12 +159,13 @@ class TestShowcaseTitle(unittest.TestCase):
 
     def test_page_background_is_yellow(self):
         # Showcase pinned the Background color picker to RGB(255,255,0).
-        self.assertEqual(self.title.page_bg, 0x0000FFFF)
+        page = self.title.pages[0]
+        self.assertEqual(page.page_bg, 0x0000FFFF)
         # Vertical scrollbar only (bit 1).
-        self.assertEqual(self.title.scrollbar_flags, 2)
+        self.assertEqual(page.scrollbar_flags, 2)
 
     def test_five_controls_in_seq_order(self):
-        controls = self.title.controls
+        controls = self.title.pages[0].controls
         self.assertEqual(len(controls), 5)
         names_seqs = [(c.name, c.seq, type(c)) for c in controls]
         self.assertEqual(
@@ -177,7 +182,7 @@ class TestShowcaseTitle(unittest.TestCase):
     def test_rects_match_showcase_doc(self):
         # Twips coordinates per docs/cvform-page-objects.md showcase
         # site table.
-        controls = {c.name: c for c in self.title.controls}
+        controls = {c.name: c for c in self.title.pages[0].controls}
         self.assertEqual(controls["Story1R"].xy_twips, (3175, 2328))
         self.assertEqual(controls["Audio1R"].xy_twips, (211, 2328))
         self.assertEqual(controls["CaptionButton1R"].xy_twips, (9101, 846))
@@ -318,20 +323,58 @@ class TestMsnTodayStoryContentChase(unittest.TestCase):
         self.assertEqual(self.story.content.header_byte_1, 0x00)
 
 
-class TestLoadedTitleBackcompatShims(unittest.TestCase):
-    """`LoadedTitle.{controls,captions,page_bg,page_pixel_w,
-    page_pixel_h,scrollbar_flags}` all delegate to `pages[0]`. PR3
-    drops the shims when `lower_to_payload` lifts to per-page emission."""
+class TestLowerToPayloadMultiPage(unittest.TestCase):
+    """PR3 emits one sec06 record per page (152 B each) in section 3,
+    plus a section 0 descriptor for every CaptionControl across all
+    pages. Scrollbar collapse rule (`_scrollbar_flags_to_sec06_flag`)
+    fires on the per-page `+0x48` byte: page 0 of 4.ttl is no-scroll
+    (collapse), pages 1/2 set vertical/horizontal (no NSR collapse)."""
 
-    def test_shims_alias_pages_zero(self):
+    def test_4ttl_emits_three_sec06_records(self):
+        from server.services.medview.ttl_loader import _SEC06_RECORD_SIZE
         t = load_title(_TITLE_4)
-        page0 = t.pages[0]
-        self.assertIs(t.controls, page0.controls)
-        self.assertEqual(t.page_bg, page0.page_bg)
-        self.assertEqual(t.page_pixel_w, page0.page_pixel_w)
-        self.assertEqual(t.page_pixel_h, page0.page_pixel_h)
-        self.assertEqual(t.scrollbar_flags, page0.scrollbar_flags)
-        self.assertEqual(t.captions, page0.captions)
+        body = lower_to_payload(t)
+        # section 0 length is u16 prefixed. Walk to section 3 (4th
+        # length-prefixed block, after sec0 / sec07 empty / sec08 empty).
+        pos = 0
+        for _ in range(3):
+            seclen = int.from_bytes(body[pos:pos + 2], "little")
+            pos += 2 + seclen
+        sec06_len = int.from_bytes(body[pos:pos + 2], "little")
+        self.assertEqual(sec06_len, 3 * _SEC06_RECORD_SIZE)
+
+    def test_msn_today_emits_one_sec06(self):
+        from server.services.medview.ttl_loader import _SEC06_RECORD_SIZE
+        t = load_title(_TITLE_MSN_TODAY)
+        body = lower_to_payload(t)
+        pos = 0
+        for _ in range(3):
+            seclen = int.from_bytes(body[pos:pos + 2], "little")
+            pos += 2 + seclen
+        sec06_len = int.from_bytes(body[pos:pos + 2], "little")
+        self.assertEqual(sec06_len, _SEC06_RECORD_SIZE)
+
+    def test_scrollbar_collapse_flag_per_page(self):
+        from server.services.medview.ttl_loader import (
+            _SEC06_FLAG_INNER_RECT_ABSOLUTE,
+            _SEC06_FLAG_NSR_ANCHOR_BOTTOM,
+            _SEC06_RECORD_SIZE,
+            _build_sec06_record,
+        )
+        t = load_title(_TITLE_4)
+        records = [_build_sec06_record(p, t) for p in t.pages]
+        # Page 0 (Test Page, scrollbar=0): collapse set.
+        self.assertEqual(
+            records[0][0x48],
+            _SEC06_FLAG_INNER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM,
+        )
+        # Page 1 (Vertical scrollbar=2): collapse cleared, absolute set.
+        self.assertEqual(records[1][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
+        # Page 2 (Horizontal scrollbar=1): degrades to V, collapse cleared.
+        self.assertEqual(records[2][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
+        # All records are 152 B.
+        for rec in records:
+            self.assertEqual(len(rec), _SEC06_RECORD_SIZE)
 
 
 class TestBbctlClsidDispatch(unittest.TestCase):
@@ -402,6 +445,58 @@ class TestShowcaseMultiPage(unittest.TestCase):
         # CContent stream in this fixture — heuristic still extracts a
         # proxy_key when one is present, or leaves both None.
         self.assertIsNotNone(story.raw_block)
+
+
+class TestBuildAllBmBaggage(unittest.TestCase):
+    """Per-page bm baggage. Each page produces a `bm<idx>` entry; pages
+    with captions or resolved Story text get a kind=8 metafile,
+    otherwise a kind=5 1bpp raster."""
+
+    def test_4ttl_keys_are_bm0_bm1_bm2(self):
+        t = load_title(_TITLE_4)
+        bags = build_all_bm_baggage(t)
+        self.assertEqual(sorted(bags.keys()), ["bm0", "bm1", "bm2"])
+        # Each carries the page's Caption "Test caption".
+        for name, blob in bags.items():
+            self.assertIn(b"Test caption", blob, name)
+
+    def test_msn_today_story_text_in_bm0_metafile(self):
+        t = load_title(_TITLE_MSN_TODAY)
+        bags = build_all_bm_baggage(t)
+        self.assertIn("bm0", bags)
+        # Resolved TextRuns body's prose substring lands inside the
+        # kind=8 metafile's TextOut payload.
+        self.assertIn(b"This is an example of content", bags["bm0"])
+
+    def test_legacy_build_bm0_baggage_is_page0(self):
+        t = load_title(_TITLE_4)
+        self.assertEqual(build_bm0_baggage(t), build_all_bm_baggage(t)["bm0"])
+
+
+class TestTitleOpenMetadataMultiPage(unittest.TestCase):
+    """`derive_title_open_metadata` floors topic_count at max(1, pages)
+    and produces nonzero deterministic cache headers."""
+
+    def test_topic_count_matches_page_count(self):
+        from server.services.medview.payload import derive_title_open_metadata
+        t = load_title(_TITLE_4)
+        md = derive_title_open_metadata(
+            page_count=len(t.pages),
+            page_pixel_w=t.pages[0].page_pixel_w,
+            page_pixel_h=t.pages[0].page_pixel_h,
+            title_name=t.title_name,
+        )
+        self.assertEqual(md.topic_count, 3)
+        self.assertNotEqual(md.cache_header0, 0)
+        self.assertNotEqual(md.cache_header1, 0)
+
+    def test_empty_title_falls_back_to_one(self):
+        from server.services.medview.payload import derive_title_open_metadata
+        md = derive_title_open_metadata(
+            page_count=0, page_pixel_w=640, page_pixel_h=480,
+            title_name="",
+        )
+        self.assertEqual(md.topic_count, 1)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ from .payload import (
     BM0_BAGGAGE,
     TITLE_OPEN_BODY,
     TITLE_OPEN_METADATA,
+    TitleOpenMetadata,
 )
 
 # --------------------------------------------------------------------------
@@ -69,18 +70,23 @@ def pre_notify_title() -> bytes:
 # --------------------------------------------------------------------------
 
 
-def open_title(body: bytes = TITLE_OPEN_BODY) -> bytes:
+def open_title(
+    body: bytes = TITLE_OPEN_BODY,
+    metadata: TitleOpenMetadata = TITLE_OPEN_METADATA,
+) -> bytes:
     """`0x01` — TitleOpen. Static fields per spec §0x01 then `0x86` +
-    9-section title body. Caller may inject a per-session body."""
-    md = TITLE_OPEN_METADATA
+    9-section title body. Caller may inject a per-session body and a
+    per-title `TitleOpenMetadata` (PR3 wires per-page `topic_count` +
+    deterministic cache header derivation per
+    `payload.derive_title_open_metadata`)."""
     static = (
-        build_tagged_reply_byte(md.title_slot)
-        + build_tagged_reply_byte(md.file_system_mode)
-        + build_tagged_reply_dword(md.contents_va)
-        + build_tagged_reply_dword(md.addr_base)
-        + build_tagged_reply_dword(md.topic_count)
-        + build_tagged_reply_dword(md.cache_header0)
-        + build_tagged_reply_dword(md.cache_header1)
+        build_tagged_reply_byte(metadata.title_slot)
+        + build_tagged_reply_byte(metadata.file_system_mode)
+        + build_tagged_reply_dword(metadata.contents_va)
+        + build_tagged_reply_dword(metadata.addr_base)
+        + build_tagged_reply_dword(metadata.topic_count)
+        + build_tagged_reply_dword(metadata.cache_header0)
+        + build_tagged_reply_dword(metadata.cache_header1)
     )
     return _dynamic_complete(static, body)
 
@@ -237,26 +243,37 @@ def get_remote_fs_error() -> bytes:
 # --------------------------------------------------------------------------
 
 
-_BM0_NAMES = frozenset({"bm0"})
+_DEFAULT_BAGGAGE_MAP: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
 
 
-def baggage_size(canonical_name: str, container_len: int = len(BM0_BAGGAGE)) -> int | None:
-    """Return baggage byte count for a canonical name, or None to reject.
-
-    `container_len` defaults to the hardcoded MSN Today bm0; caller may
-    pass a per-session container length.
-    """
-    if canonical_name in _BM0_NAMES:
-        return container_len
-    return None
+def baggage_size(
+    canonical_name: str,
+    baggage_map: dict[str, bytes] | None = None,
+) -> int | None:
+    """Baggage byte count for a canonical name, or None when the name
+    isn't in the active map. `baggage_map` defaults to the hardcoded
+    MSN Today bm0; handler injects a per-load
+    `{"bm0": ..., "bm1": ..., ...}` for multi-page titles."""
+    bm = baggage_map if baggage_map is not None else _DEFAULT_BAGGAGE_MAP
+    container = bm.get(canonical_name)
+    if container is None:
+        return None
+    return len(container)
 
 
 def baggage_chunk(
+    name: str,
     offset: int,
     count: int,
     max_chunk: int,
-    container: bytes = BM0_BAGGAGE,
+    baggage_map: dict[str, bytes] | None = None,
 ) -> bytes:
-    """Slice `container[offset : offset + min(count, max_chunk)]`."""
+    """Slice `baggage_map[name][offset : offset + min(count, max_chunk)]`.
+    Returns empty bytes when `name` is missing — caller should reject
+    the read with `read_remote_hfs_file_error()` in that case."""
+    bm = baggage_map if baggage_map is not None else _DEFAULT_BAGGAGE_MAP
+    container = bm.get(name)
+    if container is None:
+        return b""
     end = min(offset + min(count, max_chunk), len(container))
     return container[offset:end]

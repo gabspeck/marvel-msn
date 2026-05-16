@@ -155,3 +155,42 @@ Open follow-ups (not yet mapped):
 - Custom `0x413` (Set-BackColor): `View->[+0x20] = wParam; InvalidateRect`.
 
 When sec06+0x5B equals `-1`, `MosView_BuildContainerHierarchy` skips the View+0x20 write — leaving it at `FUN_7f3c7c8a` zero-init = black. The black is invisible because the inner `MosChildView` panes (which use `MosView_SetPaneBackColor` with sec06+0x78 / +0x7C) paint immediately over the entire client area.
+
+## Multi-page lowering (PR3)
+
+Server emits **one sec06 record per `LoadedPage`** concatenated into
+section 3. The per-record fields are sourced from the page (geometry /
+background / scrollbar flag), while the caption / desktop window
+position stay title-level (CBFrame). 4.ttl now ships three sec06
+records (456 B in section 3 vs. the single 152 B from PR1).
+
+### Scrollbar collapse rule
+
+The `+0x48` flag byte derives from the page's CVForm `scrollbar_flags`
+(bit 0 = H, bit 1 = V):
+
+| `scrollbar_flags` | sec06 `+0x48` | Effect |
+|---|---|---|
+| `0` (none) | `INNER_RECT_ABSOLUTE \| NSR_ANCHOR_BOTTOM` | NSR claims the full pane; no scroll UI |
+| `2` (V) | `INNER_RECT_ABSOLUTE` (no NSR collapse) | SR pane carries the vertical scrollbar |
+| `3` (V \| H) | `INNER_RECT_ABSOLUTE` | V dominates; MOSVIEW does not model H |
+| `1` (H only) | `INNER_RECT_ABSOLUTE` (with WARN log) | Degraded to V-mode — MOSVIEW ignores H |
+
+UNVERIFIED: 86Box round-trip on a multi-page TTL. Logic is structural;
+NSR collapse and inner-rect absolute mode are both pinned via SoftIce
+on `NavigateMosViewPane` (single-page case), so the per-page extension
+is the natural lift.
+
+### Section 3 size cap
+
+The section's `u16` length prefix caps at 65535 bytes ⇒ 430 sec06
+records max. `lower_to_payload` raises `ValueError` past this limit
+(`_SEC06_MAX_RECORDS` in `ttl_loader.py`). No current fixture comes
+close.
+
+### Caption / outer rect remain title-level
+
+Every sec06 record gets the same `caption` and `outer_rect`
+(`title.window_rect`). The wire allows per-record overrides; PR3
+doesn't exercise that because BBDESIGN's "Window properties" dialog
+is title-level — pages don't carry their own caption/position.

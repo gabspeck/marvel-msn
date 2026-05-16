@@ -91,8 +91,19 @@ from .mvb_loader import (
     load_mvb,
     lower_mvb_to_payload,
 )
-from .payload import BM0_BAGGAGE, TITLE_OPEN_BODY, TITLE_OPEN_METADATA
-from .ttl_loader import LoadedTitle, build_bm0_baggage, load_title, lower_to_payload
+from .payload import (
+    BM0_BAGGAGE,
+    TITLE_OPEN_BODY,
+    TITLE_OPEN_METADATA,
+    TitleOpenMetadata,
+    derive_title_open_metadata,
+)
+from .ttl_loader import (
+    LoadedTitle,
+    build_all_bm_baggage,
+    load_title,
+    lower_to_payload,
+)
 
 _TITLES_DIR = pathlib.Path(__file__).resolve().parents[4] / "resources" / "titles"
 _MVB_FALLBACK_PATH = _TITLES_DIR / "NO_NSR.MVB"
@@ -102,6 +113,11 @@ log = logging.getLogger(__name__)
 
 _HFS_READ_CHUNK_MAX = 0xF000
 _BAGGAGE_HANDLE_BM0 = 0x42
+# Per-page baggage handle base. Engine treats handles as opaque u8;
+# `0x42` is the bm0 sentinel kept for log continuity. Subsequent pages
+# allocate sequentially (`0x43` = bm1, `0x44` = bm2, …) up to the
+# byte range — practical limit << wire spec.
+_BAGGAGE_HANDLE_BASE = _BAGGAGE_HANDLE_BM0
 
 # Bound for the hex preview of dynamic payloads in trace logs. Keeps the
 # line bounded for big bodies (TitleOpen ~6 KB, baggage chunks up to
@@ -425,7 +441,9 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
     cached chunk into many rows to fill the pane (~13 stacked rows from
     a single push, screenshot 2026-05-14).
     """
-    if handler.loaded_title is not None and handler.loaded_title.captions:
+    if handler.loaded_title is not None and any(
+        page.captions for page in handler.loaded_title.pages
+    ):
         return build_case3_bf_chunk(title_slot, key)
     if handler.loaded_mvb is not None and not handler._served_first_paragraph:
         handler._served_first_paragraph = True
@@ -535,11 +553,17 @@ class MEDVIEWHandler:
         self.svc_name = svc_name
         self._subscriptions: dict[int, tuple[int, int]] = {}
         self._open_title_slots: set[int] = set()
-        self._baggage_handles: set[int] = set()
+        # Per-baggage-name handle table. Engine probes `wsprintfA("|bm%d",
+        # idx)` per page; handler responds with a unique u8 handle per
+        # name and looks the name up on subsequent reads. bm0's handle
+        # is pinned to `_BAGGAGE_HANDLE_BM0` even pre-OPEN so HFS_READ
+        # tests / call sites that bypass OPEN still resolve.
+        self._baggage_handles: dict[int, str] = {_BAGGAGE_HANDLE_BM0: "bm0"}
         self.loaded_title: LoadedTitle | None = None
         self.loaded_mvb: LoadedMVB | None = None
         self.title_body: bytes = TITLE_OPEN_BODY
-        self.bm0_container: bytes = BM0_BAGGAGE
+        self.baggage_map: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
+        self.title_metadata: TitleOpenMetadata = TITLE_OPEN_METADATA
         self._served_first_paragraph: bool = False
 
     # --- BootstrapDiscovery ----------------------------------------
@@ -724,7 +748,14 @@ class MEDVIEWHandler:
             self.loaded_title = title
             self.loaded_mvb = None
             self.title_body = lower_to_payload(title)
-            self.bm0_container = build_bm0_baggage(title)
+            self.baggage_map = build_all_bm_baggage(title)
+            first_page = title.pages[0]
+            self.title_metadata = derive_title_open_metadata(
+                page_count=len(title.pages),
+                page_pixel_w=first_page.page_pixel_w,
+                page_pixel_h=first_page.page_pixel_h,
+                title_name=title.title_name or title.caption,
+            )
             caption = title.caption or title.title_name
             source = "ttl"
         else:
@@ -733,24 +764,29 @@ class MEDVIEWHandler:
                 self.loaded_title = None
                 self.loaded_mvb = mvb
                 self.title_body = lower_mvb_to_payload(mvb)
-                self.bm0_container = build_mvb_bm0_baggage(mvb)
+                self.baggage_map = {"bm0": build_mvb_bm0_baggage(mvb)}
+                self.title_metadata = TITLE_OPEN_METADATA
                 caption = mvb.caption
                 source = "mvb"
             else:
                 self.loaded_title = None
                 self.loaded_mvb = None
                 self.title_body = TITLE_OPEN_BODY
-                self.bm0_container = BM0_BAGGAGE
+                self.baggage_map = {"bm0": BM0_BAGGAGE}
+                self.title_metadata = TITLE_OPEN_METADATA
                 caption = None
                 source = "empty"
 
         log.info(
             "open_title req_id=%d slot=0x%02x token=%r deid=%r source=%s "
-            "caption=%r body_len=%d bm0_len=%d",
+            "caption=%r body_len=%d pages=%d topic_count=%d baggage=%s",
             request_id, slot, token, deid, source, caption,
-            len(self.title_body), len(self.bm0_container),
+            len(self.title_body),
+            len(title.pages) if title is not None else 0,
+            self.title_metadata.topic_count,
+            ",".join(f"{k}={len(v)}" for k, v in self.baggage_map.items()),
         )
-        return replies.open_title(self.title_body)
+        return replies.open_title(self.title_body, metadata=self.title_metadata)
 
     def _handle_close_title(self, request_id, payload) -> bytes:
         send_params, _ = parse_request_params(payload)
@@ -765,8 +801,10 @@ class MEDVIEWHandler:
                 self.loaded_title = None
                 self.loaded_mvb = None
                 self.title_body = TITLE_OPEN_BODY
-                self.bm0_container = BM0_BAGGAGE
+                self.baggage_map = {"bm0": BM0_BAGGAGE}
+                self.title_metadata = TITLE_OPEN_METADATA
                 self._served_first_paragraph = False
+                self._baggage_handles = {_BAGGAGE_HANDLE_BM0: "bm0"}
         return replies.close_title()
 
     def _handle_get_title_info_remote(self, request_id, payload) -> bytes:
@@ -781,8 +819,8 @@ class MEDVIEWHandler:
 
     def _handle_open_remote_hfs_file(self, request_id, payload) -> bytes:
         name = _extract_baggage_name(payload)
-        canonical = name.lstrip("|")  # `wsprintfA("|bm%d", idx)` form
-        size = replies.baggage_size(canonical, container_len=len(self.bm0_container))
+        canonical = name.lstrip("|")                       # `wsprintfA("|bm%d", idx)` form
+        size = replies.baggage_size(canonical, baggage_map=self.baggage_map)
         log.info(
             "open_remote_hfs_file req_id=%d name=%r canonical=%r accept=%r",
             request_id, name, canonical, size is not None,
@@ -790,23 +828,41 @@ class MEDVIEWHandler:
         # Reject the engine's `|bm%d` first probe and any unknown name.
         if size is None or name.startswith("|"):
             return replies.open_remote_hfs_file_reject()
-        self._baggage_handles.add(_BAGGAGE_HANDLE_BM0)
-        return replies.open_remote_hfs_file_accept(_BAGGAGE_HANDLE_BM0, size)
+        # Allocate (or reuse) a stable handle per name. bm0 keeps the
+        # legacy `0x42` for log continuity; subsequent pages allocate
+        # sequentially.
+        handle = next(
+            (h for h, n in self._baggage_handles.items() if n == canonical),
+            None,
+        )
+        if handle is None:
+            if canonical == "bm0":
+                handle = _BAGGAGE_HANDLE_BM0
+            else:
+                used = set(self._baggage_handles)
+                handle = _BAGGAGE_HANDLE_BASE
+                while handle in used:
+                    handle += 1
+            self._baggage_handles[handle] = canonical
+        return replies.open_remote_hfs_file_accept(handle, size)
 
     def _handle_read_remote_hfs_file(self, request_id, payload) -> bytes:
         handle, count, offset = _extract_hfs_read_args(payload)
-        if handle != _BAGGAGE_HANDLE_BM0 or count <= 0:
+        name = self._baggage_handles.get(handle) if handle is not None else None
+        if name is None or count <= 0:
             log.info(
                 "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d → error",
                 request_id, handle, count, offset,
             )
             return replies.read_remote_hfs_file_error()
         chunk = replies.baggage_chunk(
-            offset, count, _HFS_READ_CHUNK_MAX, container=self.bm0_container,
+            name, offset, count, _HFS_READ_CHUNK_MAX,
+            baggage_map=self.baggage_map,
         )
         log.info(
-            "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d returned=%d",
-            request_id, handle, count, offset, len(chunk),
+            "read_remote_hfs_file req_id=%d handle=%r name=%r count=%d "
+            "offset=%d returned=%d",
+            request_id, handle, name, count, offset, len(chunk),
         )
         return replies.read_remote_hfs_file_chunk(chunk)
 

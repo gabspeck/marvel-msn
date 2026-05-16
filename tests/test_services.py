@@ -59,7 +59,7 @@ from server.services.logsrv import (
     build_logsrv_service_map_payload,
 )
 from server.services.medview import MEDVIEWHandler
-from server.services.medview.payload import BM0_BAGGAGE, TITLE_OPEN_BODY
+from server.services.medview.payload import BM0_BAGGAGE
 from server.services.olregsrv import (
     OLREGSRVHandler,
     build_olregsrv_service_map_payload,
@@ -2434,6 +2434,95 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertIsNotNone(pkts)
         self.assertGreater(len(pkts), 1)
         self.assertTrue(all(len(pkt) <= 1024 for pkt in pkts))
+
+
+class TestMEDVIEWPerPageBaggageDispatch(unittest.TestCase):
+    """PR3 wires the handler so per-page baggage is keyed by name.
+    Tests load a multi-page TTL into the handler and check baggage
+    dispatch by `bm0` / `bm1` / `bm2` names."""
+
+    def test_4ttl_load_seeds_three_baggage_names(self):
+        import pathlib
+
+        from server.services.medview.handler import MEDVIEWHandler
+        from server.services.medview.ttl_loader import (
+            build_all_bm_baggage,
+            load_title,
+        )
+
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        title = load_title(
+            pathlib.Path(__file__).resolve().parents[1]
+            / "resources" / "titles" / "4.ttl"
+        )
+        self.assertIsNotNone(title)
+        handler.loaded_title = title
+        handler.baggage_map = build_all_bm_baggage(title)
+        self.assertEqual(sorted(handler.baggage_map.keys()), ["bm0", "bm1", "bm2"])
+
+    def test_open_remote_hfs_file_accepts_bm1_after_bm0(self):
+        import pathlib
+
+        from server.config import MEDVIEW_SELECTOR_HFS_OPEN
+        from server.services.medview.handler import MEDVIEWHandler
+        from server.services.medview.ttl_loader import (
+            build_all_bm_baggage,
+            load_title,
+        )
+
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        title = load_title(
+            pathlib.Path(__file__).resolve().parents[1]
+            / "resources" / "titles" / "4.ttl"
+        )
+        handler.baggage_map = build_all_bm_baggage(title)
+
+        # OPEN "bm1" → accept (4.ttl has 3 pages).
+        # tag=0x04 var "bm1\0" (4B, length 0x84) — copy of bm0 form with last char incremented.
+        open_bm1 = bytes.fromhex("01 01 04 84 62 6d 31 00 01 02 81 83")
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 20, open_bm1, 5, 5,
+        )
+        self.assertIsNotNone(pkts)
+        # Decode reply: 0x87 0x81 <handle> 0x83 <size>.
+        parsed = parse_packet(pkts[0][:-1])
+        reply = parsed.payload[8:]
+        self.assertEqual(reply[0], TAG_END_STATIC)
+        self.assertEqual(reply[1], 0x81)
+        handle = reply[2]
+        self.assertNotEqual(handle, 0)
+        self.assertNotEqual(handle, 0x42)                  # bm1 ≠ bm0 handle
+        self.assertEqual(reply[3], 0x83)
+        size = struct.unpack("<I", reply[4:8])[0]
+        self.assertEqual(size, len(handler.baggage_map["bm1"]))
+
+    def test_open_remote_hfs_file_rejects_unknown_name(self):
+        import pathlib
+
+        from server.config import MEDVIEW_SELECTOR_HFS_OPEN
+        from server.services.medview.handler import MEDVIEWHandler
+        from server.services.medview.ttl_loader import (
+            build_all_bm_baggage,
+            load_title,
+        )
+
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        title = load_title(
+            pathlib.Path(__file__).resolve().parents[1]
+            / "resources" / "titles" / "4.ttl"
+        )
+        handler.baggage_map = build_all_bm_baggage(title)
+
+        # OPEN "bm9\0" (no such page — 4.ttl only has bm0/bm1/bm2).
+        open_bm9 = bytes.fromhex("01 01 04 84 62 6d 39 00 01 02 81 83")
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 21, open_bm9, 5, 5,
+        )
+        parsed = parse_packet(pkts[0][:-1])
+        reply = parsed.payload[8:]
+        self.assertEqual(reply[0], TAG_END_STATIC)
+        self.assertEqual(reply[1], 0x81)
+        self.assertEqual(reply[2], 0x00)                   # reject handle=0
 
 
 if __name__ == "__main__":
