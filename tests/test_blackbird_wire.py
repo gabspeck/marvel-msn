@@ -498,20 +498,44 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         expected[0] = 0xBF
         expected[1] = 0x01
         expected[2:4] = bytes.fromhex("4000")
+        # Prev/next contentsToken sentinels — see `_stamp_chain_terminators`.
+        # name_buf[+4] (= chunk[8:12]) is read by HfcNextPrevHfc on leading
+        # probes; name_buf[+0xC] (= chunk[16:20]) on trailing probes. 0xFFFFFFFE
+        # forces cache miss → 0x16 RPC → 0xA5/0x3F3 reply → seek loop sees
+        # leading-end and clears the V scrollbar.
+        expected[8:12] = b"\xFE\xFF\xFF\xFF"
         expected[12:16] = struct.pack("<I", 0xCAFEBABE)
+        expected[16:20] = b"\xFE\xFF\xFF\xFF"
         expected[4 + 0x26:4 + 0x29] = bytes.fromhex("010e80")
         expected[4 + 0x29:4 + 0x2F] = bytes.fromhex("008000000000")
         expected[4 + 0x2F] = 0xFF
         expected[4 + 0x30:4 + 0x3A] = b"MSN Today\x00"
-        # Bytes 0x3A..0x43 in name_buf and 0x44..0x7F in content block
-        # remain zero.
+        # Content block @ +0x14 carries the unconditional NSR-collapse
+        # sentinel — `MVCL14N!fMVHasNSR` reads `viewer+0x4c == -1`, and
+        # the content block lands at `viewer+0x38` on cache hit. Every
+        # Blackbird-authored 0xBF chunk stamps -1 here.
+        expected[4 + 0x40 + 0x14:4 + 0x40 + 0x18] = b"\xFF\xFF\xFF\xFF"
         self.assertEqual(chunk, bytes(expected))
 
-    def test_chunk_content_block_is_zero(self):
+    def test_chunk_stamps_chain_terminators(self):
+        # Prev/next contentsToken fields must be 0xFFFFFFFE so the engine's
+        # HfcNextPrevHfc walk misses cache and reaches the server's 0x16
+        # 0xA5/0x3F3 reply (instead of hitting the chunk's own key=0 entry
+        # and re-parsing the same slot forever).
+        chunk = self._chunk(key=0xCAFEBABE)
+        self.assertEqual(chunk[8:12], b"\xFE\xFF\xFF\xFF")
+        self.assertEqual(chunk[16:20], b"\xFE\xFF\xFF\xFF")
+
+    def test_chunk_content_block_is_zero_except_nsr_sentinel(self):
         chunk = self._chunk()
-        # Content block = chunk[0x44..0x7F]; bytes +0x2C / +0x34 of the
-        # block are HGLOBAL slots, kept NULL by zeros.
-        self.assertEqual(chunk[0x44:], b"\x00" * 60)
+        # Content block = chunk[0x44..0x7F]. The +0x14 slot maps to
+        # `viewer+0x4c` and is stamped 0xFFFFFFFF to flag "no NSR"
+        # (see `_stamp_no_nsr` in wire.py). The rest stays zero —
+        # bytes +0x2C / +0x34 are HGLOBAL slots, kept NULL.
+        content = chunk[0x44:]
+        self.assertEqual(content[:0x14], b"\x00" * 0x14)
+        self.assertEqual(content[0x14:0x18], b"\xFF\xFF\xFF\xFF")
+        self.assertEqual(content[0x18:], b"\x00" * (60 - 0x18))
 
     def test_empty_text_skip_row_chunk(self):
         # Empty text is intentional for the no-content fallback:
@@ -571,8 +595,12 @@ class TestCase1BfChunkExtended(unittest.TestCase):
         self.assertEqual(chunk[4 + 0x2F:4 + 0x33], bytes.fromhex("800000ff"))  # style 0, then end
         self.assertEqual(chunk[4 + 0x33], 0)                 # leading NUL runs the style control
         self.assertEqual(chunk[4 + 0x34:4 + 0x3A], b"hello\x00")
-        # Content block is appended at the end (after the larger name_buf).
-        self.assertEqual(chunk[-60:], b"\x00" * 60)
+        # Content block is appended after the larger name_buf; +0x14
+        # carries the unconditional NSR-collapse sentinel, rest zero.
+        content = chunk[-60:]
+        self.assertEqual(content[:0x14], b"\x00" * 0x14)
+        self.assertEqual(content[0x14:0x18], b"\xFF\xFF\xFF\xFF")
+        self.assertEqual(content[0x18:], b"\x00" * (60 - 0x18))
         # Key still in the canonical name_buf+0x08 slot (= chunk[12..16]).
         self.assertEqual(chunk[12:16], struct.pack("<I", 0xDEADBEEF))
 
@@ -587,7 +615,18 @@ class TestCase3BfChunk(unittest.TestCase):
         self.assertEqual(struct.unpack("<I", chunk[12:16])[0], 0xCAFEBABE)
         self.assertEqual(chunk[4 + 0x26], 0x03)
         self.assertEqual(chunk[4 + 0x27:4 + 0x40], b"\x00" * 0x19)
-        self.assertEqual(chunk[0x44:], b"\x00" * 60)
+        # Content block @ +0x14 = NSR-collapse sentinel, rest zero.
+        content = chunk[0x44:]
+        self.assertEqual(content[:0x14], b"\x00" * 0x14)
+        self.assertEqual(content[0x14:0x18], b"\xFF\xFF\xFF\xFF")
+        self.assertEqual(content[0x18:], b"\x00" * (60 - 0x18))
+
+    def test_chunk_stamps_chain_terminators(self):
+        # See TestCase1BfChunkLegacy0x40.test_chunk_stamps_chain_terminators
+        # for the rationale — case-3 stamps the same sentinels.
+        chunk = build_case3_bf_chunk(title_byte=0x01, key=0xCAFEBABE)
+        self.assertEqual(chunk[8:12], b"\xFE\xFF\xFF\xFF")
+        self.assertEqual(chunk[16:20], b"\xFE\xFF\xFF\xFF")
 
 
 if __name__ == "__main__":

@@ -454,11 +454,20 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
 
 
 def _push_type0_a5_status(_handler, title_slot: int, key: int) -> bytes:
-    """0xA5 HfcStatusRecord for 0x16 (HfcNextPrevHfc). Keyed by
-    `(title_byte, contents_token)` so the engine's 30-s adjacent-topic
-    wait short-circuits on cache match."""
+    """0xA5 HfcStatusRecord for 0x16 (HfcNextPrevHfc).
+
+    `status=0x3F3` is the engine's end-of-content signal: when
+    `MVCL14N!MVSeekVerticalLayoutSlots` sees a leading/trailing fetch
+    return NULL with this status, it sets `hitLeadingEnd=true` (or the
+    trailing equivalent), exits the slot-append loop, and — when both
+    edges report 0x3F3 and `currentTailGapY < 0` — clears
+    `viewer[+0x84]` so the V-scroll bar disappears. The companion-side
+    of this contract is `_stamp_chain_terminators` in `blackbird/wire.py`,
+    which writes `0xFFFFFFFE` into BF chunks' prev/next contentsToken
+    fields so the engine's HfcNextPrevHfc path misses cache and reaches
+    this 0x16 reply."""
     return build_type0_status_record(
-        title_byte=title_slot, status=0, contents_token=key,
+        title_byte=title_slot, status=0x3F3, contents_token=key,
     )
 
 
@@ -874,7 +883,7 @@ class MEDVIEWHandler:
         )
         log.info("close_remote_hfs_file req_id=%d handle=%r", request_id, handle)
         if handle is not None:
-            self._baggage_handles.discard(handle)
+            self._baggage_handles.pop(handle, None)
         return replies.ack()
 
     # --- Cache-miss group (sync ack + async push) ------------------

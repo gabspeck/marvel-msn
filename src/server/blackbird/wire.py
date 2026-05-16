@@ -432,6 +432,7 @@ def build_case3_bf_chunk(
     chunk[2:4] = struct.pack("<H", name_size)
     chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
     chunk[4 + 0x26] = 0x03
+    _stamp_chain_terminators(chunk)
     _stamp_no_nsr(chunk, name_size)
     return bytes(chunk)
 
@@ -456,6 +457,37 @@ def _stamp_no_nsr(chunk: bytearray, name_size: int) -> None:
     """
     nsr_off = 4 + name_size + 0x14
     chunk[nsr_off:nsr_off + 4] = b"\xFF\xFF\xFF\xFF"
+
+
+# Sentinel contentsToken stamped into the prev/next link fields of every
+# self-contained BF chunk. Must be != 0 (avoid collision with the initial
+# va key) and != 0xFFFFFFFF (HfcCache_FindEntryAndPromote early-returns
+# NULL on that, leaving the engine spinning in HfcNextPrevHfc's retry
+# wait with errOut=0). Any other unused token works; 0xFFFFFFFE is
+# unambiguous.
+CHAIN_TERMINATOR_TOKEN = 0xFFFFFFFE
+
+
+def _stamp_chain_terminators(chunk: bytearray) -> None:
+    """Stamp wire+0x8 (prev contentsToken) and wire+0x10 (next contentsToken)
+    so the engine's adjacent-chunk walk terminates on the first probe.
+
+    `MVTTL14C!HfcNextPrevHfc @ 0x7e845abb` reads `name_buf[+4]` (= wire+0x8)
+    for direction=0 leading probes and `name_buf[+0xc]` (= wire+0x10) for
+    direction=1 trailing probes, then looks up that token in HfcCache.
+    Without these stamps both fields stay at 0, which collides with our
+    initial chunk's key=0 — every leading/trailing probe in
+    `MVSeekVerticalLayoutSlots` hits cache, re-parses the same chunk, and
+    appends a duplicate slot to the layout (visible as ever-growing
+    scrollbar range with each scroll click).
+
+    With wire+0x8 / wire+0x10 = 0xFFFFFFFE: cache miss → 0x16 wire RPC →
+    server replies `0xA5` with status `0x3F3` → seek loop sets
+    `hitLeadingEnd = true` → `viewer[+0x84]` (V-scroll flag) is cleared
+    when `currentTailGapY < 0`.
+    """
+    chunk[8:12] = struct.pack("<I", CHAIN_TERMINATOR_TOKEN)
+    chunk[16:20] = struct.pack("<I", CHAIN_TERMINATOR_TOKEN)
 
 
 def build_case2_topic_header_chunk(
@@ -1068,5 +1100,6 @@ def build_case1_bf_chunk(
     text_offset = case_offset + 3 + len(tlv) + len(control_stream)
     chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
 
+    _stamp_chain_terminators(chunk)
     _stamp_no_nsr(chunk, name_size)
     return bytes(chunk)
