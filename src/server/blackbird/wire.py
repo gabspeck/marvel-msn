@@ -217,20 +217,45 @@ def build_baggage_container(bitmap: bytes) -> bytes:
 # WMF function codes (META_*) used by `build_text_metafile`.
 _META_EOF = 0x0000
 _META_SETBKMODE = 0x0102
+_META_SETBKCOLOR = 0x0201
 _META_SETTEXTCOLOR = 0x0209
+_META_SETTEXTALIGN = 0x012E
 _META_SELECTOBJECT = 0x012D
 _META_DELETEOBJECT = 0x01F0
+_META_RECTANGLE = 0x041B
 _META_TEXTOUT = 0x0521
 _META_CREATEFONTINDIRECT = 0x02FB
+_META_CREATEBRUSHINDIRECT = 0x02FC
+_META_CREATEPENINDIRECT = 0x02FA
 
 _BKMODE_TRANSPARENT = 1
+_BKMODE_OPAQUE = 2
+
+# TA_LEFT/CENTER/RIGHT for WMF SetTextAlign. iAlignment values BBDESIGN
+# emits map directly to these (left=0, center=1, right=2). The TA_TOP
+# baseline (0x00) is implicit; we OR'd with TA_BASELINE (0x18) would
+# shift y coords — keep TA_TOP for now to match the kind=8 contract.
+_TA_LEFT = 0x00
+_TA_CENTER = 0x06
+_TA_RIGHT = 0x02
+_ALIGN_TO_TA = {0: _TA_LEFT, 1: _TA_CENTER, 2: _TA_RIGHT}
 
 
 @dataclass(frozen=True)
 class TextItem:
-    """One TextOut payload for `build_text_metafile`. Per-item font + color
-    fields let multi-caption pages render each caption with its own
-    Comic-Sans-MS-26pt-italic-red authoring."""
+    """One TextOut payload for `build_text_metafile`. Per-item font +
+    color + background + border fields let multi-caption pages render
+    each caption with its full BBDESIGN-authored styling.
+
+    `transparent=True` (default) keeps text background un-filled so the
+    engine's title background shows through gaps. Set False with a
+    non-default `back_color` to fill the caption's rect bounds before
+    painting text.
+
+    `frame_style != 0` or `bevel_width > 0` triggers border drawing
+    via the WMF Rectangle record; rect bounds default to a tight box
+    around the text origin if `rect_w / rect_h` are 0.
+    """
     x: int
     y: int
     text: str
@@ -238,7 +263,22 @@ class TextItem:
     font_height: int = -16          # negative = points, positive = device units
     font_weight: int = 400          # 400 = FW_NORMAL, 700 = FW_BOLD
     italic: bool = False
-    color_rgb: int = 0              # COLORREF (BGR0 little-endian DWORD)
+    underline: bool = False
+    strikeout: bool = False
+    charset: int = 0                # LOGFONTA lfCharSet
+    color_rgb: int = 0              # text COLORREF (RGB0 little-endian DWORD)
+    back_color: int = 0xFFFFFF      # background COLORREF (only used when not transparent)
+    transparent: bool = True
+    alignment: int = 0              # 0=left, 1=center, 2=right (BBDESIGN iAlignment)
+    rect_w: int = 0                 # pixels; 0 = no rect bounds (text-only mode)
+    rect_h: int = 0
+    bevel_width: int = 0            # pixels; 0 = no bevel
+    bevel_hilight: int = 0xFFFFFF   # bevel highlight COLORREF
+    bevel_shadow: int = 0           # bevel shadow COLORREF
+    frame_style: int = 0            # 0 = no frame, non-zero = draw frame
+    frame_color: int = 0            # frame border COLORREF
+    word_wrap: bool = False         # carried; text-flow not modeled by WMF (see build_text_metafile)
+    auto_size: bool = False         # carried; text-flow not modeled by WMF
 
 
 def _wmf_record(rd_function: int, params: bytes) -> bytes:
@@ -255,12 +295,44 @@ def _wmf_setbkmode(mode: int) -> bytes:
     return _wmf_record(_META_SETBKMODE, struct.pack("<H", mode & 0xFFFF))
 
 
+def _wmf_setbkcolor(color_rgb: int) -> bytes:
+    return _wmf_record(_META_SETBKCOLOR, struct.pack("<I", color_rgb & 0xFFFFFFFF))
+
+
+def _wmf_settextalign(mode: int) -> bytes:
+    return _wmf_record(_META_SETTEXTALIGN, struct.pack("<H", mode & 0xFFFF))
+
+
 def _wmf_selectobject(idx: int) -> bytes:
     return _wmf_record(_META_SELECTOBJECT, struct.pack("<H", idx & 0xFFFF))
 
 
 def _wmf_deleteobject(idx: int) -> bytes:
     return _wmf_record(_META_DELETEOBJECT, struct.pack("<H", idx & 0xFFFF))
+
+
+def _wmf_rectangle(left: int, top: int, right: int, bottom: int) -> bytes:
+    """META_RECTANGLE: bottom, right, top, left (i16) — opposite of GDI."""
+    return _wmf_record(_META_RECTANGLE, struct.pack("<hhhh", bottom, right, top, left))
+
+
+def _wmf_createbrushindirect(color_rgb: int, style: int = 0) -> bytes:
+    """META_CREATEBRUSHINDIRECT: LOGBRUSH = [u16 style][u32 color][u16 hatch].
+
+    `style=0` (BS_SOLID) with the color fills the brush. Caller selects
+    the brush by its object slot index before drawing.
+    """
+    logbrush = struct.pack("<HIH", style & 0xFFFF, color_rgb & 0xFFFFFFFF, 0)
+    return _wmf_record(_META_CREATEBRUSHINDIRECT, logbrush)
+
+
+def _wmf_createpenindirect(color_rgb: int, width: int = 1, style: int = 0) -> bytes:
+    """META_CREATEPENINDIRECT: LOGPEN = [u16 style][i16 w_x][i16 w_y][u32 color].
+
+    `style=0` (PS_SOLID). `width` in logical units.
+    """
+    logpen = struct.pack("<HhhI", style & 0xFFFF, width, 0, color_rgb & 0xFFFFFFFF)
+    return _wmf_record(_META_CREATEPENINDIRECT, logpen)
 
 
 def _wmf_eof() -> bytes:
@@ -290,6 +362,7 @@ def _wmf_createfontindirect(
     italic: bool = False,
     underline: bool = False,
     strikeout: bool = False,
+    charset: int = 0,
     face_name: str = "MS Sans Serif",
 ) -> bytes:
     """META_CREATEFONTINDIRECT record carrying a packed LOGFONTA.
@@ -312,7 +385,7 @@ def _wmf_createfontindirect(
         1 if italic else 0,
         1 if underline else 0,
         1 if strikeout else 0,
-        0,                  # CharSet (ANSI_CHARSET)
+        charset & 0xFF,     # CharSet (0 = ANSI_CHARSET)
         0,                  # OutPrecision (default)
         0,                  # ClipPrecision (default)
         0,                  # Quality (default)
@@ -322,21 +395,56 @@ def _wmf_createfontindirect(
 
 
 def build_text_metafile(items: list[TextItem]) -> bytes:
-    """Build a Win32 .WMF rendering text strings at absolute (x, y) with
-    per-item font + italic + color.
+    """Build a Win32 .WMF rendering each `TextItem` with full BBDESIGN
+    styling: per-item font (face/size/weight/italic/underline/strikeout/
+    charset), text color, text alignment (TA_LEFT/CENTER/RIGHT), full-
+    rect opaque background fill (`transparent=False`), and frame border
+    (`frame_style != 0` or `bevel_width > 0`).
 
-    Each `TextItem` gets its own `CreateFontIndirect` (one font object
-    per slot index 0..N-1) and a `SetTextColor` before its `TextOut`,
-    so a page with mixed captions (e.g. MS Sans Serif 12pt black plus
-    Comic Sans MS 26pt italic red) renders both faithfully. Fonts stay
-    alive until the end of the metafile so `NumberOfObjects` in the
-    METAHEADER equals the item count.
+    Per `TextItem`, the metafile may create up to 3 GDI objects:
+
+    - Font (always; 1 per item).
+    - Brush (only when `transparent=False`, for full-rect background
+      fill; created lazily before the TextOut, deleted after).
+    - Pen (only when `frame_style != 0` or `bevel_width > 0`, for the
+      border Rectangle; created and deleted around the Rectangle).
+
+    Object slot management: fonts get slots 0..N-1 (created up-front
+    so the METAHEADER's NumberOfObjects equals item count for the
+    static fonts). Brushes and pens are created on-demand inline,
+    each getting a fresh slot (N, N+1, ...) and deleted immediately
+    after use. The METAHEADER's NumberOfObjects is bumped to the
+    peak count.
+
+    Metafile layout per item:
+
+      1. SetBkMode TRANSPARENT (initially; flipped to OPAQUE per item
+         if `transparent=False`).
+      2. CreateFontIndirect × N (all fonts created up-front).
+      3. For each item:
+         a. (optional) CreateBrushIndirect(back_color), SelectObject,
+            CreatePenIndirect(frame_color, 1, PS_NULL or PS_SOLID),
+            SelectObject, Rectangle(left, top, right, bottom),
+            DeleteObject(pen), DeleteObject(brush) — when border or
+            background fill is non-default.
+         b. SetTextAlign per `alignment`.
+         c. SetBkColor + SetBkMode(OPAQUE) if `transparent=False`,
+            else SetBkMode(TRANSPARENT).
+         d. SetTextColor.
+         e. SelectObject(font_idx).
+         f. TextOut.
+      4. DeleteObject × N (fonts).
+      5. EOF.
+
+    Word-wrap and auto-size (BOOL fields on `TextItem`) are NOT lowered
+    here — they affect text flow which WMF doesn't model. The kind=8
+    baggage's `PlayMetaFile` is positional, not flow-based. Honoring
+    them would require server-side text wrapping into multiple TextOut
+    records at successive y-positions; that's deferred.
 
     Coordinates are in whatever logical units MOSVIEW sets up before
     `PlayMetaFile`. With the kind=8 baggage `mapmode=1` (MM_TEXT)
     contract, x/y are device pixels and the metafile draws untransformed.
-    `BkMode = TRANSPARENT` keeps the engine's title background showing
-    through gaps between glyphs.
     """
     records = bytearray()
     records += _wmf_setbkmode(_BKMODE_TRANSPARENT)
@@ -345,9 +453,52 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
             height=item.font_height,
             weight=item.font_weight,
             italic=item.italic,
+            underline=item.underline,
+            strikeout=item.strikeout,
+            charset=item.charset,
             face_name=item.font_face,
         )
+
+    next_obj_slot = len(items)
+    peak_objects = len(items)
+
     for idx, item in enumerate(items):
+        has_border = (
+            item.frame_style != 0 or item.bevel_width > 0
+        ) and item.rect_w > 0 and item.rect_h > 0
+        has_fill = not item.transparent and item.rect_w > 0 and item.rect_h > 0
+
+        if has_border or has_fill:
+            brush_slot = next_obj_slot
+            records += _wmf_createbrushindirect(
+                item.back_color, style=0 if has_fill else 1,  # 1 = BS_NULL
+            )
+            records += _wmf_selectobject(brush_slot)
+            pen_slot = brush_slot + 1
+            pen_color = item.frame_color if item.frame_style != 0 else item.bevel_shadow
+            pen_width = max(1, item.bevel_width) if item.bevel_width > 0 else 1
+            records += _wmf_createpenindirect(
+                pen_color, width=pen_width, style=0 if has_border else 5,  # 5 = PS_NULL
+            )
+            records += _wmf_selectobject(pen_slot)
+            records += _wmf_rectangle(
+                int(item.x),
+                int(item.y),
+                int(item.x + item.rect_w),
+                int(item.y + item.rect_h),
+            )
+            records += _wmf_deleteobject(pen_slot)
+            records += _wmf_deleteobject(brush_slot)
+            next_obj_slot = brush_slot
+            peak_objects = max(peak_objects, brush_slot + 2)
+
+        ta_mode = _ALIGN_TO_TA.get(item.alignment, _TA_LEFT)
+        records += _wmf_settextalign(ta_mode)
+        if item.transparent:
+            records += _wmf_setbkmode(_BKMODE_TRANSPARENT)
+        else:
+            records += _wmf_setbkcolor(item.back_color)
+            records += _wmf_setbkmode(_BKMODE_OPAQUE)
         records += _wmf_settextcolor(item.color_rgb)
         records += _wmf_selectobject(idx)
         records += _wmf_textout(int(item.x), int(item.y), item.text)
@@ -368,13 +519,13 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
     total_words = 9 + len(records) // 2  # header + body
     header = struct.pack(
         "<HHHIHIH",
-        1,                  # Type (memory)
-        9,                  # HeaderSize (WORDs)
-        0x0300,             # Version
-        total_words,        # Size (WORDs)
-        max(1, len(items)), # NumberOfObjects (one font slot per item)
-        max_record,         # MaxRecord (WORDs)
-        0,                  # NumberOfMembers
+        1,                       # Type (memory)
+        9,                       # HeaderSize (WORDs)
+        0x0300,                  # Version
+        total_words,             # Size (WORDs)
+        max(1, peak_objects),    # NumberOfObjects (font slots + lazy brush/pen)
+        max_record,              # MaxRecord (WORDs)
+        0,                       # NumberOfMembers
     )
     return bytes(header) + bytes(records)
 

@@ -14,11 +14,13 @@ import struct
 import unittest
 
 from src.server.blackbird.wire import (
+    TextItem,
     build_baggage_container,
     build_case1_bf_chunk,
     build_case3_bf_chunk,
     build_child_record,
     build_kind5_raster,
+    build_text_metafile,
     build_trailer,
     build_type0_status_record,
     decode_case1_tlv,
@@ -627,6 +629,62 @@ class TestCase3BfChunk(unittest.TestCase):
         chunk = build_case3_bf_chunk(title_byte=0x01, key=0xCAFEBABE)
         self.assertEqual(chunk[8:12], b"\xFE\xFF\xFF\xFF")
         self.assertEqual(chunk[16:20], b"\xFE\xFF\xFF\xFF")
+
+
+class TestTextMetafileBorderAndFill(unittest.TestCase):
+    """`build_text_metafile` emits Rectangle records when a TextItem has
+    `frame_style != 0` or `bevel_width > 0` (border) or `transparent=False`
+    (full-rect background fill). Each Rectangle is bracketed by
+    Create/Delete object pairs for the brush + pen."""
+
+    def test_opaque_item_emits_rectangle_and_objects(self):
+        item = TextItem(
+            x=10, y=20, text="hi",
+            rect_w=100, rect_h=30,
+            transparent=False,
+            back_color=0x00FF00,
+        )
+        bag = build_text_metafile([item])
+        # META_RECTANGLE rdFunction = 0x041B. WMF record header:
+        # u32 rdSize (in WORDs) + u16 rdFunction. Rectangle's params
+        # are 4 i16 (bottom, right, top, left) = 8 bytes → rdSize = 7 WORDs.
+        # Wire bytes: 07 00 00 00 1b 04.
+        self.assertIn(b"\x07\x00\x00\x00\x1b\x04", bag)
+        # META_CREATEBRUSHINDIRECT rdFunction = 0x02FC. With LOGBRUSH
+        # params = 2+4+2 = 8 bytes → rdSize = 7 WORDs.
+        self.assertIn(b"\x07\x00\x00\x00\xfc\x02", bag)
+        # META_CREATEPENINDIRECT rdFunction = 0x02FA. LOGPEN = 2+2+2+4 = 10 B
+        # → rdSize = 8 WORDs.
+        self.assertIn(b"\x08\x00\x00\x00\xfa\x02", bag)
+
+    def test_framed_item_emits_pen_with_frame_color(self):
+        item = TextItem(
+            x=0, y=0, text="hi",
+            rect_w=50, rect_h=50,
+            frame_style=1,
+            frame_color=0xFF0000,  # red
+        )
+        bag = build_text_metafile([item])
+        # CreatePenIndirect LOGPEN bytes: style=PS_SOLID=0, w_x=1, w_y=0, color=0xFF0000.
+        # Layout: 00 00 01 00 00 00 00 00 ff 00
+        # That signature must appear inside the metafile body.
+        logpen_sig = b"\x00\x00\x01\x00\x00\x00\x00\x00\xff\x00"
+        self.assertIn(logpen_sig, bag)
+
+    def test_transparent_no_border_skips_rectangle(self):
+        item = TextItem(
+            x=0, y=0, text="hi",
+            rect_w=50, rect_h=50,
+            transparent=True,
+            frame_style=0,
+            bevel_width=0,
+        )
+        bag = build_text_metafile([item])
+        # No Rectangle record should be emitted.
+        self.assertNotIn(b"\x07\x00\x00\x00\x1b\x04", bag)
+        # No brush or pen records either.
+        self.assertNotIn(b"\x07\x00\x00\x00\xfc\x02", bag)
+        self.assertNotIn(b"\x08\x00\x00\x00\xfa\x02", bag)
 
 
 if __name__ == "__main__":

@@ -41,12 +41,15 @@ _TITLE_SHOWCASE = pathlib.Path("/var/share/drop/first title.ttl")
 
 
 class TestKnownTitleRegression(unittest.TestCase):
-    """4.ttl page-0 carries 2 Captions: the original "Test caption"
-    (MS Sans Serif 12pt) and "another caption!!" (Comic Sans MS 26pt).
-    Multi-caption parsing routes each descriptor (in seq order) to its
-    own StdFont CLSID anchor in the shared property region — see
-    `_caption_record_offsets` in `ttl_loader.py`. Page 0 also has both
-    scrollbars enabled (flags=3)."""
+    """4.ttl page-0 carries 4 Captions exercising distinct font/style
+    combinations: "Test caption" (MS Sans Serif 12pt regular), "another
+    caption!!" (Comic Sans MS 26pt italic, red bg), "overlapping text"
+    (Garamond 18pt underline), and the long word-wrap caption (Caption4,
+    rect at x=1905 HIMETRIC whose LSB `0x71` ('q') previously confused
+    the printable-ASCII name scanner). Multi-caption parsing routes each
+    descriptor (in seq order) to its own StdFont CLSID anchor in the
+    shared property region — see `_caption_record_offsets` in
+    `ttl_loader.py`. Page 0 also has both scrollbars enabled (flags=3)."""
 
     def test_known_title_parses_all_fields(self):
         t = load_title(_TITLE_4)
@@ -68,11 +71,13 @@ class TestKnownTitleRegression(unittest.TestCase):
         )
         self.assertEqual(page.scrollbar_flags, 3)
 
-    def test_controls_are_two_captions_each_with_own_record(self):
+    def test_controls_are_four_captions_each_with_own_record(self):
         t = load_title(_TITLE_4)
         controls = t.pages[0].controls
-        self.assertEqual(len(controls), 2)
-        cap1, cap2 = controls
+        self.assertEqual(len(controls), 4)
+        cap1, cap2, cap3, cap4 = controls
+
+        # Caption 1: default styling, MS Sans Serif 12pt regular.
         self.assertIsInstance(cap1, CaptionControl)
         self.assertEqual(cap1.seq, 1)
         self.assertEqual(cap1.name, "Caption1")
@@ -81,7 +86,20 @@ class TestKnownTitleRegression(unittest.TestCase):
         self.assertEqual(cap1.size_pt, 12)
         self.assertEqual(cap1.weight, 400)
         self.assertEqual(cap1.rect_himetric, (5291, 2963, 11641, 5926))
+        self.assertFalse(cap1.italic)
+        self.assertFalse(cap1.underline)
+        self.assertFalse(cap1.strikeout)
+        # Default back_color = COLOR_3DFACE = RGB(0xD8, 0xD0, 0xC8).
+        self.assertEqual(cap1.back_color, 0x00C8D0D8)
+        # Border + idTag defaults.
+        self.assertEqual(cap1.bevel_width, 0)
+        self.assertEqual(cap1.frame_style, 0)
+        self.assertEqual(cap1.bevel_hilight, 0x00FFFFFF)
+        self.assertEqual(cap1.bevel_shadow, 0)
+        self.assertEqual(cap1.frame_color, 0)
+        self.assertEqual(cap1.id_tag, -1)
 
+        # Caption 2: Comic Sans MS 26pt ITALIC with red back_color.
         self.assertIsInstance(cap2, CaptionControl)
         self.assertEqual(cap2.seq, 2)
         self.assertEqual(cap2.name, "Caption2")
@@ -90,6 +108,51 @@ class TestKnownTitleRegression(unittest.TestCase):
         self.assertEqual(cap2.size_pt, 26)
         self.assertEqual(cap2.weight, 400)
         self.assertEqual(cap2.rect_himetric, (8890, 7408, 16298, 8890))
+        self.assertTrue(cap2.italic)
+        self.assertFalse(cap2.underline)
+        self.assertFalse(cap2.strikeout)
+        # back_color RGB(0xFF, 0, 0) = red, as embedded in font_pre_clsid.
+        self.assertEqual(cap2.back_color, 0x000000FF)
+
+        # Caption 3: Garamond 18pt with underline only.
+        self.assertIsInstance(cap3, CaptionControl)
+        self.assertEqual(cap3.seq, 3)
+        self.assertEqual(cap3.name, "Caption3")
+        self.assertEqual(cap3.text, "overlapping text")
+        self.assertEqual(cap3.font_name, "Garamond")
+        self.assertEqual(cap3.size_pt, 18)
+        self.assertFalse(cap3.italic)
+        self.assertTrue(cap3.underline)
+        self.assertFalse(cap3.strikeout)
+
+        # Caption 4: regression case for the printable-ASCII name scanner.
+        # rect_himetric=(1905, 4445, 5080, 8890) — rect.left LSB is 'q'
+        # (0x71), which the prior heuristic consumed as part of the name
+        # ("Caption4q"), shifting the inline_tail by one byte and
+        # producing nonsense unsigned-i32 reads (one of which overflowed
+        # i16 in the WMF builder and crashed the server).
+        self.assertIsInstance(cap4, CaptionControl)
+        self.assertEqual(cap4.seq, 5)
+        self.assertEqual(cap4.name, "Caption4")
+        self.assertEqual(
+            cap4.text,
+            "Testing the auto-wrap property of the caption control.",
+        )
+        self.assertEqual(cap4.rect_himetric, (1905, 4445, 5080, 8890))
+        self.assertEqual(cap4.font_name, "MS Sans Serif")
+
+    def test_post_strcaption_fields_decode_to_defaults(self):
+        """All captions on 4.ttl share the same default post-strCaption
+        block `00 00 00 00 00 00 01 00 00 00` → fWordWrap=0,
+        fAutoSize=0, iAlignment=0, fTransparent=1. Verifies the 10-byte
+        parse."""
+        t = load_title(_TITLE_4)
+        for page in t.pages:
+            for cap in page.captions:
+                self.assertFalse(cap.word_wrap, cap.name)
+                self.assertFalse(cap.auto_size, cap.name)
+                self.assertEqual(cap.alignment, 0, cap.name)
+                self.assertTrue(cap.transparent, cap.name)
 
     def test_captions_property_filters_controls(self):
         t = load_title(_TITLE_4)
@@ -236,6 +299,92 @@ class TestLowerToPayload(unittest.TestCase):
         self.assertEqual(self.body[idx:idx + 14], b"Default Window")
 
 
+class TestSection0CarriesCaptionStyling(unittest.TestCase):
+    """Section 0 descriptors (sec0 per-caption font/style table) get
+    `lfItalic`, `lfUnderline`, `lfStrikeOut`, `lfCharSet`, and the
+    back_color stock prop populated from each CaptionControl. Each
+    descriptor is 42 B (`_SEC0_DESCRIPTOR_SIZE`)."""
+
+    def test_4ttl_page0_descriptors_carry_authored_styling(self):
+        from server.services.medview.ttl_loader import (
+            _SEC0_DESCRIPTOR_SIZE,
+            _SEC0_HEADER_SIZE,
+            _SEC0_FACE_ENTRY_SIZE,
+            _build_section0,
+        )
+        t = load_title(_TITLE_4)
+        sec0 = _build_section0(t)
+        # Descriptors live after face_table; face_count = max(slot)+1 = 3.
+        face_count = max(f.slot for f in t.font_table) + 1
+        face_table_size = face_count * _SEC0_FACE_ENTRY_SIZE
+        desc_off = _SEC0_HEADER_SIZE + face_table_size
+
+        captions = [c for p in t.pages for c in p.captions]
+        # Caption 1 (MS Sans Serif, default): no italic/underline/strikeout.
+        d1 = sec0[desc_off:desc_off + _SEC0_DESCRIPTOR_SIZE]
+        self.assertEqual(d1[0x20], 0)  # lfItalic
+        self.assertEqual(d1[0x21], 0)  # lfUnderline
+        self.assertEqual(d1[0x22], 0)  # lfStrikeOut
+        # text_color = 0 (legacy color_rgb default) → bytes 00 00 00 at +0x06..+0x08.
+        self.assertEqual(d1[0x06:0x09], bytes([0x00, 0x00, 0x00]))
+        # back_color = 0xC8D0D8 → bytes d8 d0 c8 at +0x09..+0x0B (RGB low/mid/high).
+        self.assertEqual(d1[0x09:0x0C], bytes([0xD8, 0xD0, 0xC8]))
+
+        # Caption 2 (Comic Sans MS, italic): lfItalic=1.
+        d2 = sec0[desc_off + _SEC0_DESCRIPTOR_SIZE:
+                  desc_off + 2 * _SEC0_DESCRIPTOR_SIZE]
+        self.assertEqual(d2[0x20], 1)  # lfItalic
+        self.assertEqual(d2[0x21], 0)
+        self.assertEqual(d2[0x22], 0)
+        # back_color = 0x0000FF (red) → bytes ff 00 00 LE.
+        self.assertEqual(d2[0x09:0x0C], bytes([0xFF, 0x00, 0x00]))
+
+        # Caption 3 (Garamond, underline): lfUnderline=1, lfStrikeOut=0.
+        d3 = sec0[desc_off + 2 * _SEC0_DESCRIPTOR_SIZE:
+                  desc_off + 3 * _SEC0_DESCRIPTOR_SIZE]
+        self.assertEqual(d3[0x20], 0)  # lfItalic
+        self.assertEqual(d3[0x21], 1)  # lfUnderline
+        self.assertEqual(d3[0x22], 0)  # lfStrikeOut
+
+
+class TestBaggageCarriesNewStyling(unittest.TestCase):
+    """`build_bm_baggage` emits a kind=8 WMF that carries:
+    - per-caption underline/strikeout/charset in CreateFontIndirect's LOGFONT
+    - per-caption text alignment via SetTextAlign records
+    - per-caption back_color via SetBkColor when transparent=False
+    All four 4.ttl captions ship transparent by default so SetBkMode is
+    TRANSPARENT (no SetBkColor before TextOut)."""
+
+    def test_baggage_emits_setextalign_records(self):
+        t = load_title(_TITLE_4)
+        bag = build_all_bm_baggage(t)["bm0"]
+        # WMF SetTextAlign record opcode = 0x012E. The bytes appear inside
+        # the kind=8 baggage's metafile body.
+        # Record header: u32 rdSize (size in WORDs) + u16 rdFunction.
+        # SetTextAlign with 1 word param: rdSize=4, function=0x012E.
+        # On the wire: 04 00 00 00 2e 01.
+        self.assertIn(b"\x04\x00\x00\x00\x2e\x01", bag)
+
+    def test_underline_in_caption3_logfont(self):
+        t = load_title(_TITLE_4)
+        bag = build_all_bm_baggage(t)["bm0"]
+        # LOGFONT layout: Height(i16), Width(i16), Escapement(i16),
+        # Orientation(i16), Weight(i16), Italic(u8), Underline(u8),
+        # StrikeOut(u8), CharSet(u8), Out/Clip/Quality/Pitch(4 u8), Face.
+        # Caption 3 has italic=0, underline=1, strikeout=0.
+        marker = b"Garamond\x00"
+        idx = bag.find(marker)
+        self.assertGreater(idx, 0)
+        # LOGFONT starts 18 bytes before the face name (5 i16 + 8 u8 = 18 B).
+        lf_off = idx - 18
+        italic_byte = bag[lf_off + 10]
+        underline_byte = bag[lf_off + 11]
+        strikeout_byte = bag[lf_off + 12]
+        self.assertEqual(italic_byte, 0)
+        self.assertEqual(underline_byte, 1)
+        self.assertEqual(strikeout_byte, 0)
+
+
 class TestBuildBm0Baggage(unittest.TestCase):
     def test_kind8_metafile_when_captions_present(self):
         title = load_title(_TITLE_4)
@@ -302,7 +451,9 @@ class TestMultiPage4Ttl(unittest.TestCase):
 
     def test_page_caption_counts(self):
         counts = [len(p.controls) for p in self.title.pages]
-        self.assertEqual(counts, [2, 1, 1])
+        # Page 0 has 4 captions (Test caption / another caption!! /
+        # overlapping text / word-wrap probe). Pages 1/2 each have 1.
+        self.assertEqual(counts, [4, 1, 1])
         for page in self.title.pages:
             for c in page.controls:
                 self.assertIsInstance(c, CaptionControl)

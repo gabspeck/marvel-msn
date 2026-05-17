@@ -208,50 +208,134 @@ of an already-tiled-bg baseline so the BMP is a constant.
 
 ## Caption1 property block
 
-Caption1 follows its 16-byte site descriptor (`seq + marker + size +
-flags`) immediately, with the rect inline:
+Pinned from `BBCTL.OCX!CLabelCtrl::DoPropExchange` (`FUN_40009356`,
+v=4) plus its border parent `FUN_40003dbc` (v=3), with the
+ExchangeStockProps mask `0xD2` set by `FUN_40008e81` (constructor).
+Persist call order:
 
-| offset (rel to "Caption1" name start) | size | field | source / meaning |
+1. `CPropExchange::ExchangeVersion` v=4 (CLabelCtrl outer)
+2. parent border persist:
+   - `CPropExchange::ExchangeVersion` v=3
+   - `COleControl::ExchangeStockProps` (writes mask-gated stock props
+     in MFC alphabetical order; mask 0xD2 includes `BackColor` and
+     `Font` at minimum — other bits pending more probes)
+   - `PX_Long BevelWidth` (default 0)
+   - `PX_Long FrameStyle` (default 0)
+   - `PX_Long BevelHilight` (default `0xFFFFFF`, v ≥ 3)
+   - `PX_Long BevelShadow` (default 0, v ≥ 3)
+   - `PX_Long FrameColor` (default 0, v ≥ 2)
+3. `PX_Long idTag` (default `-1`, `-1` = no script binding)
+4. `PX_String strCaption` (the visible label; v ≥ 4 always written)
+5. `PX_Bool fWordWrap` (default FALSE)
+6. `PX_Bool fAutoSize` (default FALSE)
+7. `PX_Long iAlignment` (default 0 = left)
+8. `PX_Long fTransparent` (default TRUE, v ≥ 3)
+
+On-disk layout in the LAST descriptor's `inline_tail` (which carries
+the actual per-caption record buffer for multi-caption pages, or the
+single descriptor's inline_tail for single-caption pages):
+
+| offset (rel to inline_tail start) | size | field | source / meaning |
 | --- | --- | --- | --- |
-| `+0x00` | 8 | name "Caption1" | site descriptor name (ASCII, no NUL) |
-| `+0x08` | 16 | rect | i32 LE × 4: `left, top, right, bottom` (twips) |
-| `+0x18` | 6 | site_wrapper_a | `u16` (varies) + `u32` size echo |
-| `+0x1E` | 4 | form_size | u32, total CVForm payload size |
-| `+0x22` | 12 | constants | three u32s: `(4, 4, 3)` |
-| `+0x2E` | 4 | width_redundant | i32, equals `rect.right - rect.left` |
-| `+0x32` | 4 | height_redundant | i32, equals `rect.bottom - rect.top` |
-| `+0x36` | 4 | constant | u32 = `0x0000001D` (29) |
-| `+0x3A` | 4 | zero | u32 = 0 |
-| `+0x3E` | 6 | font_pre_clsid | `00 d8 d0 c8 00 00` |
-| `+0x44` | 16 | StdFont CLSID | `{0BE35203-8F91-11CE-9DE3-00AA004BB851}` |
-| `+0x54` | 1 | font_version | `0x01` (FONT_VERSION) |
-| `+0x55` | 3 | font_charset / flags | varies per Caption styling |
-| `+0x58` | 2 | font_weight | u16, e.g. 400 (FW_NORMAL) |
-| `+0x5A` | 4 | font_size_cy_lo | u32 = points × 10000 (12pt → `0x0001D4C0`) |
-| `+0x5E` | 1 | font_name_len | u8 |
-| `+0x5F` | N | font_name | ASCII (no NUL) |
-| `+0x5F+N` | 2 | pad | `00 00` |
-| `+0x5F+N+2` | 22 | trailer_constants | parent-class persist defaults |
-| `+0x5F+N+24` | 1 | caption_text_len | u8 |
-| `+0x5F+N+25` | M | caption_text + NUL | ASCII text terminated by NUL |
+| `+0x00` | 16 | rect | i32 LE × 4: `left, top, right, bottom` (HIMETRIC) |
+| `+0x10` | 6 | site_wrapper_a | `u16` (varies) + `u32` size echo |
+| `+0x16` | 4 | form_size | u32, total CVForm payload size |
+| `+0x1A` | 4 | constant 4 | u32 — site descriptor constant |
+| `+0x1E` | 4 | CLabelCtrl version | u32 = 4 |
+| `+0x22` | 4 | border parent version | u32 = 3 |
+| `+0x26` | 4 | width_redundant | i32 = `rect.right - rect.left` |
+| `+0x2A` | 4 | height_redundant | i32 = `rect.bottom - rect.top` |
+| `+0x2E` | 4 | constant 0x1D | u32 = 29 |
+| `+0x32` | 4 | (stock pad / zero) | u32 = 0 |
+| `+0x36` | 1 | font_pre_clsid tag | u8 = 0 |
+| `+0x37` | 4 | **back_color** | COLORREF (stock prop, BackColor; default `0xC8D0D8` = COLOR_3DFACE) |
+| `+0x3B` | 1 | font_pre_clsid tail | u8 = 0 |
+| `+0x3C` | 16 | StdFont CLSID | `{0BE35203-8F91-11CE-9DE3-00AA004BB851}` |
+| `+0x4C` | 1 | font_version | `0x01` |
+| `+0x4D` | 2 | font_charset | u16, LOGFONTA `lfCharSet` |
+| `+0x4F` | 1 | font_attrs | u8: italic 0x02, underline 0x04, strikeout 0x08 |
+| `+0x50` | 2 | font_weight | u16, e.g. 400 (FW_NORMAL), 700 (FW_BOLD) |
+| `+0x52` | 4 | font_size_cy_lo | u32 = points × 10000 (12pt → `0x0001D4C0`) |
+| `+0x56` | 1 | font_name_len | u8 |
+| `+0x57` | N | font_name | ASCII (no NUL) |
+| `+0x57+N` | 4 | **BevelWidth** | LONG (default 0) |
+| `+0x57+N+4` | 4 | **FrameStyle** | LONG (default 0) |
+| `+0x57+N+8` | 4 | **BevelHilight** | COLORREF (default `0xFFFFFF`) |
+| `+0x57+N+12` | 4 | **BevelShadow** | COLORREF (default 0) |
+| `+0x57+N+16` | 4 | **FrameColor** | COLORREF (default 0) |
+| `+0x57+N+20` | 4 | **idTag** | LONG (default `-1`) |
+| `+0x57+N+24` | 1 | strCaption_len | u8 |
+| `+0x57+N+25` | M | strCaption | ASCII (no NUL) |
+| `+0x57+N+25+M` | 2 | **fWordWrap** | u16 BOOL (default 0) |
+| `+0x57+N+27+M` | 2 | **fAutoSize** | u16 BOOL (default 0) |
+| `+0x57+N+29+M` | 2 | **iAlignment** | u16 short (default 0; 0=left, 1=center, 2=right) |
+| `+0x57+N+31+M` | 4 | **fTransparent** | u32 LONG (default 1) |
+| `+0x57+N+35+M` | ... | MS Forms 1.0 form trailer (varies; not part of CLabelCtrl persist) |
 
-Round-trip: in `4.ttl`, caption_text starts at file offset `0x167` for
-Caption1 at `0xE2` (relative `0x84` + 1 = `0x85`, i.e. `0x167`).
+The `font_pre_clsid` (`+0x36..+0x3B`) is a 6-byte wrapper around the
+stock `back_color` COLORREF: `[u8 0][u32 COLORREF][u8 0]`. Observed
+values: `0xC8D0D8` (default, COLOR_3DFACE), `0x0000FF` (red), `0xFFF0FF`
+(ivory) — confirmed across `4.ttl` page 0 Caption 1/2/3.
 
-Parser implementation: `_walk_cbform` + `_decode_caption` in
-`src/server/services/medview/ttl_loader.py` walk the CVForm by scanning
-for the `0x00030073` site marker and dispatch Caption sites by name
-prefix. The decoder anchors on the StdFont CLSID landmark
+The font_attrs byte at `+0x4F` packs StdFont's `fItalic` /
+`fUnderline` / `fStrikethrough` bits — pinned by hex-diff of
+`4.ttl` page 0 captions (default styling vs italic Comic Sans MS at
+0x02 vs underline+strikethrough Garamond at 0x0C).
+
+### Post-strCaption block (10 bytes, layout pinned)
+
+`fWordWrap`, `fAutoSize`, `iAlignment`, `fTransparent` are written
+unconditionally by `FUN_40009356` as a 10-byte block immediately after
+`strCaption`'s bytes:
+
+| offset (rel to strCaption end) | size | field | type | default |
+| --- | --- | --- | --- | --- |
+| `+0x00` | 2 | `fWordWrap` | u16 BOOL | 0 (FALSE) |
+| `+0x02` | 2 | `fAutoSize` | u16 BOOL | 0 (FALSE) |
+| `+0x04` | 2 | `iAlignment` | u16 short | 0 (left; 1=center, 2=right) |
+| `+0x06` | 4 | `fTransparent` | u32 LONG | 1 (TRUE) |
+
+Pinned empirically: `4.ttl` pages 1/2 (V/H scrollbar variants, both
+single-Caption pages with default "Test caption" / MS Sans Serif) and
+`/var/share/drop/first title.ttl` page 1 (Comic Sans MS "This is
+another page") all carry the same 10 bytes
+`00 00 00 00 00 00 01 00 00 00` after their respective strCaption
+texts — decoding to `(fWordWrap=0, fAutoSize=0, iAlignment=0,
+fTransparent=1)`, the exact MFC defaults. `4.ttl` page 0's 3-caption
+record buffer also exhibits the same 10-byte block between Caption 1's
+text and Caption 2's pre-Font header.
+
+The encoding (u16/u16/u16/u32) doesn't match a stock MFC PX_Long /
+PX_Bool binary-stream output (which would write 4 bytes each =
+16 B). It matches a property-bag-style VARIANT-typed write where
+BOOL → VARIANT_BOOL (2 B) and short integers get truncated. The
+decoder uses the pinned (u16, u16, u16, u32) layout pending a
+non-default-value probe to verify on fixtures with a non-default
+`iAlignment` or `fTransparent`.
+
+Parser implementation: `_walk_cbform` + `_decode_caption` +
+`_decode_label_persist` in `src/server/services/medview/ttl_loader.py`.
+The decoder anchors on the StdFont CLSID landmark
 (`0352e30b918fce119de300aa004bb851`) so the same offsets apply whether
-the Caption's data is inline (collapsed format, 4.ttl) or carried in
-the seq-ordered property region (separate format, showcase).
+the Caption's data is inline (collapsed format, `4.ttl` single-Caption
+pages) or carried in the multi-caption shared record buffer
+(`4.ttl` page 0 with 3 captions).
 
-The single byte at `+0x57` (font_charset / flags) is the only observed
-font-block variation: `0x00` for `4.ttl`'s default styling vs `0x0c`
-for the showcase Caption (which authored Comic Sans MS). Whether this
-is the IFont charset slot or a flags byte (bold/italic/underline/
-strikethrough packed) is not yet RE'd from BBCTL.OCX; not blocking
-since plain Caption rendering doesn't need it.
+### Caption interactivity (deferred)
+
+`idTag` indexes into a per-title script table that binds Click /
+RightClick events to script macros. The event entry points are pinned
+via string refs in BBCTL.OCX:
+
+- `"Click"` @ `0x4002b298`
+- `"RightClick"` @ `0x4002b2d0`
+
+These are MFC OLE event names (`COleControl::FireEvent`). When
+`idTag >= 0`, the event handler looks up the macro via the title's
+script table (storage path not yet RE'd — likely a `CDPO` / CScript
+object reachable from `CSection`). Lowering click → macro dispatch to
+the MEDVIEW wire is a separate RE pass; the current decoder just
+surfaces `id_tag` as a tagged LONG for offline inspection.
 
 ## Walker output (current parser)
 

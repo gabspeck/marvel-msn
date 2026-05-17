@@ -59,22 +59,87 @@ class Control:
 
 @dataclass(frozen=True)
 class CaptionControl(Control):
-    """Caption1: read-only static text. Rect/font/size pulled inline
-    from the descriptor; pinned via `docs/cvform-page-objects.md`
-    §Caption1 against 4.ttl + showcase Caption1.
+    """Caption1: read-only static text. Persist layout pinned via
+    `BBCTL.OCX!CLabelCtrl::DoPropExchange` (FUN_40009356, v=4) +
+    `FUN_40003dbc` (border parent, v=3) + stock prop mask `0xD2` set in
+    `FUN_40008e81` (constructor).
 
-    `italic` reads the StdFont flags byte at `font_off + 0x13` bit 0x02.
-    `color_rgb` is the COLORREF dword stored 9 bytes *before* the StdFont
-    CLSID landmark — black (0) by default, e.g. 0x000000FF for red. Both
-    fields default to inert values so the lowering path can fall back to
-    black/non-italic without special-casing pre-PR4 captions."""
+    Persist call order (BBCTL.OCX decompile):
+    1. ExchangeVersion v=4
+    2. parent border persist (ExchangeVersion v=3 → ExchangeStockProps →
+       BevelWidth, FrameStyle, BevelHilight, BevelShadow, FrameColor)
+    3. idTag (LONG, default -1)
+    4. strCaption (CString, the visible label)
+    5. fWordWrap (BOOL, default FALSE)
+    6. fAutoSize (BOOL, default FALSE)
+    7. iAlignment (LONG, default 0)
+    8. fTransparent (LONG, default TRUE; v≥3 only)
+
+    On-disk layout in the LAST descriptor's `inline_tail` (the shared
+    per-caption record buffer for multi-caption pages, or the single
+    descriptor's inline_tail for single-caption pages):
+
+      +0x00..+0x0F  rect (i32×4 in HIMETRIC, LTRB)
+      +0x10..+0x3B  44-B form-level header (MS Forms 1.0 site wrapper +
+                   width/height_redundant + 0x1D const + zero + 6-B
+                   `font_pre_clsid` containing the stock `back_color`)
+      +0x3C..+0x4B  StdFont CLSID
+      +0x4C..       Font body:
+                     +0x10  u8 version = 1
+                     +0x11  u16 charset
+                     +0x13  u8 attrs (italic 0x02, underline 0x04,
+                                       strikeout 0x08)
+                     +0x14  u16 weight
+                     +0x16  u32 cy_lo (points * 10000)
+                     +0x1A  u8 name_len
+                     +0x1B  N B ASCII name (no NUL)
+      after Font:
+        +0x00 (4 B)  BevelWidth (LONG, default 0)
+        +0x04 (4 B)  FrameStyle (LONG, default 0)
+        +0x08 (4 B)  BevelHilight (COLORREF, default 0xFFFFFF, v≥3)
+        +0x0C (4 B)  BevelShadow (COLORREF, default 0x000000, v≥3)
+        +0x10 (4 B)  FrameColor (COLORREF, default 0x000000, v≥2)
+        +0x14 (4 B)  idTag (LONG, default -1)
+        +0x18 (1+N B) strCaption (Pascal-string)
+
+    Post-strCaption (10-byte block immediately after strCaption end):
+        +0x00 (2 B)  fWordWrap   (BOOL VARIANT_BOOL, default 0)
+        +0x02 (2 B)  fAutoSize   (BOOL VARIANT_BOOL, default 0)
+        +0x04 (2 B)  iAlignment  (short, default 0; 0=left 1=center 2=right)
+        +0x06 (4 B)  fTransparent(LONG, default 1)
+    Pinned empirically: `4.ttl` pages 1/2 and `first title.ttl` page 1
+    (all four default-valued single-Caption fixtures) share the exact
+    same 10 bytes `00 00 00 00 00 00 01 00 00 00`, which decode to the
+    MFC defaults (0, 0, 0, 1). The values BBDESIGN doesn't vary across
+    fixtures so non-default-value verification is deferred to future
+    single-property probes — but the offsets and types are pinned.
+
+    Stock-prop COLORREF wrapped in the 6-B `font_pre_clsid` (bytes
+    `[u8 0][u32 COLORREF][u8 0]` at `font_off-5..font_off`) is the
+    `back_color`. Default observed value `0xC8D0D8` = COLOR_3DFACE.
+    Probe variants exhibit `0x0000FF` (red) and `0xFFF0FF` (ivory) for
+    Caption 2 / 3 of `4.ttl` page 0."""
     text: str
     font_name: str
     size_pt: int                             # font_size_cy_lo // 10000
     weight: int                              # 400 = FW_NORMAL
     rect_himetric: tuple[int, int, int, int] # (L, T, R, B) HIMETRIC (0.01mm)
     italic: bool = False
-    color_rgb: int = 0                       # COLORREF (DWORD LE BGR0), 0 = black
+    underline: bool = False
+    strikeout: bool = False
+    charset: int = 0                         # LOGFONTA lfCharSet (WORD)
+    back_color: int = 0xC8D0D8               # COLORREF stock prop (font_pre_clsid)
+    bevel_width: int = 0                     # LONG
+    frame_style: int = 0                     # LONG
+    bevel_hilight: int = 0xFFFFFF            # COLORREF (v ≥ 3)
+    bevel_shadow: int = 0                    # COLORREF (v ≥ 3)
+    frame_color: int = 0                     # COLORREF (v ≥ 2)
+    id_tag: int = -1                         # LONG; -1 = no script binding
+    word_wrap: bool = False                  # BOOL (post-strCaption, default-only)
+    auto_size: bool = False                  # BOOL (post-strCaption, default-only)
+    alignment: int = 0                       # LONG (post-strCaption, default-only)
+    transparent: bool = True                 # LONG (post-strCaption, default-only)
+    color_rgb: int = 0                       # back_color alias (back-compat)
 
 
 @dataclass(frozen=True)
@@ -356,6 +421,63 @@ def _parse_cvform_class_table(raw: bytes) -> tuple[bytes, ...]:
     return tuple(out)
 
 
+# Minimum on-disk length of the site-class name prefix, indexed by the
+# class name resolved from the CVForm class table. When `prefix_len + 1
+# > 8`, the name field can't fit in the 8-byte slot and is therefore
+# always NUL-terminated. When it fits in 8 bytes, the field is exactly
+# 8 bytes wide: NUL-padded for shorter names, no terminator for names
+# that fill the slot exactly. The 8-byte slot rule is pinned by:
+#   - Caption1 / Outline1 (8 chars, no NUL, rect/xy_twips immediately
+#     follow) — showcase + 4.ttl
+#   - Story1R / Audio1R (7 chars + 1 NUL pad) — msn_today + showcase
+#   - Shortcut1=R (11 chars + NUL) — msn_today
+#   - CaptionButton1R (15 chars + NUL) — showcase
+_SITE_NAME_PREFIX_MIN_LEN: dict[str, int] = {
+    "Caption": 7,
+    "CaptionButton": 13,
+    "Story": 5,
+    "Audio": 5,
+    "Outline": 7,
+    "Shortcut": 8,
+}
+_SITE_NAME_SLOT = 8
+_SITE_NAME_MAX = 64                                # safety cap for NUL scan
+
+
+def _scan_site_name(
+    raw: bytes, name_off: int, end_of_list: int, class_name: str | None,
+) -> int:
+    """Compute the end offset of a site descriptor's name field.
+
+    BBDESIGN writes site names into an 8-byte slot: names shorter than 8
+    chars are NUL-padded, names exactly 8 chars have no terminator (the
+    next byte is inline data — rect for Caption, xy_twips for compound
+    controls), and names longer than 8 chars overflow with a NUL
+    terminator after the last char.
+
+    The first two cases are ambiguous from bytes alone when the inline
+    data's first byte is a printable ASCII value (e.g. Caption4 in
+    4.ttl has `rect.left = 1905 = 0x0771` whose LSB is `'q'`). The
+    class CLSID resolves the ambiguity: known classes with a prefix
+    that fits in the 8-byte slot take exactly 8 bytes when no NUL is
+    found within the slot; classes whose prefix can't fit (e.g.
+    CaptionButton, Shortcut) always overflow and use NUL termination.
+    """
+    field_end = min(name_off + _SITE_NAME_SLOT, end_of_list)
+    end = name_off
+    while end < field_end and raw[end] != 0:
+        end += 1
+    if end < field_end:
+        return end                                  # NUL within 8-byte slot
+    prefix_len = _SITE_NAME_PREFIX_MIN_LEN.get(class_name or "", 0)
+    if prefix_len + 1 <= _SITE_NAME_SLOT:
+        return field_end                            # exactly-8-char name
+    cap = min(name_off + _SITE_NAME_MAX, end_of_list)
+    while end < cap and raw[end] != 0:
+        end += 1
+    return end
+
+
 def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
     """Walk site descriptors in a CVForm (Form preamble at +0x00, sites
     starting at +0x28). Each descriptor produces a `_SiteDescriptor`
@@ -364,13 +486,15 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
 
     Each descriptor's `flags & 0xFF` indexes into the CVForm preamble's
     class table (parsed via `_parse_cvform_class_table`) to resolve a
-    16-B BBCTL class CLSID. CLSID-first dispatch + name-prefix fallback
-    happens in `_decode_descriptor`."""
+    16-B BBCTL class CLSID. The resolved class drives `_scan_site_name`
+    so the name field's exact byte boundary is pinned before slicing
+    `inline_tail`. CLSID-first dispatch + name-prefix fallback happens
+    in `_decode_descriptor`."""
     trailer_off = raw.find(_FORM_CLSID_PREFIX, _FORM_PREAMBLE_END + 4)
     end_of_list = trailer_off if trailer_off >= 0 else len(raw)
     class_table = _parse_cvform_class_table(raw)
 
-    records: list[tuple[int, int, int, str, int, int]] = []
+    records: list[tuple[int, int, int, str, int, int, int, bytes | None]] = []
     pos = _FORM_PREAMBLE_END
     while True:
         m = raw.find(_BBCTL_SITE_MARKER, pos)
@@ -384,29 +508,27 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
         if marker != _BBCTL_SITE_MARKER_U32:
             pos = m + 4
             continue
-        name_off = seq_off + 16
-        name_end = name_off
-        while name_end < end_of_list and 0x20 <= raw[name_end] < 0x7F:
-            name_end += 1
-        name = raw[name_off:name_end].decode("ascii", errors="replace")
-        records.append((seq, flags, size, name, seq_off, name_end))
-        pos = name_end + 1
-
-    descriptors: list[_SiteDescriptor] = []
-    for idx, (seq, flags, size, name, seq_off, name_end) in enumerate(records):
-        next_start = (
-            records[idx + 1][4] if idx + 1 < len(records) else end_of_list
-        )
         class_index = flags & 0xFF
         clsid = (
             class_table[class_index]
             if 0 <= class_index < len(class_table)
             else None
         )
-        # inline_tail spans name_end..next_start. Names ≤ 7 chars carry a
-        # trailing NUL pad; 8-char names (e.g. "Caption1") sit flush against
-        # the inline data with no separator. Decoders that depend on the
-        # first byte being substantive (Caption: rect) probe by name.
+        class_name = _BBCTL_CLSIDS.get(clsid) if clsid is not None else None
+        name_off = seq_off + 16
+        name_end = _scan_site_name(raw, name_off, end_of_list, class_name)
+        name = raw[name_off:name_end].decode("ascii", errors="replace")
+        records.append(
+            (seq, flags, size, name, seq_off, name_end, class_index, clsid),
+        )
+        pos = name_end + 1
+
+    descriptors: list[_SiteDescriptor] = []
+    for idx, rec in enumerate(records):
+        seq, flags, size, name, seq_off, name_end, class_index, clsid = rec
+        next_start = (
+            records[idx + 1][4] if idx + 1 < len(records) else end_of_list
+        )
         descriptors.append(_SiteDescriptor(
             seq=seq,
             flags=flags,
@@ -421,33 +543,186 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
     return tuple(descriptors)
 
 
+# Named offsets for the CLabelCtrl persist stream layout (anchored on
+# the StdFont CLSID). Pinned via BBCTL.OCX FUN_40009356 / FUN_40003dbc
+# decompile + byte-trace against 4.ttl / first title.ttl fixtures.
+
+_FONT_PRE_CLSID_BYTES = 6                                  # 6-B wrapper before CLSID
+_FONT_PRE_CLSID_COLORREF_OFF = -5                          # COLORREF inside font_pre_clsid
+_FONT_BODY_VERSION_OFF = 0x10                              # u8 = 1
+_FONT_BODY_CHARSET_OFF = 0x11                              # u16
+_FONT_BODY_ATTRS_OFF = 0x13                                # u8: italic 0x02, underline 0x04, strikeout 0x08
+_FONT_BODY_WEIGHT_OFF = 0x14                               # u16
+_FONT_BODY_CY_LO_OFF = 0x16                                # u32 = pt * 10000
+_FONT_BODY_NAME_LEN_OFF = 0x1A                             # u8
+_FONT_BODY_NAME_OFF = 0x1B                                 # N B ASCII
+
+# Border / class-specific props directly after Font name (no padding).
+# Offsets relative to (font_off + 0x1B + name_len).
+_BORDER_BEVEL_WIDTH_OFF = 0x00
+_BORDER_FRAME_STYLE_OFF = 0x04
+_BORDER_BEVEL_HILIGHT_OFF = 0x08
+_BORDER_BEVEL_SHADOW_OFF = 0x0C
+_BORDER_FRAME_COLOR_OFF = 0x10
+_CLABEL_ID_TAG_OFF = 0x14
+_CLABEL_STR_CAPTION_OFF = 0x18
+
+# Post-strCaption fields (10 B total). Empirical layout pinned via
+# byte-trace across `4.ttl` pages 1/2 and `/var/share/drop/first
+# title.ttl` page 1 — all four default-valued captions share the same
+# 10-byte block immediately after strCaption: `00 00 00 00 00 00 01
+# 00 00 00`, decoding to (fWordWrap=0, fAutoSize=0, iAlignment=0,
+# fTransparent=1) — exactly the MFC defaults for v=4 captions.
+# PX_Bool / PX_Long here use 2-byte VARIANT_BOOL / 2-byte short for
+# the first three slots and a 4-byte LONG for the last:
+#   +0x00  u16   fWordWrap       (PX_Bool, default 0)
+#   +0x02  u16   fAutoSize       (PX_Bool, default 0)
+#   +0x04  u16   iAlignment      (PX_Long via PX_Short pathway, default 0)
+#   +0x06  u32   fTransparent    (PX_Long, default 1)
+_POST_TEXT_WORD_WRAP_OFF = 0x00
+_POST_TEXT_AUTO_SIZE_OFF = 0x02
+_POST_TEXT_ALIGNMENT_OFF = 0x04
+_POST_TEXT_TRANSPARENT_OFF = 0x06
+_POST_TEXT_SIZE = 0x0A
+
+_ATTR_ITALIC = 0x02
+_ATTR_UNDERLINE = 0x04
+_ATTR_STRIKEOUT = 0x08
+
+
+def _decode_label_persist(
+    buf: bytes,
+    font_off: int,
+) -> dict:
+    """Walk the CLabelCtrl persist stream from a StdFont CLSID anchor.
+
+    Returns a dict of all decoded fields. Bounds-checked: when the buf
+    truncates before a field, that field is set to its MFC default.
+    Caller seeds non-decoded fields (post-strCaption) with their MFC
+    defaults — see CaptionControl docstring."""
+    out: dict = {
+        "back_color": 0xC8D0D8,
+        "charset": 0,
+        "italic": False,
+        "underline": False,
+        "strikeout": False,
+        "weight": 0,
+        "size_cy": 0,
+        "font_name": "",
+        "bevel_width": 0,
+        "frame_style": 0,
+        "bevel_hilight": 0xFFFFFF,
+        "bevel_shadow": 0,
+        "frame_color": 0,
+        "id_tag": -1,
+        "str_caption": "",
+        "word_wrap": False,
+        "auto_size": False,
+        "alignment": 0,
+        "transparent": True,
+    }
+
+    # Pre-Font stock prop: back_color (4 B COLORREF inside 6-B
+    # font_pre_clsid wrapper). +0x36..+0x3B = `[u8 0][u32 COLORREF][u8 0]`.
+    color_off = font_off + _FONT_PRE_CLSID_COLORREF_OFF
+    if color_off >= 0 and color_off + 4 <= len(buf):
+        out["back_color"] = struct.unpack_from("<I", buf, color_off)[0]
+
+    # Font body — variable length, anchored at font_off + CLSID size.
+    body_start = font_off + 16
+    if body_start + _FONT_BODY_NAME_LEN_OFF >= len(buf):
+        return out
+    out["charset"] = struct.unpack_from(
+        "<H", buf, font_off + _FONT_BODY_CHARSET_OFF,
+    )[0]
+    attrs = buf[font_off + _FONT_BODY_ATTRS_OFF]
+    out["italic"] = bool(attrs & _ATTR_ITALIC)
+    out["underline"] = bool(attrs & _ATTR_UNDERLINE)
+    out["strikeout"] = bool(attrs & _ATTR_STRIKEOUT)
+    out["weight"] = struct.unpack_from(
+        "<H", buf, font_off + _FONT_BODY_WEIGHT_OFF,
+    )[0]
+    out["size_cy"] = struct.unpack_from(
+        "<I", buf, font_off + _FONT_BODY_CY_LO_OFF,
+    )[0]
+    nlen = buf[font_off + _FONT_BODY_NAME_LEN_OFF]
+    name_off = font_off + _FONT_BODY_NAME_OFF
+    if name_off + nlen > len(buf):
+        return out
+    out["font_name"] = buf[name_off:name_off + nlen].decode(
+        "ascii", errors="replace",
+    )
+
+    # Border + idTag + strCaption — pinned positionally.
+    post_name = name_off + nlen
+    if post_name + 0x18 > len(buf):
+        return out
+    out["bevel_width"] = struct.unpack_from(
+        "<i", buf, post_name + _BORDER_BEVEL_WIDTH_OFF,
+    )[0]
+    out["frame_style"] = struct.unpack_from(
+        "<i", buf, post_name + _BORDER_FRAME_STYLE_OFF,
+    )[0]
+    out["bevel_hilight"] = struct.unpack_from(
+        "<I", buf, post_name + _BORDER_BEVEL_HILIGHT_OFF,
+    )[0]
+    out["bevel_shadow"] = struct.unpack_from(
+        "<I", buf, post_name + _BORDER_BEVEL_SHADOW_OFF,
+    )[0]
+    out["frame_color"] = struct.unpack_from(
+        "<I", buf, post_name + _BORDER_FRAME_COLOR_OFF,
+    )[0]
+    out["id_tag"] = struct.unpack_from(
+        "<i", buf, post_name + _CLABEL_ID_TAG_OFF,
+    )[0]
+
+    text_off = post_name + _CLABEL_STR_CAPTION_OFF
+    if text_off >= len(buf):
+        return out
+    cap_len = buf[text_off]
+    text_start = text_off + 1
+    text_end = min(text_start + cap_len, len(buf))
+    out["str_caption"] = buf[text_start:text_end].decode(
+        "ascii", errors="replace",
+    )
+
+    # Post-strCaption fields. Block size = 0x0A, fits exactly into the
+    # 10-byte slot between strCaption end and the next descriptor's
+    # pre-Font region (or, in single-Caption pages, the form trailer).
+    post_text = text_end
+    if post_text + _POST_TEXT_SIZE > len(buf):
+        return out
+    out["word_wrap"] = bool(struct.unpack_from(
+        "<H", buf, post_text + _POST_TEXT_WORD_WRAP_OFF,
+    )[0])
+    out["auto_size"] = bool(struct.unpack_from(
+        "<H", buf, post_text + _POST_TEXT_AUTO_SIZE_OFF,
+    )[0])
+    out["alignment"] = struct.unpack_from(
+        "<H", buf, post_text + _POST_TEXT_ALIGNMENT_OFF,
+    )[0]
+    out["transparent"] = bool(struct.unpack_from(
+        "<I", buf, post_text + _POST_TEXT_TRANSPARENT_OFF,
+    )[0])
+
+    return out
+
+
 def _decode_caption(
     desc: _SiteDescriptor,
     property_block: bytes,
     shared_record_buf: bytes | None = None,
     shared_record_off: int | None = None,
 ) -> CaptionControl:
-    """Caption1 decoder. Rect read from `inline_tail[0..16]`; font/text
-    parsed from the StdFont CLSID landmark forward.
+    """Caption1 decoder. Rect from `inline_tail[0..16]`; everything else
+    walked from the StdFont CLSID landmark via `_decode_label_persist`.
 
-    Collapsed format (single-Caption pages): `property_block` is empty
-    and the StdFont CLSID lives inside `inline_tail` at offset 60.
-    Separate format (Caption alongside Story/Audio/etc.): only the
-    28-B inline "small tail" carries rect + site metadata; font/text
-    live in `property_block`.
-
-    Multi-Caption pages: BBDESIGN concatenates per-caption font+text
-    records into the LAST descriptor's `inline_tail` after that
-    descriptor's own 60-byte preamble. `_decode_controls` finds the
-    StdFont CLSID anchors in the shared buffer and routes the Nth
-    caption (in seq order) to the Nth CLSID via `shared_record_buf` /
-    `shared_record_off`. When provided these win over the local
-    inline_tail scan, so each caption reads its own font/text record
-    instead of every caption hitting the first CLSID.
-
-    When CLSID is absent (block truncated / format not yet RE'd), the
-    Control falls back to rect-only with empty font/text — the lowering
-    helpers tolerate empty strings."""
+    Multi-Caption pages: BBDESIGN concatenates per-caption records into
+    the LAST descriptor's `inline_tail`. `_caption_record_offsets` locates
+    each caption's CLSID in shared buffer; passes the (buf, off) pair as
+    `shared_record_buf` / `shared_record_off`. Single-Caption pages: the
+    descriptor's own inline_tail carries the full persist; the decoder
+    scans for the StdFont CLSID landmark there."""
     buf = desc.inline_tail
     if len(buf) < 16:
         return CaptionControl(
@@ -474,45 +749,40 @@ def _decode_caption(
                 rect_himetric=rect,
             )
 
-    # font_off points at the 16-B StdFont CLSID; layout from there is
-    # `[16 CLSID][1 version][3 charset/flags][2 weight][4 size_cy_lo]
-    # [1 namelen][N namebytes][2 pad][22 trailer_constants][1 textlen]
-    # [M textbytes][1 NUL]`. The italic flag rides in the 3 charset/flags
-    # bytes (bit 0x02 of `font_off + 0x13`). The text COLORREF lives 9
-    # bytes BEFORE the CLSID landmark — black (0) on default-styled
-    # captions, RGB(255,0,0) → BGR0 LE `ff 00 00 00` on a red caption.
-    # Separate-format Caption blocks (showcase) truncate at the
-    # trailer_constants — text lives further into the property region
-    # than `size_i` advertises; text decoding is best-effort with bounds
-    # checks.
-    weight = struct.unpack_from("<H", font_buf, font_off + 0x14)[0]
-    size_cy = struct.unpack_from("<I", font_buf, font_off + 0x16)[0]
-    italic = bool(font_buf[font_off + 0x13] & 0x02)
-    color_rgb = 0
+    fields = _decode_label_persist(font_buf, font_off)
+    # `color_rgb` legacy field: previous offset (`font_off - 9`) hit a
+    # zero region for default captions and the COLORREF low bytes for
+    # explicitly-colored ones. New offset reads the full COLORREF inside
+    # the 6-B font_pre_clsid wrapper. Both fields kept so any existing
+    # text-rendering caller has the same value semantic (0 for default).
+    legacy_color = 0
     if font_off >= 9:
-        color_rgb = struct.unpack_from("<I", font_buf, font_off - 9)[0]
-    nlen = font_buf[font_off + 0x1A]
-    font_name = font_buf[font_off + 0x1B:font_off + 0x1B + nlen].decode(
-        "ascii", errors="replace",
-    )
-    text_off = font_off + 0x1B + nlen + 24
-    text = ""
-    if text_off < len(font_buf):
-        cap_len = font_buf[text_off]
-        text = font_buf[text_off + 1:text_off + 1 + cap_len].decode(
-            "ascii", errors="replace",
-        )
+        legacy_color = struct.unpack_from("<I", font_buf, font_off - 9)[0]
     return CaptionControl(
         seq=desc.seq,
         flags=desc.flags,
         name=desc.name,
-        text=text,
-        font_name=font_name,
-        size_pt=size_cy // 10000,
-        weight=weight,
+        text=fields["str_caption"],
+        font_name=fields["font_name"],
+        size_pt=fields["size_cy"] // 10000,
+        weight=fields["weight"],
         rect_himetric=rect,
-        italic=italic,
-        color_rgb=color_rgb,
+        italic=fields["italic"],
+        underline=fields["underline"],
+        strikeout=fields["strikeout"],
+        charset=fields["charset"],
+        back_color=fields["back_color"],
+        bevel_width=fields["bevel_width"],
+        frame_style=fields["frame_style"],
+        bevel_hilight=fields["bevel_hilight"],
+        bevel_shadow=fields["bevel_shadow"],
+        frame_color=fields["frame_color"],
+        id_tag=fields["id_tag"],
+        word_wrap=fields["word_wrap"],
+        auto_size=fields["auto_size"],
+        alignment=fields["alignment"],
+        transparent=fields["transparent"],
+        color_rgb=legacy_color,
     )
 
 
@@ -1178,8 +1448,18 @@ def _build_section0(title: LoadedTitle) -> bytes:
         face_slot = _resolve_face_slot(cap.font_name, title.font_table)
         descriptor = bytearray(_SEC0_DESCRIPTOR_SIZE)
         struct.pack_into("<HHH", descriptor, 0x00, face_slot, 0, 0)
-        descriptor[0x06:0x09] = b"\x01\x01\x01"            # text_color = inherit
-        descriptor[0x09:0x0C] = b"\x01\x01\x01"            # back_color = inherit
+        # +0x06 text_color (3 B BGR0-LE-low-3), +0x09 back_color (3 B).
+        # text_color carries `cap.color_rgb` (legacy field reads the
+        # COLORREF at `font_off - 9`, which is 0 for default captions
+        # and the explicit color for authored ones — e.g. Caption 2
+        # in `4.ttl` page 0 reads as red). back_color carries the
+        # full COLORREF at `font_off - 5` (BackColor stock prop).
+        descriptor[0x06] = cap.color_rgb & 0xFF
+        descriptor[0x07] = (cap.color_rgb >> 8) & 0xFF
+        descriptor[0x08] = (cap.color_rgb >> 16) & 0xFF
+        descriptor[0x09] = cap.back_color & 0xFF
+        descriptor[0x0A] = (cap.back_color >> 8) & 0xFF
+        descriptor[0x0B] = (cap.back_color >> 16) & 0xFF
         struct.pack_into(
             "<iiiii",
             descriptor,
@@ -1190,6 +1470,10 @@ def _build_section0(title: LoadedTitle) -> bytes:
             0,
             cap.weight,
         )
+        descriptor[0x20] = 1 if cap.italic else 0           # lfItalic
+        descriptor[0x21] = 1 if cap.underline else 0        # lfUnderline
+        descriptor[0x22] = 1 if cap.strikeout else 0        # lfStrikeOut
+        descriptor[0x23] = cap.charset & 0xFF               # lfCharSet
         descriptors += descriptor
 
     pointer_table = b"\x00" * (face_count * _SEC0_POINTER_ENTRY_SIZE)
@@ -1350,15 +1634,34 @@ def build_bm_baggage(page: LoadedPage, font_table: tuple[FaceEntry, ...]) -> byt
     items: list[TextItem] = []
 
     for cap in page.captions:
+        left = _himetric_to_pixels(cap.rect_himetric[0])
+        top = _himetric_to_pixels(cap.rect_himetric[1])
+        right = _himetric_to_pixels(cap.rect_himetric[2])
+        bottom = _himetric_to_pixels(cap.rect_himetric[3])
         items.append(TextItem(
-            x=_himetric_to_pixels(cap.rect_himetric[0]),
-            y=_himetric_to_pixels(cap.rect_himetric[1]),
+            x=left,
+            y=top,
             text=cap.text,
             font_face=cap.font_name or "Times New Roman",
             font_height=-(cap.size_pt * 96 // 72) if cap.size_pt else -16,
             font_weight=cap.weight or 400,
             italic=cap.italic,
+            underline=cap.underline,
+            strikeout=cap.strikeout,
+            charset=cap.charset,
             color_rgb=cap.color_rgb,
+            back_color=cap.back_color,
+            transparent=cap.transparent,
+            alignment=cap.alignment,
+            rect_w=max(0, right - left),
+            rect_h=max(0, bottom - top),
+            bevel_width=cap.bevel_width,
+            bevel_hilight=cap.bevel_hilight,
+            bevel_shadow=cap.bevel_shadow,
+            frame_style=cap.frame_style,
+            frame_color=cap.frame_color,
+            word_wrap=cap.word_wrap,
+            auto_size=cap.auto_size,
         ))
 
     for c in page.controls:

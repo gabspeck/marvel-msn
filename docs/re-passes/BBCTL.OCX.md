@@ -81,20 +81,76 @@ class index in BOTH the low word and the high word of the dword.
 Loader implementation: `_parse_cvform_class_table` +
 `_dispatch_class` in `src/server/services/medview/ttl_loader.py`.
 
-## IPersistStreamInit::Save per class — TODO
+## IPersistStreamInit::Save per class
 
-Per-class persist-stream layout is the next RE pass (deferred from
-PR2). Locator: each class's CreateObject (constructor) sets the
-interface vtable pointer at `this+0x410`; the IPersistStreamInit Save
-slot is at vtable offset `+0x18` (entry 7 — QueryInterface, AddRef,
-Release, GetClassID, IsDirty, Load, Save, GetSizeMax, InitNew).
+### `CLabelCtrl` (Caption) — pinned
+
+`CLabelCtrl::DoPropExchange` @ `0x40009356` (v=4) and its border parent
+`FUN_40003dbc` (v=3) are decompiled. Persist call sequence (MFC 4.x
+ordinals via `BBCTL.OCX`):
+
+| Ordinal | MFC function | Field | Type | Default | Version gate |
+|---|---|---|---|---|---|
+| 2378 | `CPropExchange::ExchangeVersion` | (CLabelCtrl) | u32 | 4 | always |
+| 2378 | `CPropExchange::ExchangeVersion` | (parent border) | u32 | 3 | always |
+| 2223 | `COleControl::ExchangeStockProps` | stock-prop block (mask `0xD2`, written in MFC alphabetical order) | varies | — | always |
+| 4736 | `PX_Long` | `BevelWidth` | LONG | 0 | always |
+| 4736 | `PX_Long` | `FrameStyle` | LONG | 0 | always |
+| 4736 | `PX_Long` | `BevelHilight` | COLORREF | `0xFFFFFF` | v ≥ 3 |
+| 4736 | `PX_Long` | `BevelShadow` | COLORREF | 0 | v ≥ 3 |
+| 4736 | `PX_Long` | `BevelColor` (legacy) | COLORREF | `0xFFFFFF` | 1 ≤ v < 3 |
+| 4736 | `PX_Long` | `FrameColor` | COLORREF | 0 | v ≥ 2 |
+| 4736 | `PX_Long` | `idTag` | LONG | `-1` | always |
+| 4742 | `PX_String` | `strCaption` | CString | LoadString | v ≥ 4 always; v < 4 when `idTag == -1` |
+| 4724 | `PX_Bool` | `fWordWrap` | BOOL | FALSE | always |
+| 4724 | `PX_Bool` | `fAutoSize` | BOOL | FALSE | always |
+| 4736 | `PX_Long` | `iAlignment` | LONG | 0 | always |
+| 4736 | `PX_Long` | `iBackStyle` (legacy) | LONG | 0 | v < 3 |
+| 4736 | `PX_Long` | `fTransparent` | LONG | 1 | v ≥ 3 |
+
+The stock prop mask `0xD2` (set by `FUN_40008e81` constructor at
+`this+0x318`) gates which of MFC's alphabetical-order stock props
+ExchangeStockProps writes. Empirically, the back_color stock prop
+lands in the 6-byte `font_pre_clsid` wrapper at file offset
+`font_off - 5` (4 B COLORREF). Other bits in the mask have not been
+disambiguated against MFC 4.x source.
+
+The post-strCaption fields (`fWordWrap`, `fAutoSize`, `iAlignment`,
+`fTransparent`) are emitted as a 10-byte block immediately after
+`strCaption`'s bytes. Encoding: `[u16 fWordWrap][u16 fAutoSize][u16
+iAlignment][u32 fTransparent]`. Pinned empirically (see
+`docs/cvform-page-objects.md` §"Post-strCaption block") across four
+default-valued single-Caption fixtures — non-default-value
+verification deferred to future probes.
+
+On-disk byte layout pinned in `docs/cvform-page-objects.md`
+§"Caption1 property block".
+
+Decoder: `_decode_caption` + `_decode_label_persist` in
+`src/server/services/medview/ttl_loader.py`.
+
+Event entry points (string refs):
+- `"Click"` @ `0x4002b298`
+- `"RightClick"` @ `0x4002b2d0`
+
+These bind script macros via `idTag`. Lowering of Click → script
+dispatch is deferred (script table storage path not yet RE'd).
+
+### Other classes — TODO
+
+Per-class persist-stream layouts for `CQtxtCtrl` (Story),
+`CAudioCtrl`, `CLabelBtnCtrl` (CaptionButton), `CInfomapCtrl`
+(Outline), `CBblinkCtrl` (Shortcut) are not yet pinned. Locator: each
+class's CreateObject (constructor) sets the interface vtable pointer
+at `this+0x410`; the IPersistStreamInit Save slot is at vtable offset
+`+0x18` (entry 7 — QueryInterface, AddRef, Release, GetClassID,
+IsDirty, Load, Save, GetSizeMax, InitNew).
 
 The Save method body for these MFC controls is a thin thunk to a
 shared serialiser (`Ordinal_1097` + helper); the per-class write
 sequence lives in the COleControl::ExchangeProperties dispatch table
-which is set up in the constructor. Tracing the property
-write/exchange sequence is a separate pass — for each control, plan to
-follow `Ordinal_3452` calls in the constructor to find the
+which is set up in the constructor. For each control, follow
+`Ordinal_3452` calls in the constructor to find the
 property-exchange table, then enumerate each entry.
 
 Known-good probe seeds (from showcase Story1R):
@@ -104,10 +160,10 @@ Known-good probe seeds (from showcase Story1R):
   proxy GUID — observed `{0E7044F2-47FE-11F1-B405-000C875355C8}`).
 
 `StoryControl.content_proxy_ref` is populated heuristically from the
-matched CProxyTable's entry (PR1 chase); PR2's structural CLSID
+matched CProxyTable's entry (PR1 chase); the structural CLSID
 dispatch lands without exact persist-stream offset decoding for the
 other compound fields. Per-field deep decode is queued as a follow-up
-pass — see `~/.claude/plans/golden-questing-zephyr.md` PR2 Phase 2.3.
+pass.
 
 ## Ghidra annotation pass
 
