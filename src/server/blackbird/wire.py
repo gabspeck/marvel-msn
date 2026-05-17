@@ -227,6 +227,9 @@ _META_TEXTOUT = 0x0521
 _META_CREATEFONTINDIRECT = 0x02FB
 _META_CREATEBRUSHINDIRECT = 0x02FC
 _META_CREATEPENINDIRECT = 0x02FA
+_META_SAVEDC = 0x001E
+_META_RESTOREDC = 0x0127
+_META_INTERSECTCLIPRECT = 0x0416
 
 _BKMODE_TRANSPARENT = 1
 _BKMODE_OPAQUE = 2
@@ -314,6 +317,19 @@ def _wmf_deleteobject(idx: int) -> bytes:
 def _wmf_rectangle(left: int, top: int, right: int, bottom: int) -> bytes:
     """META_RECTANGLE: bottom, right, top, left (i16) — opposite of GDI."""
     return _wmf_record(_META_RECTANGLE, struct.pack("<hhhh", bottom, right, top, left))
+
+
+def _wmf_savedc() -> bytes:
+    return _wmf_record(_META_SAVEDC, b"")
+
+
+def _wmf_restoredc(saved_dc: int = -1) -> bytes:
+    return _wmf_record(_META_RESTOREDC, struct.pack("<h", saved_dc))
+
+
+def _wmf_intersectcliprect(left: int, top: int, right: int, bottom: int) -> bytes:
+    """META_INTERSECTCLIPRECT: bottom, right, top, left (i16) — opposite of GDI."""
+    return _wmf_record(_META_INTERSECTCLIPRECT, struct.pack("<hhhh", bottom, right, top, left))
 
 
 def _wmf_createbrushindirect(color_rgb: int, style: int = 0) -> bytes:
@@ -426,21 +442,28 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
             CreatePenIndirect(frame_color, 1, PS_NULL or PS_SOLID),
             SelectObject, Rectangle(left, top, right, bottom),
             DeleteObject(pen), DeleteObject(brush) — when border or
-            background fill is non-default.
+            background fill is non-default. Border/background sit
+            outside the clip so they draw at the authored extent.
          b. SetTextAlign per `alignment`.
          c. SetBkColor + SetBkMode(OPAQUE) if `transparent=False`,
             else SetBkMode(TRANSPARENT).
          d. SetTextColor.
          e. SelectObject(font_idx).
-         f. TextOut.
+         f. (optional) SaveDC + IntersectClipRect(item rect) — when
+            `auto_size=False` and rect_w/rect_h > 0; clips TextOut to
+            the authored caption rect.
+         g. TextOut.
+         h. (optional) RestoreDC(-1) — matches step (f).
       4. DeleteObject × N (fonts).
       5. EOF.
 
-    Word-wrap and auto-size (BOOL fields on `TextItem`) are NOT lowered
-    here — they affect text flow which WMF doesn't model. The kind=8
-    baggage's `PlayMetaFile` is positional, not flow-based. Honoring
-    them would require server-side text wrapping into multiple TextOut
-    records at successive y-positions; that's deferred.
+    Word-wrap (BOOL field on `TextItem`) is NOT lowered here — text
+    flow into multiple lines is deferred. `auto_size=True` skips the
+    clip step entirely (the control grows around its text and the
+    authored rect is advisory). For fixed-size captions
+    (`auto_size=False`), the clip rect honours the authored bounds so
+    overlong text is truncated mid-glyph by the GDI clip — matching
+    BBCTL CLabelCtrl behaviour.
 
     Coordinates are in whatever logical units MOSVIEW sets up before
     `PlayMetaFile`. With the kind=8 baggage `mapmode=1` (MM_TEXT)
@@ -501,7 +524,18 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
             records += _wmf_setbkmode(_BKMODE_OPAQUE)
         records += _wmf_settextcolor(item.color_rgb)
         records += _wmf_selectobject(idx)
+        has_clip = (not item.auto_size) and item.rect_w > 0 and item.rect_h > 0
+        if has_clip:
+            records += _wmf_savedc()
+            records += _wmf_intersectcliprect(
+                int(item.x),
+                int(item.y),
+                int(item.x + item.rect_w),
+                int(item.y + item.rect_h),
+            )
         records += _wmf_textout(int(item.x), int(item.y), item.text)
+        if has_clip:
+            records += _wmf_restoredc(-1)
     for idx in range(len(items)):
         records += _wmf_deleteobject(idx)
     records += _wmf_eof()

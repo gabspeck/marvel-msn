@@ -439,6 +439,20 @@ class TestBaggageCarriesNewStyling(unittest.TestCase):
             idx += len(marker)
         self.assertTrue(found, "no italic-only Garamond LOGFONT in baggage")
 
+    def test_baggage_clips_undersized_caption(self):
+        # seq=18 ("Arial, 24pt, undersized dimensions") authors a 248x24
+        # rect too narrow for the text — auto_size=False captions with a
+        # real rect must emit SAVEDC + INTERSECTCLIPRECT + RESTOREDC
+        # around the TextOut so the client clips mid-glyph.
+        t = load_title(_TITLE_4)
+        bag = build_all_bm_baggage(t)["bm0"]
+        # META_INTERSECTCLIPRECT rdSize=7, function=0x0416 → 07 00 00 00 16 04
+        self.assertIn(b"\x07\x00\x00\x00\x16\x04", bag)
+        # META_SAVEDC rdSize=3, function=0x001E → 03 00 00 00 1e 00
+        self.assertIn(b"\x03\x00\x00\x00\x1e\x00", bag)
+        # META_RESTOREDC rdSize=4, function=0x0127 → 04 00 00 00 27 01
+        self.assertIn(b"\x04\x00\x00\x00\x27\x01", bag)
+
 
 class TestBuildBm0Baggage(unittest.TestCase):
     def test_kind8_metafile_when_captions_present(self):
