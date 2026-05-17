@@ -107,8 +107,8 @@ class CaptionControl(Control):
         +0x02 (2 B)  fAutoSize   (BOOL VARIANT_BOOL, default 0)
         +0x04 (2 B)  iAlignment  (short, default 0; 0=left 1=center 2=right)
         +0x06 (4 B)  fTransparent(LONG, default 1)
-    Pinned empirically: `4.ttl` pages 1/2 and `first title.ttl` page 1
-    (all four default-valued single-Caption fixtures) share the exact
+    Pinned empirically: `4.ttl` pages 1/2 and `tests/assets/multi_page_title.ttl`
+    (all default-valued single-Caption pages) share the exact
     same 10 bytes `00 00 00 00 00 00 01 00 00 00`, which decode to the
     MFC defaults (0, 0, 0, 1). The values BBDESIGN doesn't vary across
     fixtures so non-default-value verification is deferred to future
@@ -189,6 +189,34 @@ class OutlineControl(_CompoundControl):
 class ShortcutControl(_CompoundControl):
     """Shortcut (BBCTL.OCX class `CBblinkCtrl`, ProgID
     `BBLINK.BblinkCtrl.1`)."""
+
+
+@dataclass(frozen=True)
+class PictureControl(_CompoundControl):
+    """Picture (BBCTL.OCX class `CWaveletCtrl`, ProgID
+    `WAVELET.WaveletCtrl.1`). Per-field persist not yet RE'd."""
+
+
+@dataclass(frozen=True)
+class PictureButtonControl(_CompoundControl):
+    """PictureButton (BBCTL.OCX class `CActionCtrl`, ProgID
+    `ACTION.ActionCtrl.1`). CLSID shares the `f178b6` prefix with
+    CaptionButton — only the first byte differs. Per-field persist
+    not yet RE'd."""
+
+
+@dataclass(frozen=True)
+class PsfControl(_CompoundControl):
+    """Psf (BBCTL.OCX class `CPsfCtrl`, ProgID `PSF.PsfCtrl.1`).
+    BBDESIGN exposes this as the "DynamicStory" site type. Per-field
+    persist not yet RE'd."""
+
+
+@dataclass(frozen=True)
+class PrintPsfControl(_CompoundControl):
+    """PrintPsf (BBCTL.OCX class `CPrintPsfCtrl`, ProgID
+    `PRINTPSF.PrintPsfCtrl.1`). Not yet exercised by any fixture;
+    pinned from BBCTL.OCX so the dispatch table is complete."""
 
 
 @dataclass(frozen=True)
@@ -286,8 +314,8 @@ def _parse_cstylesheet(buf: bytes) -> tuple[FaceEntry, ...]:
 
     Wire shape (4.ttl): `[u8 version=9][u16 font_count][u16 style_count]
     { [u8 namelen][ASCII name][u16 key] }*font_count [u8 trailer]`.
-    style_count tolerates non-zero values (msn_today.ttl: 54 styles
-    after the font table; unused here).
+    style_count tolerates non-zero values (tests/assets/story_test.ttl:
+    54 styles after the font table; unused here).
     """
     if buf[0] != 0x09:
         raise ValueError(f"unsupported CStyleSheet version: {buf[0]}")
@@ -377,20 +405,24 @@ _CVFORM_CLASS_TABLE_OFF = 0x9A
 _CVFORM_CLASS_TABLE_STRIDE = 40
 
 
-# BBCTL.OCX CLSIDs extracted from `Register_C{Class}Ctrl_*` MFC factory
-# initializers (DllRegisterServer → Ordinal_403 chain). 6 CLSIDs map to
-# the 6 site-class names emitted by BBDESIGN's CVForm authoring tool
-# (Story / Caption / Audio / CaptionButton / Outline / Shortcut); the
-# remaining 4 are BBCTL controls not exercised by any current TTL
-# fixture (PictureButton / PrintPsf / Picture / Psf).
+# BBCTL.OCX CLSIDs, all 10 site classes. Pinned via Ghidra symbols on
+# the MSN95 project (BBCTL.OCX), each emitted by `Register_C{Class}Ctrl_*`
+# MFC factory initializers (DllRegisterServer → Ordinal_403 chain):
+# - CLSID_CQtxtCtrl_QTXT_BBCTL_STORY                  @ 0x40023fd8
+# - CLSID_CLabelCtrl_LABEL_BBCTL_CAPTION              @ 0x40021c50
+# - CLSID_CAudioCtrl_AUDIO_BBCTL_AUDIO                @ 0x4001fe90
+# - CLSID_CLabelBtnCtrl_LABELBTN_BBCTL_CAPTIONBUTTON  @ 0x4001f888
+# - CLSID_CInfomapCtrl_INFOMAP_BBCTL_OUTLINE          @ 0x40022d58
+# - CLSID_CBblinkCtrl_BBLINK_BBCTL_SHORTCUT           @ 0x400210b0
+# - CLSID_CWaveletCtrl_PICTURE                        @ 0x400216a0
+# - CLSID_CActionCtrl_PICTUREBUTTON                   @ 0x4001e9a8
+# - CLSID_CPsfCtrl_PSF                                @ 0x400209b8
+# - CLSID_CPrintPsfCtrl_PRINTPSF                      @ 0x4001ed50
 #
-# Annotated in Ghidra (MSN95 project, BBCTL.OCX):
-# - CLSID_CQtxtCtrl_QTXT_BBCTL_STORY              @ 0x40023fd8
-# - CLSID_CLabelCtrl_LABEL_BBCTL_CAPTION          @ 0x40021c50
-# - CLSID_CAudioCtrl_AUDIO_BBCTL_AUDIO            @ 0x4001fe90
-# - CLSID_CLabelBtnCtrl_LABELBTN_BBCTL_CAPTIONBUTTON @ 0x4001f888
-# - CLSID_CInfomapCtrl_INFOMAP_BBCTL_OUTLINE      @ 0x40022d58
-# - CLSID_CBblinkCtrl_BBLINK_BBCTL_SHORTCUT       @ 0x400210b0
+# `tests/assets/all_controls.ttl` exercises 9 of these (PrintPsf is
+# the only one with no fixture coverage). BBDESIGN's user-facing site
+# names mostly track the class — e.g. `Story1R` → CQtxtCtrl — except
+# Psf, which BBDESIGN exposes as the "DynamicStory" site type.
 _BBCTL_CLSIDS: dict[bytes, str] = {
     bytes.fromhex("00ae8392bf6ace11b94200aa004a7abf"): "Story",
     bytes.fromhex("d0096f1a7465ce11a25f00aa003e4475"): "Caption",
@@ -398,6 +430,10 @@ _BBCTL_CLSIDS: dict[bytes, str] = {
     bytes.fromhex("8bf178b684871b10bd5200aa003e4475"): "CaptionButton",
     bytes.fromhex("e053d2dee2f4cd11ab6d00aa003e4475"): "Outline",
     bytes.fromhex("a066f706094fce119a0000aa006b1e42"): "Shortcut",
+    bytes.fromhex("b0cc12e01a10ce11b33d00aa004a5b7e"): "Picture",
+    bytes.fromhex("86f178b694871b10bd5200aa003e4475"): "PictureButton",
+    bytes.fromhex("70fff53e93efcd11ab6d00aa003e4475"): "Psf",
+    bytes.fromhex("53e9d3af7464ce118c1800aa005746f2"): "PrintPsf",
 }
 
 
@@ -421,80 +457,91 @@ def _parse_cvform_class_table(raw: bytes) -> tuple[bytes, ...]:
     return tuple(out)
 
 
-# Minimum on-disk length of the site-class name prefix, indexed by the
-# class name resolved from the CVForm class table. When `prefix_len + 1
-# > 8`, the name field can't fit in the 8-byte slot and is therefore
-# always NUL-terminated. When it fits in 8 bytes, the field is exactly
-# 8 bytes wide: NUL-padded for shorter names, no terminator for names
-# that fill the slot exactly. The 8-byte slot rule is pinned by:
-#   - Caption1 / Outline1 (8 chars, no NUL, rect/xy_twips immediately
-#     follow) — showcase + 4.ttl
-#   - Story1R / Audio1R (7 chars + 1 NUL pad) — msn_today + showcase
-#   - Shortcut1=R (11 chars + NUL) — msn_today
-#   - CaptionButton1R (15 chars + NUL) — showcase
-_SITE_NAME_PREFIX_MIN_LEN: dict[str, int] = {
-    "Caption": 7,
-    "CaptionButton": 13,
-    "Story": 5,
-    "Audio": 5,
-    "Outline": 7,
-    "Shortcut": 8,
-}
-_SITE_NAME_SLOT = 8
+# 28-byte fixed tail on every Caption site descriptor: 16-byte HIMETRIC
+# rect immediately after the name slot, then a 12-byte trailer carrying
+# a stock-font handle echo + flags-with-high-bit. Empirically pinned
+# against `tests/assets/captions_test.ttl` (24-Caption form, variable
+# slot sizes 8..32) and `resources/titles/4.ttl` (4-Caption page,
+# 8-byte slot). Compound-control sites (Story/Audio/...) carry x,y twips
+# in the first 8 bytes after the slot — same total tail size on the
+# wire because the remaining bytes hold per-control inline data.
+_SITE_FIXED_TAIL = 28
+
+_SITE_NAME_FALLBACK_SLOT = 8                       # last-desc fallback
 _SITE_NAME_MAX = 64                                # safety cap for NUL scan
+_SITE_RECT_MAX_HIMETRIC = 50000                    # ~520 mm — exceeds Win95 page extents
 
 
-def _scan_site_name(
-    raw: bytes, name_off: int, end_of_list: int, class_name: str | None,
-) -> int:
-    """Compute the end offset of a site descriptor's name field.
+def _scan_site_name_in_slot(raw: bytes, name_off: int, slot_end: int) -> int:
+    """Return the end offset of the printable-ASCII name run within a
+    site-descriptor name slot.
 
-    BBDESIGN writes site names into an 8-byte slot: names shorter than 8
-    chars are NUL-padded, names exactly 8 chars have no terminator (the
-    next byte is inline data — rect for Caption, xy_twips for compound
-    controls), and names longer than 8 chars overflow with a NUL
-    terminator after the last char.
-
-    The first two cases are ambiguous from bytes alone when the inline
-    data's first byte is a printable ASCII value (e.g. Caption4 in
-    4.ttl has `rect.left = 1905 = 0x0771` whose LSB is `'q'`). The
-    class CLSID resolves the ambiguity: known classes with a prefix
-    that fits in the 8-byte slot take exactly 8 bytes when no NUL is
-    found within the slot; classes whose prefix can't fit (e.g.
-    CaptionButton, Shortcut) always overflow and use NUL termination.
-    """
-    field_end = min(name_off + _SITE_NAME_SLOT, end_of_list)
+    Slot bytes after the actual name are NUL-padding or uninitialized
+    memory; the run stops at the first NUL or non-printable byte.
+    Names whose user-set length exactly fills the slot (no NUL,
+    rect.left LSB starts at slot end) extend to `slot_end`."""
     end = name_off
-    while end < field_end and raw[end] != 0:
-        end += 1
-    if end < field_end:
-        return end                                  # NUL within 8-byte slot
-    prefix_len = _SITE_NAME_PREFIX_MIN_LEN.get(class_name or "", 0)
-    if prefix_len + 1 <= _SITE_NAME_SLOT:
-        return field_end                            # exactly-8-char name
-    cap = min(name_off + _SITE_NAME_MAX, end_of_list)
-    while end < cap and raw[end] != 0:
+    while end < slot_end and 0x20 <= raw[end] <= 0x7e:
         end += 1
     return end
+
+
+def _looks_like_caption_rect(raw: bytes, off: int) -> bool:
+    """True if the 4-i32 LE block at `off` is a plausible HIMETRIC LTRB
+    rect: each component is in `[0, _SITE_RECT_MAX_HIMETRIC)` and
+    `right > left` & `bottom > top`. Used to disambiguate the last
+    descriptor's name-slot end (no next-marker boundary)."""
+    if off + 16 > len(raw):
+        return False
+    l, t, r, b = struct.unpack_from("<iiii", raw, off)
+    return (
+        0 <= l < _SITE_RECT_MAX_HIMETRIC
+        and 0 <= t < _SITE_RECT_MAX_HIMETRIC
+        and 0 <= r < _SITE_RECT_MAX_HIMETRIC
+        and 0 <= b < _SITE_RECT_MAX_HIMETRIC
+        and r > l
+        and b > t
+    )
+
+
+def _last_descriptor_slot(raw: bytes, name_off: int, end_of_list: int) -> int:
+    """Pick a slot size for the LAST site descriptor by scanning for the
+    first 4-byte-aligned offset where the following 16 bytes look like a
+    plausible HIMETRIC rect."""
+    max_slot = min(_SITE_NAME_MAX, end_of_list - name_off - 16)
+    for slot in range(4, max_slot + 1, 4):
+        if _looks_like_caption_rect(raw, name_off + slot):
+            return slot
+    return _SITE_NAME_FALLBACK_SLOT
 
 
 def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
     """Walk site descriptors in a CVForm (Form preamble at +0x00, sites
     starting at +0x28). Each descriptor produces a `_SiteDescriptor`
-    with `inline_tail` carrying bytes up to the next site (or to the
-    trailing form CLSID at end of file).
+    with `inline_tail` carrying bytes from the descriptor's fixed
+    28-byte tail (16 B HIMETRIC rect + 12 B trailer) onward, up to the
+    next site or the form trailer CLSID.
 
-    Each descriptor's `flags & 0xFF` indexes into the CVForm preamble's
-    class table (parsed via `_parse_cvform_class_table`) to resolve a
-    16-B BBCTL class CLSID. The resolved class drives `_scan_site_name`
-    so the name field's exact byte boundary is pinned before slicing
-    `inline_tail`. CLSID-first dispatch + name-prefix fallback happens
-    in `_decode_descriptor`."""
+    Name slot width per descriptor is derived from the inter-marker
+    distance: `slot = next_seq_off - this_seq_off - 16 - 28`. Within
+    the slot, the name is the leading printable-ASCII run; trailing
+    bytes are NUL-padding or BBDESIGN uninitialized memory. The last
+    descriptor has no `next_seq_off`, so the slot is bounded by either
+    the `flags & 0xFF` low byte's increment pattern or a NUL scan with
+    cap.
+
+    `flags & 0xFF` is a per-site serial number (0..N-1), NOT a class
+    index. The CVForm preamble's class CLSID table is parsed for the
+    `_BBCTL_CLSIDS` lookup, but dispatch in `_dispatch_class` is
+    CLSID-list-based + name-prefix fallback. Single-class forms (one
+    CLSID in the table) propagate that CLSID to every site."""
     trailer_off = raw.find(_FORM_CLSID_PREFIX, _FORM_PREAMBLE_END + 4)
     end_of_list = trailer_off if trailer_off >= 0 else len(raw)
     class_table = _parse_cvform_class_table(raw)
+    sole_clsid = class_table[0] if len(class_table) == 1 else None
 
-    records: list[tuple[int, int, int, str, int, int, int, bytes | None]] = []
+    # Pass 1: collect marker positions of all sites.
+    marker_offs: list[int] = []
     pos = _FORM_PREAMBLE_END
     while True:
         m = raw.find(_BBCTL_SITE_MARKER, pos)
@@ -504,39 +551,45 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
         if seq_off < pos:
             pos = m + 4
             continue
-        seq, marker, size, flags = struct.unpack_from("<IIII", raw, seq_off)
+        marker = struct.unpack_from("<I", raw, m)[0]
         if marker != _BBCTL_SITE_MARKER_U32:
             pos = m + 4
             continue
-        class_index = flags & 0xFF
-        clsid = (
-            class_table[class_index]
-            if 0 <= class_index < len(class_table)
-            else None
-        )
-        class_name = _BBCTL_CLSIDS.get(clsid) if clsid is not None else None
-        name_off = seq_off + 16
-        name_end = _scan_site_name(raw, name_off, end_of_list, class_name)
-        name = raw[name_off:name_end].decode("ascii", errors="replace")
-        records.append(
-            (seq, flags, size, name, seq_off, name_end, class_index, clsid),
-        )
-        pos = name_end + 1
+        marker_offs.append(seq_off)
+        pos = seq_off + 16 + 1                     # past header; name handled below
 
+    # Pass 2: build descriptors using inter-marker distance for slot size.
     descriptors: list[_SiteDescriptor] = []
-    for idx, rec in enumerate(records):
-        seq, flags, size, name, seq_off, name_end, class_index, clsid = rec
-        next_start = (
-            records[idx + 1][4] if idx + 1 < len(records) else end_of_list
-        )
+    for idx, seq_off in enumerate(marker_offs):
+        seq, _mk, size, flags = struct.unpack_from("<IIII", raw, seq_off)
+        name_off = seq_off + 16
+        if idx + 1 < len(marker_offs):
+            next_seq_off = marker_offs[idx + 1]
+            slot_size = (
+                next_seq_off - seq_off - 16 - _SITE_FIXED_TAIL
+            )
+        else:
+            next_seq_off = end_of_list
+            slot_size = _last_descriptor_slot(raw, name_off, end_of_list)
+        if slot_size < 0:
+            slot_size = _SITE_NAME_FALLBACK_SLOT
+        slot_end = name_off + slot_size
+        name_end = _scan_site_name_in_slot(raw, name_off, slot_end)
+        name = raw[name_off:name_end].decode("ascii", errors="replace")
+        class_index = flags & 0xFF
+        clsid: bytes | None = None
+        if 0 <= class_index < len(class_table):
+            clsid = class_table[class_index]
+        if clsid is None:
+            clsid = sole_clsid
         descriptors.append(_SiteDescriptor(
             seq=seq,
             flags=flags,
             name=name,
             size=size,
             descriptor_off=seq_off,
-            name_end=name_end,
-            inline_tail=raw[name_end:next_start],
+            name_end=slot_end,                     # inline_tail starts at rect
+            inline_tail=raw[slot_end:next_seq_off],
             class_index=class_index,
             clsid=clsid,
         ))
@@ -545,7 +598,8 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
 
 # Named offsets for the CLabelCtrl persist stream layout (anchored on
 # the StdFont CLSID). Pinned via BBCTL.OCX FUN_40009356 / FUN_40003dbc
-# decompile + byte-trace against 4.ttl / first title.ttl fixtures.
+# decompile + byte-trace against tests/assets/{captions_test,all_controls,
+# multi_page_title}.ttl fixtures.
 
 _FONT_PRE_CLSID_BYTES = 6                                  # 6-B wrapper before CLSID
 _FONT_PRE_CLSID_COLORREF_OFF = -5                          # COLORREF inside font_pre_clsid
@@ -568,11 +622,11 @@ _CLABEL_ID_TAG_OFF = 0x14
 _CLABEL_STR_CAPTION_OFF = 0x18
 
 # Post-strCaption fields (10 B total). Empirical layout pinned via
-# byte-trace across `4.ttl` pages 1/2 and `/var/share/drop/first
-# title.ttl` page 1 — all four default-valued captions share the same
-# 10-byte block immediately after strCaption: `00 00 00 00 00 00 01
-# 00 00 00`, decoding to (fWordWrap=0, fAutoSize=0, iAlignment=0,
-# fTransparent=1) — exactly the MFC defaults for v=4 captions.
+# byte-trace across `4.ttl` and `tests/assets/multi_page_title.ttl` —
+# default-valued captions share the same 10-byte block immediately
+# after strCaption: `00 00 00 00 00 00 01 00 00 00`,
+# decoding to (fWordWrap=0, fAutoSize=0, iAlignment=0, fTransparent=1)
+# — exactly the MFC defaults for v=4 captions.
 # PX_Bool / PX_Long here use 2-byte VARIANT_BOOL / 2-byte short for
 # the first three slots and a 4-byte LONG for the last:
 #   +0x00  u16   fWordWrap       (PX_Bool, default 0)
@@ -833,10 +887,18 @@ _BBCTL_CTOR: dict[str, type[_CompoundControl] | None] = {
     "CaptionButton": CaptionButtonControl,
     "Outline": OutlineControl,
     "Shortcut": ShortcutControl,
+    "Picture": PictureControl,
+    "PictureButton": PictureButtonControl,
+    "Psf": PsfControl,
+    "PrintPsf": PrintPsfControl,
 }
 
+# Order matters: longer prefixes first so e.g. "CaptionButton1" matches
+# `CaptionButton` not `Caption`, and "PictureButton1" matches
+# `PictureButton` not `Picture`. Only used when CLSID dispatch fails.
 _NAME_PREFIX_ORDER: tuple[str, ...] = (
     "CaptionButton", "Caption", "Story", "Audio", "Outline", "Shortcut",
+    "PictureButton", "Picture", "PrintPsf", "Psf",
 )
 
 
@@ -942,9 +1004,9 @@ def _decode_controls(raw: bytes) -> tuple[Control, ...]:
 
 # Handle scheme: high 11 bits = storage table id, low 21 bits = slot
 # index. Empirically: CBForm.embedded_vform handle 0xc00000 → table 6
-# slot 0 (msn_today/4.ttl); handle 0xe00000 → table 7 slot 0 (showcase
-# first title.ttl). Decode pattern confirmed against `\x03handles`
-# entries that map back to known objects.
+# slot 0 (story_test.ttl); handle 0xe00000 → table 7 slot 0 (showcase-
+# style multi-class CVForm). Decode pattern confirmed against
+# `\x03handles` entries that map back to known objects.
 def _handle_to_storage_slot(handle: int) -> tuple[int, int]:
     return (handle >> 21, handle & ((1 << 21) - 1))
 

@@ -12,7 +12,7 @@ from server.services.medview.ccontent import (
 
 class TestDecodeTextRuns(unittest.TestCase):
     def test_msn_today_8_7_fixture(self):
-        # First 32 bytes of msn_today.ttl `8/7/object` (TextRuns).
+        # First 32 bytes of tests/assets/story_test.ttl `8/7/object` (TextRuns).
         head = bytes.fromhex(
             "0200535468697320697320616e206578616d706c65206f6620636f6e74656e74"
         )
@@ -41,7 +41,7 @@ class TestDecodeTextRuns(unittest.TestCase):
         self.assertEqual(decoded.raw_payload, b"")
 
     def test_texttree_header_raises(self):
-        # 8/6 in msn_today (TextTree): `01 05 ...`.
+        # 8/6 in story_test.ttl (TextTree): `01 05 ...`.
         with self.assertRaises(NotImplementedError):
             decode_textruns(bytes.fromhex("0105000102000b00"))
 

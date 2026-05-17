@@ -1,7 +1,8 @@
 """CContent decoder for Blackbird TTL — TextRuns body only.
 
-Scope (PR1): empirical TextRuns header pin against `msn_today.ttl 8/7`
-(122 B). Decoder is tolerant of short / empty payloads (returns an empty
+Scope (PR1): empirical TextRuns header pin against
+`tests/assets/story_test.ttl 8/7` (122 B). Decoder is tolerant of short
+/ empty payloads (returns an empty
 container) and explicit on TextTree payloads (raises NotImplementedError
 so callers can defer).
 
@@ -30,7 +31,7 @@ class TextRunsContent:
     """Decoded CContent payload for a `TextRuns` typed body."""
     text: str
     style_runs: tuple[StyleRun, ...]
-    header_version: int                                    # observed: 0x02 in msn_today 8/7
+    header_version: int                                    # observed: 0x02 in story_test.ttl 8/7
     header_byte_1: int
     raw_payload: bytes                                     # bytes from offset 2 onwards
 

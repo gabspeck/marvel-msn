@@ -13,14 +13,13 @@ state needed by selectors that don't have a static answer:
 Cache-miss group (`0x05`/`0x06`/`0x07`/`0x15`/`0x16`) emits a bare-ack
 synchronous reply followed by an async push frame on the matching
 notification iterator. Type-3 (va resolution) pushes resolve to zero
-(va=addr=0); selector 0x15 HfcNear pushes either a case-3 BF chunk
-(BBDESIGN-authored TTL with captions, bm0 carries the kind=8 WMF) or
-a case-1 BF chunk carrying the loaded MVB's first paragraph text.
+(va=addr=0); selector 0x15 HfcNear pushes a case-3 BF chunk (BBDESIGN-
+authored TTL with captions, bm0 carries the kind=8 WMF) when a TTL is
+loaded, else an empty case-1 BF chunk.
 
 OpenTitle resolves the title by deid: `{deid}.ttl` under
-`resources/titles/` wins when present; otherwise `NO_NSR.MVB` is the
-fallback. Both branches fall through to the empty
-`TITLE_OPEN_BODY` / `BM0_BAGGAGE` if the file is missing or malformed.
+`resources/titles/` wins when present; missing/malformed files fall
+through to the empty `TITLE_OPEN_BODY` / `BM0_BAGGAGE`.
 """
 
 from __future__ import annotations
@@ -84,13 +83,6 @@ from ...mpc import (
 )
 from .._dispatch import log_unhandled_selector
 from . import replies
-from .mvb_loader import (
-    LoadedMVB,
-    build_mvb_bm0_baggage,
-    build_mvb_first_paragraph_chunk,
-    load_mvb,
-    lower_mvb_to_payload,
-)
 from .payload import (
     BM0_BAGGAGE,
     TITLE_OPEN_BODY,
@@ -106,7 +98,6 @@ from .ttl_loader import (
 )
 
 _TITLES_DIR = pathlib.Path(__file__).resolve().parents[4] / "resources" / "titles"
-_MVB_FALLBACK_PATH = _TITLES_DIR / "NO_NSR.MVB"
 
 log = logging.getLogger(__name__)
 
@@ -432,22 +423,14 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
     `bm0` baggage at the slot origin and `PlayMetaFile` lowers the kind=8
     metafile carrying caption TextOuts.
 
-    MVB loaded → push the first paragraph's case-1 chunk **once** per
-    session; subsequent cache-misses fall through to the empty case-1.
-
     Empty case-1 (skip-row) is the layout walker's "return-5" fast path:
-    used when no title is loaded, or once the MVB's single content push
-    has already fired. Without that one-shot gate the engine paints the
-    cached chunk into many rows to fill the pane (~13 stacked rows from
-    a single push, screenshot 2026-05-14).
+    used when no title is loaded. Without it the engine paints the
+    cached chunk into many rows to fill the pane.
     """
     if handler.loaded_title is not None and any(
         page.captions for page in handler.loaded_title.pages
     ):
         return build_case3_bf_chunk(title_slot, key)
-    if handler.loaded_mvb is not None and not handler._served_first_paragraph:
-        handler._served_first_paragraph = True
-        return build_mvb_first_paragraph_chunk(handler.loaded_mvb, title_slot, key)
     return build_case1_bf_chunk(
         text="", title_byte=title_slot, key=key, initial_font_style=None,
     )
@@ -569,11 +552,9 @@ class MEDVIEWHandler:
         # tests / call sites that bypass OPEN still resolve.
         self._baggage_handles: dict[int, str] = {_BAGGAGE_HANDLE_BM0: "bm0"}
         self.loaded_title: LoadedTitle | None = None
-        self.loaded_mvb: LoadedMVB | None = None
         self.title_body: bytes = TITLE_OPEN_BODY
         self.baggage_map: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
         self.title_metadata: TitleOpenMetadata = TITLE_OPEN_METADATA
-        self._served_first_paragraph: bool = False
 
     # --- BootstrapDiscovery ----------------------------------------
 
@@ -747,15 +728,12 @@ class MEDVIEWHandler:
         slot = TITLE_OPEN_METADATA.title_slot
         self._open_title_slots.add(slot)
 
-        # Resolve the title body: `{deid}.ttl` (BBDESIGN) takes priority
-        # when present; otherwise fall back to `NO_NSR.MVB` (MMV 2.0).
-        # Both branches degrade to the empty MSN Today scaffold on load
-        # failure so the client never sees a missing-title crash.
+        # Resolve `{deid}.ttl` under `resources/titles/`. Missing or
+        # malformed files degrade to the empty MSN Today scaffold so the
+        # client never sees a missing-title crash.
         title = load_title(_TITLES_DIR / f"{deid}.ttl") if deid else None
-        mvb = None
         if title is not None:
             self.loaded_title = title
-            self.loaded_mvb = None
             self.title_body = lower_to_payload(title)
             self.baggage_map = build_all_bm_baggage(title)
             first_page = title.pages[0]
@@ -768,23 +746,12 @@ class MEDVIEWHandler:
             caption = title.caption or title.title_name
             source = "ttl"
         else:
-            mvb = load_mvb(_MVB_FALLBACK_PATH)
-            if mvb is not None:
-                self.loaded_title = None
-                self.loaded_mvb = mvb
-                self.title_body = lower_mvb_to_payload(mvb)
-                self.baggage_map = {"bm0": build_mvb_bm0_baggage(mvb)}
-                self.title_metadata = TITLE_OPEN_METADATA
-                caption = mvb.caption
-                source = "mvb"
-            else:
-                self.loaded_title = None
-                self.loaded_mvb = None
-                self.title_body = TITLE_OPEN_BODY
-                self.baggage_map = {"bm0": BM0_BAGGAGE}
-                self.title_metadata = TITLE_OPEN_METADATA
-                caption = None
-                source = "empty"
+            self.loaded_title = None
+            self.title_body = TITLE_OPEN_BODY
+            self.baggage_map = {"bm0": BM0_BAGGAGE}
+            self.title_metadata = TITLE_OPEN_METADATA
+            caption = None
+            source = "empty"
 
         log.info(
             "open_title req_id=%d slot=0x%02x token=%r deid=%r source=%s "
@@ -808,11 +775,9 @@ class MEDVIEWHandler:
             self._open_title_slots.discard(slot)
             if not self._open_title_slots:
                 self.loaded_title = None
-                self.loaded_mvb = None
                 self.title_body = TITLE_OPEN_BODY
                 self.baggage_map = {"bm0": BM0_BAGGAGE}
                 self.title_metadata = TITLE_OPEN_METADATA
-                self._served_first_paragraph = False
                 self._baggage_handles = {_BAGGAGE_HANDLE_BM0: "bm0"}
         return replies.close_title()
 

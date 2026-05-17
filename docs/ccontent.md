@@ -6,7 +6,7 @@
 
 ## TextRuns header (empirical)
 
-Pinned against `resources/titles/msn_today.ttl` `8/7/\x03object` (122 B,
+Pinned against `tests/assets/story_test.ttl` `8/7/\x03object` (122 B,
 type=`TextRuns`).
 
 | Offset | Size | Field | Notes |

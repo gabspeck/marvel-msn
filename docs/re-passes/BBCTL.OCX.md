@@ -31,7 +31,7 @@ construction pattern. The 10 functions and their pinned CLSIDs:
 | `CInfomapCtrl` | `INFOMAP.InfomapCtrl.1` | `Register_CInfomapCtrl_INFOMAP_BBCTL_OUTLINE` @ `0x40008166` | `CLSID_CInfomapCtrl_INFOMAP_BBCTL_OUTLINE` @ `0x40022d58` | `{DED253E0-F4E2-11CD-AB6D-00AA003E4475}` |
 
 Site-name ↔ class mapping (verified empirically against
-`resources/titles/{4,msn_today}.ttl` + `/var/share/drop/first title.ttl`):
+`resources/titles/4.ttl` + `tests/assets/{story,controls}_test.ttl`):
 
 | CVForm site name | BBCTL class | Reason for mapping |
 |---|---|---|

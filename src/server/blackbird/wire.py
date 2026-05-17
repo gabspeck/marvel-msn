@@ -690,7 +690,7 @@ def build_case2_topic_header_chunk(
         +0x18 TOPICPOS NextTopic
 
     Goal: make MSN MOSVIEW honor `NonScroll = -1` and collapse NSR per-topic,
-    matching native MV behaviour seen in `/var/share/drop/NO_NSR.MVB`. Whether
+    matching native MV behaviour. Whether
     MVCL14N's MSN-side cache reader recognises this chunk format is unknown
     until tried in the VM.
     """

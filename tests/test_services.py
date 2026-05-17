@@ -1665,33 +1665,18 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
     def test_title_open_loads_ttl_when_deid_has_fixture(self):
-        # `:2[4]0` deid resolves to resources/titles/4.ttl (BBDESIGN
-        # path). CBFrame caption = "Default Window".
+        # `:2[4]0` deid resolves to resources/titles/4.ttl. CBFrame
+        # caption = "Captions Test".
         handler, _reply = self._open_handler()
         self.assertIsNotNone(handler.loaded_title)
-        self.assertIsNone(handler.loaded_mvb)
-        self.assertEqual(handler.loaded_title.caption, "Default Window")
+        self.assertEqual(handler.loaded_title.caption, "Captions Test")
 
     def test_title_open_body_carries_ttl_caption(self):
-        _handler, reply = self._open_handler()
-        body = reply[31:]
-        # sec01 + sec06 both carry "Default Window" ASCIIZ in the TTL
-        # lowered title body.
-        self.assertIn(b"Default Window\x00", body)
-
-    def test_title_open_unknown_deid_falls_back_to_mvb(self):
-        # Deid with no `.ttl` on disk → MVB fallback loads NO_NSR.MVB.
-        unknown_req = (
-            b"\x04\x90:2[__no_ttl__]0\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x81\x81\x83\x83\x83\x83\x83"
-        )
-        handler, _reply = self._open_handler(req_payload=unknown_req)
-        self.assertIsNone(handler.loaded_title)
-        self.assertIsNotNone(handler.loaded_mvb)
-        self.assertEqual(handler.loaded_mvb.caption, "Untitled")
-
+        handler, _reply = self._open_handler()
+        # sec01 + sec06 both carry the CBFrame caption ASCIIZ in the
+        # TTL-lowered title body. The body spans multiple wire chunks
+        # (>1 KB), so check the in-memory body directly.
+        self.assertIn(b"Captions Test\x00", handler.title_body)
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
     def test_get_info_reply_size_zero(self):
@@ -1830,30 +1815,6 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         self.assertEqual(push[0], 0x85)
         self.assertEqual(push[1], 0xBF)
         self.assertEqual(push[1 + 0x2A], 0x03)
-
-    def test_va_resolve_pushes_case1_with_mvb_paragraph_text(self):
-        # OpenTitle with an unknown deid falls back to NO_NSR.MVB; first
-        # selector 0x15 cache-miss pushes a case-1 BF chunk carrying the
-        # MVB's first paragraph text.
-        handler = MEDVIEWHandler(5, "MEDVIEW")
-        open_req = (
-            b"\x04\x90:2[__no_ttl__]0\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x81\x81\x83\x83\x83\x83\x83"
-        )
-        handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5)
-        self._subscribe(handler, 0, 3)
-        key = 0xCAFE0001
-        req = b"\x01\x01\x03" + struct.pack("<I", key)
-        pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
-        )
-        push = parse_packet(pkts[1][:-1]).payload[8:]
-        self.assertEqual(push[0], 0x85)
-        self.assertEqual(push[1], 0xBF)
-        self.assertEqual(push[1 + 0x2A], 0x01)
-        self.assertIn(b"No NSR topic", push)
 
     def test_fetch_adjacent_topic_pushes_type0_a5(self):
         from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
@@ -2011,18 +1972,6 @@ class TestMEDVIEWTitleService(unittest.TestCase):
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
-
-    def test_close_title_drops_per_title_state(self):
-        from server.config import MEDVIEW_CLOSE_TITLE
-        handler = MEDVIEWHandler(5, "MEDVIEW")
-        self._open_title(handler)
-        # `_open_title` issues `:2[]0` (empty deid) so neither TTL nor
-        # MVB-by-deid matches — MVB fallback path loads NO_NSR.MVB.
-        self.assertIsNotNone(handler.loaded_mvb)
-        req_payload = bytes.fromhex("01 01")
-        handler.handle_request(0x01, MEDVIEW_CLOSE_TITLE, 3, req_payload, 5, 5)
-        self.assertIsNone(handler.loaded_title)
-        self.assertIsNone(handler.loaded_mvb)
 
     def test_query_topics_returns_empty_session(self):
         from server.config import MEDVIEW_QUERY_TOPICS
@@ -2441,7 +2390,7 @@ class TestMEDVIEWPerPageBaggageDispatch(unittest.TestCase):
     Tests load a multi-page TTL into the handler and check baggage
     dispatch by `bm0` / `bm1` / `bm2` names."""
 
-    def test_4ttl_load_seeds_three_baggage_names(self):
+    def test_captions_test_seeds_bm0_baggage(self):
         import pathlib
 
         from server.services.medview.handler import MEDVIEWHandler
@@ -2453,48 +2402,13 @@ class TestMEDVIEWPerPageBaggageDispatch(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         title = load_title(
             pathlib.Path(__file__).resolve().parents[1]
-            / "resources" / "titles" / "4.ttl"
+            / "tests" / "assets" / "captions_test.ttl"
         )
         self.assertIsNotNone(title)
         handler.loaded_title = title
         handler.baggage_map = build_all_bm_baggage(title)
-        self.assertEqual(sorted(handler.baggage_map.keys()), ["bm0", "bm1", "bm2"])
-
-    def test_open_remote_hfs_file_accepts_bm1_after_bm0(self):
-        import pathlib
-
-        from server.config import MEDVIEW_SELECTOR_HFS_OPEN
-        from server.services.medview.handler import MEDVIEWHandler
-        from server.services.medview.ttl_loader import (
-            build_all_bm_baggage,
-            load_title,
-        )
-
-        handler = MEDVIEWHandler(5, "MEDVIEW")
-        title = load_title(
-            pathlib.Path(__file__).resolve().parents[1]
-            / "resources" / "titles" / "4.ttl"
-        )
-        handler.baggage_map = build_all_bm_baggage(title)
-
-        # OPEN "bm1" → accept (4.ttl has 3 pages).
-        # tag=0x04 var "bm1\0" (4B, length 0x84) — copy of bm0 form with last char incremented.
-        open_bm1 = bytes.fromhex("01 01 04 84 62 6d 31 00 01 02 81 83")
-        pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 20, open_bm1, 5, 5,
-        )
-        self.assertIsNotNone(pkts)
-        # Decode reply: 0x87 0x81 <handle> 0x83 <size>.
-        parsed = parse_packet(pkts[0][:-1])
-        reply = parsed.payload[8:]
-        self.assertEqual(reply[0], TAG_END_STATIC)
-        self.assertEqual(reply[1], 0x81)
-        handle = reply[2]
-        self.assertNotEqual(handle, 0)
-        self.assertNotEqual(handle, 0x42)                  # bm1 ≠ bm0 handle
-        self.assertEqual(reply[3], 0x83)
-        size = struct.unpack("<I", reply[4:8])[0]
-        self.assertEqual(size, len(handler.baggage_map["bm1"]))
+        # Single-page fixture → exactly one bm0 baggage entry.
+        self.assertEqual(sorted(handler.baggage_map.keys()), ["bm0"])
 
     def test_open_remote_hfs_file_rejects_unknown_name(self):
         import pathlib
@@ -2509,11 +2423,11 @@ class TestMEDVIEWPerPageBaggageDispatch(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         title = load_title(
             pathlib.Path(__file__).resolve().parents[1]
-            / "resources" / "titles" / "4.ttl"
+            / "tests" / "assets" / "captions_test.ttl"
         )
         handler.baggage_map = build_all_bm_baggage(title)
 
-        # OPEN "bm9\0" (no such page — 4.ttl only has bm0/bm1/bm2).
+        # OPEN "bm9\0" — captions_test is single-page, only bm0 exists.
         open_bm9 = bytes.fromhex("01 01 04 84 62 6d 39 00 01 02 81 83")
         pkts = handler.handle_request(
             0x01, MEDVIEW_SELECTOR_HFS_OPEN, 21, open_bm9, 5, 5,

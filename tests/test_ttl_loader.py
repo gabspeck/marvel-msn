@@ -1,14 +1,20 @@
 """Unit tests for the BBDESIGN `.ttl` loader.
 
 Coverage:
-- `resources/titles/4.ttl` — three-page test title (Test Page, Test
-  Page Vertical Scrollbar, Test Page Horizontal Scrollbar) with one
-  Caption per page; three-font CStyleSheet.
-- `resources/titles/msn_today.ttl` — Story + Shortcut single-page,
+- `tests/assets/captions_test.ttl` — single-page title with 24 Captions
+  exercising distinct combinations of font face / size / weight /
+  italic / underline / strikeout / alignment / back_color /
+  frame_color / transparent / word_wrap. Layout matches
+  `tests/assets/captions_test_reference.png`.
+- `tests/assets/story_test.ttl` — Story + Shortcut single-page,
   CK-deflated CStyleSheet with 7 font slots + 54 styles; Story content
   body is TextRuns at 8/7 ("This is an example of content...").
-- `/var/share/drop/first title.ttl` (gated) — two-page Blackbird
-  showcase (Home: 5 controls; Second Page: 1 Caption).
+- `tests/assets/all_controls.ttl` — single-page "All Controls
+  Showcase" with 9 controls covering every BBCTL.OCX site class
+  (Story / Outline / Caption / Picture / Shortcut / DynamicStory /
+  Audio / CaptionButton / PictureButton).
+- `tests/assets/multi_page_title.ttl` — two-page title, one Caption
+  per page; verifies the CSection-tree DFS walk.
 """
 
 import pathlib
@@ -26,8 +32,12 @@ from server.services.medview.ttl_loader import (
     LoadedPage,
     LoadedTitle,
     OutlineControl,
+    PictureButtonControl,
+    PictureControl,
+    PsfControl,
     ShortcutControl,
     StoryControl,
+    UnknownControl,
     build_all_bm_baggage,
     build_bm0_baggage,
     load_title,
@@ -35,32 +45,41 @@ from server.services.medview.ttl_loader import (
 )
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-_TITLE_4 = _REPO_ROOT / "resources" / "titles" / "4.ttl"
-_TITLE_MSN_TODAY = _REPO_ROOT / "resources" / "titles" / "msn_today.ttl"
-_TITLE_SHOWCASE = pathlib.Path("/var/share/drop/first title.ttl")
+_TITLE_4 = _REPO_ROOT / "tests" / "assets" / "captions_test.ttl"
+_TITLE_MSN_TODAY = _REPO_ROOT / "tests" / "assets" / "story_test.ttl"
+_TITLE_ALL_CONTROLS = _REPO_ROOT / "tests" / "assets" / "all_controls.ttl"
+_TITLE_MULTI_PAGE = _REPO_ROOT / "tests" / "assets" / "multi_page_title.ttl"
 
 
-class TestKnownTitleRegression(unittest.TestCase):
-    """4.ttl page-0 carries 4 Captions exercising distinct font/style
-    combinations: "Test caption" (MS Sans Serif 12pt regular), "another
-    caption!!" (Comic Sans MS 26pt italic, red bg), "overlapping text"
-    (Garamond 18pt underline), and the long word-wrap caption (Caption4,
-    rect at x=1905 HIMETRIC whose LSB `0x71` ('q') previously confused
-    the printable-ASCII name scanner). Multi-caption parsing routes each
-    descriptor (in seq order) to its own StdFont CLSID anchor in the
-    shared property region — see `_caption_record_offsets` in
-    `ttl_loader.py`. Page 0 also has both scrollbars enabled (flags=3)."""
+class TestCaptionsTestFixture(unittest.TestCase):
+    """captions_test.ttl is a single-page BBDESIGN-authored title with 24
+    Captions exercising distinct combinations of font face / size / weight /
+    italic / underline / strikeout / alignment / back_color / frame_color /
+    transparent / word_wrap. Layout mirrors the on-disk reference render at
+    `tests/assets/captions_test_reference.png`."""
 
-    def test_known_title_parses_all_fields(self):
+    def test_title_top_level(self):
         t = load_title(_TITLE_4)
         self.assertIsNotNone(t)
-        self.assertEqual(t.title_name, "Test Title")
-        self.assertEqual(t.caption, "Default Window")
-        self.assertEqual(t.window_rect, (200, 100, 640, 480))
+        self.assertEqual(t.title_name, "Captions Test")
+        self.assertEqual(t.caption, "Captions Test")
+        # CBFrame rect: (left, top, right, bottom) in pixels (HIMETRIC
+        # round-tripped to pixel coords by the wire). Stored LTWH here:
+        # left=0, top=0, width=640, height=480.
+        self.assertEqual(t.window_rect, (0, 0, 640, 480))
+
+    def test_page_dimensions_and_background(self):
+        t = load_title(_TITLE_4)
         page = t.pages[0]
         self.assertEqual(page.page_pixel_w, 640)
         self.assertEqual(page.page_pixel_h, 480)
-        self.assertEqual(page.page_bg, 0x009098A8)
+        # COLOR_3DFACE-ish gray (R=0x68 G=0x78 H=0x68) — workspace bg.
+        self.assertEqual(page.page_bg, 0x00687868)
+        # Both scrollbar bits set.
+        self.assertEqual(page.scrollbar_flags, 3)
+
+    def test_font_table_has_three_faces(self):
+        t = load_title(_TITLE_4)
         self.assertEqual(
             t.font_table,
             (
@@ -69,90 +88,100 @@ class TestKnownTitleRegression(unittest.TestCase):
                 FaceEntry(slot=0, face_name="Times New Roman"),
             ),
         )
-        self.assertEqual(page.scrollbar_flags, 3)
 
-    def test_controls_are_four_captions_each_with_own_record(self):
+    def test_twenty_four_captions_in_seq_order(self):
         t = load_title(_TITLE_4)
         controls = t.pages[0].controls
-        self.assertEqual(len(controls), 4)
-        cap1, cap2, cap3, cap4 = controls
+        self.assertEqual(len(controls), 24)
+        for c in controls:
+            self.assertIsInstance(c, CaptionControl)
+        # Seq numbers from BBDESIGN authoring; 1-based with gaps where
+        # the author deleted intermediate sites (7, 9, 14 missing).
+        seqs = [c.seq for c in controls]
+        self.assertEqual(seqs, [
+            1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 15, 16, 17, 18,
+            19, 20, 21, 22, 23, 24, 25, 26, 27,
+        ])
 
-        # Caption 1: default styling, MS Sans Serif 12pt regular.
-        self.assertIsInstance(cap1, CaptionControl)
-        self.assertEqual(cap1.seq, 1)
-        self.assertEqual(cap1.name, "Caption1")
-        self.assertEqual(cap1.text, "Test caption")
-        self.assertEqual(cap1.font_name, "MS Sans Serif")
-        self.assertEqual(cap1.size_pt, 12)
-        self.assertEqual(cap1.weight, 400)
-        self.assertEqual(cap1.rect_himetric, (5291, 2963, 11641, 5926))
-        self.assertFalse(cap1.italic)
-        self.assertFalse(cap1.underline)
-        self.assertFalse(cap1.strikeout)
-        # Default back_color = COLOR_3DFACE = RGB(0xD8, 0xD0, 0xC8).
-        self.assertEqual(cap1.back_color, 0x00C8D0D8)
-        # Border + idTag defaults.
-        self.assertEqual(cap1.bevel_width, 0)
-        self.assertEqual(cap1.frame_style, 0)
-        self.assertEqual(cap1.bevel_hilight, 0x00FFFFFF)
-        self.assertEqual(cap1.bevel_shadow, 0)
-        self.assertEqual(cap1.frame_color, 0)
-        self.assertEqual(cap1.id_tag, -1)
-
-        # Caption 2: Comic Sans MS 26pt ITALIC with red back_color.
-        self.assertIsInstance(cap2, CaptionControl)
-        self.assertEqual(cap2.seq, 2)
-        self.assertEqual(cap2.name, "Caption2")
-        self.assertEqual(cap2.text, "another caption!!")
-        self.assertEqual(cap2.font_name, "Comic Sans MS")
-        self.assertEqual(cap2.size_pt, 26)
-        self.assertEqual(cap2.weight, 400)
-        self.assertEqual(cap2.rect_himetric, (8890, 7408, 16298, 8890))
-        self.assertTrue(cap2.italic)
-        self.assertFalse(cap2.underline)
-        self.assertFalse(cap2.strikeout)
-        # back_color RGB(0xFF, 0, 0) = red, as embedded in font_pre_clsid.
-        self.assertEqual(cap2.back_color, 0x000000FF)
-
-        # Caption 3: Garamond 18pt with underline only.
-        self.assertIsInstance(cap3, CaptionControl)
-        self.assertEqual(cap3.seq, 3)
-        self.assertEqual(cap3.name, "Caption3")
-        self.assertEqual(cap3.text, "overlapping text")
-        self.assertEqual(cap3.font_name, "Garamond")
-        self.assertEqual(cap3.size_pt, 18)
-        self.assertFalse(cap3.italic)
-        self.assertTrue(cap3.underline)
-        self.assertFalse(cap3.strikeout)
-
-        # Caption 4: regression case for the printable-ASCII name scanner.
-        # rect_himetric=(1905, 4445, 5080, 8890) — rect.left LSB is 'q'
-        # (0x71), which the prior heuristic consumed as part of the name
-        # ("Caption4q"), shifting the inline_tail by one byte and
-        # producing nonsense unsigned-i32 reads (one of which overflowed
-        # i16 in the WMF builder and crashed the server).
-        self.assertIsInstance(cap4, CaptionControl)
-        self.assertEqual(cap4.seq, 5)
-        self.assertEqual(cap4.name, "Caption4")
-        self.assertEqual(
-            cap4.text,
-            "Testing the auto-wrap property of the caption control.",
-        )
-        self.assertEqual(cap4.rect_himetric, (1905, 4445, 5080, 8890))
-        self.assertEqual(cap4.font_name, "MS Sans Serif")
-
-    def test_post_strcaption_fields_decode_to_defaults(self):
-        """All captions on 4.ttl share the same default post-strCaption
-        block `00 00 00 00 00 00 01 00 00 00` → fWordWrap=0,
-        fAutoSize=0, iAlignment=0, fTransparent=1. Verifies the 10-byte
-        parse."""
+    def test_alignment_variant_captions(self):
+        # Seqs 1/2/3 are "Plain caption"/"Right aligned"/"Center aligned"
+        # — same font, different rect positions. Alignment property is
+        # not yet split out from the post-strCaption block on this
+        # fixture; the visual difference comes from rect positioning
+        # in the reference PNG.
         t = load_title(_TITLE_4)
-        for page in t.pages:
-            for cap in page.captions:
-                self.assertFalse(cap.word_wrap, cap.name)
-                self.assertFalse(cap.auto_size, cap.name)
-                self.assertEqual(cap.alignment, 0, cap.name)
-                self.assertTrue(cap.transparent, cap.name)
+        controls = {c.seq: c for c in t.pages[0].controls}
+        self.assertEqual(controls[1].text, "Plain caption")
+        self.assertEqual(controls[2].text, "Right aligned")
+        self.assertEqual(controls[3].text, "Center aligned")
+        for seq in (1, 2, 3):
+            self.assertEqual(controls[seq].font_name, "MS Sans Serif")
+
+    def test_color_variant_captions(self):
+        t = load_title(_TITLE_4)
+        controls = {c.seq: c for c in t.pages[0].controls}
+        # seq=4: white background, transparency cleared.
+        white_bg = controls[4]
+        self.assertEqual(white_bg.text, "Non-transparent white bg")
+        self.assertFalse(white_bg.transparent)
+        # seq=6: red frame color.
+        red_frame = controls[6]
+        self.assertEqual(red_frame.text, "Red frame color")
+        self.assertEqual(red_frame.frame_color, 0x0000FF)
+
+    def test_font_variant_captions(self):
+        t = load_title(_TITLE_4)
+        controls = {c.seq: c for c in t.pages[0].controls}
+        comic = controls[10]
+        self.assertEqual(comic.text, "Caption in Comic Sans")
+        self.assertEqual(comic.font_name, "Comic Sans MS")
+        garamond_italic = controls[12]
+        self.assertEqual(garamond_italic.font_name, "Garamond")
+        self.assertTrue(garamond_italic.italic)
+        garamond_bold_italic = controls[13]
+        self.assertEqual(garamond_bold_italic.font_name, "Garamond")
+        self.assertTrue(garamond_bold_italic.italic)
+
+    def test_decoration_variant_captions(self):
+        t = load_title(_TITLE_4)
+        controls = {c.seq: c for c in t.pages[0].controls}
+        underlined = controls[15]
+        self.assertEqual(underlined.text, "Plain caption, underlined")
+        self.assertTrue(underlined.underline)
+        struck = controls[16]
+        self.assertEqual(struck.text, "Plain caption, strikethrough")
+        self.assertTrue(struck.strikeout)
+
+    def test_size_variant_captions(self):
+        t = load_title(_TITLE_4)
+        controls = {c.seq: c for c in t.pages[0].controls}
+        arial_24 = controls[17]
+        self.assertEqual(arial_24.text, "Arial, 24pt")
+        self.assertEqual(arial_24.font_name, "Arial")
+        self.assertEqual(arial_24.size_pt, 24)
+        arial_24_under = controls[18]
+        self.assertEqual(arial_24_under.font_name, "Arial")
+        self.assertEqual(arial_24_under.size_pt, 24)
+
+    def test_word_wrap_captions(self):
+        t = load_title(_TITLE_4)
+        controls = {c.seq: c for c in t.pages[0].controls}
+        wrap = controls[19]
+        self.assertEqual(wrap.text, "Word wrap enabled for this one")
+        self.assertTrue(wrap.word_wrap)
+        auto_resize = controls[20]
+        self.assertEqual(auto_resize.text, "This one resizes to fit the text")
+        self.assertTrue(auto_resize.word_wrap)
+
+    def test_combination_caption(self):
+        # Last seq=27: red bg, yellow frame, Lucida Handwriting, underlined.
+        t = load_title(_TITLE_4)
+        combo = next(c for c in t.pages[0].controls if c.seq == 27)
+        self.assertEqual(combo.text, "Combination")
+        self.assertEqual(combo.font_name, "Lucida Handwriting")
+        self.assertTrue(combo.underline)
+        self.assertEqual(combo.back_color, 0x0000FF)
+        self.assertEqual(combo.frame_color, 0xFFFF00)
 
     def test_captions_property_filters_controls(self):
         t = load_title(_TITLE_4)
@@ -164,7 +193,7 @@ class TestKnownTitleRegression(unittest.TestCase):
 
 
 class TestMsnTodayDecodes(unittest.TestCase):
-    """msn_today.ttl: 1 Story + 1 Shortcut on page-0. Verifies CK-deflate
+    """story_test.ttl: 1 Story + 1 Shortcut on page-0. Verifies CK-deflate
     of CStyleSheet, walker handling of compound controls, and per-control
     rect extraction."""
 
@@ -218,56 +247,65 @@ class TestMsnTodayDecodes(unittest.TestCase):
         self.assertEqual(self.title.pages[0].captions, ())
 
 
-@unittest.skipUnless(
-    _TITLE_SHOWCASE.exists(),
-    f"Showcase TTL not available at {_TITLE_SHOWCASE}",
-)
-class TestShowcaseTitle(unittest.TestCase):
-    """first title.ttl: 5 controls (Story1R / Caption1 / Audio1R /
-    CaptionButton1R / Outline1) on the "Home" page. Verifies
-    type_names_map + embedded_vform swizzle resolution (showcase
-    layout: CSection at table 5, CBForm at 6, CVForm at 7)."""
+class TestAllControlsShowcase(unittest.TestCase):
+    """all_controls.ttl: 9 controls on the "All Controls Showcase"
+    page covering every BBCTL.OCX site class pinned by the loader
+    (Story / Outline / Caption / Picture / Shortcut / DynamicStory /
+    Audio / CaptionButton / PictureButton)."""
 
     def setUp(self):
-        self.title = load_title(_TITLE_SHOWCASE)
+        self.title = load_title(_TITLE_ALL_CONTROLS)
         self.assertIsNotNone(self.title)
 
-    def test_page_background_is_yellow(self):
-        # Showcase pinned the Background color picker to RGB(255,255,0).
-        page = self.title.pages[0]
-        self.assertEqual(page.page_bg, 0x0000FFFF)
-        # Vertical scrollbar only (bit 1).
-        self.assertEqual(page.scrollbar_flags, 2)
+    def test_title_top_level(self):
+        self.assertEqual(self.title.title_name, "All Controls")
+        # CBFrame's caption field is empty in this fixture; the page
+        # name carries the displayed identity.
+        self.assertEqual(self.title.caption, "")
+        self.assertEqual(self.title.window_rect, (0, 0, 640, 480))
 
-    def test_five_controls_in_seq_order(self):
+    def test_page_dimensions_and_background(self):
+        page = self.title.pages[0]
+        self.assertEqual(page.name, "All Controls Showcase")
+        self.assertEqual(page.page_pixel_w, 640)
+        self.assertEqual(page.page_pixel_h, 480)
+        # Light gray, the BBDESIGN default ("RGB(192, 192, 192)").
+        self.assertEqual(page.page_bg, 0x00C0C0C0)
+        self.assertEqual(page.scrollbar_flags, 3)
+
+    def test_nine_controls_in_seq_order(self):
         controls = self.title.pages[0].controls
-        self.assertEqual(len(controls), 5)
-        names_seqs = [(c.name, c.seq, type(c)) for c in controls]
+        self.assertEqual(len(controls), 9)
+        names_seqs_types = [(c.name, c.seq, type(c)) for c in controls]
         self.assertEqual(
-            names_seqs,
+            names_seqs_types,
             [
                 ("Story1R", 1, StoryControl),
-                ("Caption1", 2, CaptionControl),
-                ("Audio1R", 3, AudioControl),
-                ("CaptionButton1R", 4, CaptionButtonControl),
-                ("Outline1", 6, OutlineControl),
+                ("Outline1", 2, OutlineControl),
+                ("Caption1", 3, CaptionControl),
+                ("Picture1", 4, PictureControl),
+                ("Shortcut1-V", 5, ShortcutControl),
+                # BBDESIGN's "DynamicStory" site type is backed by
+                # BBCTL's CPsfCtrl class.
+                ("DynamicStory1", 6, PsfControl),
+                ("Audio1R", 7, AudioControl),
+                ("CaptionButton1", 8, CaptionButtonControl),
+                ("PictureButton1", 9, PictureButtonControl),
             ],
         )
 
-    def test_rects_match_showcase_doc(self):
-        # Twips coordinates per docs/cvform-page-objects.md showcase
-        # site table.
+    def test_compound_xy_twips(self):
         controls = {c.name: c for c in self.title.pages[0].controls}
-        self.assertEqual(controls["Story1R"].xy_twips, (3175, 2328))
-        self.assertEqual(controls["Audio1R"].xy_twips, (211, 2328))
-        self.assertEqual(controls["CaptionButton1R"].xy_twips, (9101, 846))
-        self.assertEqual(controls["Outline1"].xy_twips, (211, 4445))
-        # Caption1 carries a 4-i32 rect (HIMETRIC for stock Caption,
-        # twips for the showcase layout — coordinates match the doc's
-        # top-left).
+        self.assertEqual(controls["Story1R"].xy_twips, (1058, 2540))
+        self.assertEqual(controls["Outline1"].xy_twips, (6773, 2540))
+        self.assertEqual(controls["Audio1R"].xy_twips, (1905, 635))
+        self.assertEqual(controls["Shortcut1-V"].xy_twips, (1270, 9736))
+        self.assertEqual(controls["CaptionButton1"].xy_twips, (6773, 423))
+
+    def test_caption1_rect_and_font(self):
+        controls = {c.name: c for c in self.title.pages[0].controls}
         cap = controls["Caption1"]
-        self.assertEqual(cap.rect_himetric[0], 4233)
-        self.assertEqual(cap.rect_himetric[1], 846)
+        self.assertEqual(cap.rect_himetric, (10160, 2540, 14182, 4233))
         self.assertEqual(cap.font_name, "MS Sans Serif")
 
 
@@ -278,7 +316,7 @@ class TestLowerToPayload(unittest.TestCase):
         self.body = lower_to_payload(self.title)
 
     def test_body_contains_caption_cstring(self):
-        self.assertIn(b"Default Window\x00", self.body)
+        self.assertIn(b"Captions Test\x00", self.body)
 
     def test_section0_face_table_contains_all_fonts(self):
         sec0_off = 2                         # leading u16 length prefix
@@ -294,9 +332,9 @@ class TestLowerToPayload(unittest.TestCase):
         )
 
     def test_sec06_record_contains_caption_at_offset_0x15(self):
-        idx = self.body.find(b"Default Window\x00")
+        idx = self.body.find(b"Captions Test\x00")
         self.assertGreater(idx, 0)
-        self.assertEqual(self.body[idx:idx + 14], b"Default Window")
+        self.assertEqual(self.body[idx:idx + 13], b"Captions Test")
 
 
 class TestSection0CarriesCaptionStyling(unittest.TestCase):
@@ -305,7 +343,7 @@ class TestSection0CarriesCaptionStyling(unittest.TestCase):
     back_color stock prop populated from each CaptionControl. Each
     descriptor is 42 B (`_SEC0_DESCRIPTOR_SIZE`)."""
 
-    def test_4ttl_page0_descriptors_carry_authored_styling(self):
+    def test_captions_test_descriptors_carry_authored_styling(self):
         from server.services.medview.ttl_loader import (
             _SEC0_DESCRIPTOR_SIZE,
             _SEC0_HEADER_SIZE,
@@ -314,46 +352,54 @@ class TestSection0CarriesCaptionStyling(unittest.TestCase):
         )
         t = load_title(_TITLE_4)
         sec0 = _build_section0(t)
-        # Descriptors live after face_table; face_count = max(slot)+1 = 3.
         face_count = max(f.slot for f in t.font_table) + 1
         face_table_size = face_count * _SEC0_FACE_ENTRY_SIZE
         desc_off = _SEC0_HEADER_SIZE + face_table_size
-
         captions = [c for p in t.pages for c in p.captions]
-        # Caption 1 (MS Sans Serif, default): no italic/underline/strikeout.
-        d1 = sec0[desc_off:desc_off + _SEC0_DESCRIPTOR_SIZE]
-        self.assertEqual(d1[0x20], 0)  # lfItalic
-        self.assertEqual(d1[0x21], 0)  # lfUnderline
-        self.assertEqual(d1[0x22], 0)  # lfStrikeOut
-        # text_color = 0 (legacy color_rgb default) → bytes 00 00 00 at +0x06..+0x08.
-        self.assertEqual(d1[0x06:0x09], bytes([0x00, 0x00, 0x00]))
-        # back_color = 0xC8D0D8 → bytes d8 d0 c8 at +0x09..+0x0B (RGB low/mid/high).
-        self.assertEqual(d1[0x09:0x0C], bytes([0xD8, 0xD0, 0xC8]))
+        seq_to_index = {c.seq: i for i, c in enumerate(captions)}
 
-        # Caption 2 (Comic Sans MS, italic): lfItalic=1.
-        d2 = sec0[desc_off + _SEC0_DESCRIPTOR_SIZE:
-                  desc_off + 2 * _SEC0_DESCRIPTOR_SIZE]
-        self.assertEqual(d2[0x20], 1)  # lfItalic
-        self.assertEqual(d2[0x21], 0)
-        self.assertEqual(d2[0x22], 0)
-        # back_color = 0x0000FF (red) → bytes ff 00 00 LE.
-        self.assertEqual(d2[0x09:0x0C], bytes([0xFF, 0x00, 0x00]))
+        # seq=1 ("Plain caption", MS Sans Serif default): plain.
+        d_plain = sec0[
+            desc_off + seq_to_index[1] * _SEC0_DESCRIPTOR_SIZE:
+            desc_off + (seq_to_index[1] + 1) * _SEC0_DESCRIPTOR_SIZE
+        ]
+        self.assertEqual(d_plain[0x20], 0)         # lfItalic
+        self.assertEqual(d_plain[0x21], 0)         # lfUnderline
+        self.assertEqual(d_plain[0x22], 0)         # lfStrikeOut
 
-        # Caption 3 (Garamond, underline): lfUnderline=1, lfStrikeOut=0.
-        d3 = sec0[desc_off + 2 * _SEC0_DESCRIPTOR_SIZE:
-                  desc_off + 3 * _SEC0_DESCRIPTOR_SIZE]
-        self.assertEqual(d3[0x20], 0)  # lfItalic
-        self.assertEqual(d3[0x21], 1)  # lfUnderline
-        self.assertEqual(d3[0x22], 0)  # lfStrikeOut
+        # seq=12 ("Garamond, italic"): lfItalic=1.
+        d_italic = sec0[
+            desc_off + seq_to_index[12] * _SEC0_DESCRIPTOR_SIZE:
+            desc_off + (seq_to_index[12] + 1) * _SEC0_DESCRIPTOR_SIZE
+        ]
+        self.assertEqual(d_italic[0x20], 1)
+        self.assertEqual(d_italic[0x21], 0)
+        self.assertEqual(d_italic[0x22], 0)
+
+        # seq=15 ("Plain caption, underlined"): lfUnderline=1.
+        d_under = sec0[
+            desc_off + seq_to_index[15] * _SEC0_DESCRIPTOR_SIZE:
+            desc_off + (seq_to_index[15] + 1) * _SEC0_DESCRIPTOR_SIZE
+        ]
+        self.assertEqual(d_under[0x20], 0)
+        self.assertEqual(d_under[0x21], 1)
+        self.assertEqual(d_under[0x22], 0)
+
+        # seq=16 ("Plain caption, strikethrough"): lfStrikeOut=1.
+        d_strike = sec0[
+            desc_off + seq_to_index[16] * _SEC0_DESCRIPTOR_SIZE:
+            desc_off + (seq_to_index[16] + 1) * _SEC0_DESCRIPTOR_SIZE
+        ]
+        self.assertEqual(d_strike[0x20], 0)
+        self.assertEqual(d_strike[0x21], 0)
+        self.assertEqual(d_strike[0x22], 1)
 
 
 class TestBaggageCarriesNewStyling(unittest.TestCase):
-    """`build_bm_baggage` emits a kind=8 WMF that carries:
-    - per-caption underline/strikeout/charset in CreateFontIndirect's LOGFONT
-    - per-caption text alignment via SetTextAlign records
-    - per-caption back_color via SetBkColor when transparent=False
-    All four 4.ttl captions ship transparent by default so SetBkMode is
-    TRANSPARENT (no SetBkColor before TextOut)."""
+    """`build_bm_baggage` emits a kind=8 WMF that carries per-caption
+    underline / strikeout / charset in CreateFontIndirect's LOGFONT,
+    text alignment via SetTextAlign records, and back_color via
+    SetBkColor when transparent=False."""
 
     def test_baggage_emits_setextalign_records(self):
         t = load_title(_TITLE_4)
@@ -365,24 +411,33 @@ class TestBaggageCarriesNewStyling(unittest.TestCase):
         # On the wire: 04 00 00 00 2e 01.
         self.assertIn(b"\x04\x00\x00\x00\x2e\x01", bag)
 
-    def test_underline_in_caption3_logfont(self):
+    def test_garamond_italic_logfont_has_italic_bit(self):
+        # seq=12 in captions_test.ttl is the only standalone italic
+        # Garamond entry. Strikeout/underline cleared, italic set.
         t = load_title(_TITLE_4)
         bag = build_all_bm_baggage(t)["bm0"]
+        marker = b"Garamond\x00"
         # LOGFONT layout: Height(i16), Width(i16), Escapement(i16),
         # Orientation(i16), Weight(i16), Italic(u8), Underline(u8),
         # StrikeOut(u8), CharSet(u8), Out/Clip/Quality/Pitch(4 u8), Face.
-        # Caption 3 has italic=0, underline=1, strikeout=0.
-        marker = b"Garamond\x00"
-        idx = bag.find(marker)
-        self.assertGreater(idx, 0)
-        # LOGFONT starts 18 bytes before the face name (5 i16 + 8 u8 = 18 B).
-        lf_off = idx - 18
-        italic_byte = bag[lf_off + 10]
-        underline_byte = bag[lf_off + 11]
-        strikeout_byte = bag[lf_off + 12]
-        self.assertEqual(italic_byte, 0)
-        self.assertEqual(underline_byte, 1)
-        self.assertEqual(strikeout_byte, 0)
+        # Find an italic Garamond LOGFONT among multiple Garamond entries.
+        idx = 0
+        found = False
+        while True:
+            idx = bag.find(marker, idx)
+            if idx < 0:
+                break
+            lf_off = idx - 18
+            if (
+                lf_off >= 0
+                and bag[lf_off + 10] == 1                  # italic
+                and bag[lf_off + 11] == 0                  # underline
+                and bag[lf_off + 12] == 0                  # strikeout
+            ):
+                found = True
+                break
+            idx += len(marker)
+        self.assertTrue(found, "no italic-only Garamond LOGFONT in baggage")
 
 
 class TestBuildBm0Baggage(unittest.TestCase):
@@ -392,7 +447,7 @@ class TestBuildBm0Baggage(unittest.TestCase):
         # Container preamble is 8 bytes; first byte of bitmap header is
         # the kind tag.
         self.assertEqual(bag[8], 0x08)
-        self.assertIn(b"Test caption", bag)
+        self.assertIn(b"Plain caption", bag)
         self.assertIn(b"MS Sans Serif", bag)
 
     def test_kind5_raster_when_no_captions(self):
@@ -426,41 +481,30 @@ class TestTokenExtractor(unittest.TestCase):
         self.assertEqual(_deid_from_title_token(token), "4")
 
 
-class TestMultiPage4Ttl(unittest.TestCase):
-    """4.ttl enumerates 3 CBForms via `CTitle.base_forms` (no enclosing
-    CSection). Per-page scrollbar_flags differ — 0 / 2 / 1 — which is
-    how this fixture was authored to differentiate the three pages."""
+class TestCaptionsTestSinglePage(unittest.TestCase):
+    """captions_test.ttl is a CSection-tree title with a single Page
+    ("Captions") holding 24 Captions. Both scrollbar bits are set."""
 
     def setUp(self):
         self.title = load_title(_TITLE_4)
         self.assertIsNotNone(self.title)
 
-    def test_three_pages_in_authoring_order(self):
-        self.assertEqual(len(self.title.pages), 3)
-        names = [p.name for p in self.title.pages]
-        self.assertEqual(names, [
-            "Test Page",
-            "Test Page Vertical Scrollbar",
-            "Test Page Horizontal Scrollbar",
-        ])
+    def test_one_page_named_captions(self):
+        self.assertEqual(len(self.title.pages), 1)
+        self.assertEqual(self.title.pages[0].name, "Captions")
 
-    def test_per_page_scrollbar_flags(self):
-        flags = [p.scrollbar_flags for p in self.title.pages]
-        # Page 0 = both scrollbars (bits 0+1), page 1 = V (bit 1), page 2 = H (bit 0).
-        self.assertEqual(flags, [3, 2, 1])
+    def test_page_scrollbar_flags(self):
+        self.assertEqual(self.title.pages[0].scrollbar_flags, 3)
 
-    def test_page_caption_counts(self):
-        counts = [len(p.controls) for p in self.title.pages]
-        # Page 0 has 4 captions (Test caption / another caption!! /
-        # overlapping text / word-wrap probe). Pages 1/2 each have 1.
-        self.assertEqual(counts, [4, 1, 1])
-        for page in self.title.pages:
-            for c in page.controls:
-                self.assertIsInstance(c, CaptionControl)
+    def test_page_holds_twenty_four_captions(self):
+        page = self.title.pages[0]
+        self.assertEqual(len(page.controls), 24)
+        for c in page.controls:
+            self.assertIsInstance(c, CaptionControl)
 
 
 class TestMsnTodayStoryContentChase(unittest.TestCase):
-    """msn_today's Story1R chases the Pascal-prefixed `Homepage.bdf`
+    """story_test.ttl's Story1R chases the Pascal-prefixed `Homepage.bdf`
     reference in its raw_block → CProxyTable@7/0 → TextRuns CContent
     at 8/7 ("This is an example of content..."). The leading 'S' before
     the prose body is unexplained empirical noise (PR2 BBCTL.OCX RE will
@@ -491,11 +535,9 @@ class TestMsnTodayStoryContentChase(unittest.TestCase):
 class TestLowerToPayloadMultiPage(unittest.TestCase):
     """PR3 emits one sec06 record per page (152 B each) in section 3,
     plus a section 0 descriptor for every CaptionControl across all
-    pages. Scrollbar collapse rule (`_scrollbar_flags_to_sec06_flag`)
-    fires on the per-page `+0x48` byte: page 0 of 4.ttl is no-scroll
-    (collapse), pages 1/2 set vertical/horizontal (no NSR collapse)."""
+    pages."""
 
-    def test_4ttl_emits_three_sec06_records(self):
+    def test_captions_test_emits_one_sec06_record(self):
         from server.services.medview.ttl_loader import _SEC06_RECORD_SIZE
         t = load_title(_TITLE_4)
         body = lower_to_payload(t)
@@ -506,7 +548,7 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
             seclen = int.from_bytes(body[pos:pos + 2], "little")
             pos += 2 + seclen
         sec06_len = int.from_bytes(body[pos:pos + 2], "little")
-        self.assertEqual(sec06_len, 3 * _SEC06_RECORD_SIZE)
+        self.assertEqual(sec06_len, _SEC06_RECORD_SIZE)
 
     def test_msn_today_emits_one_sec06(self):
         from server.services.medview.ttl_loader import _SEC06_RECORD_SIZE
@@ -519,7 +561,7 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
         sec06_len = int.from_bytes(body[pos:pos + 2], "little")
         self.assertEqual(sec06_len, _SEC06_RECORD_SIZE)
 
-    def test_scrollbar_collapse_flag_per_page(self):
+    def test_scrollbar_flag_on_only_page(self):
         from server.services.medview.ttl_loader import (
             _SEC06_FLAG_INNER_RECT_ABSOLUTE,
             _SEC06_RECORD_SIZE,
@@ -527,43 +569,43 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
         )
         t = load_title(_TITLE_4)
         records = [_build_sec06_record(p, t) for p in t.pages]
-        # Page 0 (Test Page, scrollbar=3 → both): collapse cleared.
+        self.assertEqual(len(records), 1)
+        # Single Page (scrollbar_flags=3 → both): absolute inner rect.
         self.assertEqual(records[0][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
-        # Page 1 (Vertical scrollbar=2): collapse cleared, absolute set.
-        self.assertEqual(records[1][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
-        # Page 2 (Horizontal scrollbar=1): degrades to V, collapse cleared.
-        self.assertEqual(records[2][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
-        # All records are 152 B.
-        for rec in records:
-            self.assertEqual(len(rec), _SEC06_RECORD_SIZE)
+        self.assertEqual(len(records[0]), _SEC06_RECORD_SIZE)
 
 
 class TestBbctlClsidDispatch(unittest.TestCase):
     """CLSID-first dispatch:
 
-    - msn_today's Story1R / Shortcut1=R sit at class_index 0 / 1 in the
-      CVForm preamble class table; both CLSIDs (CQtxtCtrl / CBblinkCtrl)
-      are in `_BBCTL_CLSIDS` and dispatch correctly to
+    - story_test.ttl's Story1R / Shortcut1=R sit at class_index 0 / 1
+      in the CVForm preamble class table; both CLSIDs (CQtxtCtrl /
+      CBblinkCtrl) are in `_BBCTL_CLSIDS` and dispatch correctly to
       `StoryControl` / `ShortcutControl`.
-    - 4.ttl's three pages each have one Caption (class_index 0,
-      CLSID = CLabelCtrl) and dispatch to `CaptionControl` via the
-      CLSID table.
+    - captions_test.ttl's three pages each have one Caption
+      (class_index 0, CLSID = CLabelCtrl) and dispatch to
+      `CaptionControl` via the CLSID table.
     """
 
-    def test_msn_today_clsids_pinned_per_descriptor(self):
+    def test_bbctl_clsids_pinned_per_descriptor(self):
         from server.services.medview.ttl_loader import _BBCTL_CLSIDS
-        # 6 BBCTL site classes pinned in code.
+        # All 10 BBCTL.OCX site classes pinned (Ghidra symbol table).
         names = sorted(_BBCTL_CLSIDS.values())
         self.assertEqual(names, [
-            "Audio", "Caption", "CaptionButton",
-            "Outline", "Shortcut", "Story",
+            "Audio", "Caption", "CaptionButton", "Outline", "Picture",
+            "PictureButton", "PrintPsf", "Psf", "Shortcut", "Story",
         ])
 
-    def test_4ttl_caption_dispatched_via_clsid(self):
+    def test_captions_test_dispatches_via_single_class_clsid(self):
+        # captions_test.ttl's CVForm has a single Caption CLSID in the
+        # preamble class table; `flags & 0xFF` is a per-site serial
+        # (0..23) not a class index, so the loader propagates the sole
+        # CLSID to every site. All 24 controls dispatch to CaptionControl.
         t = load_title(_TITLE_4)
-        cap = t.pages[0].controls[0]
-        self.assertIsInstance(cap, CaptionControl)
-        self.assertEqual(cap.name, "Caption1")
+        controls = t.pages[0].controls
+        self.assertEqual(len(controls), 24)
+        for c in controls:
+            self.assertIsInstance(c, CaptionControl)
 
     def test_msn_today_dispatches_both_classes(self):
         t = load_title(_TITLE_MSN_TODAY)
@@ -572,40 +614,42 @@ class TestBbctlClsidDispatch(unittest.TestCase):
         self.assertIsInstance(controls[1], ShortcutControl)
 
 
-@unittest.skipUnless(
-    _TITLE_SHOWCASE.exists(),
-    f"Showcase TTL not available at {_TITLE_SHOWCASE}",
-)
-class TestShowcaseMultiPage(unittest.TestCase):
-    """Showcase's CTitle.base_forms is empty; the loader DFS-walks the
-    CSection tree (Front Matter → Home form, Front Matter → Subsection
-    → Second Page form), preserving the BBDESIGN tree order."""
+class TestMultiPageTitle(unittest.TestCase):
+    """multi_page_title.ttl: CTitle holds two pages (Page #1, Page #2)
+    via the CSection-tree DFS walk. Each page has a single Caption."""
 
     def setUp(self):
-        self.title = load_title(_TITLE_SHOWCASE)
+        self.title = load_title(_TITLE_MULTI_PAGE)
         self.assertIsNotNone(self.title)
 
-    def test_two_pages_in_tree_order(self):
+    def test_title_top_level(self):
+        self.assertEqual(self.title.title_name, "Multi-page title")
+        self.assertEqual(self.title.caption, "")
+        self.assertEqual(self.title.window_rect, (0, 0, 640, 480))
+
+    def test_two_pages_in_authoring_order(self):
         self.assertEqual(len(self.title.pages), 2)
-        names = [p.name for p in self.title.pages]
-        self.assertEqual(names, ["Home", "Second Page"])
+        self.assertEqual(
+            [p.name for p in self.title.pages],
+            ["Page #1", "Page #2"],
+        )
 
-    def test_page0_has_five_controls(self):
-        self.assertEqual(len(self.title.pages[0].controls), 5)
+    def test_each_page_has_one_caption(self):
+        for i, page in enumerate(self.title.pages):
+            self.assertEqual(len(page.controls), 1, f"page {i}")
+            self.assertIsInstance(page.controls[0], CaptionControl)
 
-    def test_page1_is_a_single_caption(self):
-        page1 = self.title.pages[1]
-        self.assertEqual(len(page1.controls), 1)
-        self.assertIsInstance(page1.controls[0], CaptionControl)
+    def test_per_page_caption_text(self):
+        page1, page2 = self.title.pages
+        self.assertEqual(page1.controls[0].text, "This is page 1")
+        self.assertEqual(page2.controls[0].text, "This is page two")
 
-    def test_page0_story_proxy_name_resolves(self):
-        story = self.title.pages[0].controls[0]
-        self.assertIsInstance(story, StoryControl)
-        # CProxyTable for "Blackbird Document.bdf" lives in CSection
-        # "Front Matter" but its TextRuns target may not exist as a
-        # CContent stream in this fixture — heuristic still extracts a
-        # proxy_key when one is present, or leaves both None.
-        self.assertIsNotNone(story.raw_block)
+    def test_pages_share_default_background_and_scrollbar(self):
+        for page in self.title.pages:
+            self.assertEqual(page.page_bg, 0x00C0C0C0)
+            self.assertEqual(page.scrollbar_flags, 3)
+            self.assertEqual(page.page_pixel_w, 640)
+            self.assertEqual(page.page_pixel_h, 480)
 
 
 class TestBuildAllBmBaggage(unittest.TestCase):
@@ -613,13 +657,11 @@ class TestBuildAllBmBaggage(unittest.TestCase):
     with captions or resolved Story text get a kind=8 metafile,
     otherwise a kind=5 1bpp raster."""
 
-    def test_4ttl_keys_are_bm0_bm1_bm2(self):
+    def test_captions_test_key_is_bm0_only(self):
         t = load_title(_TITLE_4)
         bags = build_all_bm_baggage(t)
-        self.assertEqual(sorted(bags.keys()), ["bm0", "bm1", "bm2"])
-        # Each carries the page's Caption "Test caption".
-        for name, blob in bags.items():
-            self.assertIn(b"Test caption", blob, name)
+        self.assertEqual(sorted(bags.keys()), ["bm0"])
+        self.assertIn(b"Plain caption", bags["bm0"])
 
     def test_msn_today_story_text_in_bm0_metafile(self):
         t = load_title(_TITLE_MSN_TODAY)
@@ -647,7 +689,7 @@ class TestTitleOpenMetadataMultiPage(unittest.TestCase):
             page_pixel_h=t.pages[0].page_pixel_h,
             title_name=t.title_name,
         )
-        self.assertEqual(md.topic_count, 3)
+        self.assertEqual(md.topic_count, 1)
         self.assertNotEqual(md.cache_header0, 0)
         self.assertNotEqual(md.cache_header1, 0)
 
