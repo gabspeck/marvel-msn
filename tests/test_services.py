@@ -716,6 +716,7 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((1, 0x10B), "The Internet Center"),
                     ((1, 0x10C), "The MSN Member Lobby"),
                     ((1, 0x10D), "The Microsoft Network Beta"),
+                    ((1, 0x10E), "MEDVIEW tests"),
                 ],
             ),
             (

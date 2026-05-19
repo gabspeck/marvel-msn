@@ -156,6 +156,24 @@ CATEGORY_DEFS = (
     (0x10B, "The Internet Center", "Category"),
     (0x10C, "The MSN Member Lobby", "Folder"),
     (0x10D, "The Microsoft Network Beta", "Category"),
+    # Development-only category that exposes the BBDESIGN test fixtures
+    # checked into `tests/assets/` as MOSVIEW-launched leaves. The asset
+    # files are mirrored into `resources/titles/{deid}.ttl` so the
+    # MEDVIEW handler resolves them through the standard OpenTitle path.
+    (0x10E, "MEDVIEW tests", "Category"),
+)
+
+
+# Children of "MEDVIEW tests" — one MOSVIEW leaf per `.ttl` fixture. The
+# f0 value is the MOSVIEW deid (formatted `%X` by MOSVIEW's deid
+# normalization, see docs/MOSVIEW.md §3.3), so the on-disk filename is
+# `{f0:x}.ttl`. f8=0 keeps deid_hi clear so MCM picks the single-word
+# `%X` path instead of `%X%8X`.
+MEDVIEW_TEST_LEAF_DEFS = (
+    (0x1000, "Captions Test"),
+    (0x1001, "Story Test"),
+    (0x1002, "Multi-page Title"),
+    (0x1003, "All Controls"),
 )
 
 
@@ -261,6 +279,45 @@ def _dirsrv_container(f0, f8, name, *, type_str="Directory", language=_LCID_EN_U
     )
 
 
+def _medview_test_leaf(f0, name):
+    """MOSVIEW leaf backed by a `.ttl` fixture under `resources/titles/`.
+
+    deid_hi=0 keeps MOSVIEW on the single-word `%X` deid normalization
+    path, so f0=0x1000 → cmdline `-MOS:6:1000:0:w` → titleToken
+    `:2[1000]0` → server resolves `resources/titles/1000.ttl`.
+    """
+    key, mnid = _mnid_key(f0, 0)
+    return DirectoryNode(
+        node_id=key,
+        is_container=False,
+        app_id=APP_MEDIA_VIEWER,
+        mnid_a=mnid,
+        content=NodeContent(
+            name=name,
+            go_word="",
+            category="MEDVIEW tests",
+            type_str="MedView Title",
+            price_dword=0,
+            rating_dword=0,
+            description="",
+            language=_LCID_EN_US,
+            topics="",
+            people="",
+            place="",
+            u_value="",
+            forum_mgr="",
+            vendor_id=0,
+            owner="",
+            created="",
+            modified="",
+            size_bytes=0,
+        ),
+    )
+
+
+_MEDVIEW_TESTS_KEY = f"1:{0x10E}"
+
+
 DIRECTORY_NODES = [
     # MSN root (wire "0:0") — client's GetSpecialMnid(idx=0). Listed as the
     # LJUMP 1:0:0:0 target (Categories button). GetLocalizedNode on this node
@@ -360,6 +417,7 @@ DIRECTORY_NODES = [
         _dirsrv_container(1, f8, name, type_str="Diretorio", language=_LCID_PT_BR)
         for f8, name in A_AND_E_BR_CHILD_DEFS
     ],
+    *[_medview_test_leaf(f0, name) for f0, name in MEDVIEW_TEST_LEAF_DEFS],
 ]
 
 
@@ -407,17 +465,20 @@ DIRECTORY_CHILDREN = {
     _MEMBER_ASSISTANCE_BR_KEY: [f"1:{f8}" for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS],
     _ARTS_AND_ENTERTAINMENT_KEY: [f"1:{f8}" for f8, _ in A_AND_E_CHILD_DEFS],
     _ARTES_E_ENTRETENIMENTO_KEY: [f"1:{f8}" for f8, _ in A_AND_E_BR_CHILD_DEFS],
+    _MEDVIEW_TESTS_KEY: [f"{f0}:0" for f0, _ in MEDVIEW_TEST_LEAF_DEFS],
     # Explicit empty children for the `4:0` startup node — avoids the
     # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
     # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.
     "4:0": [],
     "3:1": [],
     # Every remaining category/A&E/MA leaf is terminal — explicit empty list
-    # keeps the fallback sentinel out of their listviews.
+    # keeps the fallback sentinel out of their listviews. 0x100 (Arts and
+    # Entertainment) and 0x10E (MEDVIEW tests) are skipped because they
+    # have their own subtrees wired above.
     **{
         f"1:{f8}": []
         for f8, _, _ in CATEGORY_DEFS
-        if f8 != 0x100
+        if f8 not in (0x100, 0x10E)
     },
     **{f"1:{f8}": [] for f8, _ in A_AND_E_CHILD_DEFS},
     **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_LEAF_DEFS},
@@ -428,6 +489,7 @@ DIRECTORY_CHILDREN = {
     },
     **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS},
     **{f"1:{f8}": [] for f8, _ in A_AND_E_BR_CHILD_DEFS},
+    **{f"{f0}:0": [] for f0, _ in MEDVIEW_TEST_LEAF_DEFS},
 }
 
 
