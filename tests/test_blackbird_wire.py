@@ -14,12 +14,14 @@ import struct
 import unittest
 
 from src.server.blackbird.wire import (
+    StyledSegment,
     TextItem,
     build_baggage_container,
     build_case1_bf_chunk,
     build_case3_bf_chunk,
     build_child_record,
     build_kind5_raster,
+    build_styled_case1_chunk,
     build_text_metafile,
     build_trailer,
     build_type0_status_record,
@@ -302,11 +304,60 @@ class TestCase1Preamble(unittest.TestCase):
         # byte (TEXT_BASE one byte past end_of_TLV).
         self.assertEqual(encode_case1_preamble(7, 0x01), bytes.fromhex("010e80"))
 
-    def test_tag_above_0x10_rejected(self):
-        # MVDecodeTopicItemPrefix's `if (0x10 < bVar1)` branch reads an extra
-        # varint we don't yet generate.
+    def test_wide_tag_with_default_prefix_u16(self):
+        # type=0x20 (widened text), length=0, prefix_u16 defaults to 0
+        # → encoded as PackedUnsignedSmall narrow (1 byte = 0x00).
+        # Wire: `20` + signed-int-narrow(0)=`0080` + PackedUnsignedSmall(0)=`00`.
+        self.assertEqual(
+            encode_case1_preamble(0, 0x20),
+            bytes.fromhex("20008000"),
+        )
+
+    def test_wide_tag_with_nonzero_prefix_u16(self):
+        # prefix_u16 = 1 fits the PackedUnsignedSmall byte-narrow form (value<<1).
+        self.assertEqual(
+            encode_case1_preamble(0, 0x20, prefix_u16=1),
+            bytes.fromhex("20008002"),
+        )
+        # prefix_u16 = 128 spills to the u16-wide form ((128<<1)|1 = 0x101).
+        self.assertEqual(
+            encode_case1_preamble(0, 0x20, prefix_u16=128),
+            bytes.fromhex("2000800101"),
+        )
+
+    def test_wide_tag_prefix_u16_overflow(self):
+        with self.assertRaises(ValueError):
+            encode_case1_preamble(0, 0x20, prefix_u16=0x8000)
+        with self.assertRaises(ValueError):
+            encode_case1_preamble(0, 0x20, prefix_u16=-1)
+
+    def test_narrow_tag_rejects_prefix_u16(self):
+        # Narrow tags (≤ 0x10) have no slot for prefix_u16; caller must
+        # use a wide tag (0x20+) to carry one.
+        with self.assertRaises(ValueError):
+            encode_case1_preamble(0, 0x01, prefix_u16=1)
+        # prefix_u16=0 / None on narrow tag stays valid (no-op).
+        self.assertEqual(
+            encode_case1_preamble(0, 0x01, prefix_u16=0),
+            bytes.fromhex("010080"),
+        )
+
+    def test_raw_pair_tags_rejected(self):
+        # 0x02 / 0x21 take the verbatim-copy short-circuit branch of
+        # MVDecodeTopicItemPrefix (no varint decode); not implemented.
         with self.assertRaises(NotImplementedError):
-            encode_case1_preamble(0, 0x11)
+            encode_case1_preamble(0, 0x02)
+        with self.assertRaises(NotImplementedError):
+            encode_case1_preamble(0, 0x21)
+
+    def test_wide_signed_int_varint_in_narrow_tag(self):
+        # Text bodies > 0x3FFF need wide SIGNED-INT VARINT (4 byte
+        # length), NOT a wide tag. Decoder pinned at MVDecodeTopicItemPrefix
+        # — narrow tag 0x01 + wide varint works.
+        encoded = encode_case1_preamble(0x4000, 0x01)
+        self.assertEqual(encoded[0], 0x01)
+        # Wide signed-int varint: ((0x4000+0x40000000)<<1)|1 = 0x80008001.
+        self.assertEqual(encoded[1:5], bytes.fromhex("01800080"))
 
     def test_tag_byte_range(self):
         with self.assertRaises(ValueError):
@@ -332,8 +383,8 @@ class TestCase1Tlv(unittest.TestCase):
             self.assertEqual(fields[offset], 0, f"field {offset:#x}")
         # Default for absent +0x22: depends on (TLV[0x12] & 1).
         self.assertEqual(fields[0x22], 0x0048)
-        # No trailing pairs.
-        self.assertEqual(fields["pairs"], [])
+        # No trailing tab stops.
+        self.assertEqual(fields["tab_stops"], [])
 
     def test_decode_consumes_only_narrow_length_plus_bitmap(self):
         # Trailing bytes after the 6-byte null TLV must NOT be read.
@@ -390,24 +441,79 @@ class TestTextItemTlvEncoder(unittest.TestCase):
         for k, v in fields.items():
             self.assertEqual(decoded[k], v, f"field 0x{k:02x}")
 
-    def test_round_trip_with_alignment_and_inline_runs_zero(self):
+    def test_round_trip_with_alignment_and_tab_stops_zero(self):
+        # Legacy positional API: fields[0x27] = 0 still works for
+        # the empty-stop-list case.
         fields = {
             0x00: 0,
             0x0C: 2,        # alignment_mode = center
-            0x27: 0,        # inline_run_count = 0 (encoded but no payload)
+            0x27: 0,        # tab_stop_count = 0 (encoded but no payload)
         }
         encoded = encode_text_item_tlv(fields)
         decoded, consumed = decode_case1_tlv(encoded)
         self.assertEqual(consumed, len(encoded))
         self.assertEqual(decoded[0x0C], 2)
         self.assertEqual(decoded[0x27], 0)
+        self.assertEqual(decoded["tab_stops"], [])
 
     def test_unknown_key_raises(self):
         with self.assertRaises(ValueError):
             encode_text_item_tlv({0x99: 1})
 
-    def test_inline_run_count_nonzero_not_implemented(self):
-        with self.assertRaises(NotImplementedError):
+    def test_tab_stops_single_no_payload(self):
+        # One stop at x=100 with default payload (0): emitted as just
+        # `PackedUnsignedSmall(100)` (1 byte = 100<<1 = 200 = 0xC8).
+        # Length(2) + bitmap_LE(4) + count_varint(1) + stop_x(1) = 8 B.
+        encoded = encode_text_item_tlv({0x00: 0}, tab_stops=[(100, 0)])
+        decoded, consumed = decode_case1_tlv(encoded)
+        self.assertEqual(consumed, len(encoded))
+        self.assertEqual(decoded[0x27], 1)
+        self.assertEqual(decoded["tab_stops"], [(100, 0)])
+
+    def test_tab_stops_with_payload(self):
+        # Stop at x=50 with payload=7. stop_x bit 14 set → second short
+        # follows. encoded as PackedUnsignedSmall((50|0x4000)) wide form
+        # then PackedUnsignedSmall(7) narrow.
+        encoded = encode_text_item_tlv({0x00: 0}, tab_stops=[(50, 7)])
+        decoded, consumed = decode_case1_tlv(encoded)
+        self.assertEqual(consumed, len(encoded))
+        self.assertEqual(decoded["tab_stops"], [(50, 7)])
+
+    def test_tab_stops_multiple_mixed(self):
+        # 8 stops, mixed payloads — exercises the multi-pair path the
+        # plan called out for inline-run encoding (which is in fact tab
+        # stops, not style runs).
+        stops = [
+            (10, 0),
+            (50, 0),
+            (100, 1),
+            (150, 0),
+            (200, 7),
+            (500, 0),
+            (1000, 3),
+            (0x3FFF, 0),
+        ]
+        encoded = encode_text_item_tlv({0x00: 0}, tab_stops=stops)
+        decoded, consumed = decode_case1_tlv(encoded)
+        self.assertEqual(consumed, len(encoded))
+        self.assertEqual(decoded[0x27], len(stops))
+        self.assertEqual(decoded["tab_stops"], stops)
+
+    def test_tab_stops_x_overflow(self):
+        # stop_x must fit in [0, 0x3FFF] — bit 14 is the flag and bit
+        # 15 / wide-form bit are reserved by the varint encoding.
+        with self.assertRaises(ValueError):
+            encode_text_item_tlv({0x00: 0}, tab_stops=[(0x4000, 0)])
+
+    def test_tab_stops_legacy_count_mismatch_rejected(self):
+        # Passing both fields[0x27] and tab_stops must agree.
+        with self.assertRaises(ValueError):
+            encode_text_item_tlv({0x00: 0, 0x27: 2}, tab_stops=[(10, 0)])
+
+    def test_tab_stops_legacy_nonzero_count_without_list_rejected(self):
+        # Old positional API only supports count=0 (no list). Non-zero
+        # count without an explicit `tab_stops=` raises.
+        with self.assertRaises(ValueError):
             encode_text_item_tlv({0x27: 1})
 
 
@@ -685,6 +791,133 @@ class TestTextMetafileBorderAndFill(unittest.TestCase):
         # No brush or pen records either.
         self.assertNotIn(b"\x07\x00\x00\x00\xfc\x02", bag)
         self.assertNotIn(b"\x08\x00\x00\x00\xfa\x02", bag)
+
+
+class TestStyledCase1Chunk(unittest.TestCase):
+    """`build_styled_case1_chunk` — multi-segment styled-text case-1 chunk.
+
+    Pinned against `MVDispatchControlRun @ 0x7e894ec0` per
+    `docs/MEDVIEW-TEXT-ENCODING.md` §5.1: each `0x80 <style u16>`
+    control fires when the text walker hits a NUL. One segment per
+    style, NUL separators between segments, trailing NUL hands off to
+    the final `0xFF` EOF control.
+    """
+
+    def test_single_segment_matches_build_case1_bf_chunk(self):
+        # Single segment with style_id=0 should produce identical bytes
+        # to `build_case1_bf_chunk(text="Hi", initial_font_style=0)`.
+        styled = build_styled_case1_chunk(
+            [StyledSegment("Hi", 0)],
+            title_byte=0x42,
+            key=0xCAFEBABE,
+        )
+        legacy = build_case1_bf_chunk(
+            text="Hi",
+            title_byte=0x42,
+            key=0xCAFEBABE,
+            initial_font_style=0,
+        )
+        self.assertEqual(styled, legacy)
+
+    def test_two_segments_emit_two_style_controls(self):
+        styled = build_styled_case1_chunk(
+            [("Hello ", 0), ("World", 1)],
+            title_byte=0x01,
+            key=0x00000001,
+        )
+        # Wire shape inspection: find the case-1 dispatch byte at +0x2A.
+        self.assertEqual(styled[0], 0xBF)
+        self.assertEqual(styled[4 + 0x26], 0x01)
+        # Preamble: 3 bytes after dispatch byte.
+        # TLV: 6 bytes (null TLV).
+        # Control stream: 0x80 00 00  0x80 01 00  0xFF (7 bytes).
+        # Text stream: \x00 H e l l o ' ' \x00 W o r l d \x00 (14 bytes).
+        control_offset = 4 + 0x26 + 3 + 6  # = 0x33
+        self.assertEqual(
+            styled[control_offset:control_offset + 7],
+            bytes.fromhex("80 00 00 80 01 00 ff".replace(" ", "")),
+        )
+        text_offset = control_offset + 7
+        self.assertEqual(
+            styled[text_offset:text_offset + 14],
+            b"\x00Hello \x00World\x00",
+        )
+
+    def test_three_segments_with_tlv_alignment_center(self):
+        styled = build_styled_case1_chunk(
+            [("A", 0), ("B", 7), ("C", 13)],
+            title_byte=0x02,
+            key=0x10,
+            tlv_fields={0x0C: 2},  # alignment_mode = center
+        )
+        # TLV is 6 bytes (length=0 narrow + bitmap with alignment bits).
+        # Control stream: 3 * 0x80 + 0xFF = 10 bytes.
+        # Text stream: \x00 A \x00 B \x00 C \x00 = 7 bytes.
+        control_offset = 4 + 0x26 + 3 + 6
+        expected_controls = (
+            b"\x80\x00\x00"     # style 0
+            b"\x80\x07\x00"     # style 7
+            b"\x80\x0d\x00"     # style 13
+            b"\xff"
+        )
+        self.assertEqual(
+            styled[control_offset:control_offset + len(expected_controls)],
+            expected_controls,
+        )
+        text_offset = control_offset + len(expected_controls)
+        self.assertEqual(
+            styled[text_offset:text_offset + 7],
+            b"\x00A\x00B\x00C\x00",
+        )
+
+    def test_with_tab_stops(self):
+        # Tab stops + multi-segment text — TLV encodes stops via the
+        # 0x2000000 bit; text stream encodes the segments.
+        styled = build_styled_case1_chunk(
+            [("Col1\tCol2", 0)],
+            title_byte=0x01,
+            key=0x00,
+            tab_stops=[(80, 0), (160, 0)],
+        )
+        # Validate the TLV decodes with the right tab stops.
+        # Find the TLV: starts at 4 + 0x26 + 3 (preamble) = 0x2D.
+        tlv_start = 4 + 0x26 + 3
+        fields, consumed = decode_case1_tlv(styled[tlv_start:tlv_start + 32])
+        self.assertEqual(fields["tab_stops"], [(80, 0), (160, 0)])
+        # Control stream right after the consumed TLV bytes.
+        ctrl_offset = tlv_start + consumed
+        self.assertEqual(styled[ctrl_offset:ctrl_offset + 3], b"\x80\x00\x00")
+        self.assertEqual(styled[ctrl_offset + 3], 0xFF)
+
+    def test_empty_segments_rejected(self):
+        with self.assertRaises(ValueError):
+            build_styled_case1_chunk([], title_byte=0, key=0)
+
+    def test_segment_with_embedded_nul_rejected(self):
+        # Embedded NUL would confuse the text/control walker
+        # synchronisation.
+        with self.assertRaises(ValueError):
+            build_styled_case1_chunk(
+                [("Bad\x00Text", 0)], title_byte=0, key=0,
+            )
+
+    def test_style_id_overflow_rejected(self):
+        with self.assertRaises(ValueError):
+            build_styled_case1_chunk(
+                [("X", 0x10000)], title_byte=0, key=0,
+            )
+
+    def test_chain_terminators_and_nsr_stamped(self):
+        styled = build_styled_case1_chunk(
+            [("X", 0)], title_byte=0x01, key=0x00,
+        )
+        # wire+0x8 and wire+0x10 are chain terminators = 0xFFFFFFFE.
+        self.assertEqual(struct.unpack("<I", styled[8:12])[0], 0xFFFFFFFE)
+        self.assertEqual(struct.unpack("<I", styled[16:20])[0], 0xFFFFFFFE)
+        # content_block +0x14 NSR sentinel = 0xFFFFFFFF.
+        name_size = struct.unpack("<H", styled[2:4])[0]
+        nsr_off = 4 + name_size + 0x14
+        self.assertEqual(struct.unpack("<I", styled[nsr_off:nsr_off + 4])[0], 0xFFFFFFFF)
 
 
 if __name__ == "__main__":

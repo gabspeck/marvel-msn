@@ -698,64 +698,20 @@ def _stamp_chain_terminators(chunk: bytearray) -> None:
     chunk[16:20] = struct.pack("<I", CHAIN_TERMINATOR_TOKEN)
 
 
-def build_case2_topic_header_chunk(
-    title_byte: int,
-    key: int,
-    *,
-    non_scroll: int = 0xFFFFFFFF,
-    scroll: int = 0,
-    topic_num: int = 0,
-    browse_back: int = 0xFFFFFFFF,
-    browse_forward: int = 0xFFFFFFFF,
-    next_topic: int = 0xFFFFFFFF,
-    name_size: int = 0x80,
-) -> bytes:
-    """Build a type-0 0xBF chunk with dispatch byte 2 carrying TOPICHEADER bytes.
-
-    EXPERIMENTAL: untested wire path. Parallel to WinHelp/MV |TOPIC stream's
-    RecordType==2 TOPICLINK whose LinkData1 is the TOPICHEADER struct (28 B):
-
-        +0x00 long BlockSize
-        +0x04 TOPICOFFSET BrowseBck   (0xFFFFFFFF = first/only topic)
-        +0x08 TOPICOFFSET BrowseFor   (0xFFFFFFFF = last/only topic)
-        +0x0C long TopicNum
-        +0x10 TOPICPOS NonScroll      (0xFFFFFFFF = no NSR)
-        +0x14 TOPICPOS Scroll
-        +0x18 TOPICPOS NextTopic
-
-    Goal: make MSN MOSVIEW honor `NonScroll = -1` and collapse NSR per-topic,
-    matching native MV behaviour. Whether
-    MVCL14N's MSN-side cache reader recognises this chunk format is unknown
-    until tried in the VM.
-    """
-    if not (0x40 <= name_size <= 0xFFFF):
-        raise ValueError(
-            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
-        )
-
-    chunk = bytearray(4 + name_size + 60)
-    chunk[0] = 0xBF
-    chunk[1] = title_byte & 0xFF
-    chunk[2:4] = struct.pack("<H", name_size)
-    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
-
-    case_off = 4 + 0x26
-    chunk[case_off] = 0x02
-
-    # Pack TOPICHEADER bytes immediately after the case dispatch byte.
-    topic_header = struct.pack(
-        "<IIIIIII",
-        28,                              # BlockSize
-        browse_back & 0xFFFFFFFF,
-        browse_forward & 0xFFFFFFFF,
-        topic_num & 0xFFFFFFFF,
-        non_scroll & 0xFFFFFFFF,
-        scroll & 0xFFFFFFFF,
-        next_topic & 0xFFFFFFFF,
-    )
-    chunk[case_off + 1:case_off + 1 + len(topic_header)] = topic_header
-    _stamp_no_nsr(chunk, name_size)
-    return bytes(chunk)
+# Case-2 TOPICHEADER builder removed 2026-05-19.
+#
+# MVWalkLayoutSlots @ 0x7e894d9f has no `case 2:` arm — its switch
+# dispatches only on tag values {1, 3, 4, 5, 0x20, 0x22, 0x23, 0x24}
+# (per the decompile's plate). Tag 0x02 IS recognised by
+# MVDecodeTopicItemPrefix (the raw-pair short-circuit branch copies
+# four bytes verbatim) but the resulting prefix falls through
+# MVWalkLayoutSlots' default arm with param_6[1] (last_view_record)
+# uninitialised, triggering the AV at +0xfc.
+#
+# Per-topic NSR collapse is achieved via `_stamp_no_nsr` writing
+# 0xFFFFFFFF at the 60-byte content_block offset +0x14 of every chunk
+# (see fMVHasNSR @ 0x7e8835b0 and HfcNear's companion-buffer memcpy);
+# no TOPICHEADER record is needed.
 
 
 # --------------------------------------------------------------------------
@@ -815,26 +771,70 @@ def encode_signed_short_varint(value: int) -> bytes:
     raise ValueError(f"signed-short varint out of range: {value}")
 
 
-def encode_case1_preamble(length_value: int, type_tag: int = 0x01) -> bytes:
+def encode_case1_preamble(
+    length_value: int,
+    type_tag: int = 0x01,
+    *,
+    prefix_u16: int | None = None,
+) -> bytes:
     """Encode the per-chunk preamble that prefixes the TLV+text region.
 
-    `MVDecodeTopicItemPrefix` reads:
+    `MVDecodeTopicItemPrefix @ 0x7e897ed0` reads:
       byte 0:    type tag (switched on by `MVWalkLayoutSlots`)
-      bytes 1+:  signed-int varint, decoded as `length_value`
+      bytes 1+:  PackedWideScalar (signed-int varint), decoded as `length_value`
+      bytes N+:  PackedUnsignedSmall (u8/u16) — present only when type_tag > 0x10
 
-    `length_value` is added to `entry+0x26+preamble_size` to compute
-    the TEXT BASE pointer (`local_c` in `MVParseLayoutChunk`). The TLV is
-    consumed at `entry+0x26+preamble_size`, so setting
-    `length_value = TLV_size` places the text immediately after the
-    TLV. Type tag 0x01 dispatches to the case-1 (text) branch.
+    Tag inventory (per `docs/mosview-authored-text-and-font-re.md`
+    §"Text Item Prefix"):
+
+      0x01 / 0x20 → MVBuildTextItem            (narrow / widened text)
+      0x03 / 0x22 → MVBuildLayoutLine          (narrow / widened image-row)
+      0x04 / 0x23 → MVBuildColumnLayoutItem    (narrow / widened column)
+      0x05 / 0x24 → MVBuildEmbeddedWindowItem  (narrow / widened embed)
+
+    `length_value` is added to `entry+0x26+preamble_size` to compute the
+    TEXT BASE pointer (`local_c` in `MVParseLayoutChunk @ 0x7e890fd0`).
+    The TLV is consumed at `entry+0x26+preamble_size`, so setting
+    `length_value = TLV_size` (+ control-stream size) places the text
+    immediately after both.
+
+    Wide tag (0x20..0x24): the extra PackedUnsignedSmall is stored at
+    `entry+0x1e` and contributes to `extent_total = entry+0x1e +
+    entry+0x22 + 1` (chunk-handle field_1c). For single-chunk text
+    bodies the default `prefix_u16=0` matches the narrow form's
+    behaviour; callers shaping multi-chunk text streams set it
+    explicitly. Note: narrow vs wide TAG is independent of narrow vs
+    wide SIGNED-INT VARINT — text bodies > 0x3FFF bytes are served by
+    the wide signed-int varint (already supported) and need not flip
+    to a wide tag.
+
+    Raw-pair tags 0x02 / 0x21 (short-circuit branch of MVDecodeTopicItemPrefix
+    — verbatim u32 + optional u16 copy with no varint decode) are not
+    used by any case-1 path observed in the wire so far; they remain
+    unimplemented.
     """
     if not (0 <= type_tag <= 0xFF):
         raise ValueError(f"preamble tag out of byte range: {type_tag}")
-    if type_tag > _PREAMBLE_NARROW_TYPE_TAG_MAX:
-        # `MVDecodeTopicItemPrefix` reads an additional byte/ushort varint after
-        # the length field for tags > 0x10 — not exercised yet.
+    if type_tag in (0x02, 0x21):
         raise NotImplementedError(
-            f"preamble tag > 0x10 has extra varint field: {type_tag}"
+            f"raw-pair short-circuit tag {type_tag:#x} not implemented "
+            "(MVDecodeTopicItemPrefix's verbatim-copy branch)"
+        )
+    if type_tag > _PREAMBLE_NARROW_TYPE_TAG_MAX:
+        effective_prefix = 0 if prefix_u16 is None else prefix_u16
+        if not (0 <= effective_prefix <= 0x7FFF):
+            raise ValueError(
+                f"prefix_u16 out of PackedUnsignedSmall range [0, 0x7FFF]: {effective_prefix}"
+            )
+        return (
+            bytes([type_tag])
+            + encode_signed_int_varint(length_value)
+            + encode_byte_or_ushort_varint(effective_prefix)
+        )
+    if prefix_u16 not in (None, 0):
+        raise ValueError(
+            f"narrow tag {type_tag:#x} has no prefix_u16 slot; "
+            f"use a wide tag (0x20/0x22/0x23/0x24) to carry prefix_u16={prefix_u16}"
         )
     return bytes([type_tag]) + encode_signed_int_varint(length_value)
 
@@ -924,10 +924,18 @@ _TLV_OPTIONAL_SHORT_FIELDS = (
 )
 
 
-def encode_text_item_tlv(fields: dict[int, int] | None = None) -> bytes:
+_TAB_STOP_SECOND_FLAG = 0x4000  # bit 14 of `stop_x` signals "stop_payload follows"
+
+
+def encode_text_item_tlv(
+    fields: dict | None = None,
+    *,
+    tab_stops: list[tuple[int, int]] | None = None,
+) -> bytes:
     """Encode a `MVDecodePackedTextHeader`-shaped TLV from a field dict.
 
     Inverse of `decode_case1_tlv`. Field semantics per
+    `MVDecodePackedTextHeader @ 0x7e897ad0` and consumers in
     `docs/mosview-authored-text-and-font-re.md` §"Text Header Grammar":
 
       0x00  text_start_index        i32  starting char index (length field)
@@ -945,12 +953,36 @@ def encode_text_item_tlv(fields: dict[int, int] | None = None) -> bytes:
       0x20  first_line_indent       i16  optional, gated by bitmap bit 0x400000
       0x22  tab_interval            i16  optional, gated by bitmap bit 0x800000
       0x24  edge_metric_flags       u16  optional, gated by bitmap bit 0x1000000
-      0x27  inline_run_count        i16  optional, gated by bitmap bit 0x2000000
+      0x27  tab_stop_count          i16  optional, gated by bitmap bit 0x2000000
+
+    The bit-0x2000000 pair list is **tab stops**, consumed by
+    `MVResolveNextTabStop @ 0x7e895620` as `(stop_x, stop_payload)`
+    shorts at decoded-header offset +0x29 stride 4. Multi-run text
+    styling is *not* encoded here — it happens via the `0x80` control
+    byte in the case-1 control stream (see §5 of
+    `docs/MEDVIEW-TEXT-ENCODING.md`). Older drafts of this module
+    misnamed the field `inline_run_count`.
+
+    Tab-stop pair wire form per `MVDecodePackedTextHeader`:
+      - First short: PackedUnsignedSmall (u8/u16, value range
+        [0, 0x7FFF]). Bit 14 of the decoded value flags whether a
+        second short follows; bit 14 is cleared after the read.
+      - Optional second short: PackedUnsignedSmall.
+
+    The decoded `stop_x` (bit-14 cleared) thus has range [0, 0x3FFF].
+    `stop_payload == 0` is the engine's default-alignment sentinel and
+    is omitted from the wire (no second short emitted, bit 14 of
+    `stop_x` left clear).
+
+    Args:
+      fields: dict keyed by struct offset (legacy positional API).
+      tab_stops: list of `(stop_x, stop_payload)` pairs; when present,
+        auto-sets bitmap bit 0x2000000 and `tab_stop_count = len(stops)`.
+        Mutually exclusive with `fields[0x27]`.
 
     Optional fields are emitted when their key is present in `fields`
     (regardless of value — explicit zero still shows up on the wire).
-    Inline-run pair list is not yet supported (set inline_run_count = 0
-    or omit). Unknown keys raise `ValueError`.
+    Unknown keys raise `ValueError`.
     """
     f = dict(fields or {})
     length_value = f.pop(0x00, 0)
@@ -987,15 +1019,36 @@ def encode_text_item_tlv(fields: dict[int, int] | None = None) -> bytes:
         bitmap |= 0x1000000
         optional_payload += struct.pack("<H", f.pop(0x24) & 0xFFFF) + b"\x00"
 
-    # Optional inline_run_count + pair list.
-    if 0x27 in f:
+    # Optional tab_stop_count + pair list.
+    legacy_count = f.pop(0x27, None)
+    if tab_stops is not None and legacy_count is not None and legacy_count != len(tab_stops):
+        raise ValueError(
+            f"fields[0x27]={legacy_count} disagrees with tab_stops length {len(tab_stops)}"
+        )
+    if tab_stops is not None:
         bitmap |= 0x2000000
-        run_count = f.pop(0x27)
-        optional_payload += encode_signed_short_varint(run_count)
-        if run_count != 0:
-            raise NotImplementedError(
-                "non-zero inline_run_count requires pair-list encoding "
-                "which has not been implemented yet"
+        optional_payload += encode_signed_short_varint(len(tab_stops))
+        for stop_x, stop_payload in tab_stops:
+            if not (0 <= stop_x <= 0x3FFF):
+                raise ValueError(
+                    f"stop_x out of range [0, 0x3FFF] (bit 14 reserved): {stop_x}"
+                )
+            if not (0 <= stop_payload <= 0x7FFF):
+                raise ValueError(
+                    f"stop_payload out of PackedUnsignedSmall range [0, 0x7FFF]: {stop_payload}"
+                )
+            if stop_payload == 0:
+                optional_payload += encode_byte_or_ushort_varint(stop_x)
+            else:
+                optional_payload += encode_byte_or_ushort_varint(stop_x | _TAB_STOP_SECOND_FLAG)
+                optional_payload += encode_byte_or_ushort_varint(stop_payload)
+    elif legacy_count is not None:
+        bitmap |= 0x2000000
+        optional_payload += encode_signed_short_varint(legacy_count)
+        if legacy_count != 0:
+            raise ValueError(
+                f"fields[0x27]={legacy_count} requires tab_stops list "
+                "(legacy positional API supports only count=0)"
             )
 
     if f:
@@ -1121,31 +1174,34 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
     else:
         fields[0x27] = 0
 
-    # Trailing pair list — each pair is two unbiased varints.
-    pairs: list[tuple[int, int]] = []
+    # Trailing tab-stop pair list per `MVDecodePackedTextHeader` (count at
+    # +0x27, payload at +0x29 stride 4). Each pair is `(stop_x,
+    # stop_payload)` PackedUnsignedSmall varints; bit 14 of the raw
+    # first short flags whether the second follows.
+    tab_stops: list[tuple[int, int]] = []
     for _ in range(max(0, fields[0x27])):
         raw_byte = buf[pos]
         if (raw_byte & 1) == 0:
-            first = raw_byte >> 1
+            stop_x = raw_byte >> 1
             pos += 1
         else:
             raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
-            first = raw_word >> 1
+            stop_x = raw_word >> 1
             pos += 2
-        if first & 0x4000:
+        if stop_x & _TAB_STOP_SECOND_FLAG:
             raw_byte = buf[pos]
             if (raw_byte & 1) == 0:
-                second = raw_byte >> 1
+                stop_payload = raw_byte >> 1
                 pos += 1
             else:
                 raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
-                second = raw_word >> 1
+                stop_payload = raw_word >> 1
                 pos += 2
         else:
-            second = 0
-        first &= ~0x4000  # parser clears bit 14 post-read
-        pairs.append((first, second))
-    fields["pairs"] = pairs
+            stop_payload = 0
+        stop_x &= ~_TAB_STOP_SECOND_FLAG  # parser clears bit 14 post-read
+        tab_stops.append((stop_x, stop_payload))
+    fields["tab_stops"] = tab_stops
 
     return (fields, pos)
 
@@ -1306,6 +1362,147 @@ def build_case1_bf_chunk(
     chunk[control_offset:control_offset + len(control_stream)] = control_stream
 
     text_offset = case_offset + 3 + len(tlv) + len(control_stream)
+    chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
+
+    _stamp_chain_terminators(chunk)
+    _stamp_no_nsr(chunk, name_size)
+    return bytes(chunk)
+
+
+@dataclass(frozen=True)
+class StyledSegment:
+    """One styled run of text in a case-1 chunk.
+
+    Each segment paints with a single CStyleSheet `style_id`; multi-
+    segment chunks switch styles via `0x80 <style u16>` controls in the
+    case-1 control stream (the only multi-run styling primitive — see
+    `docs/MEDVIEW-TEXT-ENCODING.md` §5.1).
+    """
+    text: str
+    style_id: int
+
+
+def build_styled_case1_chunk(
+    segments: list[StyledSegment | tuple[str, int]],
+    title_byte: int,
+    key: int,
+    *,
+    name_size: int = _CASE1_DEFAULT_NAME_SIZE,
+    tlv_fields: dict[int, int] | None = None,
+    tab_stops: list[tuple[int, int]] | None = None,
+) -> bytes:
+    """Build a case-1 0xBF chunk with multi-segment styled text.
+
+    Wire interleaving (one `0x80` control per segment + one trailing
+    `0xFF`):
+
+      Text region:    `\x00 seg0 \x00 seg1 \x00 ... \x00 segN \x00`
+      Control region: `\x80 <s0> \x80 <s1> ... \x80 <sN> \xFF`
+
+    Walker model (per `MVDispatchControlRun @ 0x7e894ec0` §5.1 +
+    `MVTextLayoutFSM @ 0x7e891810`): the text walker reads printable
+    bytes; on NUL it yields to the control walker which consumes one
+    control (3 B for `0x80 <style u16>` or 1 B for `0xFF`). After a
+    style switch, the text walker resumes the next printable run with
+    the new style applied.
+
+    For a single segment, the wire shape is identical to
+    `build_case1_bf_chunk(text=segments[0].text,
+    initial_font_style=segments[0].style_id)`.
+
+    Args:
+      segments: ordered list of `StyledSegment` (or plain `(text,
+        style_id)` tuples). Empty list raises; pass at least one
+        segment.
+      title_byte / key: same as `build_case1_bf_chunk`.
+      name_size: case-1 chunk's name_buf size (default
+        `_CASE1_DEFAULT_NAME_SIZE` = 0x100).
+      tlv_fields: forwarded to `encode_text_item_tlv` (alignment,
+        indents, etc.).
+      tab_stops: forwarded to `encode_text_item_tlv` (TLV bit
+        `0x2000000` pair list per §4.3).
+    """
+    if not segments:
+        raise ValueError("segments must contain at least one styled run")
+    normalised: list[StyledSegment] = []
+    for s in segments:
+        if isinstance(s, StyledSegment):
+            normalised.append(s)
+        else:
+            text, style_id = s
+            normalised.append(StyledSegment(text=text, style_id=style_id))
+
+    for seg in normalised:
+        if not -0x8000 <= seg.style_id <= 0xFFFF:
+            raise ValueError(
+                f"segment style_id out of int16/u16 range: {seg.style_id}"
+            )
+        if "\x00" in seg.text:
+            raise ValueError(
+                f"segment text must not contain embedded NUL: {seg.text!r}"
+            )
+
+    if not (0x40 <= name_size <= 0xFFFF):
+        raise ValueError(
+            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
+        )
+
+    tlv = (
+        encode_text_item_tlv(tlv_fields, tab_stops=tab_stops)
+        if tlv_fields is not None or tab_stops is not None
+        else encode_null_tlv()
+    )
+    if len(tlv) < 6:
+        raise AssertionError(f"TLV must be >= 6 bytes, got {len(tlv)}")
+
+    # Control stream: one `0x80 <style>` per segment, then 0xFF EOF.
+    control_stream = b"".join(
+        b"\x80" + struct.pack("<H", seg.style_id & 0xFFFF)
+        for seg in normalised
+    ) + b"\xFF"
+
+    # Text stream: leading NUL + segments separated by NUL + trailing NUL.
+    # Total NULs = len(segments) + 1; one consumed by the control walker
+    # per pop (matches len(segments) `0x80` controls + the final 0xFF).
+    text_bytes = b"\x00" + b"\x00".join(
+        seg.text.encode("ascii", errors="replace") for seg in normalised
+    ) + b"\x00"
+
+    # Budget check: name_size - 0x29 pad - 3 preamble - len(tlv) -
+    # len(control_stream) - len(text_bytes) ≥ 0.
+    capacity = name_size - 0x29 - 3 - len(tlv) - len(control_stream)
+    if len(text_bytes) > capacity:
+        raise ValueError(
+            f"styled payload = {len(text_bytes)} text bytes + "
+            f"{len(control_stream)} control bytes; in-name_buf form caps "
+            f"at {capacity} text bytes (name_size=0x{name_size:x}, "
+            f"tlv_size={len(tlv)}, segments={len(normalised)})"
+        )
+
+    preamble_length_value = len(tlv) + len(control_stream)
+
+    chunk = bytearray(4 + name_size + 60)
+    chunk[0] = 0xBF
+    chunk[1] = title_byte & 0xFF
+    chunk[2:4] = struct.pack("<H", name_size)
+    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
+
+    case_offset = 4 + 0x26
+    chunk[case_offset] = 0x01
+
+    preamble = encode_case1_preamble(length_value=preamble_length_value, type_tag=0x01)
+    if len(preamble) != 3:
+        raise AssertionError(
+            f"non-narrow case-1 preamble not implemented for length_value={preamble_length_value}"
+        )
+    chunk[case_offset + 1:case_offset + 3] = preamble[1:3]
+
+    chunk[case_offset + 3:case_offset + 3 + len(tlv)] = tlv
+
+    control_offset = case_offset + 3 + len(tlv)
+    chunk[control_offset:control_offset + len(control_stream)] = control_stream
+
+    text_offset = control_offset + len(control_stream)
     chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
 
     _stamp_chain_terminators(chunk)

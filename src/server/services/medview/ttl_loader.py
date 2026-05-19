@@ -26,7 +26,13 @@ from ...blackbird.wire import (
     build_text_metafile,
     build_trailer,
 )
-from .ccontent import TextRunsContent, decode_textruns, is_texttree
+from .ccontent import (
+    TextRunsContent,
+    TextTreeContent,
+    decode_textruns,
+    decode_texttree,
+    is_texttree,
+)
 from .ole_helpers import (
     SectionRecord,
     maybe_decompress_ck,
@@ -164,7 +170,7 @@ class StoryControl(_CompoundControl):
     entry rather than RE'd from the persist stream; deeper per-field
     decoding remains TODO (see `docs/re-passes/BBCTL.OCX.md`)."""
     content_proxy_ref: int | None = None
-    content: TextRunsContent | None = None
+    content: TextRunsContent | TextTreeContent | None = None
 
 
 @dataclass(frozen=True)
@@ -1232,18 +1238,16 @@ def _chase_story_content(
                 ole.openstream(_ole_path(content_path, "\x03object")).read(),
             )
             if is_texttree(content_raw):
+                decoded = decode_texttree(content_raw)
                 log.info(
                     "story_chase section=%d/%d proxy=%s content=%d/%d "
-                    "is_texttree=1 deferred",
+                    "is_texttree=1 segments=%d pictures=%d",
                     section_path[0], section_path[1], proxy_name,
                     content_path[0], content_path[1],
+                    len(decoded.segments), len(decoded.picture_refs),
                 )
-                return StoryControl(
-                    seq=story.seq, flags=story.flags, name=story.name,
-                    xy_twips=story.xy_twips, raw_block=story.raw_block,
-                    content_proxy_ref=proxy_key, content=None,
-                )
-            decoded = decode_textruns(content_raw)
+            else:
+                decoded = decode_textruns(content_raw)
         except (OSError, ValueError, NotImplementedError) as exc:
             log.info(
                 "story_chase section=%d/%d proxy=%s content=%d/%d decode_failed=%r",

@@ -1,4 +1,12 @@
-from .ccontent import StyleRun, TextRunsContent, decode_textruns, is_texttree
+from .ccontent import (
+    PictureRef,
+    StyleRun,
+    TextRunsContent,
+    TextTreeContent,
+    decode_textruns,
+    decode_texttree,
+    is_texttree,
+)
 from .handler import MEDVIEWHandler
 from .ttl_loader import (
     AudioControl,
@@ -27,13 +35,16 @@ __all__ = [
     "LoadedTitle",
     "MEDVIEWHandler",
     "OutlineControl",
+    "PictureRef",
     "ShortcutControl",
     "StoryControl",
     "StyleRun",
     "TextRunsContent",
+    "TextTreeContent",
     "UnknownControl",
     "build_bm0_baggage",
     "decode_textruns",
+    "decode_texttree",
     "is_texttree",
     "load_title",
     "lower_to_payload",

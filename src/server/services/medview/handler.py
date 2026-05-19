@@ -28,11 +28,33 @@ import logging
 import pathlib
 
 from ...blackbird.wire import (
+    StyledSegment,
     build_case1_bf_chunk,
     build_case3_bf_chunk,
+    build_styled_case1_chunk,
     build_type0_status_record,
     build_type3_op4_frame,
 )
+from .ccontent import TextRunsContent, TextTreeContent
+
+# Paragraph-marker → CStyleSheet style_id mapping. Pinned partially
+# from VIEWDLL.DLL `CRemoteText::AddTreeAndRuns @ 0x40720c1c` plus
+# empirical observations on `tests/assets/story_test.ttl 8/7`. The
+# style_id values match the conventional CStyleSheet ordering
+# (entry 0 = Normal, then headings, then list / quote variants).
+# Unknown markers fall back to style_id=0.
+_PARAGRAPH_MARKER_TO_STYLE_ID = {
+    "S": 0,    # story-body / Normal
+    "H": 1,    # Heading 1
+    "3": 3,    # Heading 3
+    "4": 4,    # Heading 4
+    "5": 5,    # Heading 5
+    "#": 7,    # ordered list item
+    "*": 8,    # unordered list item
+    "&": 9,    # quote / continuation
+    "I": 10,   # indented continuation
+    "7": 11,   # tab / table cell continuation
+}
 from ...config import (
     MEDVIEW_ATTACH_SESSION,
     MEDVIEW_CLOSE_REMOTE_HFS_FILE,
@@ -416,21 +438,74 @@ def _push_type3_op4(selector: int):
     return build
 
 
+def _collect_styled_segments(title) -> list[StyledSegment]:
+    """Walk every page's StoryControls; gather styled segments from
+    both TextTreeContent (segmented text, style_id=0 default) and
+    TextRunsContent (paragraph_markers → style_id via
+    `_PARAGRAPH_MARKER_TO_STYLE_ID`).
+
+    Order is preserved across pages and stories so the on-wire text
+    matches document order. Per
+    `docs/MEDVIEW-TEXT-ENCODING.md` §7.3, a Story persists as
+    parallel TextTree + TextRuns CContent streams — the chase in
+    `ttl_loader._chase_story_content` prefers TextRuns when both
+    exist, so this collector typically sees TextRunsContent with
+    paragraph markers carrying the real style metadata.
+    """
+    out: list[StyledSegment] = []
+    for page in title.pages:
+        for ctrl in page.controls:
+            content = getattr(ctrl, "content", None)
+            if isinstance(content, TextRunsContent):
+                if content.paragraph_markers:
+                    for _, marker, prose in content.paragraph_markers:
+                        if not prose:
+                            continue
+                        style_id = _PARAGRAPH_MARKER_TO_STYLE_ID.get(marker, 0)
+                        out.append(StyledSegment(text=prose, style_id=style_id))
+                # If markers couldn't be parsed but text exists, fall
+                # back to a single style_id=0 segment.
+                elif content.text:
+                    out.append(StyledSegment(text=content.text, style_id=0))
+            elif isinstance(content, TextTreeContent):
+                for _, segment_text in content.segments:
+                    if not segment_text:
+                        continue
+                    out.append(StyledSegment(text=segment_text, style_id=0))
+    return out
+
+
 def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
     """0xBF chunk for 0x15 (HfcNear) cache fill.
 
-    TTL loaded with captions → case-3 (bitmap cell) so the engine paints
-    `bm0` baggage at the slot origin and `PlayMetaFile` lowers the kind=8
-    metafile carrying caption TextOuts.
+    Dispatch by loaded title content:
 
-    Empty case-1 (skip-row) is the layout walker's "return-5" fast path:
-    used when no title is loaded. Without it the engine paints the
-    cached chunk into many rows to fill the pane.
+      1. Title with TextTree stories (Blackbird-authored prose) →
+         styled case-1 chunk carrying the concatenated text via
+         `build_styled_case1_chunk`. The text walker emits the prose
+         via slot tag 1; no kind=8 fallback runs.
+
+      2. Title with captions (BBDESIGN-authored caption controls) →
+         case-3 (bitmap cell) so the engine paints `bm0` baggage at
+         the slot origin and `PlayMetaFile` lowers the kind=8 WMF
+         carrying caption TextOuts.
+
+      3. Otherwise → empty case-1 ("skip-row" / layout walker's
+         return-5 fast path). Used when no title is loaded. Without
+         it the engine paints the cached chunk into many rows to
+         fill the pane.
     """
-    if handler.loaded_title is not None and any(
-        page.captions for page in handler.loaded_title.pages
-    ):
-        return build_case3_bf_chunk(title_slot, key)
+    title = handler.loaded_title
+    if title is not None:
+        if any(page.captions for page in title.pages):
+            return build_case3_bf_chunk(title_slot, key)
+        styled_segments = _collect_styled_segments(title)
+        if styled_segments:
+            return build_styled_case1_chunk(
+                styled_segments,
+                title_byte=title_slot,
+                key=key,
+            )
     return build_case1_bf_chunk(
         text="", title_byte=title_slot, key=key, initial_font_style=None,
     )

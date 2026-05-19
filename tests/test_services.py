@@ -1,5 +1,6 @@
 """Tests for LOGSRV and DIRSRV service payload builders."""
 
+import pathlib
 import struct
 import unittest
 
@@ -1793,6 +1794,139 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         self.assertEqual(push[2], 0x01)
         self.assertEqual(struct.unpack("<I", push[13:17])[0], key)
         self.assertEqual(push[1 + 0x2A], 0x01)
+
+    def test_va_resolve_pushes_styled_case1_for_texttree(self):
+        # Construct a LoadedTitle whose page-0 Story carries a
+        # TextTreeContent with two segments. The handler should ship a
+        # styled case-1 chunk (dispatch byte 0x01) — not case-3 — so
+        # the engine renders the prose via slot tag 1.
+        from server.services.medview.ccontent import TextTreeContent
+        from server.services.medview.ttl_loader import (
+            LoadedPage,
+            LoadedTitle,
+            StoryControl,
+        )
+
+        story = StoryControl(
+            seq=0,
+            flags=0,
+            name="Story1R",
+            xy_twips=(0, 0),
+            raw_block=b"",
+            content_proxy_ref=0x1500,
+            content=TextTreeContent(
+                text="Alpha\nBeta",
+                segments=((2, "Alpha"), (10, "Beta")),
+            ),
+        )
+        page = LoadedPage(
+            name="page0",
+            cbform_table=0,
+            cbform_slot=0,
+            cvform_handle=None,
+            page_bg=0xFFFFFF,
+            page_pixel_w=640,
+            page_pixel_h=480,
+            scrollbar_flags=0,
+            controls=(story,),
+        )
+        title = LoadedTitle(
+            title_name="TextTree Test",
+            caption="TextTree Test",
+            window_rect=(0, 0, 640, 480),
+            font_table=(),
+            pages=(page,),
+        )
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        handler.loaded_title = title
+        self._subscribe(handler, 0, 3)
+        key = 0xDEADBEEF
+        req = b"\x01\x01\x03" + struct.pack("<I", key)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push[0], 0x85)
+        self.assertEqual(push[1], 0xBF)
+        # Case-1 dispatch byte at name_buf[0x26].
+        self.assertEqual(push[1 + 0x2A], 0x01)
+        # Control stream begins at chunk_offset + 3 (preamble) + 6
+        # (null TLV) = chunk_offset + 9; in the wire frame this is
+        # at push[1 + 0x33]. Two segments → two `0x80 <u16 style>`
+        # controls + one trailing `0xFF`.
+        control_start = 1 + 0x33
+        self.assertEqual(
+            push[control_start:control_start + 7],
+            bytes.fromhex("80 00 00 80 00 00 ff".replace(" ", "")),
+        )
+        # Text region: leading NUL + "Alpha" + NUL + "Beta" + NUL = 12 B.
+        text_start = control_start + 7
+        self.assertEqual(
+            push[text_start:text_start + 12],
+            b"\x00Alpha\x00Beta\x00",
+        )
+
+    def test_va_resolve_pushes_styled_case1_for_textruns_markers(self):
+        # TextRuns with two paragraph markers ('S' = story-body / style 0,
+        # '#' = ordered list / style 7) should ship a styled case-1
+        # chunk where each segment's `0x80` control carries the
+        # marker-mapped style_id.
+        from server.services.medview.ccontent import TextRunsContent
+        from server.services.medview.ttl_loader import (
+            LoadedPage,
+            LoadedTitle,
+            StoryControl,
+        )
+
+        story = StoryControl(
+            seq=0, flags=0, name="Story1R",
+            xy_twips=(0, 0), raw_block=b"",
+            content_proxy_ref=0x1500,
+            content=TextRunsContent(
+                text="SHello #Goodbye",
+                style_runs=(),
+                header_version=2,
+                header_byte_1=0,
+                raw_payload=b"SHello #Goodbye",
+                paragraph_markers=(
+                    (0, "S", "Hello"),
+                    (6, "#", "Goodbye"),
+                ),
+            ),
+        )
+        page = LoadedPage(
+            name="p0", cbform_table=0, cbform_slot=0, cvform_handle=None,
+            page_bg=0xFFFFFF, page_pixel_w=640, page_pixel_h=480,
+            scrollbar_flags=0, controls=(story,),
+        )
+        title = LoadedTitle(
+            title_name="TextRuns Test", caption="TextRuns Test",
+            window_rect=(0, 0, 640, 480), font_table=(), pages=(page,),
+        )
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        handler.loaded_title = title
+        self._subscribe(handler, 0, 3)
+        req = b"\x01\x01\x03" + struct.pack("<I", 0xCAFE)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(push[1], 0xBF)
+        self.assertEqual(push[1 + 0x2A], 0x01)
+        # Control stream: `0x80 00 00` (style 0 for 'S') +
+        # `0x80 07 00` (style 7 for '#') + `0xFF`.
+        control_start = 1 + 0x33
+        self.assertEqual(
+            push[control_start:control_start + 7],
+            bytes.fromhex("80 00 00 80 07 00 ff".replace(" ", "")),
+        )
+        # Text region: \x00 Hello \x00 Goodbye \x00 = 15 B
+        # (leading NUL + "Hello"=5 + sep NUL + "Goodbye"=7 + trailing NUL).
+        text_start = control_start + 7
+        self.assertEqual(
+            push[text_start:text_start + 15],
+            b"\x00Hello\x00Goodbye\x00",
+        )
 
     def test_va_resolve_pushes_case3_when_ttl_captions_present(self):
         # OpenTitle with `:2[4]0` loads 4.ttl (a TTL with 1 caption) →
