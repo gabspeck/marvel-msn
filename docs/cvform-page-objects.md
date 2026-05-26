@@ -226,9 +226,9 @@ Persist call order:
    - `PX_Long FrameColor` (default 0, v ≥ 2)
 3. `PX_Long idTag` (default `-1`, `-1` = no script binding)
 4. `PX_String strCaption` (the visible label; v ≥ 4 always written)
-5. `PX_Bool fWordWrap` (default FALSE)
-6. `PX_Bool fAutoSize` (default FALSE)
-7. `PX_Long iAlignment` (default 0 = left)
+5. `PX_Bool fWordWrap` (default FALSE; serialised 1 B)
+6. `PX_Bool fAutoSize` (default FALSE; serialised 1 B)
+7. `PX_Long iAlignment` (default 0 = left; 1 = right, 2 = centre)
 8. `PX_Long fTransparent` (default TRUE, v ≥ 3)
 
 On-disk layout in the LAST descriptor's `inline_tail` (which carries
@@ -266,9 +266,9 @@ single descriptor's inline_tail for single-caption pages):
 | `+0x57+N+20` | 4 | **idTag** | LONG (default `-1`) |
 | `+0x57+N+24` | 1 | strCaption_len | u8 |
 | `+0x57+N+25` | M | strCaption | ASCII (no NUL) |
-| `+0x57+N+25+M` | 2 | **fWordWrap** | u16 BOOL (default 0) |
-| `+0x57+N+27+M` | 2 | **fAutoSize** | u16 BOOL (default 0) |
-| `+0x57+N+29+M` | 2 | **iAlignment** | u16 short (default 0; 0=left, 1=center, 2=right) |
+| `+0x57+N+25+M` | 1 | **fWordWrap** | u8 BOOL (default 0) |
+| `+0x57+N+26+M` | 1 | **fAutoSize** | u8 BOOL (default 0) |
+| `+0x57+N+27+M` | 4 | **iAlignment** | u32 LONG (default 0; 0=left, 1=right, 2=centre) |
 | `+0x57+N+31+M` | 4 | **fTransparent** | u32 LONG (default 1) |
 | `+0x57+N+35+M` | ... | MS Forms 1.0 form trailer (varies; not part of CLabelCtrl persist) |
 
@@ -290,28 +290,27 @@ unconditionally by `FUN_40009356` as a 10-byte block immediately after
 
 | offset (rel to strCaption end) | size | field | type | default |
 | --- | --- | --- | --- | --- |
-| `+0x00` | 2 | `fWordWrap` | u16 BOOL | 0 (FALSE) |
-| `+0x02` | 2 | `fAutoSize` | u16 BOOL | 0 (FALSE) |
-| `+0x04` | 2 | `iAlignment` | u16 short | 0 (left; 1=center, 2=right) |
+| `+0x00` | 1 | `fWordWrap` | u8 BOOL | 0 (FALSE) |
+| `+0x01` | 1 | `fAutoSize` | u8 BOOL | 0 (FALSE) |
+| `+0x02` | 4 | `iAlignment` | u32 LONG | 0 (left; 1=right, 2=centre) |
 | `+0x06` | 4 | `fTransparent` | u32 LONG | 1 (TRUE) |
 
-Pinned empirically: `4.ttl` pages 1/2 (V/H scrollbar variants, both
-single-Caption pages with default "Test caption" / MS Sans Serif) and
-`/var/share/drop/first title.ttl` page 1 (Comic Sans MS "This is
-another page") all carry the same 10 bytes
-`00 00 00 00 00 00 01 00 00 00` after their respective strCaption
-texts — decoding to `(fWordWrap=0, fAutoSize=0, iAlignment=0,
-fTransparent=1)`, the exact MFC defaults. `4.ttl` page 0's 3-caption
-record buffer also exhibits the same 10-byte block between Caption 1's
-text and Caption 2's pre-Font header.
+Pinned in two places that agree:
 
-The encoding (u16/u16/u16/u32) doesn't match a stock MFC PX_Long /
-PX_Bool binary-stream output (which would write 4 bytes each =
-16 B). It matches a property-bag-style VARIANT-typed write where
-BOOL → VARIANT_BOOL (2 B) and short integers get truncated. The
-decoder uses the pinned (u16, u16, u16, u32) layout pending a
-non-default-value probe to verify on fixtures with a non-default
-`iAlignment` or `fTransparent`.
+- Static RE of `BBCTL.OCX`. `FUN_40009356` (CLabelBtnCtrl
+  DoPropExchange) calls `PX_Bool` (`MFC40 Ordinal_4724`, 1 B) for
+  `fWordWrap` then `fAutoSize`, then `PX_Long` (`Ordinal_4736`, 4 B)
+  for `iAlignment` then `fTransparent`. The label-draw function
+  `FUN_400083f6` reads `*(int*)(this+0x2f8)` (4 B) as `iAlignment` and
+  indexes the `{0, 2, 1}` table = `{DT_LEFT, DT_RIGHT, DT_CENTER}`.
+- Empirical bytes in `tests/assets/captions_test.ttl`: `simple_right`
+  (seq 2) post-block is `00 00 01 00 00 00 01 00 00 00` → iAlignment=1
+  (right); `simple_center` (seq 3) is `00 00 02 00 00 00 01 00 00 00`
+  → iAlignment=2 (centre); `auto_resize_caption_` (seq 20) is
+  `01 01 00 00 00 00 01 00 00 00` → fWordWrap=1, fAutoSize=1.
+  Default-valued captions across `4.ttl`, `multi_page_title.ttl`, and
+  `captions_test.ttl` share `00 00 00 00 00 00 01 00 00 00`
+  (= MFC defaults).
 
 Parser implementation: `_walk_cbform` + `_decode_caption` +
 `_decode_label_persist` in `src/server/services/medview/ttl_loader.py`.

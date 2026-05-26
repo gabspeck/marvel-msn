@@ -104,16 +104,17 @@ class TestCaptionsTestFixture(unittest.TestCase):
         ])
 
     def test_alignment_variant_captions(self):
-        # Seqs 1/2/3 are "Plain caption"/"Right aligned"/"Center aligned"
-        # — same font, different rect positions. Alignment property is
-        # not yet split out from the post-strCaption block on this
-        # fixture; the visual difference comes from rect positioning
-        # in the reference PNG.
+        # Seqs 1/2/3 are simpleR / simple_right / simple_center. The
+        # post-strCaption iAlignment LONG is 0/1/2 respectively (LEFT,
+        # RIGHT, CENTER per BBCTL FUN_400083f6).
         t = load_title(_TITLE_4)
         controls = {c.seq: c for c in t.pages[0].controls}
         self.assertEqual(controls[1].text, "Plain caption")
         self.assertEqual(controls[2].text, "Right aligned")
         self.assertEqual(controls[3].text, "Center aligned")
+        self.assertEqual(controls[1].alignment, 0)
+        self.assertEqual(controls[2].alignment, 1)
+        self.assertEqual(controls[3].alignment, 2)
         for seq in (1, 2, 3):
             self.assertEqual(controls[seq].font_name, "MS Sans Serif")
 

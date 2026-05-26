@@ -234,14 +234,16 @@ _META_INTERSECTCLIPRECT = 0x0416
 _BKMODE_TRANSPARENT = 1
 _BKMODE_OPAQUE = 2
 
-# TA_LEFT/CENTER/RIGHT for WMF SetTextAlign. iAlignment values BBDESIGN
-# emits map directly to these (left=0, center=1, right=2). The TA_TOP
-# baseline (0x00) is implicit; we OR'd with TA_BASELINE (0x18) would
-# shift y coords — keep TA_TOP for now to match the kind=8 contract.
+# TA_LEFT/CENTER/RIGHT for WMF SetTextAlign. iAlignment values pinned
+# via BBCTL.OCX FUN_400083f6 (label draw): {0, 2, 1} table indexed by
+# iAlignment yields {DT_LEFT, DT_RIGHT, DT_CENTER}. Wire mapping mirrors
+# that order. The TextOut anchor x must be shifted to the rect's right
+# edge (TA_RIGHT) or horizontal centre (TA_CENTER) — see
+# `build_text_metafile`. TA_TOP baseline (0x00) is implicit.
 _TA_LEFT = 0x00
 _TA_CENTER = 0x06
 _TA_RIGHT = 0x02
-_ALIGN_TO_TA = {0: _TA_LEFT, 1: _TA_CENTER, 2: _TA_RIGHT}
+_ALIGN_TO_TA = {0: _TA_LEFT, 1: _TA_RIGHT, 2: _TA_CENTER}
 
 
 @dataclass(frozen=True)
@@ -533,7 +535,13 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
                 int(item.x + item.rect_w),
                 int(item.y + item.rect_h),
             )
-        records += _wmf_textout(int(item.x), int(item.y), item.text)
+        anchor_x = int(item.x)
+        if item.rect_w > 0:
+            if item.alignment == 1:
+                anchor_x = int(item.x + item.rect_w)
+            elif item.alignment == 2:
+                anchor_x = int(item.x + item.rect_w // 2)
+        records += _wmf_textout(anchor_x, int(item.y), item.text)
         if has_clip:
             records += _wmf_restoredc(-1)
     for idx in range(len(items)):

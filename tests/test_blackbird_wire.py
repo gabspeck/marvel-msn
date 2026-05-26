@@ -793,6 +793,107 @@ class TestTextMetafileBorderAndFill(unittest.TestCase):
         self.assertNotIn(b"\x08\x00\x00\x00\xfa\x02", bag)
 
 
+def _find_textout_records(meta: bytes) -> list[tuple[int, int, str]]:
+    """Walk a WMF body, return `(x, y, text)` for every META_TEXTOUT.
+
+    Body starts after the 18-byte METAHEADER. Records are
+    `[u32 rdSize_words][u16 rdFunction][params]`. META_TEXTOUT params:
+    `[u16 count][text padded to even][i16 y][i16 x]`.
+    """
+    pos = 18
+    out: list[tuple[int, int, str]] = []
+    while pos + 6 <= len(meta):
+        rd_size = struct.unpack_from("<I", meta, pos)[0]
+        rd_func = struct.unpack_from("<H", meta, pos + 4)[0]
+        rec_end = pos + rd_size * 2
+        if rd_func == 0x0521 and pos + 6 + 2 <= rec_end:
+            count = struct.unpack_from("<H", meta, pos + 6)[0]
+            text_padded = (count + 1) & ~1
+            y, x = struct.unpack_from("<hh", meta, pos + 8 + text_padded)
+            text = meta[pos + 8:pos + 8 + count].decode("ascii", "replace")
+            out.append((x, y, text))
+        if rd_size == 0:
+            break
+        pos = rec_end
+    return out
+
+
+class TestTextMetafileAlignment(unittest.TestCase):
+    """`build_text_metafile` lowers `TextItem.alignment` to a WMF
+    `SetTextAlign` mode AND shifts the `TextOut` anchor X so the rect
+    actually anchors at the correct edge.
+
+    BBCTL iAlignment values: 0=LEFT, 1=RIGHT, 2=CENTER (pinned via
+    BBCTL.OCX FUN_400083f6 — index {0, 2, 1} = {DT_LEFT, DT_RIGHT,
+    DT_CENTER}). WMF mapping: 0→TA_LEFT(0x00), 1→TA_RIGHT(0x02),
+    2→TA_CENTER(0x06). With `SetTextAlign(TA_RIGHT)` the TextOut x
+    becomes the right anchor; with `TA_CENTER` it becomes the horizontal
+    centre. The encoder shifts x by `rect_w` (right) or `rect_w // 2`
+    (centre).
+    """
+
+    def _settextalign_mode(self, meta: bytes) -> int:
+        sig = b"\x04\x00\x00\x00\x2e\x01"
+        idx = meta.index(sig)
+        return struct.unpack_from("<H", meta, idx + 6)[0]
+
+    def test_left_aligned_textout_anchors_at_rect_left(self):
+        meta = build_text_metafile([TextItem(
+            x=100, y=50, text="Hi", rect_w=200, rect_h=24, alignment=0,
+        )])
+        self.assertEqual(self._settextalign_mode(meta), 0x00)  # TA_LEFT
+        textouts = _find_textout_records(meta)
+        self.assertEqual(len(textouts), 1)
+        self.assertEqual(textouts[0][0], 100)
+
+    def test_right_aligned_textout_anchors_at_rect_right(self):
+        meta = build_text_metafile([TextItem(
+            x=100, y=50, text="Hi", rect_w=200, rect_h=24, alignment=1,
+        )])
+        self.assertEqual(self._settextalign_mode(meta), 0x02)  # TA_RIGHT
+        textouts = _find_textout_records(meta)
+        self.assertEqual(len(textouts), 1)
+        self.assertEqual(textouts[0][0], 300)
+
+    def test_center_aligned_textout_anchors_at_rect_center(self):
+        meta = build_text_metafile([TextItem(
+            x=100, y=50, text="Hi", rect_w=200, rect_h=24, alignment=2,
+        )])
+        self.assertEqual(self._settextalign_mode(meta), 0x06)  # TA_CENTER
+        textouts = _find_textout_records(meta)
+        self.assertEqual(len(textouts), 1)
+        self.assertEqual(textouts[0][0], 200)
+
+    def test_textout_anchor_unchanged_when_rect_w_zero(self):
+        # Story controls + text-only mode pass no rect; alignment can be
+        # set but there's nothing to anchor inside, so x stays as-is.
+        meta = build_text_metafile([TextItem(
+            x=100, y=50, text="Hi", rect_w=0, rect_h=0, alignment=1,
+        )])
+        textouts = _find_textout_records(meta)
+        self.assertEqual(textouts[0][0], 100)
+
+    def test_captions_test_fixture_lowers_alignment_end_to_end(self):
+        # captions_test.ttl seq 2 (simple_right, alignment=1) and seq 3
+        # (simple_center, alignment=2) must drive both SetTextAlign and
+        # TextOut anchor shifts inside bm0 baggage.
+        from src.server.services.medview.ttl_loader import (
+            CaptionControl, build_all_bm_baggage, load_title,
+        )
+        t = load_title("tests/assets/captions_test.ttl")
+        bag = build_all_bm_baggage(t)["bm0"]
+        captions = {c.seq: c for c in t.pages[0].controls
+                    if isinstance(c, CaptionControl)}
+        self.assertEqual(captions[2].alignment, 1)
+        self.assertEqual(captions[3].alignment, 2)
+        # Container preamble is 8 bytes, kind=8 header before metafile;
+        # search the whole baggage for TA modes — at least one TA_RIGHT
+        # (0x02) and one TA_CENTER (0x06) must appear in SetTextAlign
+        # records, alongside the default TA_LEFT for the rest.
+        self.assertIn(b"\x04\x00\x00\x00\x2e\x01\x02\x00", bag)
+        self.assertIn(b"\x04\x00\x00\x00\x2e\x01\x06\x00", bag)
+
+
 class TestStyledCase1Chunk(unittest.TestCase):
     """`build_styled_case1_chunk` — multi-segment styled-text case-1 chunk.
 

@@ -627,21 +627,23 @@ _BORDER_FRAME_COLOR_OFF = 0x10
 _CLABEL_ID_TAG_OFF = 0x14
 _CLABEL_STR_CAPTION_OFF = 0x18
 
-# Post-strCaption fields (10 B total). Empirical layout pinned via
-# byte-trace across `4.ttl` and `tests/assets/multi_page_title.ttl` —
-# default-valued captions share the same 10-byte block immediately
-# after strCaption: `00 00 00 00 00 00 01 00 00 00`,
-# decoding to (fWordWrap=0, fAutoSize=0, iAlignment=0, fTransparent=1)
-# — exactly the MFC defaults for v=4 captions.
-# PX_Bool / PX_Long here use 2-byte VARIANT_BOOL / 2-byte short for
-# the first three slots and a 4-byte LONG for the last:
-#   +0x00  u16   fWordWrap       (PX_Bool, default 0)
-#   +0x02  u16   fAutoSize       (PX_Bool, default 0)
-#   +0x04  u16   iAlignment      (PX_Long via PX_Short pathway, default 0)
-#   +0x06  u32   fTransparent    (PX_Long, default 1)
+# Post-strCaption fields (10 B total). Layout pinned via Ghidra against
+# BBCTL.OCX CLabelBtnCtrl::DoPropExchange (FUN_40009356): PX call order
+# is fWordWrap, fAutoSize, iAlignment, fTransparent; PX_Bool
+# (MFC40 Ordinal_4724) serialises as 1 byte, PX_Long (Ordinal_4736) as
+# 4 bytes. iAlignment in memory is read as DWORD at this+0x2f8 by
+# FUN_400083f6, which indexes {0, 2, 1} = {DT_LEFT, DT_RIGHT, DT_CENTER}
+# — values are 0=LEFT, 1=RIGHT, 2=CENTER.
+#   +0x00  u8   fWordWrap     (PX_Bool, default 0; 0=FALSE, 1=TRUE)
+#   +0x01  u8   fAutoSize     (PX_Bool, default 0)
+#   +0x02  u32  iAlignment    (PX_Long, default 0; 0=LEFT 1=RIGHT 2=CENTER)
+#   +0x06  u32  fTransparent  (PX_Long, default 1; 0=opaque, 1=transparent)
+# Fixtures: simple_right (seq 2) has iAlignment=1, simple_center (seq 3)
+# has iAlignment=2, simpleR_word_wrap (seq 17) has fWordWrap=1,
+# auto_resize_caption_ (seq 20) has fWordWrap=1 + fAutoSize=1.
 _POST_TEXT_WORD_WRAP_OFF = 0x00
-_POST_TEXT_AUTO_SIZE_OFF = 0x02
-_POST_TEXT_ALIGNMENT_OFF = 0x04
+_POST_TEXT_AUTO_SIZE_OFF = 0x01
+_POST_TEXT_ALIGNMENT_OFF = 0x02
 _POST_TEXT_TRANSPARENT_OFF = 0x06
 _POST_TEXT_SIZE = 0x0A
 
@@ -752,14 +754,10 @@ def _decode_label_persist(
     post_text = text_end
     if post_text + _POST_TEXT_SIZE > len(buf):
         return out
-    out["word_wrap"] = bool(struct.unpack_from(
-        "<H", buf, post_text + _POST_TEXT_WORD_WRAP_OFF,
-    )[0])
-    out["auto_size"] = bool(struct.unpack_from(
-        "<H", buf, post_text + _POST_TEXT_AUTO_SIZE_OFF,
-    )[0])
+    out["word_wrap"] = bool(buf[post_text + _POST_TEXT_WORD_WRAP_OFF])
+    out["auto_size"] = bool(buf[post_text + _POST_TEXT_AUTO_SIZE_OFF])
     out["alignment"] = struct.unpack_from(
-        "<H", buf, post_text + _POST_TEXT_ALIGNMENT_OFF,
+        "<I", buf, post_text + _POST_TEXT_ALIGNMENT_OFF,
     )[0]
     out["transparent"] = bool(struct.unpack_from(
         "<I", buf, post_text + _POST_TEXT_TRANSPARENT_OFF,
