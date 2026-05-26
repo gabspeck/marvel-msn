@@ -1866,11 +1866,13 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             b"\x00Alpha\x00Beta\x00",
         )
 
-    def test_va_resolve_pushes_styled_case1_for_textruns_markers(self):
-        # TextRuns with two paragraph markers ('S' = story-body / style 0,
-        # '#' = ordered list / style 7) should ship a styled case-1
-        # chunk where each segment's `0x80` control carries the
-        # marker-mapped style_id.
+    def test_va_resolve_pushes_styled_case1_for_textruns_blobs(self):
+        # TextRuns with two CElementData blobs should ship a styled
+        # case-1 chunk where each blob becomes one segment. Per
+        # `docs/MEDVIEW-TEXT-ENCODING.md` §7.3, TextRuns has no
+        # inline style metadata — every segment uses style_id=0
+        # until the parallel TextTree walker pins each segment's
+        # style.
         from server.services.medview.ccontent import TextRunsContent
         from server.services.medview.ttl_loader import (
             LoadedPage,
@@ -1883,15 +1885,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             xy_twips=(0, 0), raw_block=b"",
             content_proxy_ref=0x1500,
             content=TextRunsContent(
-                text="SHello #Goodbye",
+                text="",
                 style_runs=(),
                 header_version=2,
                 header_byte_1=0,
-                raw_payload=b"SHello #Goodbye",
-                paragraph_markers=(
-                    (0, "S", "Hello"),
-                    (6, "#", "Goodbye"),
-                ),
+                raw_payload=b"",
+                blobs=("Hello", "Goodbye"),
             ),
         )
         page = LoadedPage(
@@ -1913,15 +1912,13 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[1], 0xBF)
         self.assertEqual(push[1 + 0x2A], 0x01)
-        # Control stream: `0x80 00 00` (style 0 for 'S') +
-        # `0x80 07 00` (style 7 for '#') + `0xFF`.
+        # Control stream: two `0x80 00 00` (style 0) controls + `0xFF`.
         control_start = 1 + 0x33
         self.assertEqual(
             push[control_start:control_start + 7],
-            bytes.fromhex("80 00 00 80 07 00 ff".replace(" ", "")),
+            bytes.fromhex("80 00 00 80 00 00 ff".replace(" ", "")),
         )
-        # Text region: \x00 Hello \x00 Goodbye \x00 = 15 B
-        # (leading NUL + "Hello"=5 + sep NUL + "Goodbye"=7 + trailing NUL).
+        # Text region: \x00 Hello \x00 Goodbye \x00 = 15 B.
         text_start = control_start + 7
         self.assertEqual(
             push[text_start:text_start + 15],

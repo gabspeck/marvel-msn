@@ -390,22 +390,34 @@ Pinned against two fixtures:
   itemised list): 10 text segments preceded by a `PICTURE.PictureCtrl.1`
   CLSID + `FILE`/`DATA1` property pair.
 
-### 7.2 Picture intrusion (pinned shape, partial decode)
+### 7.2 Picture intrusion (pinned shape)
 
 A picture record embeds an OLE-style property table inside the
-TextTree body:
+TextTree body. Layout pinned against `tests/assets/story_test.ttl
+8/6`:
 
 ```
 [u8 5][CLSID][u8 name_len][CLSID name e.g. "PICTURE.PictureCtrl.1"]
 [u8 2][CX][u8 4][width digits]
 [u8 2][CY][u8 3][height digits]
 [u8 4][FILE][u8 5][DATA1]
-[1-byte resource ref / proxy key, plus 0xFF padding]
+[control bytes / placeholder values, varies by encoder]
+[u8 name_len][ASCII filename e.g. "bitmap.bmp"][NUL padding]
+[u32 size=16][16-byte CLSID — picture's IUID into title's CProxyTable]
+[trailing metadata]
 ```
 
-Only the leading `CLSID` token + ASCII name are surfaced by the
-current decoder (`PictureRef.clsid`); the resource ref → baggage
-proxy key mapping is open.
+Decoder surface:
+
+- `PictureRef.clsid` — `"PICTURE.PictureCtrl.1"` (the BBCTL control
+  CLSID).
+- `PictureRef.filename` — embedded picture filename (e.g.
+  `"bitmap.bmp"`).
+- `PictureRef.iuid` — 16-byte CLSID identifying the picture; this
+  is the key for `CProxyTable` lookup. Resolution to a concrete
+  baggage proxy_key would walk the title's CProxyTable's entries
+  against `iuid`; this resolution step is implementation-specific
+  per loader and not pinned here.
 
 ### 7.3 Parallel-streams architecture
 
@@ -432,35 +444,67 @@ that gets serialized as TextTree) and builds the runs array from
 nodes whose element-data flags `(byte & 3) == 3` AND data length
 > 0x20 — i.e. one entry per styled prose run.
 
-### 7.4 TextRuns body grammar (partial)
+### 7.4 TextRuns body grammar (pinned)
 
-Empirical layout, pinned against `tests/assets/story_test.ttl 8/7`
-(122 B):
+The TextRuns CContent body is
+`CTypedPtrArray<CElementData>::Serialize @ 0x407092a6` (VIEWDLL.DLL)
+output — a flat array of prose blobs with no inline style metadata:
 
 ```
 TextRuns body
-  u8 version = 0x02
-  u8 flags   = 0x00
-  Sequence of: [u8 paragraph_marker][prose bytes until next marker or EOF]
+  u16 count                      (CArchive::WriteCount — narrow form
+                                  if < 0xFFFF, else 0xFFFF + u32 wide)
+  count × CElementData:
+    u8 length                    (CElementData::Serialize — 1-byte
+                                  form if < 0xFF; else 0xFF + u16;
+                                  else 0xFF + 0xFFFF + u32)
+    length B prose bytes         (ASCII)
 ```
 
-Observed paragraph markers (single ASCII byte preceding each run):
+Pinned against `tests/assets/story_test.ttl 8/7` (122 B):
 
-- `'S'` (0x53) — story-body / default paragraph
-- `'#'` (0x23) — ordered list item
-- `'3'` (0x33) — heading-3 style
+| Offset | Bytes              | Meaning                                                |
+|--------|--------------------|--------------------------------------------------------|
+| `+0x00` | `02 00`           | u16 count = 2                                          |
+| `+0x02` | `53`              | element[0] length = 0x53 (83)                          |
+| `+0x03` | "This is an example…Extensions! " (83 B) | element[0] prose             |
+| `+0x56` | `23`              | element[1] length = 0x23 (35)                          |
+| `+0x57` | "Ordered list is supported as well: " (35 B) | element[1] prose        |
 
-Each marker selects a paragraph style index in the title's
-`CStyleSheet`; the marker → style_id mapping is not yet fully
-enumerated. The exhaustive marker inventory awaits the
-char-emit step of CTextRuns::Serialize (vtable+8 dispatch — direct
-address not yet pinned).
+Earlier drafts of this doc misread the leading length bytes (`0x53`
+= 'S', `0x23` = '#') as paragraph-style markers. They are length
+prefixes, not data. **Per-segment style information is not present
+in the TextRuns stream**; it lives in the parallel TextTree stream
+(§7.5).
 
-### 7.5 Per-element style serializers (pinned wire layout)
+### 7.5 TextTree generation (external COM parser)
 
-The CCharProps / CParaProps / CStyle records that drive paint-time
-styling are written by these MFC-virtual serializers (all in
-VIEWDLL.DLL `scratch-re.rep`):
+The TextTree stream is **not generated inside VIEWDLL.DLL** — it's
+produced by an external COM component that VIEWDLL instantiates
+via `CoCreateInstance` from `CRemoteText::CreateParseTree @
+0x40720462`:
+
+- CLSID at `0x407508e0`: `f6a0e000-f5c6-11cd-9945-00aa0051f5b7`
+- IID  at `0x407506e0`: `f3a6c930-f599-11cd-9945-00aa0051f5b7`
+
+The vendor suffix `9945-00aa0051f5b7` matches the Microsoft Blackbird
+OUI; the component is the text-document parser that VIEWDLL feeds a
+Word/RTF document into and gets back a serialized CElementNode tree
++ IStorage. The tree pointer is stashed at `this+0x44`; calling
+`vtable[2]` (Serialize) on it emits the TextTree bytes.
+
+This means the exhaustive TextTree opcode inventory is **owned by
+the external COM component**, not VIEWDLL. Static RE of VIEWDLL
+alone cannot enumerate every opcode; the partial decoder (§7.6) is
+the practical ceiling for static analysis. Further pinning requires
+either RE-ing the COM component (separate binary) or runtime
+profiling.
+
+### 7.6 Per-element style serializers (pinned wire layout)
+
+When the COM parser emits CCharProps / CParaProps / CStyle records
+inside the TextTree byte stream, they use these MFC-virtual
+serializer layouts (all in VIEWDLL.DLL):
 
 - `CContent::Serialize @ 0x4073a185` — outer pipe; loops 0x1000-byte
   reads/writes between a CFile-derived source and the CArchive.
@@ -477,13 +521,7 @@ VIEWDLL.DLL `scratch-re.rep`):
   variable-length count (1 B if <0xFF, else `0xFF + u16`, else
   `0xFF + 0xFFFF + u32`) followed by raw bytes.
 
-These are individual record writers; the document-level dispatcher
-that decides WHEN to emit each is the CTextTree / CTextRuns
-serializer (vtable+8 from `this+0x44` / `this+0x48` in
-`AddTreeAndRuns`). The exact entry point hasn't been pinned to a
-specific address yet.
-
-### 7.6 Current decoder surface
+### 7.7 Current decoder surface
 
 `server.services.medview.ccontent.decode_texttree(raw)` returns a
 `TextTreeContent` with:
@@ -492,53 +530,32 @@ specific address yet.
   order).
 - `.segments` — `tuple[(byte_offset, text), ...]` for callers that
   need per-segment positioning.
-- `.style_runs` — empty (full style decode requires pairing with
-  the parallel TextRuns stream — see §7.3 / §7.4).
+- `.style_runs` — empty (style metadata lives in TextTree's
+  interleaved CCharProps/CParaProps records, written by an external
+  COM parser per §7.5; not resolvable from VIEWDLL static RE alone).
 - `.picture_refs` — `tuple[PictureRef, ...]` of CLSID names.
 - `.raw_payload` — bytes after the 2-byte `01 05` magic.
 
-## 8. Authored → Wire Mapping — PARTIAL
+## 8. Authored → Wire Mapping
 
 ### 8.1 Pinned
 
 | Authored side                                             | Wire side                                            |
 |-----------------------------------------------------------|------------------------------------------------------|
 | TextTree `[0x03 length text]` segment                     | `0x80 <style_id u16>` control + NUL + text in case-1 |
-| TextRuns `[u8 marker][prose]` run (§7.4)                  | `0x80 <style_id u16>` control + NUL + prose in case-1 |
+| TextRuns CElementData blob (§7.4)                         | `0x80 <style_id u16>` control + NUL + prose in case-1 |
 | `CStyleSheet` font key (CStyleSheet's font_entries array) | Section-0 face slot index (per `docs/mosview-authored-text-and-font-re.md` §"Section 0 Font Table") |
 
-### 8.2 Paragraph-marker → style_id table (partial)
+### 8.2 Per-segment style_id resolution — external
 
-Observed mapping from TextRuns paragraph markers to CStyleSheet
-style_id slots. Style IDs follow the conventional CStyleSheet
-ordering (entry 0 = Normal). Markers not in this table fall back
-to style_id = 0.
-
-| Marker | CStyleSheet slot | Role                             |
-|--------|------------------|----------------------------------|
-| `'S'`  | 0                | Normal / story body              |
-| `'H'`  | 1                | Heading 1                        |
-| `'3'`  | 3                | Heading 3                        |
-| `'4'`  | 4                | Heading 4                        |
-| `'5'`  | 5                | Heading 5                        |
-| `'#'`  | 7                | Ordered list item                |
-| `'*'`  | 8                | Unordered list item              |
-| `'&'`  | 9                | Quote / continuation             |
-| `'I'`  | 10               | Indented continuation            |
-| `'7'`  | 11               | Tab / table cell continuation    |
-
-Exhaustive inventory and confirmation of slot indices awaits the
-char-emit step of CTextRuns::Serialize.
-
-### 8.3 Open
-
-| Authored side                       | Wire side                                | Blocker            |
-|-------------------------------------|------------------------------------------|--------------------|
-| `CStyle.based_on` chain (depth ≤ 0x14) → resolved style_id | case-1 slot+0x3f                           | §7.3 (full enumeration) |
-| `CCharProps.font_index/weight/colour` | TLV field set + `0x80` style control bytes | §7.3, §7.5         |
-| `CParaProps.justify/indent/space_before/after` | TLV header optional fields              | §7.5               |
-| `CParaProps.tab_stops`              | TLV bit `0x2000000` pair list (§4.3)     | §7.5               |
-| TextTree picture INTRUDE node       | kind=5 / kind=8 baggage trailer entry    | §7.2 (proxy-key resolution) |
+TextRuns has no inline style metadata (§7.4) and TextTree's
+opcode-level interleaving is owned by an external COM component
+(§7.5). Until the COM parser is RE'd or runtime-profiled, every
+case-1 segment ships with `style_id = 0` (the title's default
+CStyleSheet entry). The server's `_collect_styled_segments`
+defaults to that value; the wire encoder accepts arbitrary
+style_id values, so future style resolution slots in without
+changing the lowering path.
 
 ## 9. Multi-Chunk Topic Navigation
 
@@ -660,22 +677,21 @@ internals; deeper |TOPIC RTF-token decode is a separate workstream
 
 ## 12. Open Questions
 
-- §7.5: Document-level dispatcher that interleaves CCharProps /
-  CParaProps / CStyle records with text. The serializers' wire
-  layouts and the parallel-streams architecture (§7.3) are pinned;
-  what remains is the exact opcode order CTextTree::Serialize /
-  CTextRuns::Serialize emit (their vtable+8 entry points are
-  resolvable via `this+0x44` / `this+0x48` in
-  `CRemoteText::AddTreeAndRuns @ 0x40720c1c`).
-- §8.2: Complete the paragraph-marker → style_id table. Current
-  entries are empirical / by-convention; some slots may be off by
-  one or two depending on the title's CStyleSheet ordering.
+- §7.5 (external COM parser): The TextTree byte stream is the
+  serialised output of an external COM component (CLSID
+  `f6a0e000-f5c6-11cd-9945-00aa0051f5b7`, IID
+  `f3a6c930-f599-11cd-9945-00aa0051f5b7`). Full opcode-level
+  enumeration requires RE-ing that component (separate binary) or
+  runtime profiling under SoftIce. Static analysis of VIEWDLL.DLL
+  alone cannot reach it.
 - §3.2: Exact semantic role of `prefix_u16` in `extent_total =
   entry+0x1e + entry+0x22 + 1`. Static trace pins the additive
   contribution but the field's authored origin and downstream
   consumer (beyond the additive term) are open.
-- §7.2: TextTree picture INTRUDE node's resource ref → baggage
-  proxy key resolution.
+- §7.2: `PictureRef.iuid` → concrete baggage `proxy_key` lookup
+  via the title's `CProxyTable`. The 16-byte CLSID is now extracted
+  but the CProxyTable walk that maps it to a proxy_key is title-
+  layout-dependent and not encoded in this doc.
 - (out of scope) MV 2.0 `|TOPIC` stream's RTF-token decode for
   MVPUBKIT's MMAG/MVAPIREF/MVAUTHOR archives. Distinct from
   Blackbird's TextTree; not needed for first-pass MSN MOSVIEW

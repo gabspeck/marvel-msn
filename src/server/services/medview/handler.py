@@ -37,24 +37,13 @@ from ...blackbird.wire import (
 )
 from .ccontent import TextRunsContent, TextTreeContent
 
-# Paragraph-marker → CStyleSheet style_id mapping. Pinned partially
-# from VIEWDLL.DLL `CRemoteText::AddTreeAndRuns @ 0x40720c1c` plus
-# empirical observations on `tests/assets/story_test.ttl 8/7`. The
-# style_id values match the conventional CStyleSheet ordering
-# (entry 0 = Normal, then headings, then list / quote variants).
-# Unknown markers fall back to style_id=0.
-_PARAGRAPH_MARKER_TO_STYLE_ID = {
-    "S": 0,    # story-body / Normal
-    "H": 1,    # Heading 1
-    "3": 3,    # Heading 3
-    "4": 4,    # Heading 4
-    "5": 5,    # Heading 5
-    "#": 7,    # ordered list item
-    "*": 8,    # unordered list item
-    "&": 9,    # quote / continuation
-    "I": 10,   # indented continuation
-    "7": 11,   # tab / table cell continuation
-}
+# TextRuns CContent stores a flat list of prose blobs with no inline
+# style metadata (the per-segment style info lives in the parallel
+# TextTree stream — see `docs/MEDVIEW-TEXT-ENCODING.md` §7.3). Until
+# the TextTree document-level walker pins each blob's style index,
+# every TextRuns blob ships with `style_id = 0` (the title's default
+# CStyleSheet entry).
+_TEXTRUNS_DEFAULT_STYLE_ID = 0
 from ...config import (
     MEDVIEW_ATTACH_SESSION,
     MEDVIEW_CLOSE_REMOTE_HFS_FILE,
@@ -440,38 +429,51 @@ def _push_type3_op4(selector: int):
 
 def _collect_styled_segments(title) -> list[StyledSegment]:
     """Walk every page's StoryControls; gather styled segments from
-    both TextTreeContent (segmented text, style_id=0 default) and
-    TextRunsContent (paragraph_markers → style_id via
-    `_PARAGRAPH_MARKER_TO_STYLE_ID`).
+    both TextRunsContent (one segment per CElementData blob) and
+    TextTreeContent (segmented text).
 
     Order is preserved across pages and stories so the on-wire text
     matches document order. Per
     `docs/MEDVIEW-TEXT-ENCODING.md` §7.3, a Story persists as
     parallel TextTree + TextRuns CContent streams — the chase in
     `ttl_loader._chase_story_content` prefers TextRuns when both
-    exist, so this collector typically sees TextRunsContent with
-    paragraph markers carrying the real style metadata.
+    exist (its blob list is the displayable prose).
+
+    Every segment ships with `style_id =
+    _TEXTRUNS_DEFAULT_STYLE_ID = 0` for now: TextRuns has no inline
+    style metadata, and the TextTree document-level walker that
+    would resolve per-segment styles has not been pinned (see §7.5).
+    Once that walker lands, this collector will map each segment to
+    its real CStyleSheet slot.
     """
     out: list[StyledSegment] = []
     for page in title.pages:
         for ctrl in page.controls:
             content = getattr(ctrl, "content", None)
             if isinstance(content, TextRunsContent):
-                if content.paragraph_markers:
-                    for _, marker, prose in content.paragraph_markers:
+                if content.blobs:
+                    for prose in content.blobs:
                         if not prose:
                             continue
-                        style_id = _PARAGRAPH_MARKER_TO_STYLE_ID.get(marker, 0)
-                        out.append(StyledSegment(text=prose, style_id=style_id))
-                # If markers couldn't be parsed but text exists, fall
-                # back to a single style_id=0 segment.
+                        out.append(StyledSegment(
+                            text=prose,
+                            style_id=_TEXTRUNS_DEFAULT_STYLE_ID,
+                        ))
                 elif content.text:
-                    out.append(StyledSegment(text=content.text, style_id=0))
+                    # Fallback for short/malformed payloads where the
+                    # CTypedPtrArray decode produced no blobs.
+                    out.append(StyledSegment(
+                        text=content.text,
+                        style_id=_TEXTRUNS_DEFAULT_STYLE_ID,
+                    ))
             elif isinstance(content, TextTreeContent):
                 for _, segment_text in content.segments:
                     if not segment_text:
                         continue
-                    out.append(StyledSegment(text=segment_text, style_id=0))
+                    out.append(StyledSegment(
+                        text=segment_text,
+                        style_id=_TEXTRUNS_DEFAULT_STYLE_ID,
+                    ))
     return out
 
 

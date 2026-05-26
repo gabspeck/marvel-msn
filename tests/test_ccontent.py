@@ -28,37 +28,39 @@ def _load_ttl_object(fixture: str, stream: str) -> bytes:
 class TestDecodeTextRuns(unittest.TestCase):
     FIXTURE = "tests/assets/story_test.ttl"
 
-    def test_msn_today_8_7_fixture(self):
+    def test_msn_today_8_7_truncated_head(self):
         # First 32 bytes of tests/assets/story_test.ttl `8/7/object` (TextRuns).
+        # Body is CTypedPtrArray<CElementData>::Serialize: u16 count
+        # then count × CElementData. count = 0x0002 = 2 (bytes 0..1).
         head = bytes.fromhex(
             "0200535468697320697320616e206578616d706c65206f6620636f6e74656e74"
         )
         decoded = decode_textruns(head)
+        # Legacy (version, flag) view: bytes 0..1 are the count
+        # (matches `02 00`), exposed as-is for backward compat.
         self.assertEqual(decoded.header_version, 0x02)
         self.assertEqual(decoded.header_byte_1, 0x00)
         # `text` retains legacy semantics (everything from +2).
         self.assertTrue(decoded.text.startswith("S"))
         self.assertIn("This is an example of content", decoded.text)
         self.assertEqual(decoded.style_runs, ())
-        # Paragraph markers surface the 'S' marker + prose.
-        self.assertEqual(len(decoded.paragraph_markers), 1)
-        off, marker, prose = decoded.paragraph_markers[0]
-        self.assertEqual(off, 0)
-        self.assertEqual(marker, "S")
-        self.assertIn("This is an example of content", prose)
+        # Element 0's length byte is 0x53 (=83); 32-byte head has only
+        # 30 of those, so the decoder can't fully parse element 0 and
+        # returns an empty blob list.
+        self.assertEqual(decoded.blobs, ())
 
-    def test_full_8_7_paragraph_split(self):
-        # Full TextRuns body has two paragraphs: 'S' (story-body) +
-        # '#' (ordered-list item). The scanner picks them up at the
-        # right byte offsets.
+    def test_full_8_7_decodes_to_two_blobs(self):
+        # Full TextRuns body has two prose blobs:
+        #   element 0: length=0x53 (83) "This is an example…Extensions! "
+        #   element 1: length=0x23 (35) "Ordered list is supported as well: "
         raw = _load_ttl_object(self.FIXTURE, "8/7/\x03object")
         decoded = decode_textruns(raw)
-        markers = [(m[0], m[1]) for m in decoded.paragraph_markers]
-        self.assertEqual(markers, [(0, "S"), (0x54, "#")])
-        prose_first = decoded.paragraph_markers[0][2]
-        self.assertIn("Blackbird Extensions!", prose_first)
-        prose_second = decoded.paragraph_markers[1][2]
-        self.assertTrue(prose_second.startswith("Ordered list"))
+        self.assertEqual(len(decoded.blobs), 2)
+        self.assertTrue(decoded.blobs[0].startswith("This is an example"))
+        self.assertIn("Blackbird Extensions!", decoded.blobs[0])
+        self.assertEqual(len(decoded.blobs[0]), 0x53)
+        self.assertTrue(decoded.blobs[1].startswith("Ordered list"))
+        self.assertEqual(len(decoded.blobs[1]), 0x23)
 
     def test_empty_blob_returns_empty_container(self):
         # CContent `8/3` and `8/7` for missing/empty TextRuns ship as
@@ -131,12 +133,15 @@ class TestDecodeTextTree(unittest.TestCase):
                 "That's all folks.",
             ],
         )
-        # One picture intrusion: PICTURE.PictureCtrl.1.
+        # One picture intrusion: PICTURE.PictureCtrl.1 + filename + IUID.
         self.assertEqual(len(decoded.picture_refs), 1)
-        self.assertEqual(
-            decoded.picture_refs[0].clsid,
-            "PICTURE.PictureCtrl.1",
-        )
+        ref = decoded.picture_refs[0]
+        self.assertEqual(ref.clsid, "PICTURE.PictureCtrl.1")
+        self.assertEqual(ref.filename, "bitmap.bmp")
+        # IUID = 16 bytes; first 4 = `61 9c fa e5` = LE u32 of the
+        # picture's CLSID time-low field.
+        self.assertEqual(len(ref.iuid), 16)
+        self.assertEqual(ref.iuid[:4], bytes.fromhex("619cfae5"))
         # Segments preserve document order via byte offsets.
         offsets = [off for off, _ in decoded.segments]
         self.assertEqual(offsets, sorted(offsets))
@@ -167,9 +172,16 @@ class TestStyleRunDataclass(unittest.TestCase):
 
 class TestPictureRefDataclass(unittest.TestCase):
     def test_construction(self):
-        ref = PictureRef(byte_offset=0x4b5, clsid="PICTURE.PictureCtrl.1")
+        ref = PictureRef(
+            byte_offset=0x4b5,
+            clsid="PICTURE.PictureCtrl.1",
+            filename="bitmap.bmp",
+            iuid=b"\x01" * 16,
+        )
         self.assertEqual(ref.byte_offset, 0x4b5)
         self.assertEqual(ref.clsid, "PICTURE.PictureCtrl.1")
+        self.assertEqual(ref.filename, "bitmap.bmp")
+        self.assertEqual(len(ref.iuid), 16)
 
 
 if __name__ == "__main__":

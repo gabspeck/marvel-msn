@@ -40,32 +40,42 @@ class StyleRun:
 class PictureRef:
     """One picture-intrusion reference inside a TextTree body. The
     Blackbird writer ships these as inline records carrying a CLSID
-    (e.g. `PICTURE.PictureCtrl.1`) plus a FILE / DATA1 pair pointing
-    into baggage. The partial decoder surfaces the byte offset and
-    raw CLSID string; the full reference's baggage proxy key is left
-    open for the full grammar walk."""
+    (e.g. `PICTURE.PictureCtrl.1`), CX/CY size strings, a
+    FILE/DATA1 property pair, an embedded ASCII filename (e.g.
+    `bitmap.bmp`), and a 16-byte CLSID identifying the picture in
+    the title's CProxyTable.
+
+    The full reference's baggage proxy_key is resolved by looking up
+    `iuid` in the title's CProxyTable; the partial decoder surfaces
+    the raw bytes."""
     byte_offset: int
     clsid: str
+    filename: str = ""
+    iuid: bytes = b""
 
 
 @dataclass(frozen=True)
 class TextRunsContent:
     """Decoded CContent payload for a `TextRuns` typed body.
 
-    `paragraph_markers` lists the in-stream `[u8 marker][prose]` runs
-    surfaced by the partial decoder (see
-    `docs/MEDVIEW-TEXT-ENCODING.md` §7.4). Each tuple is
-    `(byte_offset, marker_char, prose)` — the marker byte is a single
-    ASCII char that selects a paragraph style in the title's
-    CStyleSheet (observed values include `'S'`, `'#'`, `'3'`; the
-    exhaustive inventory is not yet RE'd).
+    Wire form per VIEWDLL.DLL `CTypedPtrArray<CElementData>::Serialize`
+    @ 0x407092a6 + `CElementData::Serialize @ 0x40702e4c`:
+
+      u16 count                          (CArchive::WriteCount narrow)
+      count × CElementData:
+        u8/u16/u32 length                (per CElementData length encoding)
+        length B prose bytes
+
+    `blobs` is the decoded list of prose strings (one per visible
+    text run). The raw `text` attribute remains for backward-compat
+    callers and is the concatenation of all blobs joined by `'\\n'`.
     """
     text: str
     style_runs: tuple[StyleRun, ...]
     header_version: int                                    # observed: 0x02 in story_test.ttl 8/7
     header_byte_1: int
-    raw_payload: bytes                                     # bytes from offset 2 onwards
-    paragraph_markers: tuple[tuple[int, str, str], ...] = ()
+    raw_payload: bytes                                     # bytes from offset 2 onwards (legacy)
+    blobs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -172,14 +182,57 @@ def _scan_text_segments(payload: bytes) -> list[tuple[int, str]]:
     return segments
 
 
+def _find_filename_in_intrude(payload: bytes, start: int, end: int) -> str:
+    """Scan a picture-intrusion record's bytes (between `start` and
+    `end`) for an embedded `*.bmp` / `*.wmf` / similar filename. The
+    writer emits `[u8 length][filename][NUL pad]` inside the
+    property block; we accept any length-prefixed ASCII run ending
+    in a known image extension."""
+    pos = start
+    while pos < end - 2:
+        ln = payload[pos]
+        if 4 <= ln <= 64 and pos + 1 + ln <= end:
+            candidate = payload[pos + 1:pos + 1 + ln]
+            if (
+                all(0x20 <= b < 0x7F for b in candidate)
+                and b"." in candidate
+            ):
+                lower = candidate.lower()
+                if any(
+                    lower.endswith(ext)
+                    for ext in (b".bmp", b".wmf", b".dib", b".jpg",
+                                b".png", b".gif", b".shg")
+                ):
+                    return candidate.decode("ascii")
+        pos += 1
+    return ""
+
+
+def _find_iuid_in_intrude(payload: bytes, start: int, end: int) -> bytes:
+    """Scan a picture-intrusion record's bytes for the
+    `[u32 size=16][16-byte CLSID]` pattern that uniquely identifies
+    the picture in the title's CProxyTable. The size prefix is
+    little-endian `10 00 00 00`; the 16 GUID bytes that follow must
+    not be all-zero."""
+    pos = start
+    while pos < end - 20:
+        if payload[pos:pos + 4] == b"\x10\x00\x00\x00":
+            candidate = payload[pos + 4:pos + 20]
+            if any(b != 0 for b in candidate):
+                return bytes(candidate)
+        pos += 1
+    return b""
+
+
 def _scan_picture_refs(payload: bytes) -> list[PictureRef]:
     """Find Blackbird INTRUDE-style picture records inside `payload`.
 
     The writer ships pictures as `[u8 ascii_len][CLSID name]` followed
-    by `[u8 5][... value ...]` property pairs. We detect by scanning
-    for the literal `CLSID` token (preceded by a one-byte length =
-    5), then reading the ASCII name that follows (its length encoded
-    the same way).
+    by `[u8 5][... value ...]` property pairs, then an embedded
+    filename and a 16-byte CLSID. We detect by scanning for the
+    literal `CLSID` token (preceded by a one-byte length = 5), then
+    reading the ASCII name that follows (its length encoded the
+    same way), then scanning forward for the filename + IUID.
     """
     refs: list[PictureRef] = []
     pos = 0
@@ -198,9 +251,20 @@ def _scan_picture_refs(payload: bytes) -> list[PictureRef]:
                 if 1 <= name_len <= 0x40 and name_end <= len(payload):
                     name_bytes = payload[name_start:name_end]
                     if all(0x20 <= b < 0x7F for b in name_bytes):
+                        # Scan up to 0x200 B after the CLSID name for
+                        # the embedded filename + IUID.
+                        scan_end = min(name_end + 0x200, len(payload))
+                        filename = _find_filename_in_intrude(
+                            payload, name_end, scan_end,
+                        )
+                        iuid = _find_iuid_in_intrude(
+                            payload, name_end, scan_end,
+                        )
                         refs.append(PictureRef(
                             byte_offset=idx - 1,
                             clsid=name_bytes.decode("ascii"),
+                            filename=filename,
+                            iuid=iuid,
                         ))
                         pos = name_end
                         continue
@@ -243,82 +307,89 @@ def decode_texttree(raw: bytes) -> TextTreeContent:
     )
 
 
-_PARAGRAPH_MARKER_CHARS = frozenset("SH#3457*&I")  # observed; extend as RE pins more
+def _read_celementdata_length(data: bytes, offset: int) -> tuple[int, int]:
+    """Read a CElementData length prefix per VIEWDLL.DLL
+    `CElementData::Serialize @ 0x40702e4c`:
 
+      length < 0xFF      → 1 B
+      length < 0xFFFE    → `0xFF` + u16 LE
+      length >= 0xFFFE   → `0xFF` + `0xFFFF` + u32 LE
 
-def _scan_paragraph_markers(
-    payload: bytes,
-) -> tuple[list[tuple[int, str, str]], str]:
-    """Split a TextRuns body into `[u8 marker][prose]` runs.
-
-    Per `docs/MEDVIEW-TEXT-ENCODING.md` §7.4, each run starts with a
-    single ASCII marker byte (e.g. `'S'`, `'#'`, `'3'`) selecting a
-    paragraph style. Returns `(markers, prose_only_concat)`.
-
-    Heuristic: a marker is a single byte from
-    `_PARAGRAPH_MARKER_CHARS` that appears immediately after the
-    previous run's last printable text. We split conservatively —
-    when the first byte of `payload` is a known marker, we treat it
-    as a marker; the next ASCII run is its prose; subsequent
-    marker-boundaries are inferred only when followed by printable
-    prose, otherwise the byte is treated as text.
+    Returns `(length, bytes_consumed)`. `(0, 0)` on OOB.
     """
-    markers: list[tuple[int, str, str]] = []
-    if not payload:
-        return markers, ""
-    first = chr(payload[0])
-    if first not in _PARAGRAPH_MARKER_CHARS:
-        # No recognised paragraph marker — treat whole body as one
-        # default-style run with marker = empty string.
-        return [(0, "", payload.decode("ascii", errors="replace"))], (
-            payload.decode("ascii", errors="replace")
-        )
-    # First byte is a marker; scan forward greedily.
-    cursor = 0
-    while cursor < len(payload):
-        marker_off = cursor
-        marker = chr(payload[cursor])
-        if marker not in _PARAGRAPH_MARKER_CHARS:
-            # Ran past a marker into prose without a hand-off — append
-            # the rest to the previous run.
-            if markers:
-                last_off, last_marker, last_prose = markers[-1]
-                tail = payload[cursor:].decode("ascii", errors="replace")
-                markers[-1] = (last_off, last_marker, last_prose + tail)
+    if offset >= len(data):
+        return (0, 0)
+    b0 = data[offset]
+    if b0 != 0xFF:
+        return (b0, 1)
+    if offset + 3 > len(data):
+        return (0, 0)
+    w = int.from_bytes(data[offset + 1:offset + 3], "little")
+    if w != 0xFFFF:
+        return (w, 3)
+    if offset + 7 > len(data):
+        return (0, 0)
+    dw = int.from_bytes(data[offset + 3:offset + 7], "little")
+    return (dw, 7)
+
+
+def _parse_textruns_blobs(payload: bytes) -> tuple[list[str], int]:
+    """Decode the CTypedPtrArray<CElementData>::Serialize body.
+
+    Wire form per VIEWDLL.DLL `FUN_407092a6` (CTypedPtrArray's
+    vtable+8 Serialize):
+
+      u16 count_narrow                  (CArchive::WriteCount; 0xFFFF
+                                         spills to + u32 wide)
+      count × CElementData              ([length][bytes])
+
+    Returns `(blobs, bytes_consumed)`. On malformed input the
+    decoder returns what it could parse plus the consumed prefix.
+    """
+    if len(payload) < 2:
+        return ([], 0)
+    count = int.from_bytes(payload[0:2], "little")
+    pos = 2
+    if count == 0xFFFF:
+        if len(payload) < 6:
+            return ([], 2)
+        count = int.from_bytes(payload[2:6], "little")
+        pos = 6
+
+    blobs: list[str] = []
+    for _ in range(count):
+        length, consumed = _read_celementdata_length(payload, pos)
+        if consumed == 0 or pos + consumed + length > len(payload):
             break
-        cursor += 1
-        prose_start = cursor
-        # Walk until next marker char (preceded by a space → likely
-        # paragraph break) or end of payload.
-        while cursor < len(payload):
-            c = payload[cursor]
-            if (
-                cursor > prose_start
-                and chr(c) in _PARAGRAPH_MARKER_CHARS
-                and payload[cursor - 1] == 0x20  # ' ' before marker = boundary
-            ):
-                break
-            cursor += 1
-        prose = payload[prose_start:cursor].rstrip(b" ").decode(
-            "ascii", errors="replace",
-        )
-        markers.append((marker_off, marker, prose))
-    prose_only = "".join(p for _, _, p in markers)
-    return markers, prose_only
+        pos += consumed
+        chunk = payload[pos:pos + length]
+        blobs.append(chunk.decode("ascii", errors="replace"))
+        pos += length
+    return (blobs, pos)
 
 
 def decode_textruns(raw: bytes) -> TextRunsContent:
-    """Empirical TextRuns parser.
+    """Decode a `TextRuns` typed CContent body.
 
-    - Payloads shorter than 2 B (e.g. `00 00` empty blob) decode to an
-      empty container.
-    - TextTree payloads raise `ValueError`; callers should branch on
-      `is_texttree(raw)` and call `decode_texttree` instead.
+    Body grammar pinned via VIEWDLL.DLL
+    `CTypedPtrArray<CElementData>::Serialize @ 0x407092a6`:
 
-    `paragraph_markers` is populated by `_scan_paragraph_markers` —
-    one `(byte_offset, marker_char, prose)` tuple per run. `text`
-    retains the legacy semantics (everything from offset +2 decoded
-    as ASCII) so existing callers see no behavioural change.
+      u16 count                              (CArchive::WriteCount)
+      count × [u8/u16/u32 length][bytes]
+
+    The leading `u16 count` lives at the start of the CContent
+    payload — the older `TextRuns` decoder treated the first two
+    bytes as `(version, flag)` because they happen to be `02 00`
+    for the canonical fixture (count = 2). Both interpretations
+    decode to the same bytes; we expose the bytes via
+    `header_version` / `header_byte_1` (for backward compatibility)
+    while surfacing `blobs` as the structurally-correct decoded
+    list of prose runs.
+
+    Empty (`00 00` placeholder) and zero-length payloads decode
+    to a `TextRunsContent` with `blobs = ()`. TextTree-magic
+    payloads raise `ValueError`; callers should branch on
+    `is_texttree(raw)` and call `decode_texttree` instead.
     """
     if is_texttree(raw):
         raise ValueError(
@@ -335,13 +406,17 @@ def decode_textruns(raw: bytes) -> TextRunsContent:
     version = raw[0]
     header_byte_1 = raw[1]
     payload = bytes(raw[2:])
+    # Try the structurally-correct CTypedPtrArray decode against the
+    # full raw buffer (count + elements).
+    blobs, _consumed = _parse_textruns_blobs(bytes(raw))
+    # `text` retains the legacy semantics (everything from offset +2
+    # as ASCII) so existing substring-matching callers still work.
     text = payload.decode("ascii", errors="replace")
-    markers, _prose = _scan_paragraph_markers(payload)
     return TextRunsContent(
         text=text,
         style_runs=(),
         header_version=version,
         header_byte_1=header_byte_1,
         raw_payload=payload,
-        paragraph_markers=tuple(markers),
+        blobs=tuple(blobs),
     )
