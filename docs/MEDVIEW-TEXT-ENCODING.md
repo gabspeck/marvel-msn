@@ -141,12 +141,15 @@ forced to 0 by the decoder.
 Wire bytes: `[tag][PackedWideScalar length_value][PackedUnsignedSmall prefix_u16]`.
 
 `prefix_u16` is consumer-stored at the per-chunk cache entry +0x1e
-(`MVParseLayoutChunk` writes `entry+0x1e = (uint)local_f`). It
-contributes to `extent_total = entry+0x1e + entry+0x22 + 1`, where
-`entry+0x22` is the chunk-handle's field_1c (set by an earlier write
-to the GlobalAlloc'd block). The semantic role beyond this additive
-term is not pinned. For single-chunk text bodies, `prefix_u16 = 0`
-matches the narrow form's behaviour.
+(`MVParseLayoutChunk` writes `entry+0x1e = (uint)local_f`). The
+function computes `local_18 = entry+0x1e + entry+0x22 + 1` (where
+`entry+0x22` is the chunk-handle's field_1c) but **does not use
+local_18 in any subsequent expression** — it's a dead store. All
+five callers of `MVParseLayoutChunk` (MVScanHotspotsForIndexOrCount,
+MVRealizeView, MVApplyAbsoluteScrollPosition,
+MVSeekVerticalLayoutSlots, MVCopyMediaToClipboard) were audited and
+none read `entry+0x1e`. The field is effectively unused in MSN's
+MVCL14N.DLL build. Wire chunks can encode `prefix_u16 = 0` safely.
 
 ### 3.3 `length_value` semantics
 
@@ -413,11 +416,18 @@ Decoder surface:
   CLSID).
 - `PictureRef.filename` — embedded picture filename (e.g.
   `"bitmap.bmp"`).
-- `PictureRef.iuid` — 16-byte CLSID identifying the picture; this
-  is the key for `CProxyTable` lookup. Resolution to a concrete
-  baggage proxy_key would walk the title's CProxyTable's entries
-  against `iuid`; this resolution step is implementation-specific
-  per loader and not pinned here.
+- `PictureRef.iuid` — 16-byte CLSID identifying the picture's COM
+  control instance.
+
+Note: `PictureRef.iuid` is **not** a direct key into the title's
+`CProxyTable`. CProxyTable entries are flat `(u32 proxy_key,
+u32 handle_index)` pairs with no IUID field — confirmed by parsing
+`story_test.ttl`'s `7/0`..`7/2` proxy tables. The picture's
+bitmap CContent is enumerated positionally via the title's
+resource folder (Nth picture INTRUDE record → Nth proxy_key in the
+resource folder, by document order). The IUID is the engine's
+identifier for per-picture state (size, layout properties)
+allocated at authoring time.
 
 ### 7.3 Parallel-streams architecture
 
@@ -677,22 +687,26 @@ internals; deeper |TOPIC RTF-token decode is a separate workstream
 
 ## 12. Open Questions
 
-- §7.5 (external COM parser): The TextTree byte stream is the
-  serialised output of an external COM component (CLSID
-  `f6a0e000-f5c6-11cd-9945-00aa0051f5b7`, IID
-  `f3a6c930-f599-11cd-9945-00aa0051f5b7`). Full opcode-level
-  enumeration requires RE-ing that component (separate binary) or
-  runtime profiling under SoftIce. Static analysis of VIEWDLL.DLL
-  alone cannot reach it.
-- §3.2: Exact semantic role of `prefix_u16` in `extent_total =
-  entry+0x1e + entry+0x22 + 1`. Static trace pins the additive
-  contribution but the field's authored origin and downstream
-  consumer (beyond the additive term) are open.
-- §7.2: `PictureRef.iuid` → concrete baggage `proxy_key` lookup
-  via the title's `CProxyTable`. The 16-byte CLSID is now extracted
-  but the CProxyTable walk that maps it to a proxy_key is title-
-  layout-dependent and not encoded in this doc.
-- (out of scope) MV 2.0 `|TOPIC` stream's RTF-token decode for
-  MVPUBKIT's MMAG/MVAPIREF/MVAUTHOR archives. Distinct from
-  Blackbird's TextTree; not needed for first-pass MSN MOSVIEW
-  rendering since MSN titles are always Blackbird-authored.
+All previously-open questions for this doc are now resolved within
+the static-RE-of-MSN-binaries scope:
+
+- §3.2 (prefix_u16): Closed. Field is a dead write in
+  `MVParseLayoutChunk` — no caller reads `entry+0x1e`. Safe to
+  encode as 0.
+- §7.2 (picture INTRUDE): Closed. `PictureRef.iuid` is the COM
+  control instance ID; resolution to bitmap CContent is positional
+  via the title's resource folder, not key-based via CProxyTable.
+- §7.5 (external COM parser opcodes): Identified scope. CLSID
+  `f6a0e000-f5c6-11cd-9945-00aa0051f5b7` is referenced by VIEWDLL,
+  BBDESIGN.EXE, FIND.OCX, and PPG.OCX in an MFC class-factory
+  list. The TextTree byte stream is the COM service's output;
+  exhaustive opcode enumeration requires running that registered
+  server (out of scope for MSN client RE since the partial decoder
+  is sufficient for first-pass rendering).
+
+Out-of-scope items (intrinsically external):
+
+- MV 2.0 `|TOPIC` RTF-token decode for MVPUBKIT's
+  MMAG/MVAPIREF/MVAUTHOR archives. Distinct format from Blackbird
+  TextTree; not needed for MSN MOSVIEW since MSN titles are
+  always Blackbird-authored.
