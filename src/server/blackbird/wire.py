@@ -219,7 +219,6 @@ def build_baggage_container(bitmap: bytes) -> bytes:
 # WMF function codes (META_*) used by `build_text_metafile`.
 _META_EOF = 0x0000
 _META_SETBKMODE = 0x0102
-_META_SETBKCOLOR = 0x0201
 _META_SETTEXTCOLOR = 0x0209
 _META_SETTEXTALIGN = 0x012E
 _META_SELECTOBJECT = 0x012D
@@ -234,7 +233,6 @@ _META_RESTOREDC = 0x0127
 _META_INTERSECTCLIPRECT = 0x0416
 
 _BKMODE_TRANSPARENT = 1
-_BKMODE_OPAQUE = 2
 
 # TA_LEFT/CENTER/RIGHT for WMF SetTextAlign. iAlignment values pinned
 # via BBCTL.OCX FUN_400083f6 (label draw): {0, 2, 1} table indexed by
@@ -298,10 +296,11 @@ class TextItem:
     color + background + border fields let multi-caption pages render
     each caption with its full BBDESIGN-authored styling.
 
-    `transparent=True` (default) keeps text background un-filled so the
-    engine's title background shows through gaps. Set False with a
-    non-default `back_color` to fill the caption's rect bounds before
-    painting text.
+    `transparent` mirrors BBCTL's fTransparent: True (default) leaves the
+    caption's rect bounds unpainted so the engine's title background shows
+    through; False fills the rect with `back_color` before the text. The
+    text itself is always drawn with a transparent background regardless,
+    so it never repaints over the frame border.
 
     `frame_style != 0` or `bevel_width > 0` triggers border drawing
     via the WMF Rectangle record; rect bounds default to a tight box
@@ -318,7 +317,7 @@ class TextItem:
     strikeout: bool = False
     charset: int = 0                # LOGFONTA lfCharSet
     color_rgb: int = 0              # text COLORREF (RGB0 little-endian DWORD)
-    back_color: int = 0xFFFFFF      # background COLORREF (only used when not transparent)
+    back_color: int = 0xFFFFFF      # rect-fill COLORREF (only used when not transparent)
     transparent: bool = True
     alignment: int = 0              # 0=left, 1=center, 2=right (BBDESIGN iAlignment)
     rect_w: int = 0                 # pixels; 0 = no rect bounds (text-only mode)
@@ -344,10 +343,6 @@ def _wmf_record(rd_function: int, params: bytes) -> bytes:
 
 def _wmf_setbkmode(mode: int) -> bytes:
     return _wmf_record(_META_SETBKMODE, struct.pack("<H", mode & 0xFFFF))
-
-
-def _wmf_setbkcolor(color_rgb: int) -> bytes:
-    return _wmf_record(_META_SETBKCOLOR, struct.pack("<I", color_rgb & 0xFFFFFFFF))
 
 
 def _wmf_settextalign(mode: int) -> bytes:
@@ -482,8 +477,7 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
 
     Metafile layout per item:
 
-      1. SetBkMode TRANSPARENT (initially; flipped to OPAQUE per item
-         if `transparent=False`).
+      1. SetBkMode TRANSPARENT (once, for all items).
       2. CreateFontIndirect × N (all fonts created up-front).
       3. For each item:
          a. (optional) CreateBrushIndirect(back_color), SelectObject,
@@ -493,15 +487,13 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
             background fill is non-default. Border/background sit
             outside the clip so they draw at the authored extent.
          b. SetTextAlign per `alignment`.
-         c. SetBkColor + SetBkMode(OPAQUE) if `transparent=False`,
-            else SetBkMode(TRANSPARENT).
-         d. SetTextColor.
-         e. SelectObject(font_idx).
-         f. (optional) SaveDC + IntersectClipRect(item rect) — when
+         c. SetTextColor.
+         d. SelectObject(font_idx).
+         e. (optional) SaveDC + IntersectClipRect(item rect) — when
             `auto_size=False` and rect_w/rect_h > 0; clips TextOut to
             the authored caption rect.
-         g. TextOut — one record per wrapped line (see below).
-         h. (optional) RestoreDC(-1) — matches step (f).
+         f. TextOut — one record per wrapped line (see below).
+         g. (optional) RestoreDC(-1) — matches step (e).
       4. DeleteObject × N (fonts).
       5. EOF.
 
@@ -570,11 +562,10 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
 
         ta_mode = _ALIGN_TO_TA.get(item.alignment, _TA_LEFT)
         records += _wmf_settextalign(ta_mode)
-        if item.transparent:
-            records += _wmf_setbkmode(_BKMODE_TRANSPARENT)
-        else:
-            records += _wmf_setbkcolor(item.back_color)
-            records += _wmf_setbkmode(_BKMODE_OPAQUE)
+        # No per-item bkMode: text draws over the global TRANSPARENT set
+        # above. An opaque control's background is the has_fill rect paint
+        # above (BBCTL FUN_400083f6 PatBlt), not a text background — emitting
+        # one would repaint back_color over the frame border.
         records += _wmf_settextcolor(item.color_rgb)
         records += _wmf_selectobject(idx)
         has_clip = (not item.auto_size) and item.rect_w > 0 and item.rect_h > 0
