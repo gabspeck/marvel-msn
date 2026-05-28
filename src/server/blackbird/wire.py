@@ -36,6 +36,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from . import drawtext, textmetrics
+
 _NARROW_BYTE_MAX = 0x7F
 _NARROW_USHORT_MAX = 0x7FFF
 _WIDE_U32_MAX = 0x7FFFFFFF
@@ -245,6 +247,50 @@ _TA_CENTER = 0x06
 _TA_RIGHT = 0x02
 _ALIGN_TO_TA = {0: _TA_LEFT, 1: _TA_RIGHT, 2: _TA_CENTER}
 
+# BBDESIGN iAlignment {0=L, 1=R, 2=C} -> DrawText DT_* horizontal format,
+# matching BBCTL.OCX FUN_400083f6's {DT_LEFT, DT_RIGHT, DT_CENTER} table.
+# Drives DT_AdjustWhiteSpaces in the word-wrap port.
+_ALIGN_TO_DT = {
+    0: drawtext.DT_LEFT,
+    1: drawtext.DT_RIGHT,
+    2: drawtext.DT_CENTER,
+}
+
+
+def _wrap_item_lines(item: TextItem) -> list[str]:
+    """Lower one caption's text into the lines DrawText would lay out.
+
+    With `word_wrap` set (BBCTL fWordWrap → DT_WORDBREAK), runs the GDI
+    word-break port measuring with the real font; otherwise the text is
+    a single line. Mirrors BBCTL's `DT_WORDBREAK | DT_NOPREFIX | DT_*`.
+    """
+    if not item.text or not (item.word_wrap and item.rect_w > 0):
+        return [item.text]
+    px = abs(item.font_height) or 16
+    bold = item.font_weight >= 700
+    try:
+        measure = textmetrics.text_measurer(item.font_face, px, bold, item.italic)
+    except (OSError, ImportError):
+        # Fonts (binaries/fonts, obtained separately) or Pillow absent:
+        # degrade to a single line rather than crash the render path.
+        return [item.text]
+    fmt = drawtext.DT_WORDBREAK | drawtext.DT_NOPREFIX | _ALIGN_TO_DT.get(
+        item.alignment, drawtext.DT_LEFT
+    )
+    return drawtext.wrap_text(item.text, fmt, measure, item.rect_w) or [item.text]
+
+
+def _item_line_height(item: TextItem) -> int:
+    """Per-line vertical advance for a wrapped caption — GDI's tmHeight
+    (font cell height) for the item's resolved font.
+    """
+    px = abs(item.font_height) or 16
+    try:
+        return textmetrics.line_height(item.font_face, px, item.font_weight >= 700,
+                                       item.italic) or px
+    except (OSError, ImportError):
+        return px
+
 
 @dataclass(frozen=True)
 class TextItem:
@@ -282,8 +328,8 @@ class TextItem:
     bevel_shadow: int = 0           # bevel shadow COLORREF
     frame_style: int = 0            # 0 = no frame, non-zero = draw frame
     frame_color: int = 0            # frame border COLORREF
-    word_wrap: bool = False         # carried; text-flow not modeled by WMF (see build_text_metafile)
-    auto_size: bool = False         # carried; text-flow not modeled by WMF
+    word_wrap: bool = False         # BBCTL fWordWrap → DT_WORDBREAK pre-wrap (build_text_metafile)
+    auto_size: bool = False         # BBCTL fAutoSize → no clip; text grows past authored rect
 
 
 def _wmf_record(rd_function: int, params: bytes) -> bytes:
@@ -454,18 +500,23 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
          f. (optional) SaveDC + IntersectClipRect(item rect) — when
             `auto_size=False` and rect_w/rect_h > 0; clips TextOut to
             the authored caption rect.
-         g. TextOut.
+         g. TextOut — one record per wrapped line (see below).
          h. (optional) RestoreDC(-1) — matches step (f).
       4. DeleteObject × N (fonts).
       5. EOF.
 
-    Word-wrap (BOOL field on `TextItem`) is NOT lowered here — text
-    flow into multiple lines is deferred. `auto_size=True` skips the
-    clip step entirely (the control grows around its text and the
-    authored rect is advisory). For fixed-size captions
-    (`auto_size=False`), the clip rect honours the authored bounds so
-    overlong text is truncated mid-glyph by the GDI clip — matching
-    BBCTL CLabelCtrl behaviour.
+    Word-wrap: when `item.word_wrap` is set (BBCTL fWordWrap), the text
+    is pre-lowered into multiple lines by `_wrap_item_lines`, a port of
+    GDI's `DrawText DT_WORDBREAK` engine (`drawtext.py`) measuring with
+    the real font (`textmetrics.py`). This matches BBVIEW, which renders
+    captions by hosting BBCTL.OCX and letting `CDC::DrawText(... |
+    DT_WORDBREAK | DT_NOPREFIX | DT_LEFT/RIGHT/CENTER)` flow the text;
+    the MSN client only replays this WMF via `PlayMetaFile` (no layout
+    engine), so the wrap must be baked in here. Each line is emitted as a
+    separate TextOut advancing y by the font cell height. `auto_size=True`
+    skips the clip step (the control grows around its text); for fixed-
+    size captions the clip rect honours the authored bounds so overflow
+    is truncated by the GDI clip — matching BBCTL CLabelCtrl behaviour.
 
     Coordinates are in whatever logical units MOSVIEW sets up before
     `PlayMetaFile`. With the kind=8 baggage `mapmode=1` (MM_TEXT)
@@ -541,7 +592,10 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
                 anchor_x = int(item.x + item.rect_w)
             elif item.alignment == 2:
                 anchor_x = int(item.x + item.rect_w // 2)
-        records += _wmf_textout(anchor_x, int(item.y), item.text)
+        lines = _wrap_item_lines(item)
+        line_h = _item_line_height(item) if len(lines) > 1 else 0
+        for line_idx, line in enumerate(lines):
+            records += _wmf_textout(anchor_x, int(item.y) + line_idx * line_h, line)
         if has_clip:
             records += _wmf_restoredc(-1)
     for idx in range(len(items)):

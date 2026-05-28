@@ -5,6 +5,7 @@ description = "MSN95 (Marvel) reverse-engineered server"
 requires-python = ">=3.12"
 dependencies = [
     "olefile>=0.46",
+    "pillow>=9.2",
 ]
 
 [project.optional-dependencies]

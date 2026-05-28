@@ -10,8 +10,10 @@ Pin every byte against the format derived from RE of `MVCL14N.DLL`:
   tail_size][N*15B children][tail bytes]`.
 """
 
+import os
 import struct
 import unittest
+from pathlib import Path
 
 from src.server.blackbird.wire import (
     StyledSegment,
@@ -34,6 +36,12 @@ from src.server.blackbird.wire import (
     encode_text_item_tlv,
     encode_ushort_or_u32_varint,
 )
+
+# Word-wrap measurement needs the real MS Sans Serif strike from the
+# (gitignored) binaries/fonts set, obtained separately like the other
+# binaries. Skip the font-dependent suites when it is absent. Honour the
+# same MSN_FONT_DIR override `textmetrics` uses.
+_MS_SANS = Path(os.environ.get("MSN_FONT_DIR", "binaries/fonts")) / "sserife.fon"
 
 
 class TestVarintEncoding(unittest.TestCase):
@@ -892,6 +900,111 @@ class TestTextMetafileAlignment(unittest.TestCase):
         # records, alongside the default TA_LEFT for the rest.
         self.assertIn(b"\x04\x00\x00\x00\x2e\x01\x02\x00", bag)
         self.assertIn(b"\x04\x00\x00\x00\x2e\x01\x06\x00", bag)
+
+
+def _textouts_in_baggage(bag: bytes) -> list[tuple[int, int, str]]:
+    """Locate the WMF inside a bm0 baggage (container + kind=8 header
+    precede it) by its METAHEADER signature, then parse its TextOuts."""
+    meta_start = bag.index(b"\x01\x00\x09\x00\x00\x03")  # Type=1,HdrSize=9,Ver=0x0300
+    return _find_textout_records(bag[meta_start:])
+
+
+@unittest.skipUnless(_MS_SANS.exists(), "binaries/fonts not present")
+class TestTextMetafileWordWrap(unittest.TestCase):
+    """`build_text_metafile` lowers `TextItem.word_wrap` (BBCTL fWordWrap)
+    into one META_TEXTOUT per wrapped line via the GDI DrawText port,
+    measuring with the real font. Pinned against BBVIEW behaviour
+    (BBCTL.OCX `CDC::DrawText(... | DT_WORDBREAK | DT_NOPREFIX)`).
+    """
+
+    _SAMPLE = "Word wrap enabled for this one"
+
+    def test_word_wrap_emits_multiple_textouts(self):
+        meta = build_text_metafile([TextItem(
+            x=10, y=20, text=self._SAMPLE,
+            font_face="MS Sans Serif", font_height=-16,
+            rect_w=100, rect_h=100, word_wrap=True,
+        )])
+        textouts = _find_textout_records(meta)
+        self.assertGreaterEqual(len(textouts), 2)
+        # Lines stack downward by the font cell height (MS Sans Serif
+        # 12pt strike = 20px); y strictly increases.
+        ys = [y for (_x, y, _t) in textouts]
+        self.assertEqual(ys, sorted(ys))
+        self.assertTrue(all(b > a for a, b in zip(ys, ys[1:], strict=False)))
+        # Reassembled text (collapsing whitespace) preserves the content.
+        joined = " ".join(t.strip() for (_x, _y, t) in textouts)
+        self.assertEqual(joined.split(), self._SAMPLE.split())
+
+    def test_word_wrap_disabled_emits_single_textout(self):
+        meta = build_text_metafile([TextItem(
+            x=10, y=20, text=self._SAMPLE,
+            font_face="MS Sans Serif", font_height=-16,
+            rect_w=100, rect_h=100, word_wrap=False,
+        )])
+        textouts = _find_textout_records(meta)
+        self.assertEqual(len(textouts), 1)
+        self.assertEqual(textouts[0][2], self._SAMPLE)
+
+    def test_word_wrap_lines_fit_rect_width(self):
+        from src.server.blackbird import textmetrics
+        rect_w = 100
+        meta = build_text_metafile([TextItem(
+            x=0, y=0, text=self._SAMPLE,
+            font_face="MS Sans Serif", font_height=-16,
+            rect_w=rect_w, rect_h=200, word_wrap=True,
+        )])
+        for (_x, _y, line) in _find_textout_records(meta):
+            if len(line.split()) > 1:  # multi-word lines must fit
+                w = textmetrics.measure_text("MS Sans Serif", 16, False, False, line)
+                self.assertLessEqual(w, rect_w, f"line exceeds rect: {line!r} ({w}px)")
+
+    def test_forced_break_keeps_long_word_on_own_line(self):
+        text = "Hi supercalifragilisticexpialidocious yo"
+        meta = build_text_metafile([TextItem(
+            x=0, y=0, text=text,
+            font_face="MS Sans Serif", font_height=-16,
+            rect_w=80, rect_h=200, word_wrap=True,
+        )])
+        lines = [t.strip() for (_x, _y, t) in _find_textout_records(meta)]
+        self.assertIn("supercalifragilisticexpialidocious", lines)
+
+    def test_captions_fixture_seq19_wraps_end_to_end(self):
+        from src.server.services.medview.ttl_loader import build_all_bm_baggage, load_title
+        t = load_title("tests/assets/captions_test.ttl")
+        bag = build_all_bm_baggage(t)["bm0"]
+        textouts = _textouts_in_baggage(bag)
+        full = "Word wrap enabled for this one"
+        # The wrapping caption must NOT survive as a single TextOut...
+        self.assertNotIn(full, [t for (_x, _y, t) in textouts])
+        # ...but its words are present, split across records.
+        joined = " ".join(t for (_x, _y, t) in textouts)
+        self.assertIn("Word wrap", joined)
+        self.assertIn("one", joined.split())
+
+
+@unittest.skipUnless(_MS_SANS.exists(), "binaries/fonts not present")
+class TestTextMetrics(unittest.TestCase):
+    """Faithful font measurement over the bundled Windows fonts. Pins the
+    bitmap MS Sans Serif strike widths the wrapping captions depend on."""
+
+    def test_ms_sans_serif_12pt_strike_extent(self):
+        from src.server.blackbird import textmetrics
+        # lfHeight -16 → 12pt MS Sans Serif strike. Width is summed from
+        # the FNT dfCharTable (the table GDI itself reads), pix height 20.
+        self.assertEqual(
+            textmetrics.measure_text("MS Sans Serif", 16, False, False,
+                                     "Word wrap enabled for this one"),
+            220,
+        )
+        self.assertEqual(textmetrics.line_height("MS Sans Serif", 16, False, False), 20)
+
+    def test_unknown_face_falls_back(self):
+        from src.server.blackbird import textmetrics
+        # Should not raise; resolves to the default face.
+        self.assertGreater(
+            textmetrics.measure_text("No Such Font", 16, False, False, "abc"), 0
+        )
 
 
 class TestStyledCase1Chunk(unittest.TestCase):
