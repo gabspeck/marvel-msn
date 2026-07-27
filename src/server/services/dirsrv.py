@@ -5,6 +5,7 @@ import struct
 
 from ..config import (
     DIRSRV_BROWSE_FLAGS_CONTAINER,
+    DIRSRV_BROWSE_FLAGS_DELEGATE,
     DIRSRV_BROWSE_FLAGS_LEAF,
     DIRSRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
@@ -54,10 +55,10 @@ PROP_CATEGORY = "ca"
 PROP_NAME = "e"
 PROP_UNKNOWN_G = "g"
 PROP_SECONDARY_ICON = "h"
-PROP_UNKNOWN_I = "i"
+PROP_DELEGATE_FIELD10 = "i"
 PROP_DESCRIPTION = "j"
 PROP_GO_WORD = "k"
-PROP_UNKNOWN_L = "l"
+PROP_DELEGATE_MNID = "l"
 PROP_PRIMARY_ICON = "mf"
 PROP_FORUM_MANAGER = "n"
 PROP_RATING = "o"
@@ -208,8 +209,15 @@ def _sz(s):
     - Type 0x0A then runs WideCharToMultiByte, so the cache holds ASCII
       (what PropertySheetA and other ANSI consumers read via GetProperty).
     """
-    if not s:
-        return b"\x02"
+    # Never emit the flag-0x02 "empty" form. SVCPROP DecodeFlagByteString
+    # @ 0x7F641328 returns a NULL value with size 0 for it, and the property
+    # then fails to land in the record — SoftICE BPX on the FGet-miss branch
+    # @ 0x7F3FC8A2 caught exactly this for `w` on node 1:256. Because
+    # CServiceProperties::FSet @ 0x7F6418FF only advances the record count on
+    # success, one rejected property also drops every property after it, which
+    # can silently strip `l`/`i` from a delegate record.
+    # The ASCII form with a zero-length string is safe: it decodes to a real
+    # 2-byte L"" with a valid pointer, and consumes 2 wire bytes either way.
     data = s.encode("ascii", errors="replace")
     return b"\x01" + data + b"\x00"
 
@@ -244,11 +252,16 @@ def build_props(requested_props, node, *, is_children):
             # PROTOCOL.md §SVCPROP-props: bit 0x01 CLEAR = container (Browse),
             # SET = leaf (Exec). ExecuteCommand branches on this bit to choose
             # HrBrowseObject vs CMosTreeNode::Exec.
+            # Bit 0x04 = delegate: GetCChildren/GetNthChild call slot 6
+            # HrSetupDelegate first, which reads 'c'/'l'/'i' and hands the
+            # folder to app 'c' navigator.
             flag = (
                 node.browse_flags
                 if node.browse_flags is not None
                 else (DIRSRV_BROWSE_FLAGS_CONTAINER if node.is_container else DIRSRV_BROWSE_FLAGS_LEAF)
             )
+            if node.delegate:
+                flag |= DIRSRV_BROWSE_FLAGS_DELEGATE
             out.append((0x01, PROP_BROWSE_FLAGS, bytes([flag & 0xFF])))
         elif name == PROP_APP_ID:
             out.append((0x03, PROP_APP_ID, struct.pack("<I", node.app_id)))
@@ -308,14 +321,24 @@ def build_props(requested_props, node, *, is_children):
                     struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_BMP, 1)),
                 )
             )
-        elif name == PROP_UNKNOWN_L:
-            # DSNAV advertises 'l' but no read-site confirmed; DSNAV.md §12
-            # safe default is DWORD 0.
-            out.append((0x03, PROP_UNKNOWN_L, struct.pack("<I", 0)))
-        elif name == PROP_UNKNOWN_I:
-            # DSNAV advertises 'i' but no read-site confirmed; DSNAV.md §12
-            # safe default is DWORD 0.
-            out.append((0x03, PROP_UNKNOWN_I, struct.pack("<I", 0)))
+        elif name == PROP_DELEGATE_MNID:
+            # 'l' = the inner node's (field_8, field_c). MOSSHELL
+            # HrSetupDelegate @ 0x7F3FC14F reads it with cap 8, type 0, so the
+            # cache element must hold 8 inline bytes — wire type 0x0C (qword),
+            # not 0x0E (a 0x0E element caches a heap pointer, same hazard as
+            # 'wv'/'mf'). Non-delegate nodes emit DWORD 0.
+            if node.delegate:
+                out.append((0x0C, PROP_DELEGATE_MNID, node.mnid_a))
+            else:
+                out.append((0x03, PROP_DELEGATE_MNID, struct.pack("<I", 0)))
+        elif name == PROP_DELEGATE_FIELD10:
+            # 'i' = the inner node's field_10, read with cap 2. HrSetupDelegate
+            # defaults it to 1 when the read fails, so emit an explicit WORD 0
+            # on a delegate to keep the inner mnid locale-neutral.
+            if node.delegate:
+                out.append((0x02, PROP_DELEGATE_FIELD10, struct.pack("<H", 0)))
+            else:
+                out.append((0x03, PROP_DELEGATE_FIELD10, struct.pack("<I", 0)))
         elif name == PROP_TYPE:
             # Details-view column uses 0x0A (ASCII cache for MOSSHELL's column
             # render); Properties dialog uses 0x0B (UTF-16 cache for GetPropSz).
@@ -326,8 +349,14 @@ def build_props(requested_props, node, *, is_children):
             # → MOSSHELL 0x7F3FBC12 case 0xC → FileTimeToSz. DWORD path only
             # matches prop name "_D" (BBSNAV territory).
             # Properties dialog = 0x0B human-formatted string.
-            # On is_children, skip entirely when modified_filetime == 0 so
-            # the listview cell stays blank vs rendering 1601-01-01.
+            # With no timestamp, send an EMPTY 0x0A string rather than omitting
+            # the tag. The column formatter (0x7F3FBC12 case 0x0A) copies the
+            # ASCIIZ through, so the cell still renders blank — and the cache
+            # element is marked received. Omitting a requested tag instead
+            # leaves a permanently unreceived element: SetPropertyGroupFromPsp
+            # @ 0x7F3FC85A calls RememberProperty(name, NULL, 0, 0) on an FGet
+            # miss, and FindProperty @ 0x7F3FCE12 only re-fetches when an
+            # element is ABSENT. Every later read then returns 0x8B0B0041.
             if is_children:
                 if content.modified_filetime:
                     out.append(
@@ -337,6 +366,8 @@ def build_props(requested_props, node, *, is_children):
                             struct.pack("<Q", content.modified_filetime & 0xFFFFFFFFFFFFFFFF),
                         )
                     )
+                else:
+                    out.append((0x0A, PROP_LAST_CHANGED, _sz("")))
             else:
                 out.append((0x0B, PROP_LAST_CHANGED, _sz(content.modified)))
         elif name == PROP_DESCRIPTION:
@@ -403,7 +434,7 @@ def build_get_properties_reply_payload(request=None):
     records_with_ids = [(node.node_id, build_props(requested_props, node, is_children=False))]
 
     _log_reply("get_properties_reply", records_with_ids)
-    return _build_reply_wire(records_with_ids)
+    return build_tree_reply_wire(records_with_ids)
 
 
 def build_get_children_reply_payload(request=None):
@@ -433,7 +464,7 @@ def build_get_children_reply_payload(request=None):
     records_with_ids = _collect_children_records(request, requested_props)
 
     _log_reply("get_children_reply", records_with_ids)
-    return _build_reply_wire(records_with_ids)
+    return build_tree_reply_wire(records_with_ids)
 
 
 def _collect_children_records(request, requested_props):
@@ -486,8 +517,12 @@ def _log_reply(kind, records_with_ids):
         )
 
 
-def _build_reply_wire(records_with_ids):
-    """Build the shared DIRSRV reply framing for GetProperties and GetChildren.
+def build_tree_reply_wire(records_with_ids):
+    """Build the shared MOS-tree reply framing for GetProperties/GetChildren.
+
+    Used by both DIRSRV and BBS (the BBS read channel rides the same generic
+    TREENVCL tree, so its reply framing is identical — only the per-node tag
+    vocabulary differs).
 
     status(0) + node_count + 0x87 end-static + 0x88 stream-end + records.
 

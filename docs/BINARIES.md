@@ -192,7 +192,7 @@ Sibling of TREENVCL for the *edit* side — `CTreeEditClient` exposes mutate/reo
 - `?Lock@CTreeEditClient@@` [27], `?Unlock@CTreeEditClient@@` [44]
 - `CreateTec` [45], `_DllMain@12` [46]
 
-**Ghidra status**: Imported raw.
+**Ghidra status**: Annotated. **Notes**: `CTreeEditClient` `Private*` wire selectors decoded (`marshal->vtbl[+0xC](marshal, SELECTOR, &pipe)`): 0 Lock, 1 Unlock, 2 AddNode (parent mnid + compressed props → new mnid), 3 DeleteNode, 4 SetProperties, 5 LinkNode, 6 UnlinkNode, 7 AddShabby, 8 DeleteShabby, 10 OrderChildren, 11 GetDataSets, 12 GetTicket. Every op replays the `this+0x54` capability ticket (len-prefixed) and returns `0x116` if absent. Driven by BBSNAV's edit channel — see `docs/bbs-service-contract.md` §Write selectors.
 
 ### DATAEDCL.DLL — *Data Edit Client* (DLL, 12 KB)
 
@@ -587,7 +587,7 @@ The biggest `.NAV` — all forum/BBS rendering and posting UI. Exports full `CMo
 - `?FStretchBanner@CDIBWindow@@` [34]
 - Class-lifetime: vtable+ctor/dtor for `CMosTreeNode`, `CMosTreeEdit`, `CMosViewWnd`, `CDIBWindow`, `CMosXWindow` (exports 1–31, mangled)
 
-**Ghidra status**: Not imported. **Imports**: `MOSSHELL.DLL`, `TREENVCL.DLL`, `SVCPROP.DLL`, `MAPI32.dll`, `MOSABP32.DLL` — MAPI usage fits BBS mail gateway.
+**Ghidra status**: Annotated — see `docs/BBSNAV.md` (binary shape) + `docs/bbs-service-contract.md` (wire contract). **Static imports**: `MOSSHELL.DLL` + `USER32`/`KERNEL32`/`GDI32`/`ADVAPI32`/`COMCTL32`/`SHELL32` only. Reaches TREENVCL/TREEEDCL/SVCPROP **transitively via MOSSHELL** (dual channel: `InitializeNtnigr`/`InitializeEcig` on service `"BBS"`), not by direct link. `MAPI32.DLL` + `riched32.dll` are **dynamic** `LoadLibrary` targets (Forward/Reply-by-email gateway; RichEdit message body). `MOSABP32.DLL`/`TREEEDCL.DLL` name strings present but unreferenced. Serves both App #2 (MSN BBS) and App #10 (Internet Newsgroups).
 
 ### DSNED.NED — *Directory Services editor* (DLL, 36 KB)
 

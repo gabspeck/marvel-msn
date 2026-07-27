@@ -781,10 +781,13 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"\x0atp\x00\x01Directory\x00", payload)
         # Category containers have size_bytes=0 → inline 0x03 DWORD 0.
         self.assertIn(b"\x03p\x00\x00\x00\x00\x00", payload)
-        # Category containers have empty modified → `w` is skipped entirely so
-        # the listview cell renders blank instead of a bogus 1601 date.
-        # Check every plausible wire-type + name combination is absent.
-        for type_byte in (0x03, 0x0C, 0x0E, 0x0B, 0x0A):
+        # Category containers have empty modified → `w` ships as an EMPTY 0x0A
+        # string (flag byte 0x02). The column formatter @ 0x7F3FBC12 case 0x0A
+        # copies the ASCIIZ through, so the cell renders blank, and the cache
+        # element is marked received. Omitting the tag instead would poison it
+        # permanently — see build_props' PROP_LAST_CHANGED comment.
+        self.assertIn(b"\x0aw\x00\x01\x00", payload)
+        for type_byte in (0x03, 0x0C, 0x0E, 0x0B):
             self.assertNotIn(bytes([type_byte]) + b"w\x00", payload)
         # `l` still emits as DWORD 0 (§12 safe default for unresolved tags).
         self.assertIn(b"\x03l\x00\x00\x00\x00\x00", payload)

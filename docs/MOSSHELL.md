@@ -127,7 +127,7 @@ cross-interface plumbing that plug-ins never override).
 | `+0xB4` | 45 | `GetSnap` (take snapshot of children for enumeration) | `CMosEnumIDList_Init` |
 | `+0xB8` | 46 | `GetCanonicalMnid` | `CanonicalizePidlSpecialAlias` @ `0x7F3F24D9` |
 | `+0xBC` | — | DSNAV's inner-node slot (cache-pointer, zero'd by plug-in ctor) | DSNAV §6.2 |
-| `+0xC4` | 49 | `GetSubObject` (returns DSINK/IDocHost-like sub-node for label-qualifier) | `CMosShellFolder::GetDisplayNameOf` @ `0x7F3F3161` |
+| `+0xC4` | 49 | `CMosTreeNode::GetRealNode` @ `0x7F3FE62B` (export-mangled name) — calls slot 6 `HrSetupDelegate`; returns the delegate's inner node when `'b' & 0x04` is set, else `this` AddRef'd. Does not recurse. | `CMosShellFolder::GetDisplayNameOf` @ `0x7F3F3161` |
 | `+0xCC` | 51 | **`Exec`** (leaf-only dispatch; no browse) | `CMosTreeNode::ExecuteCommand` @ `0x7F3FF693` — verb 0x3000/0x3001 when `b`-bit set |
 | `+0xD8` | 54 | DSNAV slot verb-0x3003 target | — |
 | `+0xE0` | 56 | menu gatekeeper | DSNAV override slot 56 |
@@ -199,6 +199,42 @@ Tag strings live in `.rdata`. Key addresses (for decomp cross-reference):
 | `0x7F40EBD4` | `'mf'` | `s_prop_mf` — primary icon shabby_id |
 | `0x7F40EBE4` | `'wv'` | secondary icon shabby_id |
 
+### 4.0 How a property read resolves — the cache fetches on a miss
+
+`CMosTreeNode::GetProperty` (slot 16, `+0x40`, `0x7F3FCE71`) is **not**
+cache-only. It delegates to slot 15:
+
+```
+GetProperty(name, buf, cap, type)                       0x7F3FCE71
+  └─ FindProperty(name, &elt)              slot 15      0x7F3FCE12
+       ├─ HrFindPropertyInCache(this, name, &elt)
+       └─ on miss: GetPropertyFromHost(name)  slot 14   0x7F3FCC7E
+            ├─ pick the request group: the default 7-tag list when `name` is
+            │  in it, else that list ∪ the plug-in extras from the NtniGroup
+            │  at node+0xB8, else a 2-tag group {name, 'g'}
+            └─ GetPropertyGroupFromHost(group) slot 13  0x7F3FCB3B
+                 └─ slot 12 → CTreeNavClient::GetProperties over the node's
+                    OWN service, then retry HrFindPropertyInCache
+```
+
+So a freshly built node with an empty property cache **fetches over its own
+service** on the first read. A plug-in that overrides only slot 16 (bbsnav
+overrides it at `0x7F5F1538` for `'h'`) inherits this whole chain for every
+other tag.
+
+`0x8B0B0041` therefore means **"requested but not received"**, not "never
+fetched". The value copier `FUN_7F3FB9F5` returns it when the cache element
+exists with its received-flag (`elt+8`) clear:
+
+```c
+if (cap < elt->size) return 0x80070057;      // E_INVALIDARG
+memcpy(out, elt->data, elt->size);           // or zero-fill when data == NULL
+return elt->received ? (elt->data ? 0 : 0x8007000E) : 0x8B0B0041;
+```
+
+A server that answers the fetch but omits the tag produces exactly this code.
+Its user-facing string is "Cannot open service."
+
 ### 4.1 Default request-tag list
 
 From `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md § Property tag request lists`:
@@ -222,7 +258,7 @@ From `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md § Property tag request lists`:
 | `mf` | 0x03 DWORD (BMP/WMF/EMF shabby_id, packed `fmt<<24 \| content_id24`) | `LoadShabbyIconForNode` @ `0x7F405018`. Slot `+0x40`, cap 4, type 0. | Banner + primary-icon paint. Format byte selects loader: `1`=EMF, `3`=raw WMF, `4`=placeable WMF, `5`=BMP. |
 | `wv` | 0x03 DWORD | — (handed to `LoadShabbyIconForNode`-style paths by plug-ins via `GetShabbyProp`) | Variant icon. |
 | `x`  | 0x0E blob | — | Consumed by launcher paths (`CMosTreeNode::Exec` slot `+0xCC` implementations). |
-| `_F` | 0x01 byte (sub-object flag) | `GetDisplayNameOf` via `GetSubObject` (vtable `+0xC4`). Cap 2, type 2. | Bit `0x20` triggers STRINGTABLE 0x88 suffix append to the `e` string. |
+| `_F` | 0x01 byte (sub-object flag) | `GetDisplayNameOf` via `GetRealNode` (vtable `+0xC4`). Cap 2, type 2. | Bit `0x20` triggers STRINGTABLE 0x88 suffix append to the `e` string. |
 | `tp` | 0x0A ASCIIZ (DSNAV contract) | `CDsNavTreeNode::GetDetailsStruct` (DSNAV §10) | "Type" column — tag travels through MOSSHELL only as an opaque cache slot. |
 | `p`  | 0x03 DWORD | Properties dialog `FUN_7F3FBA69` special branch | Formats as "Size" via `FormatSizeString`; see §4.3 for the `pInner` delegation that leaves the dialog field blank on `app_id=1` nodes. |
 | `w`  | 0x03 DWORD | Column descriptor (DSNAV) | "Date Modified" column. |
@@ -361,7 +397,10 @@ Three separable render stages: label, per-item icon, banner.
 2. `HrGetPMtnFromPIdl(pidl_last, &pMtn, 0)` — resolve target node.
 3. `pMtn->HrGetPropertyEx('e', pName+4, 0x104, 1 /* ANSI */)` — copy display
    name into STRRET buffer at offset +4.
-4. `pMtn->GetSubObject(&pSubNode)` (`+0xC4`) — optional sub-node.
+4. `pMtn->GetRealNode(&pSubNode)` (`+0xC4`) — the delegate's inner node when
+   `'b' & 0x04` is set, otherwise `pMtn` itself. This is the label path's only
+   use of the delegate, and it never recurses, so it does not hit the
+   `GetCChildren` cold-cache trap.
 5. If `subNode->GetDetails()[0] == 2`: read sub-node's `'_F'` byte; if bit
    `0x20` set, `LoadStringA(hInstRes, 0x88, suffix, remaining)` and append
    " <suffix>" to the name (e.g., " (Not responding)" qualifier).

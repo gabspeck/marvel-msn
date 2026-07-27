@@ -8,6 +8,24 @@ from typing import Protocol
 
 
 @dataclass(frozen=True)
+class BbsFields:
+    """BBS-only per-node fields, carried alongside NodeContent.
+
+    The BBS read channel reuses DirectoryNode/NodeContent (it rides the same
+    generic MOS tree as DIRSRV) but emits a different tag vocabulary. These
+    fields back the BBS-specific tags; DIRSRV serialisation ignores them.
+    See docs/bbs-service-contract.md §"Property tags".
+    """
+
+    author: str = ""  # _a (ASCIIZ)
+    date_unix: int = 0  # _D — time_t seconds (MOSSHELL DWORD-as-time_t path)
+    parent_subid: int = 0  # _P — parent message's f8 (0 for a top-level node)
+    topic: str = ""  # _t (ASCIIZ, Properties-dialog sub-title)
+    has_children: bool = False  # → _F bit 0x1000 CLEAR; set = leaf (no children)
+    body: str = ""  # seeded for the deferred message-body gap; not wired
+
+
+@dataclass(frozen=True)
 class NodeContent:
     name: str
     go_word: str
@@ -35,6 +53,9 @@ class NodeContent:
     # triggers the DWORD-as-time_t path; "_D" is BBSNAV territory). 0 = no
     # cached date → server skips emitting `w`, cell renders blank.
     modified_filetime: int = 0
+    # Optional BBS-only sub-struct. None for DIRSRV/MEDVIEW nodes; set on BBS
+    # board/conversation/reply nodes so build_bbs_props can read _a/_D/_P/_t/_F.
+    bbs: BbsFields | None = None
 
 
 @dataclass(frozen=True)
@@ -47,6 +68,11 @@ class DirectoryNode:
     mnid_a: bytes  # 8-byte opaque 'a' blob
     content: NodeContent
     browse_flags: int | None = None  # wire 'b' override; None = derive from is_container
+    # Hand this folder to app_id's navigator instead of browsing it over
+    # DIRSRV. Emits 'b' bit 0x04 + 'c' + 'l' (= mnid_a) + 'i' (= 0), which
+    # MOSSHELL HrSetupDelegate turns into the inner mnid
+    # {field_0=app_id, field_8/field_c=mnid_a, field_10=0}.
+    delegate: bool = False
 
 
 @dataclass(frozen=True)

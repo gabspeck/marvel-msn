@@ -6,8 +6,9 @@ import datetime
 import struct
 from dataclasses import dataclass
 
-from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
+from ..mos_apps import APP_BBS_SERVICE, APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
 from .base import (
+    BbsFields,
     BillingProfile,
     DirectoryNode,
     NodeContent,
@@ -318,6 +319,155 @@ def _medview_test_leaf(f0, name):
 _MEDVIEW_TESTS_KEY = f"1:{0x10E}"
 
 
+# --- BBS service sample board (docs/bbs-service-contract.md) ---
+#
+# A single forum board, "Climbing BBS", listed under the existing "Sports,
+# Health and Fitness" DIRSRV category — the shape reference/screenshots show,
+# where BBS boards sit as ordinary rows beside kiosks, folders and chat rooms.
+# Opening the board runs the `b`-bit-0x04 delegate: HrSetupDelegate builds
+# {field_0=2, field_8/field_c=(2,1), field_10=0} and hands the folder to
+# bbsnav, which fetches this node and its children over svc "BBS". The inner
+# node starts with an empty property cache, and that is fine — FindProperty
+# (MOSSHELL 0x7F3FCE12) fetches on a cache miss via slot 14
+# GetPropertyFromHost. A `news:`/`msn:` URL jump reaches the same board.
+# Threading is the tree itself — a reply is a child of the message it answers,
+# so recursive GetChildren yields the indented thread list. The f0=2 namespace
+# keeps BBS mnids from colliding with DIRSRV's f0=1; all BBS nodes are
+# language=0 (locale-neutral) so they survive a filter_on=1 GetChildren.
+# Mirrors reference/screenshots/bbs.png.
+
+# Yosemite conversation body, transcribed from bbs.png. Seeded for the deferred
+# message-body wire gap: BbsFields.body is NOT yet emitted on the wire — the
+# reader's body source is a contract-flagged bounded gap (RichEdit-hosted,
+# GetPropertyToFile is only an inherited thunk) pending a live SoftICE trace.
+_YOSEMITE_BODY = (
+    "In case anyone is thinking of a trip to Yosemite, prepare for water. "
+    "I just got back from a wet trip that allowed me to see the best "
+    "waterfall display in over a decade, but I didn't get to climb.\n\n"
+    "It was a bit frustrating to gaze up to those incredible cliffs and not "
+    "be able to climb. The constant rain kept the rock wet. If it stopped "
+    "raining, the saturated mountains kept the water seeping from the cracks. "
+    "Most major cracks have turned into \"spring of '95\" springs feeding the "
+    "Merced River.\n\n"
+    "We actually climbed two pitches, dodging the wet spots on the rock "
+    "before it started to rain again."
+)
+
+
+def _bbs_date_to_unix(s):
+    """Parse a fixture `%B %d, %Y %I:%M %p` timestamp into a Unix time_t.
+
+    Empty input → 0 ("no date" sentinel). build_bbs_props then skips `_D` so
+    the listview Date cell renders blank instead of a 1970 epoch date — the
+    same blank-on-zero rule DIRSRV uses for the FILETIME `w` column.
+    """
+    if not s:
+        return 0
+    dt = datetime.datetime.strptime(s, "%B %d, %Y %I:%M %p").replace(tzinfo=datetime.UTC)
+    return int(dt.timestamp())
+
+
+def _bbs_node(
+    f0,
+    f8,
+    name,
+    *,
+    is_container,
+    author="",
+    date="",
+    parent_subid=0,
+    topic="",
+    has_children=False,
+    body="",
+    delegate=False,
+):
+    """A BBS tree node (board / conversation / reply).
+
+    Rides DirectoryNode with app_id=APP_BBS_SERVICE and language=0; the
+    BBS-specific tags (`_a/_D/_P/_t/_F`) live in the attached BbsFields, read by
+    build_bbs_props and ignored by DIRSRV serialisation. `p` (Size) is the body
+    byte count. `name` is the Subject (wire `e`).
+
+    Set `delegate` on the board — the node DIRSRV lists inside a category. It
+    emits `b` bit 0x04 + `c`/`l`/`i`, so MOSSHELL `HrSetupDelegate` builds the
+    inner mnid `{field_0=2, field_8/field_c=mnid_a, field_10=0}` and hands the
+    folder to bbsnav, which then reads this same node over svc "BBS". Nodes
+    below the board inherit field_0=2 and need no delegate tags.
+    """
+    key, mnid = _mnid_key(f0, f8)
+    return DirectoryNode(
+        node_id=key,
+        is_container=is_container,
+        app_id=APP_BBS_SERVICE,
+        mnid_a=mnid,
+        delegate=delegate,
+        content=NodeContent(
+            name=name,
+            go_word="",
+            category="",
+            type_str="",
+            price_dword=0,
+            rating_dword=0,
+            description="",
+            language=0,
+            topics="",
+            people="",
+            place="",
+            u_value="",
+            forum_mgr="",
+            vendor_id=0,
+            owner="",
+            created="",
+            modified="",
+            size_bytes=len(body),
+            bbs=BbsFields(
+                author=author,
+                date_unix=_bbs_date_to_unix(date),
+                parent_subid=parent_subid,
+                topic=topic,
+                has_children=has_children,
+                body=body,
+            ),
+        ),
+    )
+
+
+# "Sports, Health and Fitness" (CATEGORY_DEFS f8 0x10A) hosts the board.
+_SPORTS_HEALTH_FITNESS_KEY = f"1:{0x10A}"
+
+_CLIMBING_BBS = _bbs_node(
+    2, 0x1, "Climbing BBS", is_container=True, has_children=True, delegate=True
+)
+# Conversations and messages use f0=0, so the client's mnid field_8 is 0.
+# CBbsNavTreeNode_GetProperty @ 0x7F5F1538 intercepts `h` and returns icon id
+# 0x59D (a bbsnav-local glyph) when node+0x18 == 0 — that is mnid.field_8 —
+# and 0x86 otherwise. The board keeps f0=2 so it stays a folder; everything
+# inside it must read as BBS content. Ids set in FUN_7F5F1000 @ 0x7F5F1000.
+_BBS_YOSEMITE = _bbs_node(
+    0,
+    0x100,
+    "Yosemite",
+    is_container=True,
+    author="Chris Shannon",
+    date="May 16, 1995 10:12 AM",
+    has_children=True,
+    body=_YOSEMITE_BODY,
+)
+_BBS_BRITISH_CLIMBERS = _bbs_node(
+    0, 0x101, "British Climbers", is_container=False, author="KEITH SUTTON"
+)
+_BBS_RE_YOSEMITE = _bbs_node(
+    0,
+    0x200,
+    "RE: Yosemite",
+    is_container=False,
+    author="KEITH SUTTON",
+    parent_subid=0x100,
+)
+
+BBS_NODES = [_CLIMBING_BBS, _BBS_YOSEMITE, _BBS_BRITISH_CLIMBERS, _BBS_RE_YOSEMITE]
+
+
 DIRECTORY_NODES = [
     # MSN root (wire "0:0") — client's GetSpecialMnid(idx=0). Listed as the
     # LJUMP 1:0:0:0 target (Categories button). GetLocalizedNode on this node
@@ -418,6 +568,7 @@ DIRECTORY_NODES = [
         for f8, name in A_AND_E_BR_CHILD_DEFS
     ],
     *[_medview_test_leaf(f0, name) for f0, name in MEDVIEW_TEST_LEAF_DEFS],
+    *BBS_NODES,
 ]
 
 
@@ -466,6 +617,16 @@ DIRECTORY_CHILDREN = {
     _ARTS_AND_ENTERTAINMENT_KEY: [f"1:{f8}" for f8, _ in A_AND_E_CHILD_DEFS],
     _ARTES_E_ENTRETENIMENTO_KEY: [f"1:{f8}" for f8, _ in A_AND_E_BR_CHILD_DEFS],
     _MEDVIEW_TESTS_KEY: [f"{f0}:0" for f0, _ in MEDVIEW_TEST_LEAF_DEFS],
+    # BBS board "Climbing BBS" listed under "Sports, Health and Fitness"
+    # (c=2 = APP_BBS_SERVICE, b bit 0x04 = delegate). Opening it hands the
+    # folder to bbsnav, which enumerates the thread list over svc "BBS".
+    # Threading is the tree itself — replies are children of the message they
+    # answer, so recursive GetChildren yields the indented thread view.
+    _SPORTS_HEALTH_FITNESS_KEY: [_CLIMBING_BBS.node_id],
+    _CLIMBING_BBS.node_id: [_BBS_YOSEMITE.node_id, _BBS_BRITISH_CLIMBERS.node_id],
+    _BBS_YOSEMITE.node_id: [_BBS_RE_YOSEMITE.node_id],
+    _BBS_BRITISH_CLIMBERS.node_id: [],
+    _BBS_RE_YOSEMITE.node_id: [],
     # Explicit empty children for the `4:0` startup node — avoids the
     # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
     # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.
@@ -473,12 +634,13 @@ DIRECTORY_CHILDREN = {
     "3:1": [],
     # Every remaining category/A&E/MA leaf is terminal — explicit empty list
     # keeps the fallback sentinel out of their listviews. 0x100 (Arts and
-    # Entertainment) and 0x10E (MEDVIEW tests) are skipped because they
-    # have their own subtrees wired above.
+    # Entertainment), 0x10A (Sports, Health and Fitness → Climbing BBS) and
+    # 0x10E (MEDVIEW tests) are skipped because they have their own subtrees
+    # wired above.
     **{
         f"1:{f8}": []
         for f8, _, _ in CATEGORY_DEFS
-        if f8 not in (0x100, 0x10E)
+        if f8 not in (0x100, 0x10A, 0x10E)
     },
     **{f"1:{f8}": [] for f8, _ in A_AND_E_CHILD_DEFS},
     **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_LEAF_DEFS},

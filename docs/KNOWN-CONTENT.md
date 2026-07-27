@@ -71,7 +71,12 @@ Most nodes are of type "Category", exceptions noted between parentheses. Childre
 * The MSN Member Lobby (Folder)
 * The Microsoft Nework Beta
 
-Q: what makes the client read a node as a "category" vs a "folder"? Possible quirk from the beta release used in the 
-video?
+"Category" and "Folder" are Type-column text, not two node classes. The column
+is DSNAV RCDATA 0x81 col 1 (string id 141 "&Type", tag `tp`, width 120), read by
+`CDsNavTreeNode::GetDetailsStruct` @ `0x7F581621`. MOSSHELL keeps `tp` as an
+opaque cache slot and never inspects it. Neither string exists in DSNAV.NAV or
+MOSSHELL.DLL, so both values arrive over the wire. The generic folder glyph on
+the two "Folder" rows is the no-`h` default icon, not a second container class.
+The client cannot behave differently based on either value.
 
 

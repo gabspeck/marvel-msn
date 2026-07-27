@@ -73,3 +73,13 @@ the DID-launch path (`MOSVIEW.EXE -MOS:6:<deid_lo>:<deid_hi>:<tail>`)
 from PE entry to first `BitBlt`/`PlayMetaFile`. Documents every
 branch, env knob, error/exit-early path, and cross-binary call
 boundary on the standard MSN navigation path.
+
+## Focused service passes (outside the MOSVIEW total-decomp)
+
+Wire-path-deep passes on individual service binaries (not full per-function
+ledgers):
+
+- **BBSNAV.NAV** (BBS service, App #2 / #10) — `docs/re-passes/BBSNAV.NAV.md`.
+  Outputs `docs/bbs-service-contract.md` + `docs/BBSNAV.md`. Imported BBSNAV.NAV
+  (`0x7F5F0000`, 598 fns) and TREEEDCL.DLL (`0x7F2C0000`) into `MSN95.gpr`.
+  Progress JSON `scratch/annotate-progress/BBSNAV.NAV.json`.

@@ -1,0 +1,136 @@
+{
+  "binary": "BBSNAV.NAV",
+  "project": "MSN95 @ /home/gabriels/projetos/marvel-msn",
+  "image_base": "0x7f5f0000",
+  "function_count": 598,
+  "sessions": {
+    "BBSNAV.NAV": "4041a548ca854bd19596d689d4fc5d66 (rw)",
+    "TREEEDCL.DLL": "3befd2b30ccd4ceb9b033ac5a9c8e6b7 (rw)",
+    "MOSSHELL.DLL": "1ecc39a21b6849b0af1411a0abd503bb (ro, reference for vtable diff)"
+  },
+  "service_model_verdict": "RIDES DIRSRV-style infra via MOSSHELL. NO dedicated BBS service / IID table (not MEDVIEW-style). DllMain opens TWO MOSSHELL-managed channels against service name 'BBS': InitializeNtnigr (read/nav -> TREENVCL CTreeNavClient, selectors 0-6) and InitializeEcig (write/edit -> TREEEDCL CTreeEditClient). No direct imports of TREENVCL/TREEEDCL/SVCPROP/MCM/MAPI32/MOSABP32 -- all via MOSSHELL (194 imports). ADVAPI32 Reg* present (read-state in registry).",
+  "entry_points": {
+    "GETPMTN": "0x7f5f4bd0 (alloc 0x100=256B node, ctor FUN_7f5f1051, AddRef; single-branch)",
+    "DISCONNECT": "0x7f5f4c0c (HrDisconnectEcig(g_BbsEcig) + HrDisconnectNtnigr(g_BbsNtniGroup))",
+    "DllMain_entry": "0x7f609467 (CRT stub)",
+    "DllMainLogic": "FUN_7f5f4c29 (ATTACH: InitializeNtnigr(g_BbsNtniGroup,'BBS',3,8,g_BbsExtraPropTags); InitializeEcig(g_BbsEcig,'BBS',3,0); InitCS; LoadAccelerators(200); FUN_7f5f9406 register classes. DETACH: cleanup)",
+    "node_ctor": "FUN_7f5f1051 (CBbsNavTreeNode ctor: base CMosTreeNode::CMosTreeNode(this,mnid,g_BbsNtniGroup); install vtbl 0x7f60e880; +0xf0=FUN_7f5f7ece(node+0x1c); live count g_0x7f610178++)"
+  },
+  "globals": {
+    "0x7f60d000": "g_BbsNtniGroup (_NtniGroup, read/nav channel)",
+    "0x7f60d198": "g_BbsEcig (_EditClientInfoGroup, write/edit channel)",
+    "0x7f60d360": "g_BbsRefreshCS (CRITICAL_SECTION)",
+    "0x7f610174": "g_BbsHInstance",
+    "0x7f610170": "g_BbsAccelerators (HACCEL, table 200)",
+    "0x7f610178": "g_BbsLiveInstanceCount",
+    "0x7f6101a8": "g_BbsExtraPropTags (char*[8] -> {_a,_D,_P,_f,_t,p,_F,_I})",
+    "0x7f6101cc": "g_BbsCachedColumns (MDS[] from RgmdsFromRcdata, freed via CMosXAllocator)"
+  },
+  "extra_prop_tags_8": ["_a", "_D", "_P", "_f", "_t", "p", "_F", "_I"],
+  "InitializeNtnigr_sig": "void(_NtniGroup*, char* name, ulong arg3, ulong arg4_extracount, char** extras); BBS=('BBS',3,8,extras); DSNAV=('DIRSRV',7,7,extras)",
+  "vtables": {
+    "CBbsNavTreeNode (installed)": "0x7f60e880 (89 slots, 25 overrides)",
+    "CMosTreeNode RTTI vftable": "0x7f60ec68",
+    "CMosViewWnd RTTI vftable": "0x7f60ef38",
+    "CMosTreeEdit RTTI vftable": "0x7f60ebf0",
+    "CDIBWindow RTTI vftable": "0x7f60eb74",
+    "CMosXWindow RTTI vftable": "0x7f60eb70",
+    "MOSSHELL_base_CMosTreeNode": "0x7f40cae0",
+    "MOSSHELL_base_CMosViewWnd": "0x7f40ce90",
+    "MOSSHELL_base_CMosTreeEdit": "0x7f40c888"
+  },
+  "cbbsnavtreenode_overrides": {
+    "5": ["0x7f5f109a", "DeletePmtn"],
+    "9": ["0x7f5f1107", "NeedConnection"],
+    "16": ["0x7f5f1538", "GetProperty"],
+    "28": ["0x7f5f14a3", "GetDetailsStruct"],
+    "29": ["0x7f5f137b", "GetShabbyToFile"],
+    "30": ["0x7f5f13e3", "GetShabbyPropToFile"],
+    "36": ["0x7f5f1307", "GetViewWndObject"],
+    "44": ["0x7f5f1427", "OkToGetChildren"],
+    "46": ["0x7f5f12ce", "GetParent"],
+    "51": ["0x7f5f110c", "Exec"],
+    "52": ["0x7f5f11cc", "AddActivationKey"],
+    "53": ["0x7f5f121b", "ExecOneActivationKey"],
+    "55": ["0x7f5f17ae", "AddPropPages"],
+    "56": ["0x7f5f1957", "GetContextMenu"],
+    "57": ["0x7f5f198e", "AddMenus"],
+    "59": ["0x7f5f19d6", "GetCmdText"],
+    "60": ["0x7f5f1a9e", "GetCmdState"],
+    "61": ["0x7f5f1adb", "ExecuteCommand"],
+    "65": ["0x7f5f1671", "GetRightsMask"],
+    "67": ["0x7f5f16f2", "GetCutCopyFlags"],
+    "68": ["0x7f5f17a6", "HrCanSourceJunctions"],
+    "72": ["0x7f5f1593", "HrGetPMte"],
+    "82": ["0x7f5f1623", "NewObject"],
+    "85": ["0x7f5f16b5", "GetCParentsTotal"],
+    "86": ["0x7f5f16c4", "GetCChildrenTotal"]
+  },
+  "strings": {
+    "service_name": "BBS",
+    "0x7f611314": "MSNBBS (used at 0x7f5ffc13, 0x7f603d9e - NOT service name; likely registry/title)",
+    "0x7f6113a0": "SOFTWARE\\Microsoft\\MOS\\BBS Viewer (registry key, Phase 5)",
+    "0x7f610570": "BBSMsgWndClass (CMosViewWnd subclass window class)",
+    "0x7f611978": "msnbbs.hlp",
+    "new_object_types": ["New BBS Folder", "BBS Subfolder", "Reply to BBS", "BBS Message"]
+  },
+  "treeedcl_CTreeEditClient": {
+    "image_base": "0x7f2c0000",
+    "factory": "CreateTec @ 0x7f2c1183",
+    "public_to_private": "public methods validate+lock then call Private* which marshals a selector immediate before channel open-pipe (TREENVCL pattern)",
+    "methods": {
+      "AddNode": "0x7f2c15b3 / PrivateAddNode 0x7f2c1a36",
+      "DeleteNode": "0x7f2c160d / PrivateDeleteNode 0x7f2c1be3",
+      "LinkNode": "0x7f2c1699 / PrivateLinkNode 0x7f2c1e60",
+      "UnlinkNode": "0x7f2c16dd / PrivateUnlinkNode 0x7f2c1f7c",
+      "SetProperties": "0x7f2c164a / PrivateSetProperties 0x7f2c1cee",
+      "OrderChildren": "0x7f2c1721 / PrivateOrderChildren 0x7f2c2098",
+      "AddShabby": "0x7f2c176c / PrivateAddShabby 0x7f2c21c8",
+      "DeleteShabby": "0x7f2c17dd / PrivateDeleteShabby 0x7f2c22fd",
+      "GetDataSets": "0x7f2c1818 / PrivateGetDataSets 0x7f2c2405",
+      "Lock": "0x7f2c154f / PrivateLock 0x7f2c1865",
+      "Unlock": "0x7f2c1581 / PrivateUnlock 0x7f2c193e",
+      "GetTicket": "0x7f2c2600", "InvalidateTicket": "0x7f2c2718", "GetStatus": "0x7f2c255f"
+    },
+    "selector_table": {
+      "0": "Lock", "1": "Unlock", "2": "AddNode (parent mnid + compressed CServiceProperties -> new 8B mnid)",
+      "3": "DeleteNode", "4": "SetProperties (mnid + compressed props)", "5": "LinkNode (node mnid + parent mnid)",
+      "6": "UnlinkNode", "7": "AddShabby", "8": "DeleteShabby", "9": "(unused by client)",
+      "10": "OrderChildren", "11": "GetDataSets", "12": "GetTicket (HrDecodeTicket -> this+0x54)"
+    },
+    "marshal_pattern": "marshal=this+0x28; OpenPipe = marshal->vtbl[+0xc](marshal, SELECTOR, &pipe); pipe pack via vtbl+0x24 (PackSendBytes), recv vtbl+0x18, send vtbl+0x48, advance vtbl+0x10(timeout), GetStatus poll while ==1 Sleep(1000). Every op sends ticket (this+0x54, u16-len-prefixed) first; returns 0x116 if no ticket. CompressPropClnt/FreeCompressed wrap the property blob.",
+    "write_path": "CBbsNavTreeNode.NewObject(82) -> LockRefresh -> CBbsTreeEdit(node+0xbc).NewObject(slot12 kind=2): GetTec(edit slot3)->CTreeEditClient; FillSPForNewNode(slot13 override 0x7f5f1dcf: FInit + FSet('e',type0x0A,LoadString(0x1901) default name)); CTreeEditClient::AddNode(sel2) sends [ticket][parent mnid][compressed SP] -> new mnid. Property edits via SetProperties(sel4). Reply threading via LinkNode(sel5).",
+    "CBbsTreeEdit": "CMosTreeEdit subclass, 72B (0x48), vtbl_CBbsTreeEdit 0x7f60e9e8 (29-slot CMosTreeEdit base + secondary iface vtables), bound to g_BbsEcig. Overrides: slot5 GetPropertyDispatch(0x7f5f1d08), slot9 FormatSizeString(0x7f5f1e4f), slot12 NewObject(0x7f5f1d17), slot13 FillSPForNewNode(0x7f5f1dcf)."
+  },
+  "tag_roles": {
+    "e": "Subject/display-name (ANSI 0x0A); listview col0 width220 (RCDATA 6011); also Properties dlg item 0x66",
+    "_a": "Author (ASCIIZ); listview col1 width120; advertised-only (no BBSNAV read site, MOSSHELL listview consumes)",
+    "p": "Size (DWORD); listview col2 width80",
+    "_D": "Date (DWORD time_t); listview col3 width118; Properties dlg item 0x6a; _D triggers MOSSHELL time_t->date fast path",
+    "_P": "Parent/thread linkage (DWORD): FUN_7f5f1c3e copies node mnid, splices _P, HrGetPMtn -> related (parent) node = RE: threading/junction",
+    "_t": "Displayed text field (Properties dlg item 0x70); ASCIIZ",
+    "_F": "Flags word (2B): OkToGetChildren tests bit0x1000 to gate child fetch",
+    "_I": "Flags/attributes word (2B): bit0x8000->chk0x6e, bit0x4000->chk0x72 + string 0x190f/0x1910 + pricing path",
+    "_f": "Advertised-only (no BBSNAV read site)",
+    "z": "Price (DWORD) read in Properties dlg (FFormatPrice) when HrSupportsPricing; tag string @0x7f61028c"
+  },
+  "column_descriptor": "RCDATA 6011 (0x177b) @ rva 0x2d558: count=4; cols (sid,tag,width): (6530,e,220)=Subject (6531,_a,120)=Author (6532,p,80)=Size (6533,_D,118)=Date. Loaded via RgmdsFromRcdata in GetDetailsStruct(28); cached g_BbsCachedColumns.",
+  "read_state_phase5": "HKCU\\SOFTWARE\\Microsoft\\MOS\\BBS Viewer holds ONLY window placement (24B struct) under values {MSN,Net}x{Comp,Read} Wnd. FUN_7f600db2=load(RegQueryValueExA), FUN_7f600ec5=save(RegSetValueExA). Message read/unread NOT in registry -> server-side flag (likely _F/_I bit). MSN-vs-Net via FUN_7f600d21: (FUN_7f6017b3(win+0x88)&7)==0.",
+  "msn_vs_net": "BBSNAV.NAV serves BOTH app#2 (MSN BBS) and app#10 (Internet BBS). Distinguished at runtime by FUN_7f600d21 (& 7)==0 -> 'MSN' else 'Net'. UI/registry branch only; no MAPI32/MOSABP32 imports.",
+  "phase_status": {
+    "0_import": "DONE",
+    "1_skeleton": "DONE",
+    "2_service_model": "DONE",
+    "3_read_path": "DONE (columns e/_a/p/_D; threading via _P; flags _F/_I; Properties dlg FUN_7f5f385e; view=CBbsViewWnd CMosViewWnd subclass FUN_7f5f1f8b 104B; body-fetch detail TODO-light)",
+    "4_write_path": "IN PROGRESS: HrGetPMte(72)+NewObject(82)->CMosTreeEdit subclass->TREEEDCL selectors; Reply/Compose; TREEEDCL Private* selector table",
+    "5_read_state": "DONE (window placement only; read-state server-side)",
+    "6_internet_gw": "DONE: CBbs_MapiForwardOrReply (FUN_7f6044cb) DYNAMICALLY loads MAPI32.DLL (LoadLibrary+GetProcAddress MAPILogon/MAPILogoff/MAPISendMail; not in static import table). mode0=Forward 'FW: %s', mode1=Reply 'RE: %s'; body from dlg edit 0x3ed, recipient 0x3e9. Also 'Newsgroups: ' header handling + 'Internet Newsgroups' command gating for app#10. No MOSABP32. Callee MAPI32 deferred (Windows component).",
+    "7_docs": "DONE: docs/bbs-service-contract.md + docs/BBSNAV.md + docs/re-passes/BBSNAV.NAV.md created; docs/BINARIES.md (BBSNAV+TREEEDCL status/imports) + docs/re-passes/INDEX.md updated; memory project_bbsnav_plugin_shape.md + MEMORY.md pointer + treenvcl/blackbird cross-links"
+  },
+  "body_source_gap": "Message body = node content shown in Read window body edit (IDC 0x3ed); exact body property/blob tag NOT pinned statically (GetPropertyToFile is only an inherited vtable thunk, no BBSNAV-local call). Recommend live SoftICE trace on Read-window open. p=Size implies a sized content blob.",
+  "icon_globals": {
+    "0x7f60d35c": "g_BbsIcon_a (GetProperty 'h' when node+0x18 != 0)",
+    "0x7f60d380": "g_BbsIcon_b (GetProperty 'h' when node+0x18 == 0)"
+  }
+  }
+}

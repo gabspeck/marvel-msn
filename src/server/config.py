@@ -59,9 +59,12 @@ MPC_CLASS_ONEWAY_MASK = 0xE0
 # PROTOCOL.md §7.2.4 / CMosTreeNode::ExecuteCommand:
 #   bit 0x01 clear = container (browse)
 #   bit 0x01 set   = leaf (exec)
+#   bit 0x04 set   = delegate (HrSetupDelegate reads 'c'/'l'/'i' and hands the
+#                    folder to app 'c' navigator)
 #   bit 0x08 set   = server-denied
 DIRSRV_BROWSE_FLAGS_CONTAINER = 0x00
 DIRSRV_BROWSE_FLAGS_LEAF = 0x01
+DIRSRV_BROWSE_FLAGS_DELEGATE = 0x04
 DIRSRV_BROWSE_FLAGS_DENIED = 0x08
 DIRSRV_BROWSE_FLAGS_LEAF_DENIED = DIRSRV_BROWSE_FLAGS_LEAF | DIRSRV_BROWSE_FLAGS_DENIED
 
