@@ -65,13 +65,14 @@ BBS_SELECTOR_GET_ARTICLE = 0x00
 # Any other value, or a missing header (the property then reads back PT_ERROR,
 # type 0x0A), aborts the render with 0x8B0B0049.
 #
-# We send RTF. SF_TEXT leaves the RichEdit on its own default font, which draws
-# the body in Courier New — reference/screenshots/bbs.png shows proportional MS
-# Sans Serif, so the font has to come from the stream. RTF is the raw path:
-# RTFCOMP would reach the same SF_RTF mode but only after MAPI32 loads and
-# `WrapCompressedRTFStream` succeeds, and nothing observed so far says the
-# service used compression.
+# Which one a message uses is per node — `BbsFields.body_format`. SF_TEXT
+# leaves the RichEdit on its own default font, which draws the body in Courier
+# New, while reference/screenshots/bbs.png shows proportional MS Sans Serif, so
+# a faithful board sends RTF; TEXT stays available for a fixture that wants the
+# other branch exercised.
+BBS_FORMAT_TEXT = "TEXT"
 BBS_FORMAT_RTF = "RTF"
+BBS_FORMAT_RTF_COMPRESSED = "RTFCOMP"
 
 # Body font for the generated RTF, matching the reader in
 # reference/screenshots/bbs.png. `\fs16` is 8pt — RTF half-points.
@@ -375,13 +376,11 @@ def build_bbs_article(node):
     as headers.
 
     The body is streamed into a RichEdit control by `FUN_7F5FC56F` via
-    EM_STREAMIN. It is an RTF document — see BBS_FORMAT_RTF — so its own line
-    breaks are RTF `\\par` control words and the raw newlines inside it are
-    only source formatting, which RTF readers discard.
+    EM_STREAMIN, in whichever mode the node's `body_format` names.
     """
     content = node.content
     bbs = content.bbs or _EMPTY_BBS
-    body = build_body_rtf(bbs.body).encode("ascii")
+    body = encode_body(bbs.body, bbs.body_format)
 
     headers = [
         ("Path", "msn"),
@@ -390,15 +389,42 @@ def build_bbs_article(node):
         ("Subject", content.name),
         ("Date", _article_date(bbs.date_unix)),
         ("Message-ID", _message_id(node)),
-        ("X-MOS-Format", BBS_FORMAT_RTF),
+        ("X-MOS-Format", bbs.body_format),
         # Plain-text length, matching the tree's `p`. Both land on MAPI tag
         # 0x68030003, so a transfer-size value here would disagree with the
-        # Size column the list pane already shows.
+        # Size column the list pane already shows — and it would also change
+        # with body_format, which the Size column must not do.
         ("X-MOS-Size", str(content.size_bytes)),
         ("X-MOS-Attach", "0"),
     ]
     head = "".join(f"{name}{_HEADER_SEP}{value}\n" for name, value in headers)
     return head.encode("ascii", "replace") + b"\n" + body
+
+
+def encode_body(text, body_format):
+    """Turn a fixture's plain-text body into wire bytes for `body_format`.
+
+    Bodies are always authored as plain text; the format decides how they reach
+    the RichEdit. An unsupported value fails here rather than on the wire — the
+    client's own failure for a format it does not recognise is a bare
+    0x8B0B0049 with no indication of which message caused it.
+    """
+    try:
+        encoder = BODY_ENCODERS[body_format]
+    except KeyError:
+        raise ValueError(
+            f"unsupported BBS body_format {body_format!r}; "
+            f"expected one of {', '.join(sorted(BODY_ENCODERS))}"
+        ) from None
+    return encoder(text)
+
+
+def build_body_text(text):
+    """Plain-text body for EM_STREAMIN `SF_TEXT`.
+
+    CRLF line breaks, like any other RichEdit text.
+    """
+    return text.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii", "replace")
 
 
 def build_body_rtf(text):
@@ -407,7 +433,8 @@ def build_body_rtf(text):
     One font in the table and one `\\par` per source line, so a blank line in
     the text stays a blank paragraph. The document is pure ASCII: anything
     outside it goes out as `\\'hh` cp1252 escapes, which is what an RTF reader
-    of this vintage expects after `\\ansi`.
+    of this vintage expects after `\\ansi`. Raw newlines in the result are only
+    source formatting, which RTF readers discard.
 
     Deliberately free of embedded objects. `FUN_7F5FC56F` runs two extra passes
     in SF_RTF mode — `FUN_7F5FC7B7` walks EM_GETOLEINTERFACE
@@ -422,7 +449,15 @@ def build_body_rtf(text):
         f"{{\\fonttbl{{\\f0\\fswiss\\fcharset0 {_RTF_FONT};}}}}"
         f"\\pard\\f0\\fs{_RTF_FONT_HALF_POINTS} "
         f"{paragraphs}\\par\n}}"
-    )
+    ).encode("ascii")
+
+
+# `BbsFields.body_format` → encoder. RTFCOMP is absent on purpose: it needs the
+# MAPI compressed-RTF container, and nothing observed says the service used it.
+BODY_ENCODERS = {
+    BBS_FORMAT_TEXT: build_body_text,
+    BBS_FORMAT_RTF: build_body_rtf,
+}
 
 
 def _rtf_escape(text):

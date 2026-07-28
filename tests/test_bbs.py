@@ -5,6 +5,7 @@ so reply framing is shared (build_tree_reply_wire); only the per-node tag
 vocabulary differs. See docs/bbs-service-contract.md.
 """
 
+import dataclasses
 import struct
 import unittest
 
@@ -15,11 +16,14 @@ from server.services.bbs import (
     BBS_CLASS_MESSAGE,
     BBS_CLASS_TREE,
     BBSHandler,
+    build_bbs_article,
     build_bbs_article_reply_payload,
     build_bbs_get_children_reply_payload,
     build_bbs_get_properties_reply_payload,
+    encode_body,
 )
 from server.services.dirsrv import DIRSRVHandler
+from server.store import app_store
 from server.transport import parse_packet
 
 # Sample-board node ids, decimal wire form `field_8:field_c` = message id : board
@@ -35,6 +39,17 @@ _SPORTS_CATEGORY = "1:266"  # DIRSRV "Sports, Health and Fitness" (f8 0x10A)
 # into its context at +0xA8, one 0x83 status DWORD to receive, and 0x85 marking
 # the request as streaming.
 _ARTICLE_REQUEST = b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 0x100, 1) + b"\x83\x85"
+
+# The Yosemite body as the fixture authors it — plain text, whatever format the
+# node later asks the wire layer to encode it as.
+_YOSEMITE_TEXT = app_store.content.get_node(_YOSEMITE).content.bbs.body
+
+
+def _node_with_format(body_format):
+    """The Yosemite node with its `body_format` swapped, body untouched."""
+    node = app_store.content.get_node(_YOSEMITE)
+    bbs = dataclasses.replace(node.content.bbs, body_format=body_format)
+    return dataclasses.replace(node, content=dataclasses.replace(node.content, bbs=bbs))
 
 
 def _walk_records(payload):
@@ -505,6 +520,36 @@ class TestBBSArticle(unittest.TestCase):
         head = self._article()[7:].partition(b"\n\n")[0]
         self.assertIn(b"X-MOS-Format: RTF\n", head)
 
+    def test_format_header_and_body_come_from_the_node(self):
+        # The format is per message, not a server-wide constant. The header the
+        # reader dispatches on and the encoder that produced the bytes must be
+        # the same choice, both taken from BbsFields.body_format.
+        as_text = build_bbs_article(_node_with_format("TEXT"))
+        self.assertIn(b"X-MOS-Format: TEXT\n", as_text)
+        self.assertTrue(as_text.partition(b"\n\n")[2].startswith(b"In case anyone"))
+
+        as_rtf = build_bbs_article(_node_with_format("RTF"))
+        self.assertIn(b"X-MOS-Format: RTF\n", as_rtf)
+        self.assertTrue(as_rtf.partition(b"\n\n")[2].startswith(b"{\\rtf1"))
+
+    def test_unsupported_format_fails_here_not_on_the_wire(self):
+        # The client's own rejection is a bare 0x8B0B0049 that names no
+        # message, so an unencodable fixture must not reach it.
+        with self.assertRaises(ValueError) as cap:
+            encode_body("body", "RTFCOMP")
+        self.assertIn("RTFCOMP", str(cap.exception))
+
+    def test_size_header_does_not_move_with_the_format(self):
+        # X-MOS-Size shares MAPI tag 0x68030003 with the tree's `p`, so it stays
+        # the plain-text length whatever the body was encoded as — even though
+        # the two encodings differ in length.
+        text_body = encode_body(_YOSEMITE_TEXT, "TEXT")
+        rtf_body = encode_body(_YOSEMITE_TEXT, "RTF")
+        self.assertNotEqual(len(text_body), len(rtf_body))
+        expected = f"X-MOS-Size: {len(_YOSEMITE_TEXT)}\n".encode()
+        self.assertIn(expected, build_bbs_article(_node_with_format("TEXT")))
+        self.assertIn(expected, build_bbs_article(_node_with_format("RTF")))
+
     def test_headers_carry_the_node_identity(self):
         head = self._article()[7:].partition(b"\n\n")[0]
         self.assertIn(b"From: Chris Hahn\n", head)
@@ -543,7 +588,7 @@ class TestBBSArticle(unittest.TestCase):
         from server.services.bbs import build_body_rtf
 
         doc = build_body_rtf("a\\b{c}d\te")
-        self.assertIn("a\\\\b\\{c\\}d\\tab e", doc)
+        self.assertIn(b"a\\\\b\\{c\\}d\\tab e", doc)
 
     def test_size_header_matches_the_tree_size_property(self):
         # Both land on MAPI tag 0x68030003, so the header and the list pane's

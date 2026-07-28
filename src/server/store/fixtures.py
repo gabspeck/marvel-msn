@@ -409,6 +409,7 @@ def _bbs_node(
     topic="",
     has_children=False,
     body="",
+    body_format=BbsFields.body_format,
     delegate=False,
 ):
     """A BBS tree node (board / conversation / reply).
@@ -423,6 +424,11 @@ def _bbs_node(
     BBS-specific tags (`_a/_D/_P/_t/_F`) live in the attached BbsFields, read by
     build_bbs_props and ignored by DIRSRV serialisation. `p` (Size) is the body
     byte count. `name` is the Subject (wire `e`).
+
+    `body` is always plain text. `body_format` names the X-MOS-Format the
+    reader is told to stream it as, per message — "RTF" (the default) wraps it
+    in an RTF document so the body draws in a proportional font, "TEXT" sends
+    it verbatim and lands in the RichEdit's default Courier New.
 
     Set `delegate` on the board — the node DIRSRV lists inside a category. It
     emits `b` bit 0x04 + `c`/`l`/`i`, so MOSSHELL `HrSetupDelegate` builds the
@@ -468,6 +474,7 @@ def _bbs_node(
                 topic=topic,
                 has_children=has_children,
                 body=body,
+                body_format=body_format,
             ),
         ),
     )

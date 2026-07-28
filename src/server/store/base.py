@@ -22,7 +22,13 @@ class BbsFields:
     parent_subid: int = 0  # _P — parent message's f8 (0 for a top-level node)
     topic: str = ""  # _t (ASCIIZ, Properties-dialog sub-title)
     has_children: bool = False  # → _F bit 0x1000 CLEAR; set = leaf (no children)
-    body: str = ""  # seeded for the deferred message-body gap; not wired
+    # Article body, always authored as plain text. `body_format` picks the
+    # X-MOS-Format the reader is told to stream it as, and with it the encoder
+    # that turns this text into wire bytes — see server.services.bbs
+    # BODY_ENCODERS. RTF is the default because SF_TEXT would draw the body in
+    # the RichEdit's default Courier New.
+    body: str = ""
+    body_format: str = "RTF"
 
 
 @dataclass(frozen=True)
