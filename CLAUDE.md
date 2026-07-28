@@ -86,3 +86,9 @@ of wire traffic + user reports of client behavior, live debugging, static analys
 * If there's a mismatch between expected and actual client behavior, do not apply hacks on the server to force a fix
 beyond testing a hypothesis (when you do, revert it after testing it). Take a step back and analyze the problem using 
 decompilation with Ghidra, live debugging with SoftIce or a combination of both.
+
+## Git workflow
+* `master` is not protected and there is no review process. Commit straight to `master` and push. Do not create a
+working branch first, and do not open pull requests.
+
+* Still split unrelated changes into separate commits.
