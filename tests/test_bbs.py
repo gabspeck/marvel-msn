@@ -19,12 +19,13 @@ from server.services.bbs import (
 from server.services.dirsrv import DIRSRVHandler
 from server.transport import parse_packet
 
-# Sample-board node ids (decimal wire form `f0:f8`). The board keeps f0=2 so it
-# draws as a folder; conversations and messages use f0=0 so the client's mnid
-# field_8 is 0 and bbsnav's `h` override hands back its own glyph (0x59D).
-_BOARD = "2:1"  # Climbing BBS
-_YOSEMITE = "0:256"  # _mnid_key(0, 0x100)
-_RE_YOSEMITE = "0:512"  # _mnid_key(0, 0x200)
+# Sample-board node ids, decimal wire form `field_8:field_c` = message id : board
+# id. The board itself carries message id 0 — GetParent (0x7F5F12CE) reaches it by
+# zeroing field_8, and GetThreadParent (0x7F5F1C3E) reaches a parent post by
+# swapping `_P` into field_8.
+_BOARD = "0:1"  # Climbing BBS
+_YOSEMITE = "256:1"  # msg 0x100 on board 1
+_RE_YOSEMITE = "512:1"  # msg 0x200, _P = 0x100
 _SPORTS_CATEGORY = "1:266"  # DIRSRV "Sports, Health and Fitness" (f8 0x10A)
 
 
@@ -175,11 +176,11 @@ class TestBBSGetChildren(unittest.TestCase):
         self.assertEqual(_walk_records(payload), [])
 
     def test_dispatch_via_handler_returns_packet(self):
-        # Full read path: wire request (node_id (2,1) + propList "a,e") →
-        # decode → GetChildren reply → framed packet.
+        # Full read path: wire request (board mnid = message id 0, board id 1 +
+        # propList "a,e") → decode → GetChildren reply → framed packet.
         handler = BBSHandler(1, "BBS")
         wire = (
-            b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 2, 1)
+            b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 0, 1)
             + b"\x04" + bytes([0x80 | 4]) + b"a\x00e\x00"
             + b"\x83\x83\x85"
         )
@@ -294,6 +295,63 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
         self.assertGreater(len(records), 1)
         for record in records:
             self.assertEqual(set(record), set(self.DIRSRV_TAGS.split("\x00")))
+
+
+class TestBBSMnidLayout(unittest.TestCase):
+    """`field_8` = message id, `field_c` = board id.
+
+    Two bbsnav functions depend on it: GetParent (0x7F5F12CE) zeroes field_8 to
+    reach the board, and GetThreadParent (0x7F5F1C3E) swaps `_P` into field_8 to
+    reach the parent post. Inverting the pair makes GetParent resolve a message
+    to itself, and opening it fails with "Cannot open message" before any wire
+    traffic.
+    """
+
+    @staticmethod
+    def _mnid(record):
+        return struct.unpack("<II", record["a"])  # (field_8, field_c)
+
+    def test_board_carries_message_id_zero(self):
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        field_8, field_c = self._mnid(record)
+        self.assertEqual(field_8, 0)
+        self.assertNotEqual(field_c, 0)
+
+    def test_messages_share_the_board_id_and_zeroing_field_8_reaches_the_board(self):
+        board = _walk_records(
+            build_bbs_get_properties_reply_payload(
+                DirsrvRequest(node_id=_BOARD, prop_group="a\x00e")
+            )
+        )[0]
+        _, board_id = self._mnid(board)
+
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e")
+        for record in _walk_records(build_bbs_get_children_reply_payload(request)):
+            field_8, field_c = self._mnid(record)
+            self.assertNotEqual(field_8, 0, record["e"])
+            self.assertEqual(field_c, board_id, record["e"])
+            # GetParent zeroes field_8; the result must be the board's key.
+            self.assertEqual(f"{0}:{field_c}", _BOARD, record["e"])
+
+    def test_reply_parent_id_names_a_sibling_message(self):
+        # `_P` goes into field_8, so it must equal the parent's message id while
+        # the board id stays put.
+        yosemite = _walk_records(
+            build_bbs_get_properties_reply_payload(
+                DirsrvRequest(node_id=_YOSEMITE, prop_group="a\x00e")
+            )
+        )[0]
+        parent_msg_id, board_id = self._mnid(yosemite)
+
+        reply = _walk_records(
+            build_bbs_get_properties_reply_payload(
+                DirsrvRequest(node_id=_RE_YOSEMITE, prop_group="a\x00e\x00_P")
+            )
+        )[0]
+        self.assertEqual(reply["_P"], parent_msg_id)
+        self.assertEqual(self._mnid(reply)[1], board_id)
+        self.assertEqual(f"{reply['_P']}:{board_id}", _YOSEMITE)
 
 
 class TestBBSPropertiesDialogTags(unittest.TestCase):

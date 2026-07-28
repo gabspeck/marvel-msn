@@ -74,6 +74,33 @@ So **`_P` is the parent's `field_8`**, and a parent must share the child's
 `field_8` is 0 can never have a thread parent, and `_P` cannot address a parent
 that differs in any other mnid field.
 
+### BBS mnid layout
+
+`CBbsNavTreeNode::GetParent` (`0x7F5F12CE`) pins the rest of it — it copies the
+node's mnid, **zeroes `field_8`**, and resolves that:
+
+```c
+memcpy(mnid, node+0x10, 24);
+mnid.field_8 = 0;
+HrGetPMtn(mnid, &parent);      // → the board
+```
+
+Both functions only make sense under one assignment:
+
+| field | meaning |
+|---|---|
+| `field_8` | **message id**; `0` on the board itself |
+| `field_c` | **board id** |
+| `_P` | parent *message id* (swapped into `field_8`); `0` on a conversation head |
+
+Everything checks out against it: zeroing the message id yields the board,
+`_P` names a sibling post in the same board, and `field_8 == 0` short-circuits
+"no thread parent" because a board has no thread. Inverting the pair makes
+`GetParent` resolve a message **to itself**, and the reader's open path rejects
+that with "Cannot open message.##This task cannot be completed" — reported by
+`FUN_7F5F99C1(hr, 0x44E)` before any wire traffic, so the server log stays
+silent.
+
 The return value is the conversation test. `FUN_7F5F2E6C` (view slot `+0x50`)
 calls it and passes "has a parent" as the ingest flag, which lands in the store
 entry at `+0x1C`. `FUN_7F5F5DE4` increments the conversation counter

@@ -462,21 +462,34 @@ def _bbs_node(
 # "Sports, Health and Fitness" (CATEGORY_DEFS f8 0x10A) hosts the board.
 _SPORTS_HEALTH_FITNESS_KEY = f"1:{0x10A}"
 
+# BBS mnid layout, pinned by two bbsnav functions that must agree:
+#   field_8 = message id, 0 on the board itself
+#   field_c = board id
+#   `_P`    = parent message id (goes into field_8), 0 on a conversation head
+# `CBbsNavTreeNode_GetParent` (0x7F5F12CE) zeroes field_8 to reach the board, and
+# `CBbsNavTreeNode_GetThreadParent` (0x7F5F1C3E) swaps `_P` into field_8 to reach
+# the parent post — which also makes field_8 == 0 mean "no thread parent",
+# correct for a board. `_mnid_key(f0, f8)` puts its first argument in the
+# client's field_8 and its second in field_c, so the message id comes first here.
+# Getting this backwards makes GetParent return the message itself and the reader
+# fails with "Cannot open message" before any wire traffic.
+_BBS_BOARD_ID = 0x1
+
 _CLIMBING_BBS = _bbs_node(
-    2, 0x1, "Climbing BBS", is_container=True, has_children=True, delegate=True
+    0,
+    _BBS_BOARD_ID,
+    "Climbing BBS",
+    is_container=True,
+    has_children=True,
+    delegate=True,
 )
-# Conversations and messages use f0=0, so the client's mnid field_8 is 0.
-# CBbsNavTreeNode_GetProperty @ 0x7F5F1538 intercepts `h` and returns icon id
-# 0x59D (a bbsnav-local glyph) when node+0x18 == 0 — that is mnid.field_8 —
-# and 0x86 otherwise. The board keeps f0=2 so it stays a folder; everything
-# inside it must read as BBS content. Ids set in FUN_7F5F1000 @ 0x7F5F1000.
 # Authors and the Yosemite timestamp are transcribed from
 # reference/screenshots/bbs.png (list pane + reader header "Date: 10:12 AM
 # Tuesday, May 16, 1995"). The other two timestamps are NOT in the screenshot —
 # they are invented, ordered so the reply follows its parent.
 _BBS_YOSEMITE = _bbs_node(
-    0,
     0x100,
+    _BBS_BOARD_ID,
     "Yosemite",
     is_container=False,
     author="Chris Hahn",
@@ -485,16 +498,16 @@ _BBS_YOSEMITE = _bbs_node(
     body=_YOSEMITE_BODY,
 )
 _BBS_BRITISH_CLIMBERS = _bbs_node(
-    0,
     0x101,
+    _BBS_BOARD_ID,
     "British Climbers",
     is_container=False,
     author="KEITH SUTTON",
     date="May 15, 1995 8:22 AM",
 )
 _BBS_RE_YOSEMITE = _bbs_node(
-    0,
     0x200,
+    _BBS_BOARD_ID,
     "RE: Yosemite",
     is_container=False,
     author="Chris Shannon",
