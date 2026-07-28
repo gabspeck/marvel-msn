@@ -357,20 +357,30 @@ _YOSEMITE_BODY = (
 def _bbs_date_to_unix(s):
     """Parse a fixture `%B %d, %Y %I:%M %p` timestamp into a Unix time_t.
 
-    The string is **local wall-clock time**, i.e. what the client should display.
-    `_D` is a time_t that MOSSHELL renders through the local timezone, so parsing
-    as UTC made the Date column read an hour later than the same fixture's
-    `v`/`w` dialog strings (which pass through verbatim) — and an hour later than
-    reference/screenshots/bbs.png, whose reader header reads "10:12 AM".
-    Interpreting the fixture as local time keeps the column, the dialog and the
-    reference in agreement.
+    The string is **local wall-clock time**, i.e. what the client should display,
+    matching reference/screenshots/bbs.png whose reader header reads "10:12 AM".
+
+    Converted with the **current** UTC offset, not the offset that was in force
+    on the fixture's date. Windows 95 has no historical timezone database — it
+    applies its single current rule to every timestamp — so a 1995 `_D` is
+    rendered by the client with today's offset. Python's `.timestamp()` would
+    instead honor the 1995 rule (e.g. Europe/Lisbon ran CEST +0200 until 1996),
+    which put the Date column an hour behind the `v`/`w` dialog strings that pass
+    through verbatim. Using the current offset makes the column, the dialog and
+    the reference agree.
+
+    Assumes the client's timezone matches this host's. Both live on the same
+    machine here; a real deployment would format dialog strings from the
+    member's profile timezone instead.
 
     Empty input → 0, which build_bbs_props still emits as `_D` = 0 (never
     omitted — an omitted tag truncates the record).
     """
     if not s:
         return 0
-    return int(datetime.datetime.strptime(s, "%B %d, %Y %I:%M %p").timestamp())
+    naive = datetime.datetime.strptime(s, "%B %d, %Y %I:%M %p")
+    offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
+    return int((naive - offset).replace(tzinfo=datetime.UTC).timestamp())
 
 
 def _bbs_node(

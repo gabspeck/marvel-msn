@@ -323,17 +323,25 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
         self.assertEqual(record["v"], "May 16, 1995 10:12 AM")
         self.assertEqual(record["w"], "May 16, 1995 10:12 AM")
 
-    def test_dialog_date_string_agrees_with_the_D_timestamp(self):
-        # `_D` is a time_t the client renders through the local timezone, while
-        # `v`/`w` pass through verbatim. They must describe the same wall clock
-        # or the Date column and the dialog disagree by the UTC offset.
+    def test_dialog_date_string_agrees_with_what_the_client_renders(self):
+        # `_D` is a time_t the client renders through its own timezone, while
+        # `v`/`w` pass through verbatim. They must describe the same wall clock.
+        # Model the client, not this host: Windows 95 has no historical timezone
+        # database, so it applies its CURRENT offset even to a 1995 timestamp.
+        # Comparing against datetime.fromtimestamp() would instead use the 1995
+        # rule and drift wherever the two differ (Europe/Lisbon: +0200 in 1995,
+        # +0100 today).
         import datetime
 
         request = DirsrvRequest(node_id=_YOSEMITE, prop_group="v\x00_D")
         record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
-        as_local = datetime.datetime.fromtimestamp(record["_D"])
+        offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
+        as_client_shows_it = (
+            datetime.datetime.fromtimestamp(record["_D"], datetime.UTC).replace(tzinfo=None)
+            + offset
+        )
         from_string = datetime.datetime.strptime(record["v"], "%B %d, %Y %I:%M %p")
-        self.assertEqual(as_local, from_string)
+        self.assertEqual(as_client_shows_it, from_string)
 
     def test_dialog_tags_are_never_answered_with_a_dword_stand_in(self):
         # Every string-shaped dialog tag must arrive as 0x0B, not DWORD 0.

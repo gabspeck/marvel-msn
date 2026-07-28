@@ -136,10 +136,17 @@ Synthesised / non-extra tags BBS also touches:
   place the LCID at offset +4, so MCM's browse-language reader
   (`*(u32*)(value + 4)`) is satisfied either way.
 - **Dates must agree across representations.** `_D` is a `time_t` the client
-  renders through the **local** timezone; `v`/`w` are server-formatted strings
-  passed through verbatim. Derive both from the same wall-clock instant, or the
-  listview Date column and the dialog's Created field differ by the client's UTC
-  offset.
+  renders through its own timezone; `v`/`w` are server-formatted strings passed
+  through verbatim. Derive both from the same wall-clock instant, or the listview
+  Date column and the dialog's Created field differ by the client's UTC offset.
+
+  When converting a wall clock to `_D`, use the client's **current** UTC offset,
+  not the offset in force on the timestamp's date. Windows 95 carries no
+  historical timezone database — it applies its single current rule to every
+  timestamp — so a 1995 `_D` is displayed with today's offset. Any server-side
+  conversion that honors historical rules (Python's `datetime.timestamp()` does)
+  drifts wherever the two disagree: Europe/Lisbon ran CEST +0200 in 1995 and WEST
+  +0100 today, which put the Date column an hour behind the dialog.
 - **`h`** (icon) is *not* taken from the wire. `CBbsNavTreeNode_GetProperty`
   (`0x7F5F1538`) intercepts `GetProperty("h")` and returns one of two local icon
   ids (`g_0x7F60D380` if node+0x18 == 0, else `g_0x7F60D35C`). Emit nothing for
