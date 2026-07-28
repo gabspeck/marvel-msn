@@ -135,9 +135,19 @@ class TestBBSGetChildren(unittest.TestCase):
         request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e\x00_a")
         payload = build_bbs_get_children_reply_payload(request)
         records = _walk_records(payload)
+        # Authors per reference/screenshots/bbs.png.
         self.assertEqual([r["e"] for r in records], ["Yosemite", "British Climbers"])
-        self.assertEqual(records[0]["_a"], "Chris Shannon")
+        self.assertEqual(records[0]["_a"], "Chris Hahn")
         self.assertEqual(records[1]["_a"], "KEITH SUTTON")
+
+    def test_every_message_carries_an_author_and_a_date(self):
+        # A real post always has both. A missing `_D` used to be skipped
+        # entirely, which truncated the record; a missing date now still ships
+        # as 0, but the fixtures should not rely on that.
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e\x00_a\x00_D")
+        for record in _walk_records(build_bbs_get_children_reply_payload(request)):
+            self.assertTrue(record["_a"], record["e"])
+            self.assertGreater(record["_D"], 0, record["e"])
 
     def test_reply_record_carries_parent_subid(self):
         # Yosemite (2:256) → RE: Yosemite, whose _P points back at Yosemite's

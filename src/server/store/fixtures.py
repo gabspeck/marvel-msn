@@ -454,25 +454,35 @@ _CLIMBING_BBS = _bbs_node(
 # 0x59D (a bbsnav-local glyph) when node+0x18 == 0 — that is mnid.field_8 —
 # and 0x86 otherwise. The board keeps f0=2 so it stays a folder; everything
 # inside it must read as BBS content. Ids set in FUN_7F5F1000 @ 0x7F5F1000.
+# Authors and the Yosemite timestamp are transcribed from
+# reference/screenshots/bbs.png (list pane + reader header "Date: 10:12 AM
+# Tuesday, May 16, 1995"). The other two timestamps are NOT in the screenshot —
+# they are invented, ordered so the reply follows its parent.
 _BBS_YOSEMITE = _bbs_node(
     0,
     0x100,
     "Yosemite",
     is_container=False,
-    author="Chris Shannon",
+    author="Chris Hahn",
     date="May 16, 1995 10:12 AM",
     has_children=True,
     body=_YOSEMITE_BODY,
 )
 _BBS_BRITISH_CLIMBERS = _bbs_node(
-    0, 0x101, "British Climbers", is_container=False, author="KEITH SUTTON"
+    0,
+    0x101,
+    "British Climbers",
+    is_container=False,
+    author="KEITH SUTTON",
+    date="May 15, 1995 8:22 AM",
 )
 _BBS_RE_YOSEMITE = _bbs_node(
     0,
     0x200,
     "RE: Yosemite",
     is_container=False,
-    author="KEITH SUTTON",
+    author="Chris Shannon",
+    date="May 17, 1995 3:45 PM",
     parent_subid=0x100,
 )
 
