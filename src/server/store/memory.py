@@ -26,6 +26,17 @@ class InMemoryContentStore:
                 return node
         return None
 
+    def has_children(self, node_id):
+        # Backs 'b' bit 0x02 (SFGAO_HASSUBFOLDER). Deliberately unfiltered by
+        # locale: the attribute is asked per-pidl outside any browse request,
+        # so there is no LCID in hand.
+        ids = self._children.get(node_id)
+        if ids is None:
+            # Mirrors get_children's permissive fallback, which yields one
+            # sentinel child for unlisted nodes.
+            return True
+        return bool(ids)
+
     def get_children(self, node_id, locale_raw=None):
         # Permissive fallback: any node without an explicit child list resolves
         # to [fallback]. CMosTreeNode::Exec caches 'z'/'c' from the GetChildren

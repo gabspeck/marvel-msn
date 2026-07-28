@@ -6,6 +6,7 @@ import struct
 from ..config import (
     DIRSRV_BROWSE_FLAGS_CONTAINER,
     DIRSRV_BROWSE_FLAGS_DELEGATE,
+    DIRSRV_BROWSE_FLAGS_HAS_CHILDREN,
     DIRSRV_BROWSE_FLAGS_LEAF,
     DIRSRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
@@ -262,6 +263,23 @@ def build_props(requested_props, node, *, is_children):
             )
             if node.delegate:
                 flag |= DIRSRV_BROWSE_FLAGS_DELEGATE
+            # Bit 0x02 = SFGAO_HASSUBFOLDER, per CMosShellFolder::GetAttributesOf
+            # @ 0x7F3F2EE0. Explorer builds its namespace tree from this word;
+            # a container that leaves the bit clear is a folder Explorer
+            # believes is empty. Only meaningful alongside a clear bit 0x01 —
+            # GetAttributesOf ORs SFGAO_FOLDER before it looks at 0x02, so
+            # setting it on a leaf yields HASSUBFOLDER without FOLDER.
+            #
+            # Delegates are excluded on purpose: setting 0x02 takes the JNZ at
+            # 0x7F3F2F6A and skips the inner-node re-query, which is how the
+            # plug-in (bbsnav) reports its own children. Let the inner node
+            # answer for those.
+            if (
+                not (flag & DIRSRV_BROWSE_FLAGS_LEAF)
+                and not node.delegate
+                and _default_store.content.has_children(node.node_id)
+            ):
+                flag |= DIRSRV_BROWSE_FLAGS_HAS_CHILDREN
             out.append((0x01, PROP_BROWSE_FLAGS, bytes([flag & 0xFF])))
         elif name == PROP_APP_ID:
             out.append((0x03, PROP_APP_ID, struct.pack("<I", node.app_id)))

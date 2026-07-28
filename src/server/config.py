@@ -59,11 +59,24 @@ MPC_CLASS_ONEWAY_MASK = 0xE0
 # PROTOCOL.md §7.2.4 / CMosTreeNode::ExecuteCommand:
 #   bit 0x01 clear = container (browse)
 #   bit 0x01 set   = leaf (exec)
+#   bit 0x02 set   = container has children  → SFGAO_HASSUBFOLDER
 #   bit 0x04 set   = delegate (HrSetupDelegate reads 'c'/'l'/'i' and hands the
 #                    folder to app 'c' navigator)
 #   bit 0x08 set   = server-denied
+#
+# Bit 0x02 is read by CMosShellFolder::GetAttributesOf @ MOSSHELL 0x7F3F2EE0,
+# which builds each pidl's SFGAO word from 'b' alone (disassembly at
+# 0x7F3F2F47..0x7F3F2FA8):
+#   base                 = 0x00040044
+#   bit 0x01 clear       → |= 0x20000000  SFGAO_FOLDER
+#   bit 0x02 set         → |= 0x80000000  SFGAO_HASSUBFOLDER, and SKIP the
+#                          inner-node re-query (JNZ at 0x7F3F2F6A)
+#   bit 0x02 clear       → re-ask the inner/delegate node (vtable +0x18 →
+#                          its own 'b') and OR 0x80 into the attr high byte
+# Leaving bit 0x02 clear tells Explorer the folder has no subfolders.
 DIRSRV_BROWSE_FLAGS_CONTAINER = 0x00
 DIRSRV_BROWSE_FLAGS_LEAF = 0x01
+DIRSRV_BROWSE_FLAGS_HAS_CHILDREN = 0x02
 DIRSRV_BROWSE_FLAGS_DELEGATE = 0x04
 DIRSRV_BROWSE_FLAGS_DENIED = 0x08
 DIRSRV_BROWSE_FLAGS_LEAF_DENIED = DIRSRV_BROWSE_FLAGS_LEAF | DIRSRV_BROWSE_FLAGS_DENIED
