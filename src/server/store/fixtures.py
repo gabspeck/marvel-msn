@@ -344,16 +344,18 @@ _MEDVIEW_TESTS_KEY = f"1:{0x10E}"
 # node starts with an empty property cache, and that is fine — FindProperty
 # (MOSSHELL 0x7F3FCE12) fetches on a cache miss via slot 14
 # GetPropertyFromHost. A `news:`/`msn:` URL jump reaches the same board.
-# Threading is the tree itself — a reply is a child of the message it answers,
-# so recursive GetChildren yields the indented thread list. The f0=2 namespace
-# keeps BBS mnids from colliding with DIRSRV's f0=1; all BBS nodes are
-# language=0 (locale-neutral) so they survive a filter_on=1 GetChildren.
+# The tree under a board is FLAT — every message, reply included, is a direct
+# child of the board. Threading is carried by `_P` alone:
+# CBbsNavTreeNode_GetThreadParent (0x7F5F1C3E) copies the node's own mnid and
+# overwrites field_8 with `_P`, so a parent and its reply are siblings sharing
+# field_c. The reader enumerates the board once — one FUN_7F5F2E6C ingest call
+# per child — and never asks a message for children, so a reply nested under
+# its parent never reaches the list at all. The f0=2 namespace keeps BBS mnids
+# from colliding with DIRSRV's f0=1; all BBS nodes are language=0
+# (locale-neutral) so they survive a filter_on=1 GetChildren.
 # Mirrors reference/screenshots/bbs.png.
 
-# Yosemite conversation body, transcribed from bbs.png. Seeded for the deferred
-# message-body wire gap: BbsFields.body is NOT yet emitted on the wire — the
-# reader's body source is a contract-flagged bounded gap (RichEdit-hosted,
-# GetPropertyToFile is only an inherited thunk) pending a live SoftICE trace.
+# Yosemite conversation body, transcribed from bbs.png.
 _YOSEMITE_BODY = (
     "In case anyone is thinking of a trip to Yosemite, prepare for water. "
     "I just got back from a wet trip that allowed me to see the best "
@@ -416,9 +418,14 @@ def _bbs_node(
 
     `is_container` means **board or folder**, not "has replies" — it drives `b`
     bit 0x01 (CLEAR = container, SET = message), which is bbsnav's conversation
-    test. A conversation head is a message that has children, so it takes
-    is_container=False with has_children=True; `_F` carries the expand gate
-    independently.
+    test. Every message takes is_container=False, whether or not anything
+    replies to it; a reply is expressed by `parent_subid` (`_P`), not by tree
+    position.
+
+    `has_children` drives `_F` bit 0x1000, the child-count gate read by
+    CBbsNavTreeNode_OkToGetChildren (0x7F5F1427). Only the board sets it —
+    messages have no tree children, so leaving it False stops the reader
+    asking for children that do not exist.
 
     Rides DirectoryNode with app_id=APP_BBS_SERVICE and language=0; the
     BBS-specific tags (`_a/_D/_P/_t/_F`) live in the attached BbsFields, read by
@@ -515,7 +522,6 @@ _BBS_YOSEMITE = _bbs_node(
     is_container=False,
     author="Chris Hahn",
     date="May 16, 1995 10:12 AM",
-    has_children=True,
     body=_YOSEMITE_BODY,
 )
 _BBS_BRITISH_CLIMBERS = _bbs_node(
@@ -679,10 +685,20 @@ DIRECTORY_CHILDREN = {
     # Threading is the tree itself — replies are children of the message they
     # answer, so recursive GetChildren yields the indented thread view.
     _SPORTS_HEALTH_FITNESS_KEY: [_CLIMBING_BBS.node_id],
-    _CLIMBING_BBS.node_id: [_BBS_YOSEMITE.node_id, _BBS_BRITISH_CLIMBERS.node_id],
-    _BBS_YOSEMITE.node_id: [_BBS_RE_YOSEMITE.node_id],
-    _BBS_BRITISH_CLIMBERS.node_id: [],
+    # Every message is a direct child of the board, replies included. The
+    # reader enumerates the board once and never asks a message for children,
+    # so a reply nested under its parent is simply never seen. Order places a
+    # reply after the message it answers.
+    _CLIMBING_BBS.node_id: [
+        _BBS_YOSEMITE.node_id,
+        _BBS_RE_YOSEMITE.node_id,
+        _BBS_BRITISH_CLIMBERS.node_id,
+    ],
+    # Explicit and empty: ContentStore.get_children answers an unlisted node
+    # with the fallback sentinel, which would inject a bogus row.
+    _BBS_YOSEMITE.node_id: [],
     _BBS_RE_YOSEMITE.node_id: [],
+    _BBS_BRITISH_CLIMBERS.node_id: [],
     # Explicit empty children for the `4:0` startup node — avoids the
     # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
     # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.

@@ -5,9 +5,10 @@ as DSNAV — a MOSSHELL `_NtniGroup` wrapping a TREENVCL `CTreeNavClient`, opene
 on the service named "BBS" (docs/bbs-service-contract.md §Framing). The wire
 request/reply shapes are therefore identical to DIRSRV; only the per-node
 property vocabulary differs (`e, _a, p, _D, _P, _t, _F, _I, _f` + base `a/c/b`).
-A board/conversation/reply is a `CMosTreeNode` and threading is the tree itself:
-a reply is a child of the message it answers, so recursive GetChildren yields
-the indented thread list.
+A board/conversation/reply is a `CMosTreeNode`, but the tree under a board is
+flat: every message is a direct child of the board and threading rides the `_P`
+property. The reader enumerates the board once and never asks a message for
+children, so a reply nested under its parent never reaches the list.
 
 Write/edit channel (TREEEDCL `CTreeEditClient`, selectors 0–12) is out of
 scope. A Compose first sends `GetTicket` (selector 12) to obtain a capability
@@ -287,11 +288,12 @@ def build_bbs_get_properties_reply_payload(request):
 
 
 def build_bbs_get_children_reply_payload(request):
-    """BBS GetChildren (selector 0x02): the threaded child list.
+    """BBS GetChildren (selector 0x02): every message on the board.
 
-    board → conversations, conversation → replies (recursive). `locale_raw` is
-    forwarded so a filter_on=1 request still resolves — BBS nodes are
-    language=0 (locale-neutral) and survive every locale filter.
+    One flat list — replies included, since threading rides `_P` rather than
+    tree position. `locale_raw` is forwarded so a filter_on=1 request still
+    resolves; BBS nodes are language=0 (locale-neutral) and survive every
+    locale filter.
     """
     requested = _requested_props(request.prop_group)
     children = _default_store.content.get_children(request.node_id, request.locale_raw)

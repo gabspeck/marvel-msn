@@ -178,14 +178,20 @@ class TestBBSGetProperties(unittest.TestCase):
 
 
 class TestBBSGetChildren(unittest.TestCase):
-    def test_board_children_are_two_conversations_with_author(self):
+    def test_board_lists_every_message_including_replies(self):
+        # The tree under a board is flat — the reader enumerates the board once
+        # and never asks a message for children, so a reply nested under its
+        # parent would never reach the list. Order puts a reply after the
+        # message it answers.
         request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e\x00_a")
-        payload = build_bbs_get_children_reply_payload(request)
-        records = _walk_records(payload)
+        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        self.assertEqual(
+            [r["e"] for r in records],
+            ["Yosemite", "RE: Yosemite", "British Climbers"],
+        )
         # Authors per reference/screenshots/bbs.png.
-        self.assertEqual([r["e"] for r in records], ["Yosemite", "British Climbers"])
         self.assertEqual(records[0]["_a"], "Chris Hahn")
-        self.assertEqual(records[1]["_a"], "KEITH SUTTON")
+        self.assertEqual(records[2]["_a"], "KEITH SUTTON")
 
     def test_every_message_carries_an_author_and_a_date(self):
         # A real post always has both. A missing `_D` used to be skipped
@@ -197,21 +203,28 @@ class TestBBSGetChildren(unittest.TestCase):
             self.assertGreater(record["_D"], 0, record["e"])
 
     def test_reply_record_carries_parent_subid(self):
-        # Yosemite (2:256) → RE: Yosemite, whose _P points back at Yosemite's
-        # f8 (0x100) for CBbsNavTreeNode_GetThreadParent / HrGetPMtn.
-        request = DirsrvRequest(node_id=_YOSEMITE, prop_group="a\x00e\x00_a\x00_P")
-        payload = build_bbs_get_children_reply_payload(request)
-        records = _walk_records(payload)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["e"], "RE: Yosemite")
-        self.assertEqual(records[0]["_P"], 0x100)
+        # RE: Yosemite is a SIBLING of Yosemite whose _P holds Yosemite's f8
+        # (0x100). GetThreadParent copies the reply's own mnid and overwrites
+        # field_8 with _P, so the two must differ in nothing else.
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e\x00_P")
+        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        by_name = {r["e"]: r for r in records}
+        self.assertEqual(by_name["RE: Yosemite"]["_P"], 0x100)
+        self.assertEqual(by_name["Yosemite"]["_P"], 0)
+        # Same field_c (board), different field_8 — the only difference _P can
+        # express.
+        parent_a = struct.unpack("<II", by_name["Yosemite"]["a"])
+        reply_a = struct.unpack("<II", by_name["RE: Yosemite"]["a"])
+        self.assertEqual(parent_a[1], reply_a[1])
+        self.assertEqual(parent_a[0], by_name["RE: Yosemite"]["_P"])
 
-    def test_terminal_message_has_no_children(self):
-        # RE: Yosemite (2:512) is a leaf reply — empty thread list, no fallback
-        # sentinel leaking into the listview.
-        request = DirsrvRequest(node_id=_RE_YOSEMITE, prop_group="a\x00e")
-        payload = build_bbs_get_children_reply_payload(request)
-        self.assertEqual(_walk_records(payload), [])
+    def test_no_message_reports_children(self):
+        # Messages are leaves: the reader must never fetch a thread list from
+        # one, and an unlisted node would answer with the fallback sentinel.
+        for node_id in (_YOSEMITE, _RE_YOSEMITE, "257:1"):
+            request = DirsrvRequest(node_id=node_id, prop_group="a\x00e")
+            payload = build_bbs_get_children_reply_payload(request)
+            self.assertEqual(_walk_records(payload), [], node_id)
 
     def test_dispatch_via_handler_returns_packet(self):
         # Full read path: wire request (board mnid = message id 0, board id 1 +
@@ -295,13 +308,10 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
         request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00b\x00e\x00_F")
         for record in _walk_records(build_bbs_get_children_reply_payload(request)):
             self.assertEqual(record["b"] & 0x01, 0x01, record["e"])
-        # Yosemite is a leaf `b` but still expandable: _F bit 0x1000 clear.
-        yosemite = next(
-            r
-            for r in _walk_records(build_bbs_get_children_reply_payload(request))
-            if r["e"] == "Yosemite"
-        )
-        self.assertEqual(yosemite["_F"] & 0x1000, 0)
+            # And every message is a leaf in the tree too — replies hang off
+            # `_P`, not off the message. OkToGetChildren (0x7F5F1427) forces
+            # the child count to 0 when _F bit 0x1000 is set.
+            self.assertEqual(record["_F"] & 0x1000, 0x1000, record["e"])
 
     def test_bbs_board_record_has_no_gaps(self):
         # The board has no author, topic or date — every one of those must

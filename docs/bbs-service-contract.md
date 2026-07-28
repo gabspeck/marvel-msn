@@ -52,14 +52,17 @@ BBS-specific opcode space.
 
 | Tree level | What it is | Children |
 |---|---|---|
-| Board folder | a BBS board / forum (e.g. "Climbing BBS") | conversations (top-level messages) |
-| Conversation root | a top-level message | its replies |
-| Reply | a `RE:` message | its replies (recursive) |
+| Board folder | a BBS board / forum (e.g. "Climbing BBS") | every message on the board |
+| Message | a post, whether a conversation head or a `RE:` reply | none |
 
-Threading is **the tree itself**: a reply is a child node of the message it
-answers, so `GetChildren` recursion yields the indented thread view. Each node
-*also* carries an explicit parent pointer in `_P`, and its exact meaning is
-fixed by `CBbsNavTreeNode_GetThreadParent` (`0x7F5F1C3E`):
+The tree under a board is **flat**. The reader enumerates the board once — one
+`FUN_7F5F2E6C` ingest call per child — and never asks a message for children,
+so a reply nested under the message it answers never reaches the list at all.
+A board therefore returns replies alongside conversation heads, and a message
+sets `_F` bit `0x1000` (no children).
+
+Threading rides `_P` alone, and its exact meaning is fixed by
+`CBbsNavTreeNode_GetThreadParent` (`0x7F5F1C3E`):
 
 ```c
 memcpy(mnid, node+0x10, 24);          // the node's own 24-byte mnid
@@ -70,9 +73,16 @@ HrGetPMtn(mnid, &parent);             // parent = same mnid, field_8 := _P
 ```
 
 So **`_P` is the parent's `field_8`**, and a parent must share the child's
-`field_0`, `field_c` and `field_10`. Two consequences: a node whose own
-`field_8` is 0 can never have a thread parent, and `_P` cannot address a parent
-that differs in any other mnid field.
+`field_0`, `field_c` and `field_10`. Three consequences: a node whose own
+`field_8` is 0 can never have a thread parent, `_P` cannot address a parent
+that differs in any other mnid field, and a message and its reply are
+**siblings** — which is why the tree under a board is flat.
+
+`FUN_7F5F2E6C` calls `GetThreadParent` per ingested node and passes the low
+byte of the resulting pointer to `FUN_7F5F5B4A` as the ingest flag, so "has a
+thread parent" is the only thread fact recorded at ingest time. It lands in the
+store entry at `+0x1C`, and `FUN_7F5F5DE4` counts a conversation only when that
+bit is clear.
 
 ### BBS mnid layout
 
