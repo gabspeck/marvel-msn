@@ -180,7 +180,9 @@ MPCCL iterator, splits it at the first blank line, hands the headers to
 `FUN_7F5FB4A9` (header → MAPI tag table at `0x7F610A50`) and the rest to an
 in-memory IStream. `FUN_7F5FC56F` then reads `X-MOS-Format` (`0x6801001E`) back
 and streams the body into the RichEdit via EM_STREAMIN as `TEXT`, `RTF` or
-`RTFCOMP`. Full shape in `docs/bbs-service-contract.md` §Message-content channel.
+`RTFCOMP`. `TEXT` draws in the control's default Courier New, so the body font
+in `reference/screenshots/bbs.png` means the real bodies were RTF. Full shape in
+`docs/bbs-service-contract.md` §Message-content channel.
 
 ## 9. Write / posting pipeline
 

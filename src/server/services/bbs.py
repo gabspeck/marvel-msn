@@ -59,11 +59,24 @@ BBS_SELECTOR_GET_ARTICLE = 0x00
 # renderer `FUN_7F5FC56F` @ 0x7F5FC56F. It reads MAPI property 0x6801001E off
 # the message, then:
 #   "RTFCOMP" → EM_STREAMIN SF_RTF, stream wrapped by WrapCompressedRTFStream
+#               (MAPI32 ordinal 185, behind an ordinal-21 init call)
 #   "TEXT"    → EM_STREAMIN SF_TEXT
 #   "RTF"     → EM_STREAMIN SF_RTF, stream passed through raw
 # Any other value, or a missing header (the property then reads back PT_ERROR,
 # type 0x0A), aborts the render with 0x8B0B0049.
-BBS_FORMAT_TEXT = "TEXT"
+#
+# We send RTF. SF_TEXT leaves the RichEdit on its own default font, which draws
+# the body in Courier New — reference/screenshots/bbs.png shows proportional MS
+# Sans Serif, so the font has to come from the stream. RTF is the raw path:
+# RTFCOMP would reach the same SF_RTF mode but only after MAPI32 loads and
+# `WrapCompressedRTFStream` succeeds, and nothing observed so far says the
+# service used compression.
+BBS_FORMAT_RTF = "RTF"
+
+# Body font for the generated RTF, matching the reader in
+# reference/screenshots/bbs.png. `\fs16` is 8pt — RTF half-points.
+_RTF_FONT = "MS Sans Serif"
+_RTF_FONT_HALF_POINTS = 16
 
 # Article header → MAPI property map, from the parse table BBSNAV builds at
 # 0x7F610A50 (initialiser at 0x7F5FAAEF, names/lengths copied out of the
@@ -362,11 +375,13 @@ def build_bbs_article(node):
     as headers.
 
     The body is streamed into a RichEdit control by `FUN_7F5FC56F` via
-    EM_STREAMIN, so it carries CRLF line breaks like any other RichEdit text.
+    EM_STREAMIN. It is an RTF document — see BBS_FORMAT_RTF — so its own line
+    breaks are RTF `\\par` control words and the raw newlines inside it are
+    only source formatting, which RTF readers discard.
     """
     content = node.content
     bbs = content.bbs or _EMPTY_BBS
-    body = bbs.body.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii", "replace")
+    body = build_body_rtf(bbs.body).encode("ascii")
 
     headers = [
         ("Path", "msn"),
@@ -375,12 +390,55 @@ def build_bbs_article(node):
         ("Subject", content.name),
         ("Date", _article_date(bbs.date_unix)),
         ("Message-ID", _message_id(node)),
-        ("X-MOS-Format", BBS_FORMAT_TEXT),
-        ("X-MOS-Size", str(len(body))),
+        ("X-MOS-Format", BBS_FORMAT_RTF),
+        # Plain-text length, matching the tree's `p`. Both land on MAPI tag
+        # 0x68030003, so a transfer-size value here would disagree with the
+        # Size column the list pane already shows.
+        ("X-MOS-Size", str(content.size_bytes)),
         ("X-MOS-Attach", "0"),
     ]
     head = "".join(f"{name}{_HEADER_SEP}{value}\n" for name, value in headers)
     return head.encode("ascii", "replace") + b"\n" + body
+
+
+def build_body_rtf(text):
+    """Wrap a plain-text body as an RTF document for EM_STREAMIN `SF_RTF`.
+
+    One font in the table and one `\\par` per source line, so a blank line in
+    the text stays a blank paragraph. The document is pure ASCII: anything
+    outside it goes out as `\\'hh` cp1252 escapes, which is what an RTF reader
+    of this vintage expects after `\\ansi`.
+
+    Deliberately free of embedded objects. `FUN_7F5FC56F` runs two extra passes
+    in SF_RTF mode — `FUN_7F5FC7B7` walks EM_GETOLEINTERFACE
+    (`IRichEditOle::GetObjectCount`/`GetObject`) collecting objects of one
+    CLSID, and `FUN_7F5FC919` resolves each against the tree. Both are no-ops
+    at object count 0, which is the shape we ship.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    paragraphs = "\\par\n".join(_rtf_escape(line) for line in lines)
+    return (
+        "{\\rtf1\\ansi\\ansicpg1252\\deff0"
+        f"{{\\fonttbl{{\\f0\\fswiss\\fcharset0 {_RTF_FONT};}}}}"
+        f"\\pard\\f0\\fs{_RTF_FONT_HALF_POINTS} "
+        f"{paragraphs}\\par\n}}"
+    )
+
+
+def _rtf_escape(text):
+    """Escape one line of body text for an RTF stream."""
+    out = []
+    for ch in text:
+        if ch in "\\{}":
+            out.append("\\" + ch)
+        elif ch == "\t":
+            out.append("\\tab ")
+        elif " " <= ch <= "~":
+            out.append(ch)
+        else:
+            for byte in ch.encode("cp1252", errors="replace"):
+                out.append(f"\\'{byte:02x}")
+    return "".join(out)
 
 
 def _board_name(node):

@@ -344,11 +344,28 @@ strcmps it to pick the RichEdit stream mode:
 |---|---|
 | `TEXT` | `SF_TEXT` (1) |
 | `RTF` | `SF_RTF` (2), stream passed through |
-| `RTFCOMP` | `SF_RTF` (2), wrapped by `WrapCompressedRTFStream` (MAPI32 ordinal 185) |
+| `RTFCOMP` | `SF_RTF` (2), wrapped by `WrapCompressedRTFStream` (MAPI32 ordinal 185, behind an ordinal-21 init call) |
 
 The header is mandatory. Omit it and the property reads back PT_ERROR (type
-`0x0A`), which aborts the render with `0x8B0B0049`. Because the body reaches a
-RichEdit control, it carries CRLF line breaks; only the header block is LF-only.
+`0x0A`), which aborts the render with `0x8B0B0049`.
+
+`SF_TEXT` leaves the RichEdit on its own default font and the body draws in
+Courier New. The reference screenshot `reference/screenshots/bbs.png` shows
+proportional MS Sans Serif, so the font has to arrive inside the stream — i.e.
+the body is RTF, not plain text. `RTF` and `RTFCOMP` reach the same `SF_RTF`
+mode; nothing observed so far says which one the service used.
+
+In `SF_RTF` mode two extra passes run after the stream:
+
+- `FUN_7F5FC7B7` — `EM_GETOLEINTERFACE` (`0x043C`), then
+  `IRichEditOle::GetObjectCount` / `GetObject` over every embedded object,
+  keeping those whose CLSID matches `DAT_7F60E3E0` in an array at reader
+  `+0xC4` (count at `+0xC0`).
+- `FUN_7F5FC919` — reads `0x68160014` + `0x68150040` off the message and
+  resolves each kept object against the tree through `FUN_7F5FCEE5`.
+
+Both are guarded on a nonzero object count, so an RTF body with no embedded
+objects skips them entirely.
 
 Opening a message also makes the client read `_r` and `z` on the node
 (`props=_r,g` then `z,g`), and the status bar's unread count drops — so `_r` is

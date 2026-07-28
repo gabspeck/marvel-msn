@@ -486,7 +486,7 @@ class TestBBSArticle(unittest.TestCase):
         head, sep, body = article.partition(b"\n\n")
         self.assertEqual(sep, b"\n\n")
         self.assertNotIn(b"\r", head)
-        self.assertTrue(body.startswith(b"In case anyone is thinking"))
+        self.assertTrue(body.startswith(b"{\\rtf1"))
 
     def test_every_header_matches_the_tabled_name_exactly(self):
         # BBSNAV strncmps each line against a tabled name that includes its
@@ -497,11 +497,13 @@ class TestBBSArticle(unittest.TestCase):
             self.assertEqual(sep, ": ", line)
             self.assertFalse(value.startswith(" "), line)
 
-    def test_format_header_selects_the_plain_text_stream(self):
+    def test_format_header_selects_the_rich_text_stream(self):
         # FUN_7F5FC56F reads MAPI 0x6801001E and strcmps it. Absent, the
         # property reads back PT_ERROR and the render aborts with 0x8B0B0049.
+        # SF_TEXT leaves the control on its default font (Courier New); the
+        # reference screenshot is proportional, so the font must ride the RTF.
         head = self._article()[7:].partition(b"\n\n")[0]
-        self.assertIn(b"X-MOS-Format: TEXT\n", head)
+        self.assertIn(b"X-MOS-Format: RTF\n", head)
 
     def test_headers_carry_the_node_identity(self):
         head = self._article()[7:].partition(b"\n\n")[0]
@@ -512,17 +514,44 @@ class TestBBSArticle(unittest.TestCase):
         self.assertIn(b"Newsgroups: Climbing BBS\n", head)
         self.assertIn(b"Message-ID: <256.1@bbs.msn.com>\n", head)
 
-    def test_body_uses_richedit_line_breaks(self):
-        # The body is handed to EM_STREAMIN, so it carries CRLF like any other
-        # RichEdit text; only the header block is LF-only.
-        body = self._article()[7:].partition(b"\n\n")[2]
-        self.assertIn(b"\r\n\r\n", body)
-        self.assertNotIn(b"\n\n", body)
+    def test_body_is_a_self_contained_rtf_document(self):
+        body = self._article()[7:].partition(b"\n\n")[2].decode()
+        self.assertTrue(body.startswith("{\\rtf1\\ansi"))
+        self.assertTrue(body.endswith("}"))
+        self.assertEqual(body.count("{"), body.count("}"))
+        # The font has to come from the stream — that is the whole point of
+        # choosing SF_RTF over SF_TEXT.
+        self.assertIn("\\fonttbl", body)
+        self.assertIn("MS Sans Serif;", body)
+        self.assertIn("\\f0\\fs16 ", body)
 
-    def test_size_header_counts_the_body_as_sent(self):
-        article = self._article()[7:]
-        head, _sep, body = article.partition(b"\n\n")
-        self.assertIn(f"X-MOS-Size: {len(body)}\n".encode(), head)
+    def test_rtf_body_is_pure_ascii(self):
+        # `\\ansi` plus `\\'hh` escapes; a raw high byte in the stream would be
+        # read through whatever code page the control happens to be on.
+        body = self._article()[7:].partition(b"\n\n")[2]
+        self.assertTrue(all(b < 0x80 for b in body))
+
+    def test_blank_lines_survive_as_empty_paragraphs(self):
+        # The fixture separates paragraphs with a blank line. One \\par per
+        # source line keeps that shape instead of running the text together.
+        body = self._article()[7:].partition(b"\n\n")[2].decode()
+        self.assertIn("\\par\n\\par\n", body)
+        # Three paragraphs and two blank lines between them.
+        self.assertEqual(body.count("\\par\n"), 5)
+
+    def test_rtf_escapes_the_control_characters(self):
+        from server.services.bbs import build_body_rtf
+
+        doc = build_body_rtf("a\\b{c}d\te")
+        self.assertIn("a\\\\b\\{c\\}d\\tab e", doc)
+
+    def test_size_header_matches_the_tree_size_property(self):
+        # Both land on MAPI tag 0x68030003, so the header and the list pane's
+        # Size column must not disagree.
+        request = DirsrvRequest(node_id=_YOSEMITE, prop_group="p")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        head = self._article()[7:].partition(b"\n\n")[0]
+        self.assertIn(f"X-MOS-Size: {record['p']}\n".encode(), head)
 
     def test_date_header_shows_the_same_wall_clock_as_the_date_column(self):
         # Windows 95 applies its current timezone rule to every timestamp, so
@@ -547,9 +576,11 @@ class TestBBSArticle(unittest.TestCase):
         # must still split cleanly — an empty or malformed article parks the
         # fetch thread just as a missing reply does.
         article = self._article(msg_id=0xDEAD, board_id=0xBEEF)[7:]
-        head, sep, _body = article.partition(b"\n\n")
+        head, sep, body = article.partition(b"\n\n")
         self.assertEqual(sep, b"\n\n")
-        self.assertIn(b"X-MOS-Format: TEXT\n", head)
+        self.assertIn(b"X-MOS-Format: RTF\n", head)
+        self.assertTrue(body.startswith(b"{\\rtf1"))
+        self.assertTrue(body.endswith(b"}"))
 
 
 class TestBBSWriteSelectorDeferred(unittest.TestCase):
