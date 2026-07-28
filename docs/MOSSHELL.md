@@ -362,15 +362,35 @@ Batches `celt` children into the caller's `rgelt[]`:
 
 The snapshot owns child references; the enumerator only holds pidls.
 
-### 5.4 `CMosShellFolder::BindToObject`
+### 5.4 `CMosShellFolder::BindToObject` @ `0x7F3F2BFA`
 
-Not decompiled in detail here, but its contract is documented in memory
-`project_mosshell_addrbar_enum_path`:
+Explorer calls this to descend into a child folder — the address-bar
+drop-down selection path. It builds a **second** `CMosShellFolder` rather
+than re-pointing the current one:
 
-> Explorer's address-bar drop-down calls **BindToObject**; that fires the
-> wire `HrGetPMtn` → plug-in `GETPMTN` for the target. The listview's
-> refresh-existing-folder path calls **EnumObjects**, which reuses the
-> already-materialized snapshot without further wire traffic.
+1. `PvAlloc(0x50)` + outer ctor `FUN_7F3F211A` — all three tear-off slots
+   (`+0x24`, `+0x28`, `+0x2C`) start NULL.
+2. `FUN_7F3F223D` allocates the three 12-byte tear-offs. `+0x2C` gets ctor
+   `FUN_7F3F356B`, vtable `0x7F40CCC8` — the IMosTreeNode-facing tear-off
+   that `EnumObjects` (§5.1) later reads back.
+3. Outer `QueryInterface(riid, ppv)` — on failure, dtor + free.
+4. `(*pTearOff2C->vtable[+0x14])(pidl, 0)` — **SetPidl** @ `0x7F3F361E`:
+   releases the previous node at `outer+0x48`, frees the previous pidl at
+   `outer+0x44`, stores `IDL_Clone(pidl)` into `+0x44`, then resolves
+   `HrGetPMtnFromPIdl(pidl, outer+0x48, 0)`.
+5. `(*pTearOff2C->vtable[+0x1C])(parentFolder->outer+0x40)` — propagates the
+   caller's `+0x40` slot into the new folder.
+
+**The bound node comes from the pidl's LAST segment.**
+`HrGetPMtnFromPIdl` @ `0x7F3FB68E` is `IDL_PIdLast(pidl)` + `HrGetPMtn` on
+the MNID at `+0x10` of that segment — the same tail-segment rule
+`GetDisplayNameOf` (§6.1) uses. Title and enumeration therefore always
+resolve to the same node; a window whose title and listview disagree did
+not get its listview from this path.
+
+Wire traffic is whatever `HrGetPMtn` needs (cache hit = none), plus the
+`GetChildren` that `EnumObjects` → `CMosEnumIDList_Init` → GetSnap fires on
+the newly bound node.
 
 ### 5.5 PIDL helpers used by navigation
 
@@ -380,12 +400,25 @@ Not decompiled in detail here, but its contract is documented in memory
   fresh `0x28 + tail_size`-byte pidl stamped with
   `{cb=0x28, mnidType=0x1B70A, flags=1}` and the parent's canonical MNID.
   No wire traffic.
-- **`HrResolvePidlAndWaitChildren`** @ `0x7F3F270A` — used by address-bar
-  navigation to synchronously wait until a node's children are populated
-  before Explorer asks `EnumObjects`. Resolves the pidl via `HrGetPMtn`,
-  reads `'b'` (folder vs leaf) and `'c'` (app_id), then waits on
-  `DAT_7F40E03C` (the DNR/child-ready event):
-  `c == 7` blocks forever, else 30s bounded with `DnrJobCount` bumped.
+- **`HrResolvePidlAndWaitChildren`** @ `0x7F3F270A` — **sole caller is
+  `FUN_7F3F28BC`**, the `'X'` / Mosxapi branch of `ParseDisplayName`
+  (§7.4), which pulls the pidl bytes out of
+  `HKCU\SOFTWARE\Microsoft\MOS\Mosxapi\<key>`, `RegDeleteValueA`s them, and
+  hands them here. Confirmed by `function_callers` — exactly one caller. It
+  is **not** on the address-bar path (§5.4 is), so it gates nothing about
+  listview refresh.
+
+  `IDL_Clone` the pidl, `HrGetPMtn` on the tail segment's MNID, then read
+  `'b'` (`DAT_7F40E1C4`, cap 1, type 1) and branch:
+
+  | `'b'` / mnid | Behavior |
+  |---|---|
+  | bit `0x01` **clear** (container) | Store the cloned pidl in `*ppidlOut`, return S_OK. **No wait, no Exec** — the caller browses it. |
+  | bit set, `mnid->field_0 == 2` | Re-resolve, call node `vtable[+0xD0]` with the tail segment's `+0x18` word, zero that word, collapse the pidl to one segment, return it. |
+  | bit set, otherwise (leaf) | Read `'c'` (`DAT_7F40E1C0`, cap 4), call `Exec` (`vtable[+0xCC]`). A **successful** Exec is rewritten to `0x800704C7` (`ERROR_CANCELLED`) so the caller knows no pidl came back. Then `c == 7` → `DispatchWaitForSingleObject(DAT_7F40E03C, INFINITE)`; else if the code is `0x800704C7` → `IncrementDnrJobCount` + 30 s bounded wait + `DecrementDnrJobCount`. |
+
+  The 30 s wait therefore only ever runs after an Exec of a **leaf**, never
+  when browsing a container.
 
 ## 6. Render pipeline
 
@@ -409,6 +442,52 @@ Three separable render stages: label, per-item icon, banner.
 
 Encoding is always ANSI — 0x0B wire-type strings get truncated at first
 wide-NUL (memory `project_dirsrv_nav_e_encoding`).
+
+#### 6.1.1 The two Worldwide hubs are named client-side, not from `'e'`
+
+`CMosTreeNode::RememberProperty` @ `0x7F3FBA69` is the property-cache store
+that `SetPropertyGroupFromPsp` (§?) calls per property. Before it copies a
+value it special-cases the display name:
+
+```c
+if (lstrcmpA(this->propName, "e") == 0) {
+    pNode->GetMnid(mnid);                        // vtable +0x68
+    GetSpecialMnid(0, &sp0);                     // (1,0,0) → wire "0:0"
+    GetSpecialMnid(1, &sp1);                     // (1,1,0) → wire "1:0"
+    if ((MnidEqual(mnid, &sp0) || MnidEqual(mnid, &sp1))
+        && LoadStringA(hInstRes, 0x8F - (mnid.field_8 == 0), buf, 0x40)) {
+        value  = buf;                            // server's 'e' DISCARDED
+        length = lstrlenA(buf) + 1;
+    }
+}
+```
+
+The two STRINGTABLE entries are adjacent at `0x7F41C65A` / `0x7F41C684`,
+the last two populated slots of their block:
+
+| mnid | wire key | string id | Name the user sees |
+|---|---|---|---|
+| `GetSpecialMnid(0)` = `(1,0,0)` | `0:0` | `0x8E` | **Worldwide Categories** |
+| `GetSpecialMnid(1)` = `(1,1,0)` | `1:0` | `0x8F` | **Worldwide Member Assistance** |
+
+So the client **pins both Worldwide hubs to fixed mnids** and supplies their
+labels itself. Whatever `'e'` the server sends for `0:0` or `1:0` never
+reaches the UI. Two consequences for server content:
+
+- Node `0:0` **is** Worldwide Categories. It is not a generic "MSN root"
+  that can hold arbitrary children — its child list is what the Worldwide
+  Categories window shows. Node `1:0` is its Member Assistance twin.
+- Serving a *separate* Worldwide Categories node at an ordinary mnid
+  produces a duplicate. The address-bar row named "Worldwide Categories" is
+  `0:0`, so selecting it lists `0:0`'s children while the same-named listview
+  item points at the other node — the two disagree.
+
+This also settles the `JUMP`/`LJUMP` pairing in
+`docs/MSN_CENTRAL_HOMEBASE_MENU_MAPPING.md`: `LJUMP 1:0:0:0` (Categories) is
+`GetLocalizedNode` on the Worldwide **Categories** hub, and `LJUMP 1:1:0:0`
+(Member Assistance) is `GetLocalizedNode` on the Worldwide **Member
+Assistance** hub. Each button descends into its own hub; nothing is
+cross-wired.
 
 ### 6.2 Per-item icon — `CacheNodeIconsIntoImageLists` @ `0x7F4047C2`
 

@@ -106,11 +106,26 @@ The same HOMEBASE resource also includes two zero-rectangle entries:
    - rect: `(0,0)-(0,0)`
    - command: `JUMP 1:1:0:0`
 
-These help explain why the client-side hierarchy can look cross-wired even
-before any DIRSRV data is involved:
+Each hidden entry shares a target with a visible button:
 
-- `1:0:0:0` is used by `Categories` and also by hidden `Worldwide Member Assistance`
-- `1:1:0:0` is used by `Member Assistance` and also by hidden `Worldwide Categories`
+- `1:0:0:0` is used by `Categories` and by one hidden Worldwide entry
+- `1:1:0:0` is used by `Member Assistance` and by the other
+
+That sharing is the design, not a defect: `LJUMP` descends into a hub and
+takes its localized child, `JUMP` opens the hub itself. The two targets are
+`GetSpecialMnid(0)` and `GetSpecialMnid(1)`, which MOSSHELL names from its
+own STRINGTABLE (`docs/MOSSHELL.md` §6.1.1):
+
+| mnid | wire key | Hub |
+|---|---|---|
+| `1:0:0:0` | `0:0` | Worldwide **Categories** |
+| `1:1:0:0` | `1:0` | Worldwide **Member Assistance** |
+
+So `Categories` (`LJUMP 1:0:0:0`) localizes inside Worldwide Categories, and
+`Member Assistance` (`LJUMP 1:1:0:0`) localizes inside Worldwide Member
+Assistance. The label→command pairing listed above for the two zero-rect
+entries is the raw record order from the resource decode; the authoritative
+label for each mnid is MOSSHELL's string `0x8E`/`0x8F`, not this list.
 
 ## Conclusion
 
@@ -122,6 +137,7 @@ The authoritative HOMEBASE-defined mapping for the visible MSN Central menu is:
 - `Member Assistance` -> `1:1:0:0`
 - `Categories` -> `1:0:0:0`
 
-This mismatch between visible labels and the hidden "Worldwide ..." aliases is
-present in the original client-side HOMEBASE resource data. It is not caused by
-the DIRSRV server hierarchy.
+The visible buttons and the hidden "Worldwide ..." entries deliberately share
+two mnids. `LJUMP` enters a hub and localizes; `JUMP` opens the hub itself.
+Both hubs are client-pinned special mnids — see the table above and
+`docs/MOSSHELL.md` §6.1.1.

@@ -344,9 +344,9 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(0x88, payload)
 
     def test_children_of_default_root_return_localized_wrappers(self):
-        # DirsrvRequest() defaults to node_id="0:0". MSN root is server wire
-        # "0:0" (GetSpecialMnid(0) → field_8=0, field_c=0). Its children list
-        # is the address-bar dropdown: Cats US / MA US / WW Cat / WW MA.
+        # DirsrvRequest() defaults to node_id="0:0" — GetSpecialMnid(0), the
+        # Worldwide Categories hub. Its children are the localized Categories
+        # wrappers.
         request = DirsrvRequest(
             dword_0=1,
             dword_1=14,
@@ -355,7 +355,7 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_get_children_reply_payload(request)
         self.assertIn(b"Categories (US)", payload)
-        self.assertIn(b"Worldwide Member Assistance", payload)
+        self.assertIn(b"Categorias (BR)", payload)
 
     def test_get_properties_returns_self_record_only(self):
         # GetProperties (selector 0x00) is always a single-record query for
@@ -378,9 +378,14 @@ class TestDIRSRVReply(unittest.TestCase):
         # Self-mnid must be present.
         self.assertIn(struct.pack("<II", 1, 0x10), payload)
 
-    def test_msn_root_self_properties_return_correct_name(self):
-        # Client's MSN root wire = "0:0". Self-query returns "The Microsoft
-        # Network" with mnid_a = (0, 0) — its own (field_8, field_c).
+    def test_worldwide_categories_hub_self_properties(self):
+        # Wire "0:0" is GetSpecialMnid(0) — the Worldwide Categories hub.
+        # mnid_a = (0, 0), its own (field_8, field_c).
+        #
+        # The `e` we send here never reaches the UI: RememberProperty @
+        # MOSSHELL 0x7F3FBA69 matches the mnid against GetSpecialMnid(0)/(1)
+        # and substitutes STRINGTABLE 0x8E / 0x8F. We still send the matching
+        # text so server logs read the same as the client.
         request = DirsrvRequest(
             node_id="0:0",
             node_id_raw=struct.pack("<II", 0, 0),
@@ -390,7 +395,7 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_get_properties_reply_payload(request)
-        self.assertIn(b"The Microsoft Network", payload)
+        self.assertIn(b"Worldwide Categories", payload)
 
     def test_special_msn_today_node_returns_title(self):
         request = DirsrvRequest(
@@ -445,11 +450,17 @@ class TestDIRSRVReply(unittest.TestCase):
         # the wire cmdline, not a DnR temp filename.
         self.assertNotIn(b"fn\x00\x01MSNTODAY.HTM", payload)
 
-    def test_msn_root_children_emit_localized_wrappers(self):
-        # Server "0:0" is the HOMEBASE Categories LJUMP target (LJUMP 1:0:0:0
-        # resolves to the client's MSN root which has wire key "0:0" on the
-        # server). GetLocalizedNode on this node takes the first child, so
-        # Cats US must lead the list for the Categories button to land there.
+    def test_worldwide_categories_hub_holds_only_categories_wrappers(self):
+        # Wire "0:0" = GetSpecialMnid(0) = the Worldwide Categories hub, and the
+        # HOMEBASE Categories LJUMP 1:0:0:0 target. It carries exactly the
+        # localized Categories wrappers: browsing the hub lists them all, and
+        # GetLocalizedNode takes the first to survive the locale filter, so
+        # Cats (US) must lead for the Categories button to land there.
+        #
+        # Regression guard: the Member Assistance wrappers belong to the OTHER
+        # hub ("1:0"), and neither hub may list itself. Serving them here put
+        # four extra rows — including a self-reference — in the Worldwide
+        # Categories view.
         request = DirsrvRequest(
             node_id="0:0",
             node_id_raw=struct.pack("<II", 0, 0),
@@ -460,15 +471,35 @@ class TestDIRSRVReply(unittest.TestCase):
         )
         payload = build_get_children_reply_payload(request)
         self.assertIn(struct.pack("<II", 1, 0x10), payload)  # Categories (US) 'a'
-        self.assertIn(struct.pack("<II", 1, 0x11), payload)  # Member Assistance (US) 'a'
-        self.assertIn(struct.pack("<II", 1, 0x12), payload)  # Worldwide Categories 'a'
-        self.assertIn(struct.pack("<II", 1, 0), payload)     # WW MA (aliased to wire "1:0")
+        self.assertIn(struct.pack("<II", 1, 0x13), payload)  # Categorias (BR) 'a'
         self.assertIn(b"Categories (US)", payload)
-        self.assertIn(b"Member Assistance (US)", payload)
-        self.assertIn(b"Worldwide Categories", payload)
-        self.assertIn(b"Worldwide Member Assistance", payload)
+        self.assertIn(b"Categorias (BR)", payload)
+        self.assertNotIn(struct.pack("<II", 1, 0x11), payload)  # no MA (US)
+        self.assertNotIn(struct.pack("<II", 1, 0x14), payload)  # no MA (BR)
+        self.assertNotIn(struct.pack("<II", 1, 0), payload)     # no WW MA hub
+        self.assertNotIn(b"Member Assistance", payload)
         self.assertNotIn(struct.pack("<II", 4, 0), payload)  # no MSN Today
         self.assertNotIn(struct.pack("<II", 3, 1), payload)  # no Favorite Places
+
+    def test_worldwide_member_assistance_hub_holds_only_ma_wrappers(self):
+        # Twin of the above on wire "1:0" = GetSpecialMnid(1), the LJUMP
+        # 1:1:0:0 target. This hub was already correct; the assertion pins it
+        # so the two hubs stay symmetric.
+        request = DirsrvRequest(
+            node_id="1:0",
+            node_id_raw=struct.pack("<II", 1, 0),
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_get_children_reply_payload(request)
+        self.assertIn(struct.pack("<II", 1, 0x11), payload)  # Member Assistance (US)
+        self.assertIn(struct.pack("<II", 1, 0x14), payload)  # Assistencia (BR)
+        self.assertIn(b"Member Assistance (US)", payload)
+        self.assertNotIn(struct.pack("<II", 1, 0x10), payload)  # no Cats (US)
+        self.assertNotIn(struct.pack("<II", 1, 0x13), payload)  # no Cats (BR)
+        self.assertNotIn(b"Categories (US)", payload)
 
     def test_narrow_root_children_request_returns_localized_wrappers(self):
         request = DirsrvRequest(
@@ -516,24 +547,27 @@ class TestDIRSRVReply(unittest.TestCase):
             payload = build_get_children_reply_payload(request)
             self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
-    def test_startup_browse_walk_for_msn_root_omits_menu_aliases(self):
-        request = DirsrvRequest(
-            node_id="0:0",
-            node_id_raw=struct.pack("<II", 0, 0),
-            dword_0=1,
-            dword_1=14,
-            prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
-            recv_descriptors=[0x83, 0x83, 0x85],
-        )
-        payload = build_get_children_reply_payload(request)
-        # MSN Today and Favorite Places are client-side HOMEBASE aliases; they
-        # must not appear in the server-enumerated root listing.
-        self.assertNotIn(struct.pack("<II", 4, 0), payload)
-        self.assertNotIn(struct.pack("<II", 3, 1), payload)
-        # The localized wrappers must be present — these are the
-        # GetLocalizedNode targets for the Categories / MA buttons.
-        self.assertIn(struct.pack("<II", 1, 0x10), payload)
-        self.assertIn(struct.pack("<II", 1, 0x11), payload)
+    def test_startup_browse_walk_for_hubs_omits_menu_aliases(self):
+        # MSN Today (4:0) and Favorite Places (3:1) are client-side HOMEBASE
+        # aliases. Neither hub may enumerate them.
+        for node_id, f8, localized in (
+            ("0:0", 0, 0x10),   # WW Categories → Categories (US)
+            ("1:0", 1, 0x11),   # WW Member Assistance → Member Assistance (US)
+        ):
+            request = DirsrvRequest(
+                node_id=node_id,
+                node_id_raw=struct.pack("<II", f8, 0),
+                dword_0=1,
+                dword_1=14,
+                prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
+                recv_descriptors=[0x83, 0x83, 0x85],
+            )
+            payload = build_get_children_reply_payload(request)
+            self.assertNotIn(struct.pack("<II", 4, 0), payload)
+            self.assertNotIn(struct.pack("<II", 3, 1), payload)
+            # The hub's own localized wrapper — the GetLocalizedNode target
+            # for that HOMEBASE button — must be present.
+            self.assertIn(struct.pack("<II", 1, localized), payload)
 
     def test_worldwide_member_assistance_hub_self_identity(self):
         # Server wire "1:0" = client's MSN Central, overloaded as Worldwide
@@ -677,10 +711,6 @@ class TestDIRSRVReply(unittest.TestCase):
                 [
                     ((1, 0x10), "Categories (US)"),
                     ((1, 0x13), "Categorias (BR)"),
-                    ((1, 0x11), "Member Assistance (US)"),
-                    ((1, 0x14), "Assistencia ao Associado (BR)"),
-                    ((1, 0x12), "Worldwide Categories"),
-                    ((1, 0), "Worldwide Member Assistance"),
                 ],
             ),
             (
@@ -689,14 +719,6 @@ class TestDIRSRVReply(unittest.TestCase):
                 [
                     ((1, 0x11), "Member Assistance (US)"),
                     ((1, 0x14), "Assistencia ao Associado (BR)"),
-                ],
-            ),
-            (
-                f"1:{0x12}",
-                struct.pack("<II", 1, 0x12),
-                [
-                    ((1, 0x10), "Categories (US)"),
-                    ((1, 0x13), "Categorias (BR)"),
                 ],
             ),
             (

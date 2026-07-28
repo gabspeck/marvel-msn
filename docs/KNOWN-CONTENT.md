@@ -18,8 +18,12 @@ The Microsoft Network
 |_ Worldwide Member Assistance
 ```
 
-* The localized versions of Categories and Member Assistance seem to be **direct children** of the root MSN node, NOT
-of their worldwide counterparts.
+* This combobox is a tree view, so the five rows are not all siblings. `Worldwide Categories` and
+`Worldwide Member Assistance` are the client's two pinned hubs — `GetSpecialMnid(0)` (wire `0:0`) and
+`GetSpecialMnid(1)` (wire `1:0`) — and MOSSHELL names them from STRINGTABLE `0x8E`/`0x8F` rather than
+from the server's `e` (`docs/MOSSHELL.md` §6.1.1). `Categories (US)` and `Member Assistance (US)` are the
+localized children each hub resolves to via `GetLocalizedNode`, which is also where the two HOMEBASE
+`LJUMP` buttons land.
   * From the video, it's possible to see that a node can be linked from multiple parents. E.g. Member assistance contains
   a link to MSN Today.
 

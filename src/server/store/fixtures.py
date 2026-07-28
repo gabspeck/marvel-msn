@@ -98,33 +98,44 @@ def _mnid_key(f0, f8):
     return f"{f0}:{f8}", struct.pack("<II", f0, f8)
 
 
-# MSN root — GetSpecialMnid(idx=0) returns `(field_0=1, field_8=0, field_c=0)`,
-# which lands on the wire as `(field_8=0, field_c=0)` → server key "0:0".
-# This is the LJUMP 1:0:0:0 target (HOMEBASE Categories button).
-_MSN_ROOT_KEY, _MSN_ROOT_MNID = _mnid_key(0, 0)
+# The two Worldwide hubs are NOT ordinary nodes — the client pins them to
+# GetSpecialMnid(0) and GetSpecialMnid(1) and supplies their display names
+# from its own resources.
+#
+# CMosTreeNode::RememberProperty @ MOSSHELL 0x7F3FBA69, when caching the 'e'
+# property, compares the node's mnid against GetSpecialMnid(0) and (1); on a
+# match it DISCARDS the server's value and substitutes
+# `LoadStringA(hInst, 0x8F - (field_8 == 0))`. Those two STRINGTABLE entries
+# are adjacent at MOSSHELL 0x7F41C65A / 0x7F41C684:
+#
+#   special 0  (1,0,0) → wire "0:0" → id 0x8E → "Worldwide Categories"
+#   special 1  (1,1,0) → wire "1:0" → id 0x8F → "Worldwide Member Assistance"
+#
+# So "0:0" IS the Worldwide Categories hub. Whatever `e` we send for it is
+# overwritten client-side. Serving a separate Worldwide Categories node at an
+# ordinary mnid produced a duplicate: the address-bar row named "Worldwide
+# Categories" is this node, so selecting it listed this node's children.
+#
+# The HOMEBASE buttons follow from the same pairing — LJUMP takes the hub's
+# localized child (docs/MSN_CENTRAL_HOMEBASE_MENU_MAPPING.md):
+#   Categories        LJUMP 1:0:0:0 → GetLocalizedNode("0:0") → Categories (US)
+#   Member Assistance LJUMP 1:1:0:0 → GetLocalizedNode("1:0") → Member Assistance (US)
+_WORLDWIDE_CATEGORIES_KEY, _WORLDWIDE_CATEGORIES_MNID = _mnid_key(0, 0)
+_WORLDWIDE_MEMBER_ASSISTANCE_KEY, _WORLDWIDE_MEMBER_ASSISTANCE_MNID = _mnid_key(1, 0)
 # HOMEBASE MSN Today button — LJUMP 1:4:0:0. GetSpecialMnid(idx=4) gives
 # `(field_0=1, field_8=4, field_c=0)`, wire "4:0".
 _MSN_TODAY_KEY, _MSN_TODAY_SPECIAL_MNID = _mnid_key(4, 0)
-# Client's MSN Central — GetSpecialMnid(idx=1) returns `(field_0=1, field_8=1,
-# field_c=0)`, wire "1:0". HOMEBASE Member Assistance button (LJUMP 1:1:0:0)
-# dispatches here, and GetLocalizedNode descends one level. We overload this
-# node as the Worldwide Member Assistance hub; its first child (MA US) is
-# where clicking the button lands.
-_WORLDWIDE_MEMBER_ASSISTANCE_KEY, _WORLDWIDE_MEMBER_ASSISTANCE_MNID = _mnid_key(1, 0)
 # Localized wrapper mnids. The wire key `"f8:f_c"` on the server maps to the
 # client's `(field_0=1 inherited, field_8, field_c)`.
 _CATEGORIES_US_KEY, _CATEGORIES_US_MNID = _mnid_key(1, 0x10)
 _MEMBER_ASSISTANCE_US_KEY, _MEMBER_ASSISTANCE_US_MNID = _mnid_key(1, 0x11)
-_WORLDWIDE_CATEGORIES_KEY, _WORLDWIDE_CATEGORIES_MNID = _mnid_key(1, 0x12)
 _CATEGORIES_BR_KEY, _CATEGORIES_BR_MNID = _mnid_key(1, 0x13)
 _MEMBER_ASSISTANCE_BR_KEY, _MEMBER_ASSISTANCE_BR_MNID = _mnid_key(1, 0x14)
 
 ROOT_CONTENT = _container_content("Root")
-MSN_ROOT_CONTENT = _container_content("The Microsoft Network")
 
-# Localized wrappers. `language=0` on the Worldwide containers marks them as
-# locale-neutral so a future `filter_on=1` request with any LCID still
-# accepts them.
+# Localized wrappers. `language=0` on the Worldwide hubs marks them as
+# locale-neutral so a `filter_on=1` request with any LCID still accepts them.
 CATEGORIES_US_CONTENT = _container_content("Categories (US)", language=_LCID_EN_US)
 MEMBER_ASSISTANCE_US_CONTENT = _container_content(
     "Member Assistance (US)", language=_LCID_EN_US
@@ -133,6 +144,9 @@ CATEGORIES_BR_CONTENT = _container_content("Categorias (BR)", language=_LCID_PT_
 MEMBER_ASSISTANCE_BR_CONTENT = _container_content(
     "Assistencia ao Associado (BR)", language=_LCID_PT_BR
 )
+# Both names are cosmetic — RememberProperty replaces them with STRINGTABLE
+# 0x8E / 0x8F. Kept matching the resource text so server logs read the same as
+# the client UI.
 WORLDWIDE_CATEGORIES_CONTENT = _container_content("Worldwide Categories", language=0)
 WORLDWIDE_MEMBER_ASSISTANCE_CONTENT = _container_content(
     "Worldwide Member Assistance", language=0
@@ -519,17 +533,17 @@ BBS_NODES = [_CLIMBING_BBS, _BBS_YOSEMITE, _BBS_BRITISH_CLIMBERS, _BBS_RE_YOSEMI
 
 
 DIRECTORY_NODES = [
-    # MSN root (wire "0:0") — client's GetSpecialMnid(idx=0). Listed as the
-    # LJUMP 1:0:0:0 target (Categories button). GetLocalizedNode on this node
-    # descends one level and takes the first locale-matching child; the
-    # children list below interleaves Cats(US)/Cats(BR) ahead of WW Categories
-    # so each locale's filter_on=1 pass surfaces the right Categories wrapper.
+    # Worldwide Categories hub (wire "0:0") — client's GetSpecialMnid(idx=0),
+    # named from STRINGTABLE 0x8E regardless of the `e` we send. LJUMP 1:0:0:0
+    # (Categories button) runs GetLocalizedNode here and takes the first
+    # locale-matching child, so the children list holds only the localized
+    # Categories wrappers.
     DirectoryNode(
-        node_id=_MSN_ROOT_KEY,
+        node_id=_WORLDWIDE_CATEGORIES_KEY,
         is_container=True,
         app_id=APP_DIRECTORY_SERVICE,
-        mnid_a=_MSN_ROOT_MNID,
-        content=MSN_ROOT_CONTENT,
+        mnid_a=_WORLDWIDE_CATEGORIES_MNID,
+        content=WORLDWIDE_CATEGORIES_CONTENT,
     ),
     # MSN Today: MedView-title leaf served by App #6 (MOSVIEW.EXE).
     #
@@ -565,8 +579,8 @@ DIRECTORY_NODES = [
         mnid_a=_WORLDWIDE_MEMBER_ASSISTANCE_MNID,
         content=WORLDWIDE_MEMBER_ASSISTANCE_CONTENT,
     ),
-    # Localized Categories / Member Assistance wrappers and the Worldwide
-    # Categories hub, following KNOWN-CONTENT.md's address-bar hierarchy.
+    # Localized Categories / Member Assistance wrappers. Each hub holds only
+    # its own locale set.
     DirectoryNode(
         node_id=_CATEGORIES_US_KEY,
         is_container=True,
@@ -580,13 +594,6 @@ DIRECTORY_NODES = [
         app_id=APP_DIRECTORY_SERVICE,
         mnid_a=_MEMBER_ASSISTANCE_US_MNID,
         content=MEMBER_ASSISTANCE_US_CONTENT,
-    ),
-    DirectoryNode(
-        node_id=_WORLDWIDE_CATEGORIES_KEY,
-        is_container=True,
-        app_id=APP_DIRECTORY_SERVICE,
-        mnid_a=_WORLDWIDE_CATEGORIES_MNID,
-        content=WORLDWIDE_CATEGORIES_CONTENT,
     ),
     DirectoryNode(
         node_id=_CATEGORIES_BR_KEY,
@@ -622,29 +629,22 @@ DIRECTORY_NODES = [
 ]
 
 
-# MSN root's children double as the address-bar combobox under "The Microsoft
-# Network" (per KNOWN-CONTENT.md — the localized Cats/MA wrappers are direct
-# children of MSN root, not of their worldwide hubs) and as the LJUMP 1:0:0:0
-# GetLocalizedNode target list. The interleaved order keeps each locale's
-# Cats wrapper ahead of WW Categories so that under filter_on=1 the
-# locale-specific entry is the first survivor: pt-BR drops Cats(US)/MA(US)
-# and lands on Cats(BR); en-US drops the BR variants and lands on Cats(US).
-# WW MA is referenced by its server key (`"1:0"`) because it aliases client's
-# MSN Central — same physical node, two roles (address-bar entry + LJUMP
-# 1:1:0:0 target).
+# Each Worldwide hub holds exactly its own locale set — nothing else. The hub
+# serves two roles at once, and both are satisfied by that list:
+#   - browsing the hub (the address-bar row named from STRINGTABLE 0x8E / 0x8F)
+#     shows every localized variant;
+#   - LJUMP's GetLocalizedNode picks the first child surviving the filter_on=1
+#     locale pass — en-US takes the (US) wrapper, pt-BR drops it and takes (BR).
+# Locale order therefore matters: US first, BR second.
 _ARTS_AND_ENTERTAINMENT_KEY = f"1:{0x100}"
 _ARTES_E_ENTRETENIMENTO_KEY = f"1:{0x180}"
 DIRECTORY_CHILDREN = {
-    _MSN_ROOT_KEY: [
+    # Worldwide Categories hub — LJUMP 1:0:0:0 target.
+    _WORLDWIDE_CATEGORIES_KEY: [
         _CATEGORIES_US_KEY,
         _CATEGORIES_BR_KEY,
-        _MEMBER_ASSISTANCE_US_KEY,
-        _MEMBER_ASSISTANCE_BR_KEY,
-        _WORLDWIDE_CATEGORIES_KEY,
-        _WORLDWIDE_MEMBER_ASSISTANCE_KEY,
     ],
-    # MSN Central / WW MA hub — LJUMP 1:1:0:0 target. MA US first so the
-    # HOMEBASE Member Assistance click descends to Member Assistance (US).
+    # Worldwide Member Assistance hub — LJUMP 1:1:0:0 target.
     _WORLDWIDE_MEMBER_ASSISTANCE_KEY: [
         _MEMBER_ASSISTANCE_US_KEY,
         _MEMBER_ASSISTANCE_BR_KEY,
@@ -661,7 +661,6 @@ DIRECTORY_CHILDREN = {
         f"1:{0x307}",        # Member Guidelines (document?)
         f"1:{0x308}",        # Member Agreement (document?)
     ],
-    _WORLDWIDE_CATEGORIES_KEY: [_CATEGORIES_US_KEY, _CATEGORIES_BR_KEY],
     _CATEGORIES_BR_KEY: [f"1:{f8}" for f8, _, _ in CATEGORY_BR_DEFS],
     _MEMBER_ASSISTANCE_BR_KEY: [f"1:{f8}" for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS],
     _ARTS_AND_ENTERTAINMENT_KEY: [f"1:{f8}" for f8, _ in A_AND_E_CHILD_DEFS],
