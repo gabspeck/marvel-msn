@@ -357,14 +357,20 @@ _YOSEMITE_BODY = (
 def _bbs_date_to_unix(s):
     """Parse a fixture `%B %d, %Y %I:%M %p` timestamp into a Unix time_t.
 
-    Empty input → 0 ("no date" sentinel). build_bbs_props then skips `_D` so
-    the listview Date cell renders blank instead of a 1970 epoch date — the
-    same blank-on-zero rule DIRSRV uses for the FILETIME `w` column.
+    The string is **local wall-clock time**, i.e. what the client should display.
+    `_D` is a time_t that MOSSHELL renders through the local timezone, so parsing
+    as UTC made the Date column read an hour later than the same fixture's
+    `v`/`w` dialog strings (which pass through verbatim) — and an hour later than
+    reference/screenshots/bbs.png, whose reader header reads "10:12 AM".
+    Interpreting the fixture as local time keeps the column, the dialog and the
+    reference in agreement.
+
+    Empty input → 0, which build_bbs_props still emits as `_D` = 0 (never
+    omitted — an omitted tag truncates the record).
     """
     if not s:
         return 0
-    dt = datetime.datetime.strptime(s, "%B %d, %Y %I:%M %p").replace(tzinfo=datetime.UTC)
-    return int(dt.timestamp())
+    return int(datetime.datetime.strptime(s, "%B %d, %Y %I:%M %p").timestamp())
 
 
 def _bbs_node(

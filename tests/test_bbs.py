@@ -78,6 +78,14 @@ def _walk_records(payload):
                 p += 4
                 props[name] = payload[p : p + blob_len]
                 p += blob_len
+            elif ptype == 0x10:
+                # dword array: [count][count*4]
+                count = struct.unpack_from("<I", payload, p)[0]
+                p += 4
+                props[name] = [
+                    struct.unpack_from("<I", payload, p + i * 4)[0] for i in range(count)
+                ]
+                p += count * 4
             elif ptype in (0x0A, 0x0B):
                 flag = payload[p]
                 p += 1
@@ -297,21 +305,35 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
     established wire type.
     """
 
-    def test_language_is_the_eight_byte_qword_form(self):
-        # `q` must be type 0x04 (8 bytes): MCM reads the LCID as
-        # *(u32*)(value + 4), so a 4-byte value reads past the end.
+    def test_language_is_the_dword_array_form_so_the_dialog_names_it(self):
+        # `q` must be type 0x10 [count][lcid]. MOSSHELL's formatter @ 0x7F3FBC12
+        # case 0x10 calls GetLocaleInfoA and prints a language name; case
+        # 0x04/0x08 falls to wsprintfA("%u:%u", …) — the "Language: 0:0" bug.
+        # The LCID sits at +4 either way, so MCM's browse-language read is safe.
         request = DirsrvRequest(node_id=_YOSEMITE, prop_group="q\x00g")
         payload = build_bbs_get_properties_reply_payload(request)
-        self.assertIn(b"\x04q\x00", payload)
+        self.assertIn(b"\x10q\x00", payload)
+        self.assertNotIn(b"\x04q\x00", payload)
         self.assertNotIn(b"\x03q\x00", payload)
-        record = _walk_records(payload)[0]
-        self.assertEqual(record["q"] >> 32, 0)
+        self.assertEqual(_walk_records(payload)[0]["q"], [0x0409])
 
     def test_created_and_modified_carry_the_post_date(self):
         request = DirsrvRequest(node_id=_YOSEMITE, prop_group="v\x00w\x00g")
         record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
         self.assertEqual(record["v"], "May 16, 1995 10:12 AM")
         self.assertEqual(record["w"], "May 16, 1995 10:12 AM")
+
+    def test_dialog_date_string_agrees_with_the_D_timestamp(self):
+        # `_D` is a time_t the client renders through the local timezone, while
+        # `v`/`w` pass through verbatim. They must describe the same wall clock
+        # or the Date column and the dialog disagree by the UTC offset.
+        import datetime
+
+        request = DirsrvRequest(node_id=_YOSEMITE, prop_group="v\x00_D")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        as_local = datetime.datetime.fromtimestamp(record["_D"])
+        from_string = datetime.datetime.strptime(record["v"], "%B %d, %Y %I:%M %p")
+        self.assertEqual(as_local, from_string)
 
     def test_dialog_tags_are_never_answered_with_a_dword_stand_in(self):
         # Every string-shaped dialog tag must arrive as 0x0B, not DWORD 0.

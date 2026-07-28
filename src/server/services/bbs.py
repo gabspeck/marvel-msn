@@ -57,6 +57,13 @@ PROP_TOPIC = "_t"
 PROP_HAS_CHILDREN = "_F"
 PROP_PRICE_INFO = "_I"
 PROP_UNKNOWN_F = "_f"
+PROP_LANGUAGE = "q"
+
+# LCID the Properties dialog displays for a BBS post. Distinct from the node's
+# `language` field, which stays 0 so the node survives every locale filter in
+# ContentStore.get_children — this value is display only, and the sample board
+# lives under Categories (US).
+BBS_DISPLAY_LCID = 0x0409
 
 # Substituted when a node carries no BbsFields (e.g. the unknown-mnid fallback
 # node routed onto the BBS pipe) so property serialisation never AttributeErrors.
@@ -168,6 +175,16 @@ def build_bbs_props(requested_props, node, *, is_children):
         elif name == PROP_UNKNOWN_F:
             # `_f` advertised but no BBSNAV read site; safe default DWORD 0.
             out.append((0x03, name, struct.pack("<I", 0)))
+        elif name == PROP_LANGUAGE:
+            # `q` as a type-0x10 dword array [count][lcid], NOT the 0x04 qword
+            # DIRSRV uses. MOSSHELL's value formatter @ 0x7F3FBC12 switches on
+            # the cached type: case 0x10 calls GetLocaleInfoA(value[1],
+            # LOCALE_SLANGUAGE) and prints a language name, while case 0x04/0x08
+            # falls to FUN_7F3FAE1C = wsprintfA("%u:%u", high, low) — which is
+            # why the Properties dialog read "Language: 0:0". Both encodings put
+            # the LCID at offset +4, so MCM's browse-language reader
+            # (*(u32*)(value + 4)) is satisfied either way.
+            out.append((0x10, name, struct.pack("<II", 1, BBS_DISPLAY_LCID)))
         else:
             # Anything outside the BBS vocabulary is a shared MOS tree tag, and
             # the Properties dialog fetches those one at a time as {name, 'g'}

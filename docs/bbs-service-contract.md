@@ -122,13 +122,24 @@ Synthesised / non-extra tags BBS also touches:
   Author/Size/Date blank, and report "0 conversations" while still listing the
   rows. Confirmed live 2026-07-28 (`BPX 0x7F5F5DE4`, flag `0x01` on a node with
   mnid `field_8=0, field_c=0x100`), and fixed by sending the leaf bit.
-- **Shared MOS tree tags** (`q, j, k, ca, r, s, t, u, n, on, v, w, y, o, z`)
-  are fetched from a BBS node too, one at a time as `{name, 'g'}` groups, when
-  the Properties dialog opens — observed live as `q,g` then `v,g` on a message
-  node. They keep their DIRSRV wire types, notably `q` as the **8-byte** qword
-  `[u32 header][u32 lcid]`: a 4-byte `q` makes MCM's `*(u32*)(value + 4)` LCID
-  read run past the buffer. Answering any of them with a DWORD-0 stand-in
+- **Shared MOS tree tags** (`j, k, ca, r, s, t, u, n, on, v, w, y, o, z`) are
+  fetched from a BBS node too, one at a time as `{name, 'g'}` groups, when the
+  Properties dialog opens — observed live as `q,g` then `v,g` on a message node.
+  They keep their DIRSRV wire types; answering any with a DWORD-0 stand-in
   leaves the dialog blank or garbled.
+- **`q`** (language) is the exception: send it as type **`0x10`** dword array
+  `[count=1][lcid]`, not DIRSRV's `0x04` qword. MOSSHELL's value formatter
+  (`0x7F3FBC12`) switches on the cached type — case `0x10` calls
+  `GetLocaleInfoA(value[1], LOCALE_SLANGUAGE)` and prints a language name, while
+  case `0x04`/`0x08` falls through to `FUN_7F3FAE1C` =
+  `wsprintfA("%u:%u", high, low)`, which renders as a bare `0:0`. Both encodings
+  place the LCID at offset +4, so MCM's browse-language reader
+  (`*(u32*)(value + 4)`) is satisfied either way.
+- **Dates must agree across representations.** `_D` is a `time_t` the client
+  renders through the **local** timezone; `v`/`w` are server-formatted strings
+  passed through verbatim. Derive both from the same wall-clock instant, or the
+  listview Date column and the dialog's Created field differ by the client's UTC
+  offset.
 - **`h`** (icon) is *not* taken from the wire. `CBbsNavTreeNode_GetProperty`
   (`0x7F5F1538`) intercepts `GetProperty("h")` and returns one of two local icon
   ids (`g_0x7F60D380` if node+0x18 == 0, else `g_0x7F60D35C`). Emit nothing for
