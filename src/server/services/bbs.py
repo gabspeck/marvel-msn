@@ -144,6 +144,29 @@ PROP_PRICE_INFO = "_I"
 PROP_UNKNOWN_F = "_f"
 PROP_LANGUAGE = "q"
 
+# `_F` folder-flag bits. BBSNAV dialog resource 124 "BBS Folder" is the
+# authoring surface and labels each one: FUN_7F5F4346 @ 0x7F5F4346 reads `_F`
+# into its controls, FUN_7F5F4418 @ 0x7F5F4418 writes them back.
+#   bits 0..2  message format — 0 "Plain text (Usenet newsgroups)", 1 "Rich
+#              text (MSN formatted text)", 2 "MIME (Some Usenet newsgroups)".
+#              Radio 0x68 (MIME) ships with an unconditional EnableWindow(FALSE),
+#              so the shipped client never authors format 2.
+#   0x0400     "This bulletin board is read-only." No shipping read site.
+#   0x0800     radio 0x69 "This is an MSN bulletin board", CLEAR = radio 0x6A
+#              "This is a Usenet Newsgroup". Dialog display only.
+#   0x1000     dialog label "All messages (even old ones) are always shown".
+#              CBbsNavTreeNode_OkToGetChildren @ 0x7F5F1427 also reads this bit
+#              and skips deriving node+0xB4 when it is SET. The two readings are
+#              not reconciled — the child-count gate is the behaviour we rely on.
+#   0x2000     posting gate, no dialog control. SET greys New Message (1101) and
+#              Reply (1303) via FUN_7F600D56 @ 0x7F600D56.
+#   0x4000     "No messages with attachments are allowed." FUN_7F600D84.
+#   0x8000     "Attachments are automatically approved."
+BBS_F_FORMAT_PLAIN_TEXT = 0x0000
+BBS_F_FORMAT_RICH_TEXT = 0x0001
+BBS_F_MSN_BULLETIN_BOARD = 0x0800
+BBS_F_NO_CHILDREN = 0x1000
+
 # LCID the Properties dialog displays for a BBS post. Distinct from the node's
 # `language` field, which stays 0 so the node survives every locale filter in
 # ContentStore.get_children — this value is display only, and the sample board
@@ -318,6 +341,34 @@ class BBSHandler:
         return handle
 
 
+def _folder_flags(bbs):
+    """The `_F` word for a BBS node.
+
+    Every board served here is a native MSN bulletin board, so the format field
+    reads "Rich text (MSN formatted text)" and the MSN-vs-Usenet radio reads
+    MSN. The format field is what unlocks composition: CBbs_FIsMsnBbs @
+    0x7F600D21 computes `(_F & 7) == 0`, and OnInitMenuPopup @ 0x7F5FF42C greys
+    Font (1351), Paragraph (1358), Insert File (1401), Insert Object (1402),
+    Paste Special (1158) and the formatting toolbar (1254) whenever that holds.
+    The status bar then reads STRINGTABLE 1741 "This command is not available
+    in Internet Newsgroups." Format 0 also enables ROT13 (1453) and stops
+    FUN_7F5FDC68 @ 0x7F5FDC68 truncating PR_SENDER_NAME at its '@', which is
+    how a Usenet author keeps a full internet address in the reader header.
+
+    Read-only (0x2000) and no-attachments (0x4000) stay CLEAR so the board takes
+    posts and accepts attachments on them.
+
+    Every node carries the same flags, board and message alike. The Compose
+    window reads `_F` off the node it holds at +0x88, and FUN_7F5F26FB @
+    0x7F5F26FB reads it off the parent, so a split value would gate the same
+    menu two ways.
+    """
+    flags = BBS_F_FORMAT_RICH_TEXT | BBS_F_MSN_BULLETIN_BOARD
+    if not bbs.has_children:
+        flags |= BBS_F_NO_CHILDREN
+    return flags
+
+
 def build_bbs_props(requested_props, node, *, is_children):
     """Serialise a BBS tree node into (type, name, value) property tuples.
 
@@ -369,11 +420,7 @@ def build_bbs_props(requested_props, node, *, is_children):
         elif name == PROP_PARENT_SUBID:
             out.append((0x03, name, struct.pack("<I", bbs.parent_subid & 0xFFFFFFFF)))
         elif name == PROP_HAS_CHILDREN:
-            # `_F` 2-byte flags. CBbsNavTreeNode::OkToGetChildren @ 0x7F5F1427
-            # reads it and tests the HIGH byte against 0x10, i.e. u16 bit
-            # 0x1000. Bit SET → child count forced to 0. So the bit means
-            # "leaf / no children", the inverse of its old reading here.
-            out.append((0x02, name, struct.pack("<H", 0 if bbs.has_children else 0x1000)))
+            out.append((0x02, name, struct.pack("<H", _folder_flags(bbs))))
         elif name == PROP_PRICE_INFO:
             # `_I` 2-byte attributes. 0 = free content (no pricing checkbox).
             out.append((0x02, name, struct.pack("<H", 0)))

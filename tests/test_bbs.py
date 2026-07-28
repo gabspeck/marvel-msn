@@ -219,6 +219,25 @@ class TestBBSGetProperties(unittest.TestCase):
         # board would collapse the thread list.
         self.assertEqual(records[0]["_F"] & 0x1000, 0)
 
+    def test_every_node_is_a_native_msn_rich_text_board(self):
+        # `_F` bits 0..2 are the message format. CBbs_FIsMsnBbs @ 0x7F600D21
+        # returns `(_F & 7) == 0` and OnInitMenuPopup @ 0x7F5FF42C greys Font,
+        # Paragraph, Insert File, Insert Object, Paste Special and the
+        # formatting toolbar whenever it does, with status text STRINGTABLE 1741
+        # "This command is not available in Internet Newsgroups." Format 1 is
+        # "Rich text (MSN formatted text)" per dialog 124 radio 0x67.
+        for node_id in (_BOARD, _YOSEMITE, _RE_YOSEMITE):
+            request = DirsrvRequest(node_id=node_id, prop_group="a\x00e\x00_F")
+            record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+            flags = record["_F"]
+            self.assertEqual(flags & 0x0007, 0x0001, record["e"])
+            # Radio 0x69 "This is an MSN bulletin board".
+            self.assertEqual(flags & 0x0800, 0x0800, record["e"])
+            # 0x2000 gates New Message (1101) and Reply (1303) via FUN_7F600D56.
+            self.assertEqual(flags & 0x2000, 0, record["e"])
+            # 0x4000 "No messages with attachments are allowed" via FUN_7F600D84.
+            self.assertEqual(flags & 0x4000, 0, record["e"])
+
 
 class TestBBSGetChildren(unittest.TestCase):
     def test_board_lists_every_message_including_replies(self):

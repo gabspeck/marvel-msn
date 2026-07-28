@@ -428,7 +428,10 @@ def _bbs_node(
     `has_children` drives `_F` bit 0x1000, the child-count gate read by
     CBbsNavTreeNode_OkToGetChildren (0x7F5F1427). Only the board sets it —
     messages have no tree children, so leaving it False stops the reader
-    asking for children that do not exist.
+    asking for children that do not exist. The rest of `_F` is fixed: every
+    node here is a native MSN bulletin board carrying rich text, which is what
+    unlocks the Compose window's formatting and attachment commands. See
+    `server.services.bbs._folder_flags`.
 
     Rides DirectoryNode with app_id=APP_BBS_SERVICE and language=0; the
     BBS-specific tags (`_a/_D/_P/_t/_F`) live in the attached BbsFields, read by
