@@ -289,10 +289,45 @@ terminology) also carries framing flags for large requests:
 |-------|---------|
 | 0x01 | Normal call head (two-way) |
 | 0x06 | Call head with continuation frames following |
-| 0xE6 / 0xE7 | One-way continuation frames (drop if bit `0xE0` is set) |
+| 0xE6 | Chunked-field frame, more follow (one-way) |
+| 0xE7 | Chunked-field frame, last one for the stream (one-way) |
 
-Continuation frames (0xE6/0xE7) carry extra payload for the preceding call
-head but expect **no reply**. Server must ignore them.
+### 5.x Chunked fields
+
+`MPCCL!AppendTaggedRequestField @ 0x046067E2` takes the chunked path when a
+parameter is variable (`tag & 0x0F == 4`) and the request body has less room
+left than `length + 0x80`. It writes a 6-byte reference where the field would
+have gone and sends the bytes out of band:
+
+```
+inline, in the call head:   [0x05][stream_id][u32 length]
+```
+
+The tag is `0x45` instead of `0x05` when the original tag was `0x44`, carrying
+over the caller's `0x40` "keep a copy" bit. `stream_id` comes off a
+per-connection counter at `conn+0x96`, bumped inside a critical section, so ids
+run 1, 2, 3 … and never collide between concurrent calls on one connection.
+
+`AppendChunkedRequestField @ 0x04606CB2` then queues the bytes as frames:
+
+```
+each frame:   [0xE6 | 0xE7][stream_id][raw bytes]
+```
+
+A continuation frame has **no request id and no selector** — byte 1 is the
+stream id, and the field content starts at byte 2. Decoding a VLI request id
+out of it eats the first payload bytes. `0xE7` marks the last frame of a
+stream. The frames expect no reply, and acking one sends a reply the client has
+no pending request for.
+
+Frames arrive **after** the head that references them, and the client does not
+drain them before sending the next call. A server that needs the whole field —
+the BBS post channel, whose method 4 commits an article — must hold the
+operation until every stream it quotes has seen its `0xE7`, while still
+answering the head immediately.
+
+Rich text and attachments always take this path: a formatted BBS body runs past
+the 1024-byte packet the client can receive, so it never fits inline.
 
 ---
 

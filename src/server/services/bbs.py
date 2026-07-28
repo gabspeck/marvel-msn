@@ -19,8 +19,14 @@ import datetime
 import logging
 import struct
 
-from ..config import BBS_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE_SIGNAL, TAG_END_STATIC
-from ..models import ByteParam, DwordParam, VarParam, WordParam
+from ..config import (
+    BBS_INTERFACE_GUIDS,
+    MPC_CLASS_CONTINUATION_LAST,
+    MPC_CLASS_ONEWAY_MASK,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_END_STATIC,
+)
+from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -192,6 +198,11 @@ class BBSHandler:
         # so the upload state belongs here rather than in a global.
         self._uploads = {}
         self._next_handle = _POST_HANDLE_MIN
+        # Chunked-field streams, stream_id → ChunkStream. A field too big for
+        # the inline request body arrives on class 0xE6/0xE7 frames that quote
+        # the id the head referenced. The ids come off a per-connection counter
+        # and the handler is per-pipe, so this dict is the whole namespace.
+        self._streams = {}
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Advertise the generic TREENVCL tree IIDs plus the message channel.
@@ -212,7 +223,13 @@ class BBSHandler:
         message-content class (0x0B) methods 0 (article fetch) and 2/3/4/7 (post
         upload). Everything else — GetParents (1), the unimplemented
         enum/resolve slots — is logged unhandled and left unanswered.
+
+        Class 0xE6/0xE7 are not calls. They carry the body of a field the head
+        was too small to hold, and they expect no reply.
         """
+        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+            self._take_continuation(msg_class, selector, payload)
+            return None
         if msg_class == BBS_CLASS_MESSAGE:
             if selector == BBS_SELECTOR_GET_ARTICLE:
                 reply_payload = build_bbs_article_reply_payload(payload)
@@ -266,6 +283,7 @@ class BBSHandler:
             board_id=request.board_id,
             total_bytes=request.total_bytes,
             chunks=[request.chunk],
+            streams=self._streams,
         )
         log.info(
             "bbs_post_start handle=%d parent=%d:%d total_bytes=%d chunk_bytes=%d attachments=%d",
@@ -273,7 +291,7 @@ class BBSHandler:
             request.parent_msg_id,
             request.board_id,
             request.total_bytes,
-            len(request.chunk),
+            _chunk_len(request.chunk),
             request.attachment_count,
         )
         return build_post_reply(handle)
@@ -301,23 +319,70 @@ class BBSHandler:
             log.info(
                 "bbs_post_append handle=%d chunk_bytes=%d received=%d/%d",
                 request.handle,
-                len(request.chunk),
+                _chunk_len(request.chunk),
                 upload.received_bytes,
                 upload.total_bytes,
             )
             return build_post_reply(_POST_ACK_OK)
 
-        del self._uploads[request.handle]
+        upload.commit_pending = True
+        self._finish_if_ready(request.handle, upload)
+        return build_post_reply(_POST_ACK_OK)
+
+    def _take_continuation(self, msg_class, stream_id, payload):
+        """Fold one class-0xE6/0xE7 frame into its stream.
+
+        0xE7 closes the stream. The commit for an upload that quotes it may
+        already have landed — the client does not wait for the frames to drain
+        before sending method 4 — so a closing frame finishes whatever was left
+        waiting on it.
+        """
+        stream = self._streams.get(stream_id)
+        if stream is None:
+            stream = ChunkStream()
+            self._streams[stream_id] = stream
+        stream.data += payload
+        stream.complete = msg_class == MPC_CLASS_CONTINUATION_LAST
+        # One line per frame is far too much at INFO: an attachment runs to
+        # hundreds of ~460-byte frames. Only the closing frame is worth a line.
+        log.debug(
+            "bbs_chunk_frame id=%d frame_bytes=%d received=%d",
+            stream_id,
+            len(payload),
+            len(stream.data),
+        )
+        if stream.complete:
+            log.info("bbs_chunk_stream_done id=%d bytes=%d", stream_id, len(stream.data))
+            for handle, upload in list(self._uploads.items()):
+                if upload.commit_pending:
+                    self._finish_if_ready(handle, upload)
+
+    def _finish_if_ready(self, handle, upload):
+        """Store a committed upload once every stream it quotes has closed."""
+        pending = upload.pending_streams
+        if pending:
+            log.info(
+                "bbs_post_commit_deferred handle=%d waiting=%s bytes=%d/%d",
+                handle,
+                ",".join(str(s) for s in pending),
+                upload.received_bytes,
+                upload.total_bytes,
+            )
+            return
+        del self._uploads[handle]
         node = commit_post(upload)
+        # Only now, with the article built, are the streams safe to drop.
+        for stream_id in upload.stream_ids:
+            self._streams.pop(stream_id, None)
         log.info(
-            "bbs_post_commit handle=%d node=%s subject=%r parent=%d bytes=%d",
-            request.handle,
+            "bbs_post_commit handle=%d node=%s subject=%r parent=%d bytes=%d/%d",
+            handle,
             node.node_id,
             node.content.name,
             node.content.bbs.parent_subid,
             upload.received_bytes,
+            upload.total_bytes,
         )
-        return build_post_reply(_POST_ACK_OK)
 
     def _post_abort(self, payload):
         """Method 7: drop an upload the client gave up on.
@@ -743,21 +808,65 @@ POST_HEADER_SIZE = "X-MOS-Size"
 _POST_UNTITLED_SUBJECT = "(No subject)"
 
 
-class PostUpload:
-    """One in-flight post: where it goes, and the chunks received so far."""
+def _chunk_len(chunk):
+    """Byte count a chunk contributes, or its declared size when it is a reference."""
+    if isinstance(chunk, ChunkedParam):
+        return chunk.total_length
+    return len(chunk)
 
-    def __init__(self, parent_msg_id, board_id, total_bytes, chunks):
+
+class ChunkStream:
+    """Bytes of one chunked field, gathered from its class-0xE6/0xE7 frames."""
+
+    def __init__(self):
+        self.data = b""
+        self.complete = False
+
+
+class PostUpload:
+    """One in-flight post: where it goes, and the chunks received so far.
+
+    A chunk is either inline bytes or a ChunkedParam naming a stream that
+    carries the field out of band. `streams` is the handler's stream table, so
+    a reference resolves against whatever has arrived by the time it is read.
+    """
+
+    def __init__(self, parent_msg_id, board_id, total_bytes, chunks, streams):
         self.parent_msg_id = parent_msg_id
         self.board_id = board_id
         self.total_bytes = total_bytes
         self.chunks = chunks
+        self.streams = streams
+        self.commit_pending = False
+
+    def _parts(self):
+        for chunk in self.chunks:
+            if isinstance(chunk, ChunkedParam):
+                stream = self.streams.get(chunk.stream_id)
+                yield stream.data if stream else b""
+            else:
+                yield chunk
+
+    @property
+    def stream_ids(self):
+        return [c.stream_id for c in self.chunks if isinstance(c, ChunkedParam)]
+
+    @property
+    def pending_streams(self):
+        """Quoted stream ids that have not seen their closing 0xE7 yet."""
+        out = []
+        for stream_id in self.stream_ids:
+            stream = self.streams.get(stream_id)
+            if stream is None or not stream.complete:
+                out.append(stream_id)
+        return out
 
     @property
     def received_bytes(self):
-        return sum(len(c) for c in self.chunks)
+        return sum(len(p) for p in self._parts())
 
     def article(self):
-        return b"".join(self.chunks)
+        return b"".join(self._parts())
 
 
 class PostStartRequest:
@@ -796,19 +905,22 @@ def decode_post_start_request(payload):
     which is the only shape this cannot work with.
     """
     send_params, _recv = parse_request_params(payload)
-    var_params = [p for p in send_params if isinstance(p, VarParam)]
+    # A chunked reference stands exactly where its field would have been, so
+    # position still picks the right one out of the three variable parameters.
+    fields = [p for p in send_params if isinstance(p, (VarParam, ChunkedParam))]
     dwords = [p for p in send_params if isinstance(p, DwordParam)]
     words = [p for p in send_params if isinstance(p, WordParam)]
-    if len(var_params) < 3 or len(dwords) < 1:
+    if len(fields) < 3 or len(dwords) < 1 or not isinstance(fields[0], VarParam):
         return None
-    target = var_params[0].data
+    target = fields[0].data
     parent_msg_id, board_id = struct.unpack("<II", target[:8]) if len(target) >= 8 else (0, 0)
+    chunk = fields[2]
     return PostStartRequest(
         total_bytes=dwords[0].value,
         parent_msg_id=parent_msg_id,
         board_id=board_id,
         attachment_count=words[1].value if len(words) > 1 else 0,
-        chunk=var_params[2].data,
+        chunk=chunk if isinstance(chunk, ChunkedParam) else chunk.data,
     )
 
 
@@ -819,12 +931,13 @@ def decode_post_chunk_request(payload):
     """
     send_params, _recv = parse_request_params(payload)
     handles = [p for p in send_params if isinstance(p, ByteParam)]
-    chunks = [p for p in send_params if isinstance(p, VarParam)]
+    chunks = [p for p in send_params if isinstance(p, (VarParam, ChunkedParam))]
     if not handles:
         return None
+    chunk = chunks[0] if chunks else b""
     return PostChunkRequest(
         handle=handles[0].value,
-        chunk=chunks[0].data if chunks else b"",
+        chunk=chunk if isinstance(chunk, (ChunkedParam, bytes)) else chunk.data,
     )
 
 

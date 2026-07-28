@@ -86,6 +86,28 @@ class VarParam:
 
 
 @dataclass
+class ChunkedParam:
+    """A variable field too large to fit in the inline request body.
+
+    `MPCCL!AppendTaggedRequestField @ 0x046067E2` takes this path when the tag
+    is variable (`tag & 0x0F == 4`) and the field needs more room than the body
+    has left (`remaining <= length + 0x80`). It writes a 6-byte reference in
+    place of the field — `[0x05][stream_id][u32 length]`, or tag `0x45` when the
+    original tag was `0x44` — and hands the bytes to
+    `AppendChunkedRequestField @ 0x04606CB2`, which queues them as class
+    0xE6/0xE7 continuation frames stamped with the same `stream_id`.
+
+    `stream_id` is a per-connection counter at `conn+0x96`, bumped under a
+    critical section, so ids run 1, 2, 3 … across every chunked field on the
+    connection and never collide between concurrent calls.
+    """
+
+    tag: int
+    stream_id: int
+    total_length: int
+
+
+@dataclass
 class EndMarker:
     tag: int
 

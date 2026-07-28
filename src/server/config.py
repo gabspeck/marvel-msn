@@ -55,6 +55,20 @@ TAG_DYNAMIC_STREAM_END = 0x88       # iterator stream end, signals +0x28/+0x2c
 # preceding head).  They must not be acked — see §9a.3 / §9a.5b.
 MPC_CLASS_ONEWAY_MASK = 0xE0
 
+# A continuation frame is `[class][stream_id][raw bytes]` — no request id and no
+# selector. `MPCCL!AppendChunkedRequestField @ 0x04606CB2` writes the class into
+# byte 0 and the stream id into byte 1, then memcpy's the field bytes after it.
+# 0xE6 means more frames follow, 0xE7 is the last one for that stream.
+MPC_CLASS_CONTINUATION_MORE = 0xE6
+MPC_CLASS_CONTINUATION_LAST = 0xE7
+MPC_CONTINUATION_HEADER_LEN = 2
+
+# Send tags standing in for a chunked field. 0x45 is 0x05 with the caller's
+# 0x40 "keep a copy" bit carried over from tag 0x44.
+MPC_TAG_CHUNKED = 0x05
+MPC_TAG_CHUNKED_COPY = 0x45
+MPC_CHUNKED_REF_LEN = 5  # stream_id byte + u32 length, after the tag
+
 # --- DIRSRV property 'b' browse flags ---
 # PROTOCOL.md §7.2.4 / CMosTreeNode::ExecuteCommand:
 #   bit 0x01 clear = container (browse)

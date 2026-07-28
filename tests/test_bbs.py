@@ -11,7 +11,7 @@ import unittest
 
 from server.models import DirsrvRequest
 from server.mos_apps import APP_BBS_SERVICE
-from server.mpc import parse_host_block
+from server.mpc import parse_host_block, parse_request_params
 from server.services import dirsrv
 from server.services.bbs import (
     BBS_CLASS_MESSAGE,
@@ -832,6 +832,101 @@ class TestBBSPostFraming(PostChannelTestCase):
                 self.assertIsNotNone(
                     self.handler.handle_request(BBS_CLASS_MESSAGE, selector, 1, payload, 5, 5)
                 )
+
+
+class TestBBSChunkedFieldUpload(PostChannelTestCase):
+    """A field too big for the request body rides class 0xE6/0xE7 frames.
+
+    `MPCCL!AppendTaggedRequestField @ 0x046067E2` swaps the field for a 6-byte
+    `[0x05][stream_id][u32 length]` reference and queues the bytes through
+    `AppendChunkedRequestField @ 0x04606CB2`, which stamps each frame
+    `[0xE6|0xE7][stream_id]` and memcpy's the payload after it. 0xE7 is the last
+    frame. Rich text and attachments always take this path — the body alone
+    runs past the 1024-byte packet the client can receive.
+    """
+
+    def ref_chunk(self, handle, stream_id, total_length):
+        """Method-3/4 request whose chunk is a reference, not inline bytes."""
+        return (
+            bytes([0x01, handle, 0x05, stream_id])
+            + struct.pack("<I", total_length)
+            + b"\x03"
+            + struct.pack("<I", total_length)
+            + b"\x81"
+        )
+
+    def feed(self, stream_id, data, *, last):
+        msg_class = 0xE7 if last else 0xE6
+        frame = bytes([msg_class, stream_id]) + data
+        block = parse_host_block(frame)
+        self.assertEqual(block.msg_class, msg_class)
+        self.assertEqual(block.selector, stream_id)
+        self.assertEqual(block.request_id, 0)
+        self.assertEqual(block.payload, data, "continuation payload must not lose bytes")
+        return self.handler.handle_request(
+            block.msg_class, block.selector, block.request_id, block.payload, 5, 5
+        )
+
+    def test_continuation_frames_are_never_acked(self):
+        # They are one-way. An ack on the stream would be a reply the client has
+        # no request waiting for.
+        self.assertIsNone(self.feed(1, b"abc", last=True))
+
+    def test_referenced_field_reassembles_in_arrival_order(self):
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD, total=999))[1]
+        body = b"".join(bytes([0x41 + i]) * 200 for i in range(6))
+        self.send(BBS_SELECTOR_POST_APPEND, self.ref_chunk(handle, 4, len(body)))
+        for offset in range(0, len(body), 460):
+            frame = body[offset : offset + 460]
+            self.feed(4, frame, last=offset + 460 >= len(body))
+        self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, b"tail"))
+        node = app_store.content.get_children(_BOARD)[-1]
+        self.assertEqual(node.content.bbs.body_raw, body + b"tail")
+
+    def test_commit_waits_for_a_stream_that_has_not_closed(self):
+        # The client does not drain the frames before it sends method 4, so the
+        # commit lands first. Storing then would truncate the article.
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD, total=999))[1]
+        before = len(app_store.content.get_children(_BOARD))
+        self.send(BBS_SELECTOR_POST_COMMIT, self.ref_chunk(handle, 9, 12))
+        self.feed(9, b"first ", last=False)
+        self.assertEqual(len(app_store.content.get_children(_BOARD)), before)
+        self.feed(9, b"half", last=True)
+        children = app_store.content.get_children(_BOARD)
+        self.assertEqual(len(children), before + 1)
+        self.assertEqual(children[-1].content.bbs.body_raw, b"first half")
+
+    def test_deferred_commit_still_acks_immediately(self):
+        # FUN_7F5FB7CA reads the byte back and fails the post on zero, so the
+        # ack cannot wait for the stream.
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD, total=999))[1]
+        reply = self.send(BBS_SELECTOR_POST_COMMIT, self.ref_chunk(handle, 3, 4))
+        self.assertEqual(reply, bytes([0x81, 0x01, 0x87]))
+
+
+class TestChunkedReferenceDecoding(unittest.TestCase):
+    def test_reference_is_six_bytes_and_carries_no_inline_data(self):
+        # Parsing it as a variable field reads the stream id as a length byte
+        # and swallows the rest of the request — that is what reduced a real
+        # 1722-byte post to 207 bytes on the wire.
+        payload = bytes([0x01, 0x2A, 0x05, 0x02]) + struct.pack("<I", 1534) + b"\x81"
+        send_params, recv = parse_request_params(payload)
+        self.assertEqual(recv, [0x81])
+        self.assertEqual(len(send_params), 2)
+        self.assertEqual(send_params[0].value, 0x2A)
+        self.assertEqual(send_params[1].stream_id, 0x02)
+        self.assertEqual(send_params[1].total_length, 1534)
+
+    def test_copy_tag_0x45_decodes_the_same_way(self):
+        # 0x45 is 0x05 with the caller's 0x40 bit carried over from tag 0x44.
+        send_params, _ = parse_request_params(bytes([0x45, 0x07]) + struct.pack("<I", 9))
+        self.assertEqual(send_params[0].tag, 0x45)
+        self.assertEqual(send_params[0].stream_id, 0x07)
+        self.assertEqual(send_params[0].total_length, 9)
+
+    def test_variable_field_tag_0x04_is_untouched(self):
+        send_params, _ = parse_request_params(b"\x04" + bytes([0x80 | 3]) + b"abc")
+        self.assertEqual(send_params[0].data, b"abc")
 
 
 class TestBBSPostRequestDecoding(PostChannelTestCase):

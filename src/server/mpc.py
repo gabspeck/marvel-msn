@@ -7,6 +7,11 @@ format that travels inside logical pipes.
 import struct
 
 from .config import (
+    MPC_CHUNKED_REF_LEN,
+    MPC_CLASS_ONEWAY_MASK,
+    MPC_CONTINUATION_HEADER_LEN,
+    MPC_TAG_CHUNKED,
+    MPC_TAG_CHUNKED_COPY,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_INDEX_MASK,
@@ -16,6 +21,7 @@ from .config import (
 )
 from .models import (
     ByteParam,
+    ChunkedParam,
     DirsrvRequest,
     DwordParam,
     EndMarker,
@@ -77,10 +83,26 @@ def build_discovery_host_block(payload, request_id=0):
 
 
 def parse_host_block(data):
-    """Parse an MPC host block. Returns HostBlock or None."""
-    if len(data) < 3:
+    """Parse an MPC host block. Returns HostBlock or None.
+
+    A one-way continuation frame (class bits 0xE0 set) is not a call: it has no
+    request id and no selector, only `[class][stream_id][raw bytes]` per
+    `MPCCL!AppendChunkedRequestField @ 0x04606CB2`. Decoding a VLI out of its
+    body would eat the first payload bytes, so the stream id lands in
+    `selector` and `request_id` stays 0.
+    """
+    if len(data) < 2:
         return None
     msg_class = data[0]
+    if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        return HostBlock(
+            msg_class=msg_class,
+            selector=data[1],
+            request_id=0,
+            payload=data[MPC_CONTINUATION_HEADER_LEN:],
+        )
+    if len(data) < 3:
+        return None
     selector = data[1]
     req_id, vli_len = decode_vli(data, 2)
     if req_id is None:
@@ -138,8 +160,13 @@ def parse_request_params(data):
     """Decode send-side tagged parameters from an MPC request payload.
 
     Send-side tags (bit 7 clear): 0x01=byte, 0x02=word, 0x03=dword,
-    0x04=variable, 0x05=dynamic.
+    0x04=variable, 0x05/0x45=chunked reference.
     Receive descriptors (bit 7 set): 0x81-0x88, no data attached.
+
+    A chunked reference is 6 bytes and carries no inline data — the field rides
+    class 0xE6/0xE7 frames instead. It must not go through the variable-field
+    branch: `_decode_var_length` would read the stream id as a length byte and
+    slice the rest of the request into a bogus value.
     """
     send_params = []
     recv_descriptors = []
@@ -169,7 +196,16 @@ def parse_request_params(data):
             val = struct.unpack("<I", data[pos : pos + 4])[0]
             send_params.append(DwordParam(tag=tag, value=val))
             pos += 4
-        elif tag in (0x04, 0x05):
+        elif tag in (MPC_TAG_CHUNKED, MPC_TAG_CHUNKED_COPY):
+            if pos + MPC_CHUNKED_REF_LEN > len(data):
+                break
+            stream_id = data[pos]
+            total_length = struct.unpack("<I", data[pos + 1 : pos + 5])[0]
+            send_params.append(
+                ChunkedParam(tag=tag, stream_id=stream_id, total_length=total_length)
+            )
+            pos += MPC_CHUNKED_REF_LEN
+        elif tag == 0x04:
             length, pos = _decode_var_length(data, pos)
             if length is None:
                 break
