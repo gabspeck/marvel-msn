@@ -12,8 +12,10 @@ from server.models import DirsrvRequest
 from server.mos_apps import APP_BBS_SERVICE
 from server.services import dirsrv
 from server.services.bbs import (
+    BBS_CLASS_MESSAGE,
     BBS_CLASS_TREE,
     BBSHandler,
+    build_bbs_article_reply_payload,
     build_bbs_get_children_reply_payload,
     build_bbs_get_properties_reply_payload,
 )
@@ -28,6 +30,11 @@ _BOARD = "0:1"  # Climbing BBS
 _YOSEMITE = "256:1"  # msg 0x100 on board 1
 _RE_YOSEMITE = "512:1"  # msg 0x200, _P = 0x100
 _SPORTS_CATEGORY = "1:266"  # DIRSRV "Sports, Health and Fitness" (f8 0x10A)
+
+# Class-0x0B method-0 request as the reader sends it: the 8-byte mnid it copied
+# into its context at +0xA8, one 0x83 status DWORD to receive, and 0x85 marking
+# the request as streaming.
+_ARTICLE_REQUEST = b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 0x100, 1) + b"\x83\x85"
 
 
 def _walk_records(payload):
@@ -196,8 +203,12 @@ class TestBBSGetChildren(unittest.TestCase):
         # propList "a,e") → decode → GetChildren reply → framed packet.
         handler = BBSHandler(1, "BBS")
         wire = (
-            b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 0, 1)
-            + b"\x04" + bytes([0x80 | 4]) + b"a\x00e\x00"
+            b"\x04"
+            + bytes([0x80 | 8])
+            + struct.pack("<II", 0, 1)
+            + b"\x04"
+            + bytes([0x80 | 4])
+            + b"a\x00e\x00"
             + b"\x83\x83\x85"
         )
         pkts = handler.handle_request(BBS_CLASS_TREE, 0x02, 0, wire, 5, 5)
@@ -224,9 +235,7 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
         # inner mnid {field_0=2, field_8/field_c=(2,1), field_10=0}. 'l' must be
         # 8 inline bytes (wire type 0x0C) — a 0x0E blob caches a heap pointer
         # and the cap-8 read would copy the pointer, not the mnid.
-        request = DirsrvRequest(
-            node_id=_SPORTS_CATEGORY, prop_group="a\x00c\x00b\x00e\x00l\x00i"
-        )
+        request = DirsrvRequest(node_id=_SPORTS_CATEGORY, prop_group="a\x00c\x00b\x00e\x00l\x00i")
         records = _walk_records(dirsrv.build_get_children_reply_payload(request))
         board = next(r for r in records if r["e"] == "Climbing BBS")
         self.assertEqual(board["b"] & 0x04, 0x04)
@@ -237,9 +246,7 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
     def test_plain_category_row_has_no_delegate_tags(self):
         # Only the board delegates. A normal category keeps 'b' bit 0x04 clear,
         # otherwise every folder would try to load a navigator.
-        request = DirsrvRequest(
-            node_id=_SPORTS_CATEGORY, prop_group="a\x00c\x00b\x00e\x00l\x00i"
-        )
+        request = DirsrvRequest(node_id=_SPORTS_CATEGORY, prop_group="a\x00c\x00b\x00e\x00l\x00i")
         records = _walk_records(dirsrv.build_get_children_reply_payload(request))
         for record in (r for r in records if r["e"] != "Climbing BBS"):
             self.assertEqual(record["b"] & 0x04, 0)
@@ -275,7 +282,8 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
             self.assertEqual(record["b"] & 0x01, 0x01, record["e"])
         # Yosemite is a leaf `b` but still expandable: _F bit 0x1000 clear.
         yosemite = next(
-            r for r in _walk_records(build_bbs_get_children_reply_payload(request))
+            r
+            for r in _walk_records(build_bbs_get_children_reply_payload(request))
             if r["e"] == "Yosemite"
         )
         self.assertEqual(yosemite["_F"] & 0x1000, 0)
@@ -427,18 +435,121 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
 
 
 class TestBBSClassDispatch(unittest.TestCase):
-    def test_message_content_class_is_not_answered_by_the_tree_serialiser(self):
+    def test_method_zero_routes_by_class_not_by_selector(self):
         # `msg_class` is the interface (its discovery selector); `selector` is the
-        # method within it. Class 0x0B is the message-content channel
-        # (IID 00028B2F). Dispatching on `selector` alone routed its method 0
-        # into GetProperties, which answered with a record the reader cannot use
-        # — and the client ACKed it. Leave the class unanswered instead.
+        # method within it. Method 0 exists on both: class 0x03 is GetProperties
+        # on the tree channel, class 0x0B is the article fetch on the
+        # message-content channel (IID 00028B2F). Dispatching on `selector`
+        # alone routed the article fetch into the tree serialiser, which
+        # answered with a record the reader cannot use — and the client ACKed it.
         handler = BBSHandler(1, "BBS")
-        wire = b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 0x100, 1) + b"\x83\x83\x85"
+        wire = _ARTICLE_REQUEST
+        article = handler.handle_request(BBS_CLASS_MESSAGE, 0x00, 0, wire, 5, 5)
+        tree = handler.handle_request(BBS_CLASS_TREE, 0x00, 0, wire, 5, 5)
+        self.assertIsNotNone(article)
+        self.assertIsNotNone(tree)
+        self.assertNotEqual(article, tree)
+
+    def test_unknown_method_on_the_message_class_stays_unanswered(self):
+        handler = BBSHandler(1, "BBS")
         with self.assertLogs("server.services.bbs", level="WARNING"):
-            self.assertIsNone(handler.handle_request(0x0B, 0x00, 0, wire, 5, 5))
-        # The same method index on the tree class is still served.
-        self.assertIsNotNone(handler.handle_request(BBS_CLASS_TREE, 0x00, 0, wire, 5, 5))
+            self.assertIsNone(
+                handler.handle_request(BBS_CLASS_MESSAGE, 0x01, 0, _ARTICLE_REQUEST, 5, 5)
+            )
+
+
+class TestBBSArticle(unittest.TestCase):
+    """Class 0x0B method 0 — the message body the Read Message window streams."""
+
+    def _article(self, msg_id=0x100, board_id=1):
+        wire = b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", msg_id, board_id) + b"\x83\x85"
+        return build_bbs_article_reply_payload(wire)
+
+    def test_reply_is_a_zero_status_then_a_dynamic_complete_section(self):
+        # `0x83 [status] 0x87 0x86 [bytes]`. The 0x86 tag matters: MPCCL
+        # ProcessTaggedServiceReply (0x04604F26) calls SignalRequestCompletion
+        # for 0x86, which sets request +0x18, and the reader's fetch thread
+        # (FUN_7F5FB15F) only leaves its WaitIncremental loop when +0x18 makes
+        # the wait return 0x0B0B000B. A 0x88 stream-end leaves +0x18 clear, the
+        # wait returns 0x0B0B000C forever, and the reader hangs blank.
+        payload = self._article()
+        self.assertEqual(payload[0], 0x83)
+        self.assertEqual(struct.unpack_from("<I", payload, 1)[0], 0)
+        self.assertEqual(payload[5], 0x87)
+        self.assertEqual(payload[6], 0x86)
+
+    def test_headers_end_at_a_bare_blank_line(self):
+        # FUN_7F5FB15F splits the stream at the first two adjacent '\n' bytes.
+        # CRLF headers never produce that pair, so the split never fires and the
+        # whole article is swallowed as headers.
+        article = self._article()[7:]
+        head, sep, body = article.partition(b"\n\n")
+        self.assertEqual(sep, b"\n\n")
+        self.assertNotIn(b"\r", head)
+        self.assertTrue(body.startswith(b"In case anyone is thinking"))
+
+    def test_every_header_matches_the_tabled_name_exactly(self):
+        # BBSNAV strncmps each line against a tabled name that includes its
+        # trailing space, so `Name: value` with exactly one space is required.
+        head = self._article()[7:].partition(b"\n\n")[0].decode()
+        for line in head.split("\n"):
+            name, sep, value = line.partition(": ")
+            self.assertEqual(sep, ": ", line)
+            self.assertFalse(value.startswith(" "), line)
+
+    def test_format_header_selects_the_plain_text_stream(self):
+        # FUN_7F5FC56F reads MAPI 0x6801001E and strcmps it. Absent, the
+        # property reads back PT_ERROR and the render aborts with 0x8B0B0049.
+        head = self._article()[7:].partition(b"\n\n")[0]
+        self.assertIn(b"X-MOS-Format: TEXT\n", head)
+
+    def test_headers_carry_the_node_identity(self):
+        head = self._article()[7:].partition(b"\n\n")[0]
+        self.assertIn(b"From: Chris Hahn\n", head)
+        self.assertIn(b"Subject: Yosemite\n", head)
+        # Newsgroups is the board — the same mnid with the message id zeroed,
+        # which is how CBbsNavTreeNode::GetParent reaches it.
+        self.assertIn(b"Newsgroups: Climbing BBS\n", head)
+        self.assertIn(b"Message-ID: <256.1@bbs.msn.com>\n", head)
+
+    def test_body_uses_richedit_line_breaks(self):
+        # The body is handed to EM_STREAMIN, so it carries CRLF like any other
+        # RichEdit text; only the header block is LF-only.
+        body = self._article()[7:].partition(b"\n\n")[2]
+        self.assertIn(b"\r\n\r\n", body)
+        self.assertNotIn(b"\n\n", body)
+
+    def test_size_header_counts_the_body_as_sent(self):
+        article = self._article()[7:]
+        head, _sep, body = article.partition(b"\n\n")
+        self.assertIn(f"X-MOS-Size: {len(body)}\n".encode(), head)
+
+    def test_date_header_shows_the_same_wall_clock_as_the_date_column(self):
+        # Windows 95 applies its current timezone rule to every timestamp, so
+        # `_D` and this line must agree under the CURRENT offset, not the 1995
+        # one. Europe/Lisbon ran +0200 in 1995 and +0100 today.
+        import datetime
+
+        request = DirsrvRequest(node_id=_YOSEMITE, prop_group="_D")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
+        as_client_shows_it = (
+            datetime.datetime.fromtimestamp(record["_D"], datetime.UTC).replace(tzinfo=None)
+            + offset
+        )
+        head = self._article()[7:].partition(b"\n\n")[0].decode()
+        line = next(x for x in head.split("\n") if x.startswith("Date: "))
+        from_header = datetime.datetime.strptime(line[6:], "%a, %d %b %Y %H:%M:%S %z")
+        self.assertEqual(as_client_shows_it, from_header.replace(tzinfo=None))
+
+    def test_unknown_mnid_still_ships_a_well_formed_article(self):
+        # An unresolvable node falls back to the store's placeholder. The reply
+        # must still split cleanly — an empty or malformed article parks the
+        # fetch thread just as a missing reply does.
+        article = self._article(msg_id=0xDEAD, board_id=0xBEEF)[7:]
+        head, sep, _body = article.partition(b"\n\n")
+        self.assertEqual(sep, b"\n\n")
+        self.assertIn(b"X-MOS-Format: TEXT\n", head)
 
 
 class TestBBSWriteSelectorDeferred(unittest.TestCase):

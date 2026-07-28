@@ -171,8 +171,16 @@ unread tracking is server-side (a node flag bit).
 QueryInterfaces out. Registered as window class **`BBSMsgWndClass`**. The
 message **body** is a **RichEdit** control — `riched32.dll` is `LoadLibrary`d in
 `FUN_7F5F9406` at init. The list-view columns are §6; the threaded view nests
-replies via tree structure (recursive `GetChildren`). Body wire source is a
-bounded gap (see contract doc).
+replies via tree structure (recursive `GetChildren`).
+
+The body arrives on the message-content channel (class `0x0B`, IID `00028B2F`)
+as an RFC-1036 news article. `FUN_7F5FB056` spawns the fetch thread
+`LAB_7F5FB0D3` → `FUN_7F5FB15F`, which drains a `0x86` dynamic reply through the
+MPCCL iterator, splits it at the first blank line, hands the headers to
+`FUN_7F5FB4A9` (header → MAPI tag table at `0x7F610A50`) and the rest to an
+in-memory IStream. `FUN_7F5FC56F` then reads `X-MOS-Format` (`0x6801001E`) back
+and streams the body into the RichEdit via EM_STREAMIN as `TEXT`, `RTF` or
+`RTFCOMP`. Full shape in `docs/bbs-service-contract.md` §Message-content channel.
 
 ## 9. Write / posting pipeline
 
@@ -222,10 +230,10 @@ columns `e/_a/p/_D`; threading via tree + `_P`; flags `_F`/`_I`; price `z`; icon
 
 ## 12. Known gaps / follow-ups
 
-- **Message body wire source** not pinned statically (RichEdit-hosted; `p`=size
-  implies a content blob). Recommend live SoftICE trace on Read-window open.
 - `_f` advertised but no read site found; `_t` is a short text field (topic), not
   the body.
+- Attachments: `X-MOS-Attach` (`0x68020002`) is parsed and enabled, but the
+  transfer path for a nonzero count is not traced.
 - TREEEDCL selector 9 unused by the client.
 - Secondary `CBbsTreeEdit` interface vtables (after the first 29-slot table at
   `0x7F60E9E8`) are mostly local but not individually annotated (property

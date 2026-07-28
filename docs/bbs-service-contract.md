@@ -242,19 +242,113 @@ task cannot be completed" *before any request reaches the wire* — the server l
 stays silent. Note `0x1F42`, the detail string used there, is that reporter's
 default branch, i.e. an HRESULT it has no specific mapping for.
 
-Observed request once the IID is advertised (2026-07-28):
+#### Method 0 — fetch the article
+
+`FUN_7F5FB056` copies the 8-byte mnid into the reader context at `+0xA8` and
+spawns the fetch thread `LAB_7F5FB0D3`, whose body is `FUN_7F5FB15F`. That
+function builds one request on the object `FUN_7F5FCD1A` left at `+0x20`:
+
+| call | MPCCL | wire |
+|---|---|---|
+| request vtable `+0x24`(mnid, 8) | `RegisterVariableReplyBuffer` peer | `04 88` + 8 bytes |
+| request vtable `+0x18`(&status) | `RegisterFixedReplyDwordField` `0x04603E17` | `83` |
+| request vtable `+0x40`() | sets the request's streaming flag | — |
+| request vtable `+0x48`(&iterator) | `DispatchBuiltServiceRequest` `0x046040D8` | `85` |
 
 ```
 class=0x0B selector=0x00
 payload: 04 88 [msg_id:u32][board_id:u32] 83 85
-         └ 8-byte var param = the message mnid
-         recv descriptors 0x83 (status DWORD) + 0x85 (var-length blob)
 ```
 
-Leaving it unanswered hangs the reader (headers blank, empty body). The reply
-framing is not yet pinned — the body itself is still an open gap, and the client
-side to trace is the object `FUN_7F5FCD1A` returns into `param_1+0x20`, consumed
-by the worker thread `LAB_7F5FB0D3` that `FUN_7F5FB056` spawns.
+The `0x85` byte is appended by `DispatchBuiltServiceRequest` only because the
+streaming flag is set, and it is what makes the reply's dynamic section legal —
+`ProcessTaggedServiceReply` (`0x04604F26`) rejects a dynamic tag with "MPC
+Problem: Receiving Dynamic w…" when the flag is clear.
+
+Reply:
+
+```
+83 [status:u32] 87 86 [article bytes …]
+```
+
+`status` must be `0`. `FUN_7F5FB15F` checks it after the first wait and bails
+with `0x8B0B0049` on anything else, before reading a byte of the body.
+
+The dynamic tag must be **`0x86`, not `0x88`**. `ProcessTaggedServiceReply`
+branches on it:
+
+- `0x86` → `SignalRequestCompletion` (`0x04604DDC`): sets request `+0x18 = 1`,
+  then `SetEvent` on `+0x24`, `+0x28` and `+0x2C`.
+- `0x88` → `FUN_04604E25` + `FUN_04604E52`: signals `+0x28` and `+0x2C` only,
+  leaving `+0x18` clear.
+
+The fetch thread drains the stream through iterator vtable `+0x14`
+`WaitIncremental` (`0x046049BC`), which waits on `+0x28` and returns
+`0x0B0B000B` when `+0x18` is set and `0x0B0B000C` when it is clear. Only
+`0x0B0B000B` ends the loop, so a `0x88` reply parks the thread on the next wait
+and the Read Message window stays blank. The tree channel uses `0x88` because
+its consumer is TREENVCL's node iterator, which waits on the `+0x2C` stream-end
+event instead.
+
+Each pass reads the chunk through iterator vtable `+0x1C`, whose object exposes
+the accumulation buffer at `+0xC` (`+0x20` offset added) and the running total
+at `+0x10`; the thread tracks how much it has already consumed, so a single
+`0x86` blob arrives as one full chunk.
+
+#### Article format
+
+The payload is an RFC-1036 news article: header lines, a blank line, then the
+body. `FUN_7F5FB15F` splits at the **first two adjacent `\n` bytes** — header
+lines therefore end in a bare LF. With CRLF the two newlines are never adjacent,
+the split never fires, and the whole article is swallowed as headers.
+
+Headers go to `FUN_7F5FB4A9`, which parses against a 22-entry table it copies
+from `0x7F610A50`. That table is filled in at runtime by the initialiser at
+`0x7F5FAAEF` out of the `(char*, len)` array at `0x7F610978` — on disk the
+template is zeroed apart from the first tag, so a static dump of `.data` shows
+an empty table. Each entry is 20 bytes: MAPI tag, name pointer, name length
+(word), seen flag, enable flag. Matching is `strncmp` against the tabled name
+*including its trailing space*, so a line must read `Name: value` with exactly
+one space. A recognized name whose enable flag is clear is marked seen and
+skipped.
+
+| header | MAPI tag | enabled |
+|---|---|---|
+| `From: ` | `0x0C1A001E` PR_SENDER_NAME | yes |
+| `Subject: ` | `0x0037001E` PR_SUBJECT | yes |
+| `Message-ID: ` | `0x6817001E` | yes |
+| `X-MOS-Format: ` | `0x6801001E` | yes |
+| `X-MOS-Attach: ` | `0x68020002` | yes |
+| `X-MOS-Size: ` | `0x68030003` | yes |
+| `Newsgroups: ` | `0x6804001E` | yes |
+| `Path: ` | `0x6805001E` | yes |
+| `Date: ` | `0x6818001E` | no |
+| `X-MOS-To: ` | `0x6800001E` | no |
+| `X-MOS-Parent: ` | `0x68140003` | no |
+| `X-MOS-Icon: ` | `0x68190002` | no |
+| `X-MOS-Info: ` | — | no |
+
+The rest of the table covers plain news headers (`Reply-To`, `Sender`,
+`Followup-To`, `Expires`, `References`, `Control`, `Distribution`,
+`Organization`, `Keywords`, `Summary`, `Approved`, `Lines`, `Xref`).
+
+`X-MOS-Parent` shares tag `0x68140003` with the node property `_P`, and
+`X-MOS-Size` shares `0x68030003` with `p`, so an article can restate what the
+tree already supplied.
+
+Body bytes after the blank line go into an in-memory IStream (`FUN_7F605B02` is
+its `Write`). `FUN_7F5FC56F` then reads `0x6801001E` back off the message and
+strcmps it to pick the RichEdit stream mode:
+
+| `X-MOS-Format` | EM_STREAMIN wParam |
+|---|---|
+| `TEXT` | `SF_TEXT` (1) |
+| `RTF` | `SF_RTF` (2), stream passed through |
+| `RTFCOMP` | `SF_RTF` (2), wrapped by `WrapCompressedRTFStream` (MAPI32 ordinal 185) |
+
+The header is mandatory. Omit it and the property reads back PT_ERROR (type
+`0x0A`), which aborts the render with `0x8B0B0049`. Because the body reaches a
+RichEdit control, it carries CRLF line breaks; only the header block is LF-only.
 
 Opening a message also makes the client read `_r` and `z` on the node
 (`props=_r,g` then `z,g`), and the status bar's unread count drops — so `_r` is

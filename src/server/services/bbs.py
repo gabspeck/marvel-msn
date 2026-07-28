@@ -15,16 +15,20 @@ ticket; that selector falls into the unhandled bucket here, so a Compose
 attempt is logged and left unanswered rather than crashing or being misrouted.
 """
 
+import datetime
 import logging
 import struct
 
-from ..config import BBS_INTERFACE_GUIDS
+from ..config import BBS_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE_SIGNAL, TAG_END_STATIC
+from ..models import VarParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
+    build_tagged_reply_dword,
     decode_dirsrv_request,
+    parse_request_params,
 )
 from ..store import app_store as _default_store
 from ..store.base import BbsFields
@@ -46,6 +50,38 @@ BBS_SELECTOR_GET_PROPERTIES = 0x00
 BBS_SELECTOR_GET_CHILDREN = 0x02
 BBS_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03
 BBS_SELECTOR_GET_SHABBY = 0x04
+
+# Message-content channel (class 0x0B) method index. Only one method exists:
+# fetch the article for the mnid the reader was opened on.
+BBS_SELECTOR_GET_ARTICLE = 0x00
+
+# `X-MOS-Format` values BBSNAV accepts, from the strcmp chain in the body
+# renderer `FUN_7F5FC56F` @ 0x7F5FC56F. It reads MAPI property 0x6801001E off
+# the message, then:
+#   "RTFCOMP" → EM_STREAMIN SF_RTF, stream wrapped by WrapCompressedRTFStream
+#   "TEXT"    → EM_STREAMIN SF_TEXT
+#   "RTF"     → EM_STREAMIN SF_RTF, stream passed through raw
+# Any other value, or a missing header (the property then reads back PT_ERROR,
+# type 0x0A), aborts the render with 0x8B0B0049.
+BBS_FORMAT_TEXT = "TEXT"
+
+# Article header → MAPI property map, from the parse table BBSNAV builds at
+# 0x7F610A50 (initialiser at 0x7F5FAAEF, names/lengths copied out of the
+# (char*, len) array at 0x7F610978) and consumes in `FUN_7F5FB4A9`. A header
+# only takes effect when its table entry has the enable dword set; the rest are
+# recognised and skipped. Entries relevant here:
+#   From:          0x0C1A001E PR_SENDER_NAME   enabled
+#   Subject:       0x0037001E PR_SUBJECT       enabled
+#   Message-ID:    0x6817001E                  enabled
+#   X-MOS-Format:  0x6801001E                  enabled  (drives the renderer)
+#   X-MOS-Attach:  0x68020002                  enabled
+#   X-MOS-Size:    0x68030003                  enabled
+#   Newsgroups:    0x6804001E                  enabled
+#   Path:          0x6805001E                  enabled
+#   Date:          0x6818001E                  disabled (the column reads `_D`)
+# Name matching is `strncmp` against the tabled name *including its trailing
+# space*, so every line must read exactly `Name: value` with one space.
+_HEADER_SEP = ": "
 
 # BBS property tags (docs/bbs-service-contract.md §"Property tags"). `e` is the
 # Subject; `_a` the Author; `_D` a DWORD time_t (MOSSHELL DWORD-as-time_t date
@@ -102,13 +138,18 @@ class BBSHandler:
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch a BBS request by (interface class, method selector).
 
-        Only the tree class (0x03) is served: methods 0/2/3/4. Everything else —
-        GetParents (1), the unimplemented enum/resolve slots, every TREEEDCL write
-        selector (0–12, incl. GetTicket), and the whole message-content class
-        (0x0B) — is logged unhandled and left unanswered. Answering a class we do
-        not implement is worse than silence: a class-0x0B method-0 reply built by
-        the tree serialiser is a record the reader cannot use, and it accepts it.
+        Two classes are served: the tree class (0x03) methods 0/2/3/4, and the
+        message-content class (0x0B) method 0. Everything else — GetParents (1),
+        the unimplemented enum/resolve slots, every TREEEDCL write selector
+        (0–12, incl. GetTicket) — is logged unhandled and left unanswered.
         """
+        if msg_class == BBS_CLASS_MESSAGE:
+            if selector != BBS_SELECTOR_GET_ARTICLE:
+                log_unhandled_selector(log, msg_class, selector, request_id, payload)
+                return None
+            reply_payload = build_bbs_article_reply_payload(payload)
+            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
+            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
         if msg_class != BBS_CLASS_TREE:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -247,11 +288,146 @@ def build_bbs_get_children_reply_payload(request):
         len(children),
     )
     records = [
-        (child.node_id, build_bbs_props(requested, child, is_children=True))
-        for child in children
+        (child.node_id, build_bbs_props(requested, child, is_children=True)) for child in children
     ]
     return dirsrv.build_tree_reply_wire(records)
 
 
 def _requested_props(prop_group):
     return [p for p in prop_group.split("\x00") if p]
+
+
+# --- Message-content channel (class 0x0B) ---
+
+
+def build_bbs_article_reply_payload(payload):
+    """Class 0x0B method 0: the opened message as an RFC-1036 news article.
+
+    Request is `04 88 [msg_id:u32][board_id:u32] 83 85` — the 8-byte mnid the
+    reader copied into its context at +0xA8, one 0x83 status DWORD to receive,
+    and 0x85 marking the request as streaming (appended by MPCCL
+    `DispatchBuiltServiceRequest` @ 0x046040D8 when the caller set the stream
+    flag through request vtable +0x40).
+
+    Reply is `0x83 [status=0] 0x87 0x86 [article bytes]`.
+
+    The 0x86 tag, not 0x88. MPCCL `ProcessTaggedServiceReply` @ 0x04604F26
+    branches on the dynamic tag: 0x86 calls `SignalRequestCompletion`
+    (request +0x18 = 1, then SetEvent on +0x24/+0x28/+0x2c), while 0x88 only
+    signals the two chunk events and leaves +0x18 clear. The reader's fetch
+    thread `FUN_7F5FB15F` @ 0x7F5FB15F drains the stream through request
+    vtable +0x14 `WaitIncremental` @ 0x046049BC, which returns 0x0B0B000B when
+    +0x18 is set and 0x0B0B000C when it is clear. Only 0x0B0B000B ends the
+    loop, so a 0x88 reply parks that thread on the next wait forever and the
+    Read Message window stays blank — the hang this selector was leaving
+    behind. The tree channel uses 0x88 because its consumer is TREENVCL's node
+    iterator, which waits on the +0x2c stream-end event instead.
+
+    A nonzero status DWORD makes the fetch thread bail with 0x8B0B0049 before
+    reading a byte, so it is always 0 here; a missing node resolves to the
+    store fallback and still ships a well-formed article.
+    """
+    node_id = _article_request_node_id(payload)
+    node = _default_store.content.get_node(node_id)
+    article = build_bbs_article(node)
+    log.info("bbs_get_article node=%s article_bytes=%d", node_id, len(article))
+    return (
+        build_tagged_reply_dword(0) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + article
+    )
+
+
+def _article_request_node_id(payload):
+    """Decode the 8-byte mnid from a class-0x0B request into a store key.
+
+    Same `[dword_0][dword_1]` packing as the tree channel's node id, so it
+    reuses the `"f8:board"` fixture keys — BBS mnids put the message id in
+    field_8 and the board id in field_c.
+    """
+    send_params, _recv = parse_request_params(payload)
+    for p in send_params:
+        if isinstance(p, VarParam) and len(p.data) >= 8:
+            msg_id, board_id = struct.unpack("<II", p.data[:8])
+            return f"{msg_id}:{board_id}"
+    return ""
+
+
+def build_bbs_article(node):
+    """Serialise a BBS node as the news article its reader expects.
+
+    `FUN_7F5FB15F` splits the stream at the first pair of adjacent `\\n` bytes:
+    everything before goes to the header parser `FUN_7F5FB4A9`, everything
+    after is written into an in-memory IStream that becomes the message body.
+    Header lines therefore end in a bare LF — with CRLF the two newlines are
+    never adjacent, the split never fires, and the whole article is swallowed
+    as headers.
+
+    The body is streamed into a RichEdit control by `FUN_7F5FC56F` via
+    EM_STREAMIN, so it carries CRLF line breaks like any other RichEdit text.
+    """
+    content = node.content
+    bbs = content.bbs or _EMPTY_BBS
+    body = bbs.body.replace("\r\n", "\n").replace("\n", "\r\n").encode("ascii", "replace")
+
+    headers = [
+        ("Path", "msn"),
+        ("From", bbs.author),
+        ("Newsgroups", _board_name(node)),
+        ("Subject", content.name),
+        ("Date", _article_date(bbs.date_unix)),
+        ("Message-ID", _message_id(node)),
+        ("X-MOS-Format", BBS_FORMAT_TEXT),
+        ("X-MOS-Size", str(len(body))),
+        ("X-MOS-Attach", "0"),
+    ]
+    head = "".join(f"{name}{_HEADER_SEP}{value}\n" for name, value in headers)
+    return head.encode("ascii", "replace") + b"\n" + body
+
+
+def _board_name(node):
+    """Newsgroups value: the name of the board the message hangs under.
+
+    A BBS mnid is `(message id, board id)`, and the board is that same mnid
+    with the message id zeroed — the rule `CBbsNavTreeNode::GetParent`
+    (0x7F5F12CE) uses. An unresolvable board falls back to the node's own name.
+    """
+    _msg_id, _sep, board_id = node.node_id.partition(":")
+    board = _default_store.content.get_node(f"0:{board_id}")
+    return board.content.name or node.content.name
+
+
+def _message_id(node):
+    """`<message.board@bbs.msn.com>` — synthesised from the mnid.
+
+    The client caches it as MAPI 0x6817001E; nothing on the wire round-trips
+    it back, so any stable unique form serves.
+    """
+    msg_id, _sep, board_id = node.node_id.partition(":")
+    return f"<{msg_id}.{board_id}@bbs.msn.com>"
+
+
+def _article_date(date_unix):
+    """RFC-1036 date carrying the same wall clock the Date column shows.
+
+    Inverts `_bbs_date_to_unix`: that helper subtracts the host's *current* UTC
+    offset rather than the one in force on the post's date, because Windows 95
+    applies one timezone rule to every timestamp. Adding the same offset back
+    reproduces the wall clock; letting `astimezone` pick the historical offset
+    would shift the line off the Date column by an hour.
+
+    BBSNAV's header table has `Date:` disabled, so this line is recognised and
+    skipped rather than parsed. It is here for a well-formed article, not
+    because a value is read from it.
+    """
+    if not date_unix:
+        return "Thu, 01 Jan 1970 00:00:00 +0000"
+    offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
+    stamp = datetime.datetime.fromtimestamp(date_unix, datetime.UTC) + offset
+    return stamp.strftime("%a, %d %b %Y %H:%M:%S ") + _utc_offset_text(offset)
+
+
+def _utc_offset_text(offset):
+    """`+HHMM` / `-HHMM` for an RFC-1036 date line."""
+    total = int(offset.total_seconds())
+    sign = "-" if total < 0 else "+"
+    total = abs(total)
+    return f"{sign}{total // 3600:02d}{total % 3600 // 60:02d}"
