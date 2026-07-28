@@ -36,6 +36,18 @@ class BbsFields:
     # untouched. When this is set it wins over `body`/BODY_ENCODERS, which
     # exist to turn fixture-authored plain text into wire bytes.
     body_raw: bytes | None = None
+    # Files attached to the message. An attachment never travels on the message
+    # channel: the article carries headers plus the body alone, and the file
+    # reaches the reader as an OLE object embedded in that RTF body (CLSID
+    # {00028B50-0000-0000-C000-000000000046}, MOSAF.DLL "Mos Attached File").
+    # BBSNAV FUN_7F5FC7B7 @ 0x7F5FC7B7 collects the objects carrying that CLSID
+    # and FUN_7F5FC919 @ 0x7F5FC919 hands object k the mnid (message id + k,
+    # board id), so the count decides how many tree nodes sit behind a message.
+    # `attachment_data` is what the post channel uploaded past the body — one
+    # file when the count is 1, and the concatenation otherwise, since the
+    # per-file boundaries are not visible on the wire.
+    attachment_count: int = 0
+    attachment_data: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -180,6 +192,7 @@ class ContentStore(Protocol):
     def has_children(self, node_id: str) -> bool: ...
     def find_by_go_word(self, go_word: str) -> DirectoryNode | None: ...
     def add_child(self, parent_id: str, node: DirectoryNode) -> None: ...
+    def add_node(self, node: DirectoryNode) -> None: ...
 
 
 class AccountStore(Protocol):

@@ -37,6 +37,16 @@ class InMemoryContentStore:
             return True
         return bool(ids)
 
+    def add_node(self, node):
+        """Register a node that hangs off no parent.
+
+        A BBS attachment is reachable only by its mnid — FUN_7F5FC919 builds
+        `(message id + k, board id)` from the message and asks for it directly.
+        It is not a child of the board, so listing it there would put a bogus
+        row in the reader.
+        """
+        self._nodes[node.node_id] = node
+
     def add_child(self, parent_id, node):
         """Register a node and append it to `parent_id`'s child list.
 

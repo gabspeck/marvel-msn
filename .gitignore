@@ -15,6 +15,9 @@ binaries*/
 # Session captures (run server/server.py to generate your own)
 session_capture*.log
 
+# Uploaded BBS posts, written by the post channel on commit
+captures/
+
 # Development tools
 .codex
 .junie/

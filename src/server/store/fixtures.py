@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import pathlib
 import struct
 from dataclasses import dataclass
 
@@ -416,6 +417,8 @@ def _bbs_node(
     delegate=False,
     body_raw=None,
     size_bytes=None,
+    attachment_count=0,
+    attachment_data=b"",
 ):
     """A BBS tree node (board / conversation / reply).
 
@@ -491,6 +494,8 @@ def _bbs_node(
                 body=body,
                 body_format=body_format,
                 body_raw=body_raw,
+                attachment_count=attachment_count,
+                attachment_data=attachment_data,
             ),
         ),
     )
@@ -509,7 +514,18 @@ BBS_POST_AUTHOR = "Chris Hahn"
 BBS_POST_DATE_FORMAT = "%B %d, %Y %I:%M %p"
 
 
-def build_bbs_post(msg_id, board_id, *, subject, parent_subid, body_raw, body_format, size_bytes):
+def build_bbs_post(
+    msg_id,
+    board_id,
+    *,
+    subject,
+    parent_subid,
+    body_raw,
+    body_format,
+    size_bytes,
+    attachment_count=0,
+    attachment_data=b"",
+):
     """A BBS message node built from an article the Compose window just posted.
 
     `body_raw` is the uploaded body verbatim — the client encodes it before it
@@ -528,7 +544,41 @@ def build_bbs_post(msg_id, board_id, *, subject, parent_subid, body_raw, body_fo
         body_raw=body_raw,
         body_format=body_format,
         size_bytes=size_bytes,
+        attachment_count=attachment_count,
+        attachment_data=attachment_data,
     )
+
+
+# Name each attachment node carries as its Subject (`e`). The reader never
+# shows it — the file name it draws under the icon comes out of the MOSAF
+# object's own CONTENTS record inside the body — so it only has to be something
+# legible in a log or the Properties dialog.
+BBS_ATTACHMENT_NAME = "Attachment %d"
+
+
+def build_bbs_attachment_nodes(message):
+    """The tree nodes behind one message's attachments.
+
+    BBSNAV `FUN_7F5FC919` @ 0x7F5FC919 walks the MOSAF objects it found in the
+    body and addresses the k-th one as `(message id + k, board id)`, then reads
+    `z` and `_r` off it through `CTreeNavClient::GetProperties`. Each of those
+    mnids has to resolve, so a message with N attachments brings N nodes with
+    it. They hang off no parent: the board lists messages, not files.
+    """
+    msg_id, _sep, board_id = message.node_id.partition(":")
+    bbs = message.content.bbs
+    return [
+        _bbs_node(
+            int(msg_id) + k,
+            int(board_id),
+            BBS_ATTACHMENT_NAME % k,
+            is_container=False,
+            author=bbs.author,
+            date=message.content.created,
+            parent_subid=int(msg_id),
+        )
+        for k in range(1, bbs.attachment_count + 1)
+    ]
 
 
 # "Sports, Health and Fitness" (CATEGORY_DEFS f8 0x10A) hosts the board.
@@ -586,7 +636,51 @@ _BBS_RE_YOSEMITE = _bbs_node(
     parent_subid=0x100,
 )
 
-BBS_NODES = [_CLIMBING_BBS, _BBS_YOSEMITE, _BBS_BRITISH_CLIMBERS, _BBS_RE_YOSEMITE]
+# A message carrying one attachment, captured verbatim from the Compose window
+# on 2026-07-28. Both files are the client's own upload bytes:
+#
+#   attachment-post.rtfcomp  the body as X-MOS-Format "RTFCOMP" names it —
+#       MAPI compressed RTF (`LZFu`, 1282 compressed / 6717 raw), carrying
+#       `{\object\objemb{\*\objclass MOSAF}...{\*\objdata ...}}`. The objdata
+#       is an OLE1 embedded-object header wrapping a 3072-byte compound file
+#       whose root CLSID is {00028B50-0000-0000-C000-000000000046} — MOSAF.DLL,
+#       "Mos Attached File". Its CONTENTS stream reads version 2, kind 1,
+#       file_size 175, state 3, name "BIGBUT.BMP", and that name is what the
+#       reader draws under the icon.
+#   attachment-post.mos2     the file segment that followed the body, 175 bytes
+#       of `MOS2` container — the client compresses an attachment through
+#       MCM `HrMos2CompFile` before uploading it, so this is not raw BMP.
+#
+# Authored bytes cannot stand in for either one: the compressed RTF carries the
+# object's persisted storage, and nothing here builds a docfile.
+_BBS_ATTACHMENT_DIR = pathlib.Path(__file__).resolve().parents[3] / "resources" / "bbs"
+
+_BBS_ATTACHMENT = _bbs_node(
+    0x201,
+    _BBS_BOARD_ID,
+    "Attachment test",
+    is_container=False,
+    author="Chris Hahn",
+    date="May 18, 1995 9:03 AM",
+    body_raw=(_BBS_ATTACHMENT_DIR / "attachment-post.rtfcomp").read_bytes(),
+    body_format="RTFCOMP",
+    # X-MOS-Size on the upload: the body length, which for a compressed body is
+    # the stream length rather than any plain-text count.
+    size_bytes=1286,
+    attachment_count=1,
+    attachment_data=(_BBS_ATTACHMENT_DIR / "attachment-post.mos2").read_bytes(),
+)
+
+BBS_NODES = [
+    _CLIMBING_BBS,
+    _BBS_YOSEMITE,
+    _BBS_BRITISH_CLIMBERS,
+    _BBS_RE_YOSEMITE,
+    _BBS_ATTACHMENT,
+    # (0x202, board) — the mnid FUN_7F5FC919 builds for the one MOSAF object in
+    # the body above. Off the board's child list: it is a file, not a message.
+    *build_bbs_attachment_nodes(_BBS_ATTACHMENT),
+]
 
 
 DIRECTORY_NODES = [
@@ -737,12 +831,14 @@ DIRECTORY_CHILDREN = {
         _BBS_YOSEMITE.node_id,
         _BBS_RE_YOSEMITE.node_id,
         _BBS_BRITISH_CLIMBERS.node_id,
+        _BBS_ATTACHMENT.node_id,
     ],
     # Explicit and empty: ContentStore.get_children answers an unlisted node
     # with the fallback sentinel, which would inject a bogus row.
     _BBS_YOSEMITE.node_id: [],
     _BBS_RE_YOSEMITE.node_id: [],
     _BBS_BRITISH_CLIMBERS.node_id: [],
+    _BBS_ATTACHMENT.node_id: [],
     # Explicit empty children for the `4:0` startup node — avoids the
     # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
     # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.

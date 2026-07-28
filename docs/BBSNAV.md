@@ -234,8 +234,11 @@ columns `e/_a/p/_D`; threading via tree + `_P`; flags `_F`/`_I`; price `z`; icon
 
 - `_f` advertised but no read site found; `_t` is a short text field (topic), not
   the body.
-- Attachments: `X-MOS-Attach` (`0x68020002`) is parsed and enabled, but the
-  transfer path for a nonzero count is not traced.
+- Attachments: the object side is traced (MOSAF.DLL, CLSID `{00028B50-…}`,
+  mnid `message id + k`; see `docs/bbs-service-contract.md` §Attachments). The
+  FTM download itself — `HrFtmDownloadWithUIFRI` / `HrQueueToFtm` — is not.
+  `X-MOS-Attach` (`0x68020002`) is parsed and enabled, but the count the
+  Properties page shows comes from the objects found in the body.
 - TREEEDCL selector 9 unused by the client.
 - Secondary `CBbsTreeEdit` interface vtables (after the first 29-slot table at
   `0x7F60E9E8`) are mostly local but not individually annotated (property

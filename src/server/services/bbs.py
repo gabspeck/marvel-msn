@@ -17,6 +17,7 @@ is not the TREEEDCL write channel.
 
 import datetime
 import logging
+import pathlib
 import struct
 
 from ..config import (
@@ -39,7 +40,7 @@ from ..mpc import (
     parse_request_params,
 )
 from ..store import app_store as _default_store
-from ..store import build_bbs_post
+from ..store import build_bbs_attachment_nodes, build_bbs_post
 from ..store.base import BbsFields
 from . import dirsrv
 from ._dispatch import log_unhandled_selector
@@ -282,6 +283,7 @@ class BBSHandler:
             parent_msg_id=request.parent_msg_id,
             board_id=request.board_id,
             total_bytes=request.total_bytes,
+            attachment_count=request.attachment_count,
             chunks=[request.chunk],
             streams=self._streams,
         )
@@ -645,7 +647,12 @@ def build_bbs_article(node):
         # Size column the list pane already shows — and it would also change
         # with body_format, which the Size column must not do.
         ("X-MOS-Size", str(content.size_bytes)),
-        ("X-MOS-Attach", "0"),
+        # Attachment count. It lands on MAPI tag 0x68020002 and no read site is
+        # known — the reader counts the MOSAF objects it found in the body
+        # instead (`FUN_7F5FC7B7` fills reader+0xC0, which is what the message
+        # Properties page prints). Kept truthful so the header block matches the
+        # body the client is about to parse.
+        ("X-MOS-Attach", str(bbs.attachment_count)),
     ]
     head = "".join(f"{name}{_HEADER_SEP}{value}\n" for name, value in headers)
     return head.encode("ascii", "replace") + b"\n" + body
@@ -831,10 +838,11 @@ class PostUpload:
     a reference resolves against whatever has arrived by the time it is read.
     """
 
-    def __init__(self, parent_msg_id, board_id, total_bytes, chunks, streams):
+    def __init__(self, parent_msg_id, board_id, total_bytes, attachment_count, chunks, streams):
         self.parent_msg_id = parent_msg_id
         self.board_id = board_id
         self.total_bytes = total_bytes
+        self.attachment_count = attachment_count
         self.chunks = chunks
         self.streams = streams
         self.commit_pending = False
@@ -867,6 +875,22 @@ class PostUpload:
 
     def article(self):
         return b"".join(self._parts())
+
+    def split(self):
+        """Cut the upload into `(header block, body, attachment bytes)`.
+
+        `FUN_7F5FC1D4` @ 0x7F5FC1D4 builds one segment per part — the header
+        block, the body stream, then one per attachment — and the method-2
+        `total_bytes` dword counts the header block plus the body alone. The
+        first attachment byte therefore sits at exactly that offset. Attachments
+        run together past it: `FUN_7F5FC2D8` caps a chunk at 1 MB, so a chunk
+        boundary is not a file boundary, and nothing on the wire says where one
+        file ends and the next begins.
+        """
+        article = self.article()
+        head_and_body, attachments = article[: self.total_bytes], article[self.total_bytes :]
+        header, _sep, body = head_and_body.partition(b"\n\n")
+        return header, body, attachments
 
 
 class PostStartRequest:
@@ -957,38 +981,75 @@ def commit_post(upload):
     The uploaded article splits the same way the reader splits a downloaded one
     — at the first pair of adjacent LFs — into a header block and the body. The
     body is already encoded as X-MOS-Format names, so it is stored verbatim and
-    goes back out untouched.
+    goes back out untouched. Attachment bytes are kept off the body: they ride
+    their own segments past `total_bytes` and never reach the reader through the
+    article.
+
+    Every attachment also gets its own tree node at `(message id + k, board id)`
+    — the mnid FUN_7F5FC919 builds for the k-th embedded MOSAF object — so the
+    `z`/`_r` read the reader fires while rendering the body resolves.
     """
-    headers, body = parse_posted_article(upload.article())
+    header_block, body, attachments = upload.split()
+    headers = parse_article_headers(header_block)
     board_key = f"0:{upload.board_id}"
+    msg_id = _next_message_id(board_key, upload.board_id)
     node = build_bbs_post(
-        _next_message_id(board_key, upload.board_id),
+        msg_id,
         upload.board_id,
         subject=headers.get(POST_HEADER_SUBJECT) or _POST_UNTITLED_SUBJECT,
         parent_subid=_header_int(headers, POST_HEADER_PARENT, upload.parent_msg_id),
         body_raw=body,
         body_format=headers.get(POST_HEADER_FORMAT) or BBS_FORMAT_TEXT,
         size_bytes=_header_int(headers, POST_HEADER_SIZE, len(body)),
+        attachment_count=upload.attachment_count,
+        attachment_data=attachments,
     )
     _default_store.content.add_child(board_key, node)
+    for attachment_node in build_bbs_attachment_nodes(node):
+        _default_store.content.add_node(attachment_node)
+    _write_post_capture(node, header_block, body, attachments)
     return node
 
 
-def parse_posted_article(article):
-    """Split an uploaded article into `({header: value}, body_bytes)`.
+# Uploaded posts land here as three files — the header block, the body as the
+# reader will stream it, and whatever followed the body. A post is the only way
+# to obtain a body carrying a real MOSAF attachment object, so the capture is
+# what turns one into a fixture.
+_CAPTURE_DIR = pathlib.Path("captures/bbs")
 
-    Header lines are `Name: value` with one space, terminated by a bare LF, and
-    a blank line ends the block — `FUN_7F5FBD4E` writes exactly that. A line
-    without the separator is skipped rather than failing the post; the client
-    has already committed the message by the time this runs.
+
+def _write_post_capture(node, header_block, body, attachments):
+    """Write one committed upload to `captures/bbs/<node>-<subject>/`."""
+    slug = "".join(c if c.isalnum() else "-" for c in node.content.name).strip("-").lower()
+    directory = _CAPTURE_DIR / f"{node.node_id.replace(':', '-')}-{slug}"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "headers.txt").write_bytes(header_block)
+    (directory / "body.bin").write_bytes(body)
+    if attachments:
+        (directory / "attachments.bin").write_bytes(attachments)
+    log.info(
+        "bbs_post_capture dir=%s header_bytes=%d body_bytes=%d attachment_bytes=%d",
+        directory,
+        len(header_block),
+        len(body),
+        len(attachments),
+    )
+
+
+def parse_article_headers(header_block):
+    """Decode an uploaded header block into `{name: value}`.
+
+    Lines are `Name: value` with one space, terminated by a bare LF —
+    `FUN_7F5FBD4E` writes exactly that. A line without the separator is skipped
+    rather than failing the post; the client has already committed the message
+    by the time this runs.
     """
-    head, _sep, body = article.partition(b"\n\n")
     headers = {}
-    for line in head.decode("ascii", "replace").split("\n"):
+    for line in header_block.decode("ascii", "replace").split("\n"):
         name, sep, value = line.partition(_HEADER_SEP)
         if sep:
             headers[name] = value
-    return headers, body
+    return headers
 
 
 def _header_int(headers, name, default):
@@ -1000,14 +1061,18 @@ def _header_int(headers, name, default):
 
 
 def _next_message_id(board_key, board_id):
-    """One past the highest message id on the board.
+    """One past the last id any message on the board owns.
 
     Message ids are the `field_8` half of the mnid and must be unique per board
-    — `_P` threading and the article fetch both key on them.
+    — `_P` threading and the article fetch both key on them. A message with
+    attachments owns more than its own id: FUN_7F5FC919 addresses the k-th
+    attachment as `message id + k`, so the next message starts past the last of
+    them or the two collide on one mnid.
     """
     highest = 0
     for child in _default_store.content.get_children(board_key):
         msg_id, _sep, child_board = child.node_id.partition(":")
         if child_board == str(board_id) and msg_id.isdigit():
-            highest = max(highest, int(msg_id))
+            bbs = child.content.bbs or _EMPTY_BBS
+            highest = max(highest, int(msg_id) + bbs.attachment_count)
     return highest + 1

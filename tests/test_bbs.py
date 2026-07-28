@@ -6,13 +6,15 @@ vocabulary differs. See docs/bbs-service-contract.md.
 """
 
 import dataclasses
+import pathlib
 import struct
+import tempfile
 import unittest
 
 from server.models import DirsrvRequest
 from server.mos_apps import APP_BBS_SERVICE
 from server.mpc import parse_host_block, parse_request_params
-from server.services import dirsrv
+from server.services import bbs, dirsrv
 from server.services.bbs import (
     BBS_CLASS_MESSAGE,
     BBS_CLASS_TREE,
@@ -28,7 +30,7 @@ from server.services.bbs import (
     decode_post_chunk_request,
     decode_post_start_request,
     encode_body,
-    parse_posted_article,
+    parse_article_headers,
 )
 from server.services.dirsrv import DIRSRVHandler
 from server.store import app_store
@@ -42,6 +44,22 @@ _BOARD = "0:1"  # Climbing BBS
 _YOSEMITE = "256:1"  # msg 0x100 on board 1
 _RE_YOSEMITE = "512:1"  # msg 0x200, _P = 0x100
 _SPORTS_CATEGORY = "1:266"  # DIRSRV "Sports, Health and Fitness" (f8 0x10A)
+_ATTACHMENT_POST = "513:1"  # msg 0x201, one MOSAF object in its body
+_ATTACHMENT_FILE = "514:1"  # that object's mnid — message id + 1
+
+
+def _mapi_crc(data):
+    """MS-OXRTFCP CRC-32: poly 0xEDB88320, init 0, no final complement."""
+    table = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (c >> 1) ^ (0xEDB88320 if c & 1 else 0)
+        table.append(c)
+    value = 0
+    for byte in data:
+        value = table[(value ^ byte) & 0xFF] ^ (value >> 8)
+    return value
 
 # Class-0x0B method-0 request as the reader sends it: the 8-byte mnid it copied
 # into its context at +0xA8, one 0x83 status DWORD to receive, and 0x85 marking
@@ -239,6 +257,59 @@ class TestBBSGetProperties(unittest.TestCase):
             self.assertEqual(flags & 0x4000, 0, record["e"])
 
 
+class TestBBSAttachmentFixture(unittest.TestCase):
+    """The sample message carrying one attachment (`resources/bbs/`).
+
+    Its body is the Compose window's own upload, captured verbatim: MAPI
+    compressed RTF holding an embedded MOSAF object (CLSID
+    {00028B50-0000-0000-C000-000000000046}). Re-encoding it is not possible —
+    nothing here builds the object's compound-file storage — so the bytes must
+    reach the reader untouched.
+    """
+
+    def setUp(self):
+        self.node = app_store.content.get_node(_ATTACHMENT_POST)
+
+    def test_body_reaches_the_reader_byte_for_byte(self):
+        article = build_bbs_article(self.node)
+        self.assertEqual(article.partition(b"\n\n")[2], self.node.content.bbs.body_raw)
+
+    def test_body_is_compressed_rtf_that_passes_its_own_crc(self):
+        # The stream states its own compressed and raw sizes and carries the
+        # CRC MS-OXRTFCP defines over the compressed bytes. Losing so much as
+        # one byte in transport shows up here.
+        body = self.node.content.bbs.body_raw
+        comp_size, raw_size, magic, want = struct.unpack_from("<IIII", body, 0)
+        self.assertEqual(magic, 0x75465A4C, "LZFu")
+        self.assertEqual(comp_size + 4, len(body))
+        self.assertEqual(raw_size, 6717)
+        self.assertEqual(_mapi_crc(body[16 : comp_size + 4]), want)
+
+    def test_format_header_tells_the_reader_to_decompress(self):
+        # FUN_7F5FC56F strcmp's this value: RTFCOMP takes EM_STREAMIN SF_RTF
+        # behind WrapCompressedRTFStream. Any other value renders garbage.
+        self.assertIn(b"X-MOS-Format: RTFCOMP\n", build_bbs_article(self.node))
+
+    def test_article_declares_one_attachment(self):
+        self.assertIn(b"X-MOS-Attach: 1\n", build_bbs_article(self.node))
+
+    def test_the_object_mnid_resolves_on_the_tree(self):
+        # FUN_7F5FC919 addresses the single MOSAF object as message id + 1 and
+        # reads `z` and `_r` off it.
+        request = DirsrvRequest(node_id=_ATTACHMENT_FILE, prop_group="z\x00_r")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        self.assertEqual((record["z"], record["_r"]), (0, 0))
+
+    def test_the_uploaded_file_is_kept_off_the_body(self):
+        # The file rode its own upload segment as a MOS2 container (the client
+        # compresses it through MCM HrMos2CompFile), and the reader never sees
+        # those bytes — it downloads them through FTM when the icon is opened.
+        data = self.node.content.bbs.attachment_data
+        self.assertEqual(data[:4], b"MOS2")
+        self.assertEqual(len(data), 175)
+        self.assertNotIn(data, self.node.content.bbs.body_raw)
+
+
 class TestBBSGetChildren(unittest.TestCase):
     def test_board_lists_every_message_including_replies(self):
         # The tree under a board is flat — the reader enumerates the board once
@@ -249,7 +320,7 @@ class TestBBSGetChildren(unittest.TestCase):
         records = _walk_records(build_bbs_get_children_reply_payload(request))
         self.assertEqual(
             [r["e"] for r in records],
-            ["Yosemite", "RE: Yosemite", "British Climbers"],
+            ["Yosemite", "RE: Yosemite", "British Climbers", "Attachment test"],
         )
         # Authors per reference/screenshots/bbs.png.
         self.assertEqual(records[0]["_a"], "Chris Hahn")
@@ -727,6 +798,10 @@ class PostChannelTestCase(unittest.TestCase):
         store = app_store.content
         self._board_children = list(store._children[_BOARD])
         self._node_ids = set(store._nodes)
+        # A commit writes the upload to disk; keep the test run out of the repo.
+        self._captures = tempfile.TemporaryDirectory()
+        self._capture_dir = bbs._CAPTURE_DIR
+        bbs._CAPTURE_DIR = pathlib.Path(self._captures.name)
 
     def tearDown(self):
         store = app_store.content
@@ -734,6 +809,8 @@ class PostChannelTestCase(unittest.TestCase):
         for node_id in set(store._nodes) - self._node_ids:
             del store._nodes[node_id]
             store._children.pop(node_id, None)
+        bbs._CAPTURE_DIR = self._capture_dir
+        self._captures.cleanup()
 
     def start(self, head, *, parent=0x200, board=1, total=None, attachments=b"", attach_count=0):
         """Method-2 request, in the parameter order FUN_7F5FB7CA builds."""
@@ -763,7 +840,12 @@ class PostChannelTestCase(unittest.TestCase):
         return _reply_payload(packets)
 
     def post(self, head, body, **kwargs):
-        """A whole two-segment post; returns the committed node."""
+        """A whole two-segment post; returns the committed node.
+
+        `total` counts the header block plus the body — the dword FUN_7F5FBD4E
+        computes before any attachment segment is added.
+        """
+        kwargs.setdefault("total", len(head) + len(body))
         handle = self.send(BBS_SELECTOR_POST_START, self.start(head, **kwargs))[1]
         self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, body))
         return app_store.content.get_children(_BOARD)[-1]
@@ -873,15 +955,17 @@ class TestBBSChunkedFieldUpload(PostChannelTestCase):
         self.assertIsNone(self.feed(1, b"abc", last=True))
 
     def test_referenced_field_reassembles_in_arrival_order(self):
-        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD, total=999))[1]
-        body = b"".join(bytes([0x41 + i]) * 200 for i in range(6))
+        body = b"".join(bytes([0x41 + i]) * 200 for i in range(6)) + b"tail"
+        total = len(_POST_HEAD) + len(body)
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD, total=total))[1]
+        body, tail = body[:-4], body[-4:]
         self.send(BBS_SELECTOR_POST_APPEND, self.ref_chunk(handle, 4, len(body)))
         for offset in range(0, len(body), 460):
             frame = body[offset : offset + 460]
             self.feed(4, frame, last=offset + 460 >= len(body))
-        self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, b"tail"))
+        self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, tail))
         node = app_store.content.get_children(_BOARD)[-1]
-        self.assertEqual(node.content.bbs.body_raw, body + b"tail")
+        self.assertEqual(node.content.bbs.body_raw, body + tail)
 
     def test_commit_waits_for_a_stream_that_has_not_closed(self):
         # The client does not drain the frames before it sends method 4, so the
@@ -968,12 +1052,12 @@ class TestBBSPostedArticleParsing(PostChannelTestCase):
         # FUN_7F5FBD4E terminates each line with the separator at 0x7F610C0C,
         # a single 0x0A, and closes the block with a second one. Splitting on
         # CRLF would swallow the whole article as headers.
-        headers, body = parse_posted_article(_POST_HEAD + _POST_BODY)
-        self.assertEqual(headers["Subject"], "RE: RE: Yosemite")
-        self.assertEqual(body, _POST_BODY)
+        node = self.post(_POST_HEAD, _POST_BODY)
+        self.assertEqual(node.content.name, "RE: RE: Yosemite")
+        self.assertEqual(node.content.bbs.body_raw, _POST_BODY)
 
     def test_every_header_the_compose_window_writes_is_recognised(self):
-        headers, _body = parse_posted_article(_POST_HEAD + _POST_BODY)
+        headers = parse_article_headers(_POST_HEAD)
         self.assertEqual(
             sorted(headers),
             [
@@ -990,8 +1074,8 @@ class TestBBSPostedArticleParsing(PostChannelTestCase):
         )
 
     def test_a_body_containing_a_blank_line_keeps_it(self):
-        headers, body = parse_posted_article(_POST_HEAD + b"one\n\ntwo")
-        self.assertEqual(body, b"one\n\ntwo")
+        node = self.post(_POST_HEAD, b"one\n\ntwo")
+        self.assertEqual(node.content.bbs.body_raw, b"one\n\ntwo")
 
 
 class TestBBSPostCommit(PostChannelTestCase):
@@ -1031,6 +1115,66 @@ class TestBBSPostCommit(PostChannelTestCase):
         # back PT_ERROR, leaving it empty. An empty `e` gives a nameless row.
         head = _POST_HEAD.replace(b"Subject: RE: RE: Yosemite\n", b"Subject: \n")
         self.assertTrue(self.post(head, _POST_BODY).content.name)
+
+
+class TestBBSPostedAttachments(PostChannelTestCase):
+    """A post carrying files — one upload segment per attachment past the body.
+
+    `FUN_7F5FC1D4` @ 0x7F5FC1D4 appends one segment per attachment after the
+    body, and the method-2 `total_bytes` dword counts the header block plus the
+    body alone. The file bytes therefore start at exactly that offset and never
+    belong to the article the reader streams into its RichEdit.
+    """
+
+    def post_with_file(self, file_bytes, *, count=1, body=None):
+        head = _POST_HEAD.replace(b"X-MOS-Attach: 0\n", f"X-MOS-Attach: {count}\n".encode())
+        body = _POST_BODY if body is None else body
+        handle = self.send(
+            BBS_SELECTOR_POST_START,
+            self.start(head, total=len(head) + len(body), attach_count=count),
+        )[1]
+        self.send(BBS_SELECTOR_POST_APPEND, self.chunk(handle, body))
+        self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, file_bytes))
+        return app_store.content.get_children(_BOARD)[-1]
+
+    def test_file_bytes_stay_out_of_the_body(self):
+        node = self.post_with_file(b"\x00\x01\x02PK-ish file bytes")
+        self.assertEqual(node.content.bbs.body_raw, _POST_BODY)
+        self.assertEqual(node.content.bbs.attachment_data, b"\x00\x01\x02PK-ish file bytes")
+
+    def test_article_declares_the_attachment_count(self):
+        node = self.post_with_file(b"file", count=2)
+        self.assertIn(b"X-MOS-Attach: 2\n", build_bbs_article(node))
+
+    def test_each_attachment_resolves_at_message_id_plus_k(self):
+        # FUN_7F5FC919 @ 0x7F5FC919 addresses the k-th MOSAF object in the body
+        # as (message id + k, board id) and reads `z` and `_r` off it. An mnid
+        # that does not resolve leaves the object without its properties.
+        node = self.post_with_file(b"file", count=2)
+        msg_id, _sep, board_id = node.node_id.partition(":")
+        for k in (1, 2):
+            with self.subTest(attachment=k):
+                key = f"{int(msg_id) + k}:{board_id}"
+                request = DirsrvRequest(node_id=key, prop_group="z\x00_r")
+                record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+                self.assertEqual(record["z"], 0)
+                self.assertEqual(record["_r"], 0)
+
+    def test_attachments_are_not_listed_on_the_board(self):
+        # They are files, not messages. A row per attachment would show up in
+        # the reader's list pane.
+        node = self.post_with_file(b"file")
+        children = {child.node_id for child in app_store.content.get_children(_BOARD)}
+        msg_id, _sep, board_id = node.node_id.partition(":")
+        self.assertNotIn(f"{int(msg_id) + 1}:{board_id}", children)
+
+    def test_the_next_post_starts_past_the_attachment_ids(self):
+        # A message with attachments owns message id + 1 … + N as well. Handing
+        # the next post one of those aliases two nodes onto one mnid.
+        first = self.post_with_file(b"file", count=2)
+        second = self.post(_POST_HEAD, _POST_BODY)
+        first_id = int(first.node_id.partition(":")[0])
+        self.assertEqual(int(second.node_id.partition(":")[0]), first_id + 3)
 
 
 class TestBBSPostedBodyRoundTrip(PostChannelTestCase):

@@ -365,21 +365,80 @@ proportional MS Sans Serif, so the font has to arrive inside the stream — i.e.
 the body is RTF, not plain text. `RTF` and `RTFCOMP` reach the same `SF_RTF`
 mode; nothing observed so far says which one the service used.
 
+#### Attachments
+
+An attachment never travels on the message channel. The article carries headers
+and the body alone; the file reaches the reader as an OLE object embedded in
+that body, and its bytes are fetched later through FTM.
+
 In `SF_RTF` mode two extra passes run after the stream:
 
 - `FUN_7F5FC7B7` — `EM_GETOLEINTERFACE` (`0x043C`), then
   `IRichEditOle::GetObjectCount` / `GetObject` over every embedded object,
-  keeping those whose CLSID matches `DAT_7F60E3E0` in an array at reader
-  `+0xC4` (count at `+0xC0`).
-- `FUN_7F5FC919` — reads `0x68160014` + `0x68150040` off the message and
-  resolves each kept object against the tree through `FUN_7F5FCEE5`.
+  keeping those whose `REOBJECT.clsid` equals
+  `{00028B50-0000-0000-C000-000000000046}` (`DAT_7F60E3E0`) in an array of
+  16-byte entries at reader `+0xC4`, count at `+0xC0`. Per entry it
+  `QueryInterface`s the object for `{00028B51-…}` (`DAT_7F60E3F0`) into `+0xC`,
+  then calls that interface's vtable `+0x14` and `+0x18` to read a dword into
+  `+0x0` and `+0x4`.
+- `FUN_7F5FC919` — reads `0x68160014` (PT_I8, the node's `a` mnid, low = message
+  id and high = board id, stamped by `FUN_7F6014DA` when the message is built)
+  and `0x68150040` (PT_SYSTIME, from `_D`) off the message. For the k-th kept
+  object, k counting from 1, it builds the mnid `(message id + k, board id)`,
+  calls vtable `+0x10` with `(2, board id, message id + k)`, resolves that mnid
+  through `FUN_7F5FCEE5`, and calls vtable `+0x1C` with the FILETIME, the two
+  resolved values and 1.
 
-Both are guarded on a nonzero object count, so an RTF body with no embedded
-objects skips them entirely.
+Both are guarded on a nonzero object count, so a body with no embedded objects
+skips them entirely. **A message with N attachments therefore owns N more mnids
+than its own**, and the next message on the board has to start past them.
 
-Opening a message also makes the client read `_r` and `z` on the node
-(`props=_r,g` then `z,g`), and the status bar's unread count drops — so `_r` is
-the read-state tag.
+`FUN_7F5FCEE5` is `CTreeNavClient::GetProperties` over service "BBS" for
+`z` and `_r`, both DWORD, both in one request — observed live 2026-07-28 as
+`props=z,_r` on the attachment mnid immediately after the article fetch. Its
+return value is discarded, so a failed resolve leaves the object holding zeros.
+
+The object is MOSAF.DLL, "Mos Attached File InprocServer (c)1994 Microsoft
+Corp." — an in-proc server that aggregates the OLE default handler
+(`OleCreateDefaultHandler` in `FUN_7F4C13B6`) and persists to a `CONTENTS`
+stream in its storage. `IPersistStorage::InitNew` (`0x7F4C2C5B`) writes the
+CLSID with `WriteClassStg` and creates that stream; `Load` (`0x7F4C2CB0`) reads:
+
+```
+u16 version        ; < 1 stops the read, 0x348 selects the legacy fixed record
+u16 kind           ; forced to 2 when version == 0x348
+u32 file_size      ; bytes to expect from the download (CreateFileMapping size)
+u16 state          ; version >= 2 only; 3 = a local file is in hand
+u16 name_len       ; version != 0x348 only; the legacy record uses 0x104
+u8  name[name_len] ; the file name the icon is captioned with
+```
+
+Compose builds it in `FUN_7F600344`: `OleCreate` on the MOSAF CLSID into a
+sub-storage named `MOSAF %d`, then vtable `+0xC` on the `{00028B51-…}`
+interface with the ANSI path. A file whose extension matches `DAT_7F611338`
+takes `OleCreateFromFile` with a different CLSID and a `REOBJ %d` storage
+instead. Double-clicking downloads through FTMAPI —
+`HrFtmDownloadWithUIFRI`, `HrQueueToFtm`, `FGetDefaultDownloadDir`.
+
+Captured 2026-07-28 from the Compose window, one 175-byte BMP attached:
+
+- body: `X-MOS-Format: RTFCOMP`, `LZFu` 1282 compressed / 6717 raw;
+- RTF: `{\object\objemb{\*\objclass MOSAF}{\*\objname Object1}\objw1649\objh929{\*\objdata …}}`;
+- objdata: OLE1 embedded header — version `0x00000501`, format 2, class name
+  `MOSAF\0`, width 0, height 0 — wrapping a 3072-byte compound file whose root
+  CLSID is `{00028B50-…}` and whose streams are `\1Ole`, `\2OlePres000`,
+  `RichEditFlags` and `CONTENTS` (that last name written as ANSI bytes in the
+  directory entry, so a UTF-16 reader shows mojibake);
+- `CONTENTS`: version 2, kind 1, file_size 175, state 3, name `BIGBUT.BMP`;
+- upload segment: 175 bytes opening with `MOS2` — the client compresses an
+  attachment through MCM `HrMos2CompFile`, so the segment is not the raw file,
+  and `file_size` counts the compressed bytes.
+
+The message Properties page (`FUN_7F604F96`, `WM_INITDIALOG`) prints the
+attachment count from reader `+0xC0` — the objects it found — not from
+`X-MOS-Attach`. The same page reads `_r` and `z` off the message node
+(`props=_r,g` then `z,g`), and the status bar's unread count drops when a
+message is opened, so `_r` is the read-state tag.
 
 #### Methods 2/3/4/7 — post an article
 
