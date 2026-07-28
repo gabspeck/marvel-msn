@@ -205,6 +205,61 @@ descriptor to that node's slot 28 first.)
 
 ---
 
+## Interface classes
+
+A request's `msg_class` is the **interface** — the selector the server assigned
+that IID in the discovery reply — and `selector` is the **method index** within
+it. BBS uses two:
+
+| class | IID | channel |
+|---|---|---|
+| `0x03` | `00028B27` | `CTreeNavClient` read channel (methods below) |
+| `0x0B` | `00028B2F` | message content, negotiated when a message is opened |
+
+Dispatching on `selector` alone therefore misroutes: class-`0x0B` method 0 lands
+on GetProperties, which answers with a record the reader cannot use — and the
+client ACKs it rather than complaining.
+
+### Message-content channel (class `0x0B`)
+
+`CBbsNavTreeNode::Exec` (`0x7F5F110C`) → `FUN_7F5F116B` → `FUN_7F5F9618` builds
+the reader. Inside it `FUN_7F6014DA` assembles a five-property MAPI array from
+node reads through vtable `+0x44` (`GetPropertyBuf`) — `e`→`0x6800001E`,
+`a`→`0x68160014`, `_D`→`0x68150040` PT_SYSTIME, `_P`→`0x68140003`,
+`p`→`0x68030003` — and before that calls `FUN_7F5FCD1A`, which opens the content
+channel:
+
+```c
+tnc = CreateTnc("BBS", 3, locale, …);
+marshaller = tnc[+0x24];
+wsprintfA(buf, "agid=%d", locale);
+hr = marshaller->vtable[0x24]("BBS", IID 00028B2F, &out, 3, buf);
+```
+
+If the discovery reply omits `00028B2F` this returns **E_NOINTERFACE**
+(`0x80004002`) and `FUN_7F5F99C1(hr, 0x44E)` reports "Cannot open message.##This
+task cannot be completed" *before any request reaches the wire* — the server log
+stays silent. Note `0x1F42`, the detail string used there, is that reporter's
+default branch, i.e. an HRESULT it has no specific mapping for.
+
+Observed request once the IID is advertised (2026-07-28):
+
+```
+class=0x0B selector=0x00
+payload: 04 88 [msg_id:u32][board_id:u32] 83 85
+         └ 8-byte var param = the message mnid
+         recv descriptors 0x83 (status DWORD) + 0x85 (var-length blob)
+```
+
+Leaving it unanswered hangs the reader (headers blank, empty body). The reply
+framing is not yet pinned — the body itself is still an open gap, and the client
+side to trace is the object `FUN_7F5FCD1A` returns into `param_1+0x20`, consumed
+by the worker thread `LAB_7F5FB0D3` that `FUN_7F5FB056` spawns.
+
+Opening a message also makes the client read `_r` and `z` on the node
+(`props=_r,g` then `z,g`), and the status bar's unread count drops — so `_r` is
+the read-state tag.
+
 ## Read selectors (TREENVCL `CTreeNavClient`, channel `g_BbsNtniGroup`)
 
 BBS does **not** override child enumeration — `GetCChildren`/`GetNthChild` are

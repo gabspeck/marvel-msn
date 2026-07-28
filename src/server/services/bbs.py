@@ -18,7 +18,7 @@ attempt is logged and left unanswered rather than crashing or being misrouted.
 import logging
 import struct
 
-from ..config import DIRSRV_INTERFACE_GUIDS
+from ..config import BBS_INTERFACE_GUIDS
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -31,9 +31,17 @@ from ..store.base import BbsFields
 from . import dirsrv
 from ._dispatch import log_unhandled_selector
 
+# A request's `msg_class` is the *interface* — the selector we handed that IID in
+# the discovery table — and `selector` is the method index within it. Class 0x03
+# is IID 00028B27, the CTreeNavClient read channel; class 0x0B is IID 00028B2F,
+# the message-content channel the reader negotiates when a message is opened
+# (BBSNAV FUN_7F5FCD1A). Dispatching on `selector` alone misroutes class-0x0B
+# method 0 into GetProperties, which answers it with a meaningless record.
+BBS_CLASS_TREE = 0x03
+BBS_CLASS_MESSAGE = 0x0B
+
 # BBS read-channel selectors — identical numbering to DIRSRV (the generic
-# TREENVCL tree, docs/bbs-service-contract.md §"Read selectors"). Slots map to
-# IIDs via the same discovery table DSNAV advertises.
+# TREENVCL tree, docs/bbs-service-contract.md §"Read selectors").
 BBS_SELECTOR_GET_PROPERTIES = 0x00
 BBS_SELECTOR_GET_CHILDREN = 0x02
 BBS_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03
@@ -80,22 +88,30 @@ class BBSHandler:
         self.svc_name = svc_name
 
     def build_discovery_packet(self, server_seq, client_ack):
-        """Advertise the generic TREENVCL tree IIDs (same table as DSNAV).
+        """Advertise the generic TREENVCL tree IIDs plus the message channel.
 
-        BBS resolves the same read-channel IIDs as DIRSRV — it is not a
-        self-describing MEDVIEW-style service, it rides MOSSHELL's tree client.
+        BBS rides MOSSHELL's tree client, so it resolves the same read-channel
+        IIDs as DIRSRV — it is not a self-describing MEDVIEW-style service. It
+        needs one extra: 00028B2F, which the reader negotiates on a second
+        CreateTnc("BBS", 3) when a message is opened. See BBS_INTERFACE_GUIDS.
         """
-        payload = build_discovery_payload(DIRSRV_INTERFACE_GUIDS)
+        payload = build_discovery_payload(BBS_INTERFACE_GUIDS)
         host_block = build_discovery_host_block(payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        """Dispatch a BBS request by selector.
+        """Dispatch a BBS request by (interface class, method selector).
 
-        Read selectors 0/2/3/4 are answered; everything else — GetParents (1),
-        the unimplemented enum/resolve slots, and every TREEEDCL write selector
-        (0–12, incl. GetTicket) — is logged unhandled and left unanswered.
+        Only the tree class (0x03) is served: methods 0/2/3/4. Everything else —
+        GetParents (1), the unimplemented enum/resolve slots, every TREEEDCL write
+        selector (0–12, incl. GetTicket), and the whole message-content class
+        (0x0B) — is logged unhandled and left unanswered. Answering a class we do
+        not implement is worse than silence: a class-0x0B method-0 reply built by
+        the tree serialiser is a record the reader cannot use, and it accepts it.
         """
+        if msg_class != BBS_CLASS_TREE:
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
+            return None
         if selector == BBS_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
             reply_payload = build_bbs_get_properties_reply_payload(request)

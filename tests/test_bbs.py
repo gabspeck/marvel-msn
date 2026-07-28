@@ -12,6 +12,7 @@ from server.models import DirsrvRequest
 from server.mos_apps import APP_BBS_SERVICE
 from server.services import dirsrv
 from server.services.bbs import (
+    BBS_CLASS_TREE,
     BBSHandler,
     build_bbs_get_children_reply_payload,
     build_bbs_get_properties_reply_payload,
@@ -114,15 +115,30 @@ def _walk_records(payload):
 
 
 class TestBBSDiscovery(unittest.TestCase):
-    def test_discovery_matches_dirsrv_tree_table(self):
-        # BBS resolves the same generic TREENVCL tree IIDs as DSNAV/DIRSRV, so
-        # its discovery packet is byte-identical for the same pipe/seq/ack.
+    def test_discovery_adds_the_message_channel_iid(self):
+        # BBS resolves the same generic TREENVCL tree IIDs as DSNAV/DIRSRV plus
+        # one more: 00028B2F, which the reader negotiates on a second
+        # CreateTnc("BBS", 3) when a message is opened (BBSNAV FUN_7F5FCD1A).
+        # Without it that negotiation returns E_NOINTERFACE and the reader
+        # reports "Cannot open message" before any request reaches the wire.
         bbs_pkts = BBSHandler(1, "BBS").build_discovery_packet(3, 3)
         dirsrv_pkts = DIRSRVHandler(1, "DIRSRV").build_discovery_packet(3, 3)
         self.assertIsInstance(bbs_pkts, list)
         parsed = parse_packet(bbs_pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
-        self.assertEqual(bbs_pkts, dirsrv_pkts)
+        self.assertNotEqual(bbs_pkts, dirsrv_pkts)
+        self.assertGreater(len(bbs_pkts[0]), len(dirsrv_pkts[0]))
+
+    def test_interface_table_is_dirsrv_plus_00028b2f(self):
+        import uuid
+
+        from server.config import BBS_INTERFACE_GUIDS, DIRSRV_INTERFACE_GUIDS
+
+        self.assertEqual(BBS_INTERFACE_GUIDS[: len(DIRSRV_INTERFACE_GUIDS)], DIRSRV_INTERFACE_GUIDS)
+        self.assertEqual(
+            BBS_INTERFACE_GUIDS[len(DIRSRV_INTERFACE_GUIDS) :],
+            [(uuid.UUID("00028B2F-0000-0000-C000-000000000046").bytes_le, 0x0B)],
+        )
 
 
 class TestBBSGetProperties(unittest.TestCase):
@@ -184,7 +200,7 @@ class TestBBSGetChildren(unittest.TestCase):
             + b"\x04" + bytes([0x80 | 4]) + b"a\x00e\x00"
             + b"\x83\x83\x85"
         )
-        pkts = handler.handle_request(0x01, 0x02, 0, wire, 5, 5)
+        pkts = handler.handle_request(BBS_CLASS_TREE, 0x02, 0, wire, 5, 5)
         self.assertIsInstance(pkts, list)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -408,6 +424,21 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
         payload = build_bbs_get_properties_reply_payload(request)
         for tag in tags:
             self.assertIn(bytes([0x0B]) + tag.encode() + b"\x00", payload, tag)
+
+
+class TestBBSClassDispatch(unittest.TestCase):
+    def test_message_content_class_is_not_answered_by_the_tree_serialiser(self):
+        # `msg_class` is the interface (its discovery selector); `selector` is the
+        # method within it. Class 0x0B is the message-content channel
+        # (IID 00028B2F). Dispatching on `selector` alone routed its method 0
+        # into GetProperties, which answered with a record the reader cannot use
+        # — and the client ACKed it. Leave the class unanswered instead.
+        handler = BBSHandler(1, "BBS")
+        wire = b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 0x100, 1) + b"\x83\x83\x85"
+        with self.assertLogs("server.services.bbs", level="WARNING"):
+            self.assertIsNone(handler.handle_request(0x0B, 0x00, 0, wire, 5, 5))
+        # The same method index on the tree class is still served.
+        self.assertIsNotNone(handler.handle_request(BBS_CLASS_TREE, 0x00, 0, wire, 5, 5))
 
 
 class TestBBSWriteSelectorDeferred(unittest.TestCase):

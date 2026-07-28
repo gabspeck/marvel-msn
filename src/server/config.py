@@ -151,6 +151,19 @@ DIRSRV_INTERFACE_GUIDS = [
     (_guid_le("00028B2E-0000-0000-C000-000000000046"), 0x0A),
 ]
 
+# BBS advertises the generic tree IIDs plus one more: opening a message runs
+# BBSNAV FUN_7F5FCD1A (0x7F5FCD1A), which does a second CreateTnc("BBS", 3) and
+# then asks the marshaller for IID 00028B2F with the parameter string
+# `agid=<locale>`. That IID is one past the end of the DIRSRV table, so a
+# DIRSRV-shaped discovery reply makes the negotiation return E_NOINTERFACE
+# (0x80004002) and the reader gives up with "Cannot open message. This task
+# cannot be completed" — reported by FUN_7F5F99C1(hr, 0x44E) before any request
+# reaches the wire. Confirmed live 2026-07-28 via BPX 0x7F601578.
+# This is the message-content channel; its selectors are not implemented yet.
+BBS_INTERFACE_GUIDS = DIRSRV_INTERFACE_GUIDS + [
+    (_guid_le("00028B2F-0000-0000-C000-000000000046"), 0x0B),
+]
+
 # OLREGSRV (On-Line Registration Service) interfaces.  SIGNUP.EXE holds
 # the client-side IID table at 0x40b4e8 — sixteen 00028Bxx GUIDs covering
 # the phone-book / trial-info / product-details sync used by its "Get the
