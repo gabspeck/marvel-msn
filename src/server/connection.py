@@ -71,6 +71,10 @@ class ConnectionState:
         self.client_ack = 0
         self.services = {}
         self.pipe_buffers = defaultdict(bytearray)
+        # Bytes still owed on a pipe frame whose content spans transport
+        # packets; parse_pipe_frame reads a content length only when a pipe
+        # owes nothing.
+        self.pipe_pending = {}
         self.pipes_closed = set()
         self.buf = bytearray()
         self.transport_started = False
@@ -185,7 +189,7 @@ class ConnectionState:
         self._send(ack_pkt, logging.DEBUG, "tx_ack n=%d seq=%d ack=%d", pkt.seq, self.client_ack)
 
         # Process pipe frames
-        frames = parse_pipe_frames(pkt.payload)
+        frames = parse_pipe_frames(pkt.payload, self.pipe_pending)
         for pf in frames:
             self.pipe_buffers[pf.pipe_idx].extend(pf.content)
 

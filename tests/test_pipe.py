@@ -64,6 +64,25 @@ class TestPipeFrameHasLength(unittest.TestCase):
 
 
 class TestParseMultipleFrames(unittest.TestCase):
+    def test_a_continuation_frame_leaves_the_rest_of_the_packet_alone(self):
+        # A continuation frame owns its declared content, not the rest of the
+        # packet. Consuming everything dropped whatever followed it — the tail
+        # of a chunked post body lost 6 bytes that way and its compressed RTF
+        # then failed its own CRC.
+        f1 = build_pipe_frame(5, b"A" * 10)
+        f2 = build_pipe_frame(5, b"B" * 6)
+        frames = parse_pipe_frames(f1 + f2)
+        self.assertEqual([f.content for f in frames], [b"A" * 10, b"B" * 6])
+
+    def test_a_frame_split_across_packets_keeps_what_arrived(self):
+        # The first fragment declares the whole content length but carries only
+        # part of it; the connection layer joins the rest from the next packet.
+        frame = build_pipe_frame(5, b"C" * 401)[:244]
+        parsed, consumed = parse_pipe_frame(frame)
+        self.assertEqual(parsed.content_length, 401)
+        self.assertEqual(parsed.content, b"C" * 241)
+        self.assertEqual(consumed, len(frame))
+
     def test_two_frames(self):
         f1 = build_pipe_frame_has_length(1, b"first")
         f2 = build_pipe_frame(2, b"second")

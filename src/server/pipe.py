@@ -53,10 +53,18 @@ def build_control_frame(ctrl_type, payload):
     return struct.pack("<HB", ROUTING_CONTROL, ctrl_type) + payload
 
 
-def parse_pipe_frame(payload):
+def parse_pipe_frame(payload, pending=None):
     """Parse a single pipe frame from unstuffed transport payload.
 
     Returns (PipeFrame, bytes_consumed) or (None, 0).
+
+    `pending` maps pipe index to the bytes still owed on a frame that did not
+    fit in one transport packet. Such a frame continues in the next packet
+    behind a header byte and nothing else — the 2-byte content length appears
+    once, in the packet that opens the frame. Reading a length out of every
+    fragment ate 2 bytes of content per packet boundary, which is what left an
+    uploaded post body short and its compressed RTF failing its own CRC.
+    Callers with no state to keep pass nothing and get single-packet framing.
     """
     if not payload:
         return None, 0
@@ -70,7 +78,6 @@ def parse_pipe_frame(payload):
     pos = 1
     if continuation:
         data_bytes = payload[pos:]
-        pos = len(payload)
     else:
         if pos >= len(payload):
             return None, 0
@@ -79,10 +86,23 @@ def parse_pipe_frame(payload):
         data_bytes = payload[pos : pos + data_len]
         pos += data_len
 
-    if len(data_bytes) < 2:
-        return None, pos
-    content_length = struct.unpack("<H", data_bytes[0:2])[0]
-    content = data_bytes[2 : 2 + content_length]
+    owed = pending.get(pipe_idx, 0) if pending is not None else 0
+    if owed:
+        content = data_bytes[:owed]
+        content_length = len(content)
+        consumed = len(content)
+    else:
+        if len(data_bytes) < 2:
+            return None, pos
+        content_length = struct.unpack("<H", data_bytes[0:2])[0]
+        content = data_bytes[2 : 2 + content_length]
+        consumed = 2 + len(content)
+    if pending is not None:
+        pending[pipe_idx] = (owed or content_length) - len(content)
+    if continuation:
+        # Only this frame's own bytes are consumed. Running to the end of the
+        # payload instead would swallow a second frame packed behind it.
+        pos += consumed
 
     return PipeFrame(
         pipe_idx=pipe_idx,
@@ -94,12 +114,15 @@ def parse_pipe_frame(payload):
     ), pos
 
 
-def parse_pipe_frames(payload):
-    """Parse all pipe frames in a transport payload."""
+def parse_pipe_frames(payload, pending=None):
+    """Parse all pipe frames in a transport payload.
+
+    `pending` is the caller's per-pipe fragment state, carried across packets.
+    """
     frames = []
     pos = 0
     while pos < len(payload):
-        pf, consumed = parse_pipe_frame(payload[pos:])
+        pf, consumed = parse_pipe_frame(payload[pos:], pending)
         if pf is None:
             break
         frames.append(pf)
