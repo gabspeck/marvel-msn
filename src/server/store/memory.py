@@ -37,6 +37,18 @@ class InMemoryContentStore:
             return True
         return bool(ids)
 
+    def add_child(self, parent_id, node):
+        """Register a node and append it to `parent_id`'s child list.
+
+        Backs the BBS post channel, whose commit has to make the new message
+        visible to the next GetChildren on the board. The child list is created
+        empty for the node itself — get_children answers an unlisted node with
+        the fallback sentinel, which would put a bogus row under the message.
+        """
+        self._nodes[node.node_id] = node
+        self._children.setdefault(node.node_id, [])
+        self._children.setdefault(parent_id, []).append(node.node_id)
+
     def get_children(self, node_id, locale_raw=None):
         # Permissive fallback: any node without an explicit child list resolves
         # to [fallback]. CMosTreeNode::Exec caches 'z'/'c' from the GetChildren

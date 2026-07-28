@@ -414,6 +414,8 @@ def _bbs_node(
     body="",
     body_format=BbsFields.body_format,
     delegate=False,
+    body_raw=None,
+    size_bytes=None,
 ):
     """A BBS tree node (board / conversation / reply).
 
@@ -474,7 +476,9 @@ def _bbs_node(
             # listview Date column still comes from `_D`.
             created=date,
             modified=date,
-            size_bytes=len(body),
+            # A posted message carries its own plain-text length in X-MOS-Size;
+            # `body` is empty there because the upload is already encoded.
+            size_bytes=len(body) if size_bytes is None else size_bytes,
             bbs=BbsFields(
                 author=author,
                 date_unix=_bbs_date_to_unix(date),
@@ -483,8 +487,44 @@ def _bbs_node(
                 has_children=has_children,
                 body=body,
                 body_format=body_format,
+                body_raw=body_raw,
             ),
         ),
+    )
+
+
+# Author stamped on a message that arrives over the BBS post channel. A real
+# service takes it from the authenticated session; nothing here tracks a
+# signed-in member, and the uploaded article carries no author header — the
+# Compose window writes X-MOS-To, Subject, References and the X-MOS-* control
+# set (BBSNAV FUN_7F5FBD4E @ 0x7F5FBD4E), never a From. Naming an existing
+# MEMBER_PROFILES entry keeps the Properties sheet working on a new post.
+BBS_POST_AUTHOR = "Chris Hahn"
+
+# Wall-clock format `_bbs_date_to_unix` parses, and the one the Properties
+# dialog shows verbatim through `created`/`modified`.
+BBS_POST_DATE_FORMAT = "%B %d, %Y %I:%M %p"
+
+
+def build_bbs_post(msg_id, board_id, *, subject, parent_subid, body_raw, body_format, size_bytes):
+    """A BBS message node built from an article the Compose window just posted.
+
+    `body_raw` is the uploaded body verbatim — the client encodes it before it
+    reaches the wire, so it goes back out untouched under the same
+    `body_format`. Dated now, because the article the client sends carries no
+    Date header.
+    """
+    return _bbs_node(
+        msg_id,
+        board_id,
+        subject,
+        is_container=False,
+        author=BBS_POST_AUTHOR,
+        date=datetime.datetime.now().strftime(BBS_POST_DATE_FORMAT),
+        parent_subid=parent_subid,
+        body_raw=body_raw,
+        body_format=body_format,
+        size_bytes=size_bytes,
     )
 
 

@@ -381,6 +381,95 @@ Opening a message also makes the client read `_r` and `z` on the node
 (`props=_r,g` then `z,g`), and the status bar's unread count drops — so `_r` is
 the read-state tag.
 
+#### Methods 2/3/4/7 — post an article
+
+Sending a message rides this same class, not TREEEDCL. `FUN_7F5FB7CA`
+(`0x7F5FB7CA`) drives a chunked upload:
+
+1. `FUN_7F5FBD4E` (`0x7F5FBD4E`) reads six MAPI properties off the compose
+   message (`0x6800001E`, `0x68140003`, `0x0037001E`, `0x6809001E`,
+   `0x6817001E`, `0x68160014`) and formats the header block into a `0x1000`-byte
+   buffer at `+0xB4`, length at `+0xB0`. It caches `0x68140003` at `+0xA8` and
+   the **high** dword of `0x68160014` at `+0xAC`.
+2. `FUN_7F5FC1D4` (`0x7F5FC1D4`) builds a segment list — the header block, then
+   the body stream (`IStream::Stat` gives its size), then one segment per
+   attachment. Each entry is `{ptr, length, sent}`.
+3. `FUN_7F5FC2D8` (`0x7F5FC2D8`) hands out the next chunk, capped at `0x100000`
+   bytes, and returns `0` only for the chunk that empties the **last** segment.
+
+The first chunk goes out on method 2, the chunk returning `0` on method 4, and
+anything between on method 3. A post with no attachments has two segments, so
+it is method 2 then method 4 — method 3 never appears.
+
+Request vtable primitives: `+0x24` blob (`04`), `+0x28` dword (`03`), `+0x2C`
+word (`02`), `+0x30` byte (`01`), `+0x20` receive byte (`81`), `+0x48` dispatch.
+
+```
+class=0x0B selector=0x02            (start)
+  03 [header_len + body_len:u32]
+  04 88 [parent_msg_id:u32][board_id:u32]
+  02 [0001:u16]
+  04 [len] [attachment id array, 4 bytes each]
+  02 [attachment count:u16]
+  04 [len] [chunk]
+  03 [chunk_len:u32]
+  81
+
+class=0x0B selector=0x03 / 0x04     (append / commit)
+  01 [handle]
+  04 [len] [chunk]
+  03 [chunk_len:u32]
+  81
+
+class=0x0B selector=0x07            (abort)
+  01 [handle]
+```
+
+The 8-byte parameter is `+0xA8`, so it packs like every other BBS mnid:
+`[parent message id][board id]`. A reply to message `0x200` on board `1` sends
+`(0x200, 1)`. The dword before it counts the header block plus the body only —
+attachment bytes are excluded.
+
+Reply to 2/3/4:
+
+```
+81 [handle_or_ack] 87
+```
+
+**The byte must be nonzero.** `FUN_7F5FB7CA` tests it after each wait
+(`CMP byte ptr [EBP-2],0x0` for the start, `CMP byte ptr [EBP-1],0x0` @
+`0x7F5FBB1A` for the rest) and returns `0x8B0B0001` when it is clear. Method 2's
+byte is the **upload handle**, which methods 3/4/7 quote back as their first
+parameter; on 3 and 4 it is a per-chunk acknowledgement. Zero is the designed
+failure path — the Compose window reports the post failed instead of waiting.
+
+Method 7 carries the handle alone, has no receive descriptor, and the client
+releases the request without waiting, so the reply is a bare `87`. It is sent
+only when the upload already failed with `0x0B0B000D`.
+
+The uploaded article uses the same framing as a fetched one — `Name: value`
+lines ending in a bare `\n`, a blank line, then the body — but a different
+header set, written in this order by `FUN_7F5FBD4E`:
+
+| Header | MAPI tag | Notes |
+|---|---|---|
+| `X-MOS-To:` | `0x6800001E` | |
+| `X-MOS-Parent:` | `0x68140003` | message this answers, `0` for a new topic |
+| `Subject:` | `0x0037001E` | written even when empty |
+| `References:` | `0x6809001E` | only when `X-MOS-Parent` is nonzero |
+| `X-MOS-Icon:` | literal `0` | |
+| `X-MOS-Format:` | — | `RTFCOMP` or `TEXT`, never plain `RTF` |
+| `X-MOS-Attach:` | — | attachment count |
+| `X-MOS-Size:` | — | body length |
+| `X-MOS-CP:` | `GetACP()` | |
+
+There is no `From:` — the author is the authenticated session, not something the
+client states. A property that read back `PT_ERROR` (type `0x0A`) writes an
+empty value rather than dropping its line.
+
+The body arrives already encoded as `X-MOS-Format` names, so it round-trips back
+to the reader untouched.
+
 ## Read selectors (TREENVCL `CTreeNavClient`, channel `g_BbsNtniGroup`)
 
 BBS does **not** override child enumeration — `GetCChildren`/`GetNthChild` are
@@ -435,7 +524,12 @@ The property blob is wrapped by `SVCPROP!CompressPropClnt` / `FreeCompressed`
 around the send. `CompressPropClnt` produces the same tagged-property byte shape
 the read path decompresses.
 
-### Posting flow (Compose / new folder)
+### Node-creation flow (new folder)
+
+Sending a message does **not** come through here — it is the class-`0x0B`
+chunked upload above (methods 2/3/4). Observed live: a reply to `RE: Yosemite`
+arrived as `class=0x0b selector=0x02`, with no TREEEDCL traffic before it. What
+follows is the node-creation path, recovered statically.
 
 `CBbsNavTreeNode_NewObject` (slot 82, `0x7F5F1623`) →
 `CBbsTreeEdit_NewObject` (slot 12, `0x7F5F1D17`):
@@ -447,8 +541,8 @@ the read path decompresses.
 3. `CTreeEditClient::AddNode` (sel 2): `[ticket][parent mnid][compressed SP]` →
    new mnid. `EnumMosWindows(RefreshEmw)` refreshes all shell views.
 
-Subsequent user edits (subject/body) → `SetProperties` (sel 4). Threading a
-reply under its parent → `LinkNode` (sel 5). The 72-byte edit object
+Subsequent user edits → `SetProperties` (sel 4); relinking a node → `LinkNode`
+(sel 5). Neither has been seen on the wire. The 72-byte edit object
 (`CBbsTreeEdit`, vtable `vtbl_CBbsTreeEdit` `0x7F60E9E8`) is bound to `g_BbsEcig`
 and cached at node+0xBC by `CBbsNavTreeNode_HrGetPMte` (slot 72, `0x7F5F1593`).
 

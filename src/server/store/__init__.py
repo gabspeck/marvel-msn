@@ -13,7 +13,7 @@ from .base import (
     Subscription,
     TransactionRecord,
 )
-from .fixtures import default_seed
+from .fixtures import build_bbs_post, default_seed
 from .memory import build_app_store
 
 app_store = build_app_store(default_seed())
@@ -34,5 +34,6 @@ __all__ = [
     "TransactionRecord",
     "app_store",
     "build_app_store",
+    "build_bbs_post",
     "default_seed",
 ]

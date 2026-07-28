@@ -11,16 +11,24 @@ import unittest
 
 from server.models import DirsrvRequest
 from server.mos_apps import APP_BBS_SERVICE
+from server.mpc import parse_host_block
 from server.services import dirsrv
 from server.services.bbs import (
     BBS_CLASS_MESSAGE,
     BBS_CLASS_TREE,
+    BBS_SELECTOR_POST_ABORT,
+    BBS_SELECTOR_POST_APPEND,
+    BBS_SELECTOR_POST_COMMIT,
+    BBS_SELECTOR_POST_START,
     BBSHandler,
     build_bbs_article,
     build_bbs_article_reply_payload,
     build_bbs_get_children_reply_payload,
     build_bbs_get_properties_reply_payload,
+    decode_post_chunk_request,
+    decode_post_start_request,
     encode_body,
+    parse_posted_article,
 )
 from server.services.dirsrv import DIRSRVHandler
 from server.store import app_store
@@ -43,6 +51,41 @@ _ARTICLE_REQUEST = b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", 0x100, 1) + 
 # The Yosemite body as the fixture authors it — plain text, whatever format the
 # node later asks the wire layer to encode it as.
 _YOSEMITE_TEXT = app_store.content.get_node(_YOSEMITE).content.bbs.body
+
+
+# A post's header block, in the order FUN_7F5FBD4E @ 0x7F5FBD4E appends it,
+# with the bare-LF line terminator it uses (the separator at 0x7F610C0C is one
+# 0x0A). `References` appears only on a reply, which this is — to `RE: Yosemite`
+# (message 0x200) on the Climbing BBS.
+_POST_HEAD = (
+    b"X-MOS-To: Climbing BBS\n"
+    b"X-MOS-Parent: 512\n"
+    b"Subject: RE: RE: Yosemite\n"
+    b"References: <512.1@bbs.msn.com>\n"
+    b"X-MOS-Icon: 0\n"
+    b"X-MOS-Format: TEXT\n"
+    b"X-MOS-Attach: 0\n"
+    b"X-MOS-Size: 11\n"
+    b"X-MOS-CP: 1252\n"
+    b"\n"
+)
+_POST_BODY = b"Nice trip!\n"
+
+
+def _var(data):
+    """A send-side variable parameter (tag 0x04) as the client encodes it."""
+    if len(data) < 0x80:
+        return b"\x04" + bytes([0x80 | len(data)]) + data
+    return b"\x04" + bytes([len(data) >> 8, len(data) & 0xFF]) + data
+
+
+def _reply_payload(packets):
+    """The host-block payload out of a one-packet service reply.
+
+    Frame is `header byte | u16 content length | u16 pipe routing | host block`.
+    """
+    frame = parse_packet(packets[0][:-1]).payload
+    return parse_host_block(frame[5:]).payload
 
 
 def _node_with_format(body_format):
@@ -655,6 +698,265 @@ class TestBBSWriteSelectorDeferred(unittest.TestCase):
             )
         self.assertIsNone(result)
         self.assertTrue(any("unhandled" in m for m in cap.output))
+
+
+class PostChannelTestCase(unittest.TestCase):
+    """Base for the post tests — commits mutate the shared store, so undo them."""
+
+    def setUp(self):
+        self.handler = BBSHandler(5, "BBS")
+        store = app_store.content
+        self._board_children = list(store._children[_BOARD])
+        self._node_ids = set(store._nodes)
+
+    def tearDown(self):
+        store = app_store.content
+        store._children[_BOARD] = self._board_children
+        for node_id in set(store._nodes) - self._node_ids:
+            del store._nodes[node_id]
+            store._children.pop(node_id, None)
+
+    def start(self, head, *, parent=0x200, board=1, total=None, attachments=b"", attach_count=0):
+        """Method-2 request, in the parameter order FUN_7F5FB7CA builds."""
+        return (
+            b"\x03"
+            + struct.pack("<I", len(head) if total is None else total)
+            + b"\x04"
+            + bytes([0x80 | 8])
+            + struct.pack("<II", parent, board)
+            + b"\x02\x01\x00"
+            + _var(attachments)
+            + b"\x02"
+            + struct.pack("<H", attach_count)
+            + _var(head)
+            + b"\x03"
+            + struct.pack("<I", len(head))
+            + b"\x81"
+        )
+
+    def chunk(self, handle, data):
+        """Method-3/4 request: handle byte, chunk, chunk length, receive byte."""
+        return bytes([0x01, handle]) + _var(data) + b"\x03" + struct.pack("<I", len(data)) + b"\x81"
+
+    def send(self, selector, payload):
+        packets = self.handler.handle_request(BBS_CLASS_MESSAGE, selector, 1, payload, 5, 5)
+        self.assertIsNotNone(packets, f"selector 0x{selector:02x} left the client waiting")
+        return _reply_payload(packets)
+
+    def post(self, head, body, **kwargs):
+        """A whole two-segment post; returns the committed node."""
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(head, **kwargs))[1]
+        self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, body))
+        return app_store.content.get_children(_BOARD)[-1]
+
+
+class TestBBSPostFraming(PostChannelTestCase):
+    """Class 0x0B methods 2/3/4/7 — the Compose window's chunked upload."""
+
+    def test_start_answers_with_a_nonzero_handle(self):
+        # Every post method receives exactly one byte (request vtable +0x20) and
+        # FUN_7F5FB7CA bails with 0x8B0B0001 when it reads back zero. Leaving
+        # the method unanswered instead parked the Compose window forever.
+        reply = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD))
+        self.assertEqual(reply[0], 0x81)
+        self.assertNotEqual(reply[1], 0)
+        self.assertEqual(reply[2], 0x87)
+        self.assertEqual(len(reply), 3)
+
+    def test_commit_quotes_the_handle_start_issued(self):
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD))[1]
+        reply = self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, _POST_BODY))
+        self.assertNotEqual(reply[1], 0)
+
+    def test_unknown_handle_fails_the_post_instead_of_stalling_it(self):
+        with self.assertLogs("server.services.bbs", level="ERROR"):
+            reply = self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(0x7F, _POST_BODY))
+        self.assertEqual(reply, bytes([0x81, 0x00, 0x87]))
+
+    def test_concurrent_uploads_get_distinct_handles(self):
+        first = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD))[1]
+        second = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD))[1]
+        self.assertNotEqual(first, second)
+
+    def test_append_carries_a_middle_chunk(self):
+        # FUN_7F5FC2D8 emits method 3 for any chunk that is neither the first
+        # nor the one emptying the last segment — attachments, or a segment over
+        # 1 MB. The article must reassemble in send order.
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD, total=999))[1]
+        self.send(BBS_SELECTOR_POST_APPEND, self.chunk(handle, b"first half. "))
+        self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, b"second half."))
+        node = app_store.content.get_children(_BOARD)[-1]
+        self.assertEqual(node.content.bbs.body_raw, b"first half. second half.")
+
+    def test_abort_drops_the_upload_and_sends_no_receive_byte(self):
+        # Method 7 carries the handle alone and FUN_7F5FB7CA releases it without
+        # waiting, so the reply is a bare end-of-static.
+        handle = self.send(BBS_SELECTOR_POST_START, self.start(_POST_HEAD))[1]
+        self.assertEqual(self.send(BBS_SELECTOR_POST_ABORT, bytes([0x01, handle])), b"\x87")
+        with self.assertLogs("server.services.bbs", level="ERROR"):
+            reply = self.send(BBS_SELECTOR_POST_COMMIT, self.chunk(handle, _POST_BODY))
+        self.assertEqual(reply[1], 0)
+
+    def test_dispatch_routes_every_post_method_on_the_message_class(self):
+        for selector in (
+            BBS_SELECTOR_POST_START,
+            BBS_SELECTOR_POST_APPEND,
+            BBS_SELECTOR_POST_COMMIT,
+            BBS_SELECTOR_POST_ABORT,
+        ):
+            with self.subTest(selector=selector):
+                payload = (
+                    self.start(_POST_HEAD)
+                    if selector == BBS_SELECTOR_POST_START
+                    else self.chunk(1, _POST_BODY)
+                )
+                self.assertIsNotNone(
+                    self.handler.handle_request(BBS_CLASS_MESSAGE, selector, 1, payload, 5, 5)
+                )
+
+
+class TestBBSPostRequestDecoding(PostChannelTestCase):
+    def test_target_is_the_parent_message_and_its_board(self):
+        # The 8-byte parameter comes from FUN_7F5FB7CA's context at +0xA8:
+        # MAPI 0x68140003 (X-MOS-Parent) then the high dword of 0x68160014.
+        # It packs like every other BBS mnid, so a reply to 0x200 on board 1
+        # arrives as (0x200, 1).
+        request = decode_post_start_request(self.start(_POST_HEAD, parent=0x200, board=1))
+        self.assertEqual((request.parent_msg_id, request.board_id), (0x200, 1))
+
+    def test_start_reads_the_total_size_and_the_first_chunk(self):
+        request = decode_post_start_request(self.start(_POST_HEAD, total=1234))
+        self.assertEqual(request.total_bytes, 1234)
+        self.assertEqual(request.chunk, _POST_HEAD)
+
+    def test_attachment_count_comes_from_the_second_word(self):
+        request = decode_post_start_request(
+            self.start(_POST_HEAD, attachments=struct.pack("<II", 7, 9), attach_count=2)
+        )
+        self.assertEqual(request.attachment_count, 2)
+
+    def test_empty_attachment_array_is_the_common_shape(self):
+        # A post with no attachments still sends the array parameter, as a
+        # zero-length blob (`04 80`). Treating that as a missing parameter
+        # would misalign every parameter after it.
+        request = decode_post_start_request(self.start(_POST_HEAD))
+        self.assertEqual(request.attachment_count, 0)
+        self.assertEqual(request.chunk, _POST_HEAD)
+
+    def test_abort_request_carries_a_handle_and_no_chunk(self):
+        request = decode_post_chunk_request(bytes([0x01, 0x2A]))
+        self.assertEqual(request.handle, 0x2A)
+        self.assertEqual(request.chunk, b"")
+
+
+class TestBBSPostedArticleParsing(PostChannelTestCase):
+    def test_headers_end_at_the_first_blank_line(self):
+        # FUN_7F5FBD4E terminates each line with the separator at 0x7F610C0C,
+        # a single 0x0A, and closes the block with a second one. Splitting on
+        # CRLF would swallow the whole article as headers.
+        headers, body = parse_posted_article(_POST_HEAD + _POST_BODY)
+        self.assertEqual(headers["Subject"], "RE: RE: Yosemite")
+        self.assertEqual(body, _POST_BODY)
+
+    def test_every_header_the_compose_window_writes_is_recognised(self):
+        headers, _body = parse_posted_article(_POST_HEAD + _POST_BODY)
+        self.assertEqual(
+            sorted(headers),
+            [
+                "References",
+                "Subject",
+                "X-MOS-Attach",
+                "X-MOS-CP",
+                "X-MOS-Format",
+                "X-MOS-Icon",
+                "X-MOS-Parent",
+                "X-MOS-Size",
+                "X-MOS-To",
+            ],
+        )
+
+    def test_a_body_containing_a_blank_line_keeps_it(self):
+        headers, body = parse_posted_article(_POST_HEAD + b"one\n\ntwo")
+        self.assertEqual(body, b"one\n\ntwo")
+
+
+class TestBBSPostCommit(PostChannelTestCase):
+    def test_commit_puts_the_message_on_the_board(self):
+        before = len(app_store.content.get_children(_BOARD))
+        node = self.post(_POST_HEAD, _POST_BODY)
+        self.assertEqual(len(app_store.content.get_children(_BOARD)), before + 1)
+        self.assertEqual(node.content.name, "RE: RE: Yosemite")
+
+    def test_new_message_takes_a_free_id_on_the_same_board(self):
+        # Message ids are the field_8 half of the mnid; `_P` threading and the
+        # article fetch both key on them, so a collision would alias two posts.
+        existing = {n.node_id for n in app_store.content.get_children(_BOARD)}
+        node = self.post(_POST_HEAD, _POST_BODY)
+        self.assertNotIn(node.node_id, existing)
+        self.assertTrue(node.node_id.endswith(":1"))
+
+    def test_thread_parent_comes_from_the_header(self):
+        node = self.post(_POST_HEAD, _POST_BODY)
+        self.assertEqual(node.content.bbs.parent_subid, 0x200)
+
+    def test_post_is_a_message_not_a_container_and_reports_no_children(self):
+        # `b` bit 0x01 SET is bbsnav's conversation test, and `_F` bit 0x1000
+        # stops OkToGetChildren asking a message for children it has none of.
+        node = self.post(_POST_HEAD, _POST_BODY)
+        self.assertFalse(node.is_container)
+        self.assertFalse(node.content.bbs.has_children)
+
+    def test_committed_post_survives_a_board_enumeration(self):
+        node = self.post(_POST_HEAD, _POST_BODY)
+        request = DirsrvRequest(node_id=_BOARD, prop_group="e\x00_P\x00_D")
+        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        self.assertIn(node.content.name, [r["e"] for r in records])
+
+    def test_a_post_with_no_subject_still_names_its_row(self):
+        # The Compose window writes the Subject line even when the property read
+        # back PT_ERROR, leaving it empty. An empty `e` gives a nameless row.
+        head = _POST_HEAD.replace(b"Subject: RE: RE: Yosemite\n", b"Subject: \n")
+        self.assertTrue(self.post(head, _POST_BODY).content.name)
+
+
+class TestBBSPostedBodyRoundTrip(PostChannelTestCase):
+    def test_uploaded_body_goes_back_out_untouched(self):
+        # The Compose window encodes before it uploads — RTFCOMP (MAPI
+        # compressed RTF) or TEXT, per the X-MOS-Format it wrote. Re-encoding
+        # would corrupt a compressed body, which no encoder here produces.
+        compressed = bytes(range(0x20, 0x60))
+        head = _POST_HEAD.replace(b"X-MOS-Format: TEXT\n", b"X-MOS-Format: RTFCOMP\n")
+        node = self.post(head, compressed)
+        article = build_bbs_article(node)
+        self.assertEqual(article.partition(b"\n\n")[2], compressed)
+
+    def test_format_header_is_echoed_so_the_reader_picks_the_same_stream(self):
+        head = _POST_HEAD.replace(b"X-MOS-Format: TEXT\n", b"X-MOS-Format: RTFCOMP\n")
+        node = self.post(head, b"x")
+        self.assertIn(b"X-MOS-Format: RTFCOMP\n", build_bbs_article(node))
+
+    def test_size_column_reports_the_length_the_client_declared(self):
+        # X-MOS-Size is the plain-text length, which an encoded body no longer
+        # has. Both the `p` property and the header must carry the declared one.
+        head = _POST_HEAD.replace(b"X-MOS-Size: 11\n", b"X-MOS-Size: 4096\n")
+        node = self.post(head, _POST_BODY)
+        self.assertEqual(node.content.size_bytes, 4096)
+        self.assertIn(b"X-MOS-Size: 4096\n", build_bbs_article(node))
+
+    def test_a_posted_reply_is_readable_over_the_article_channel(self):
+        node = self.post(_POST_HEAD, _POST_BODY)
+        msg_id, _sep, board_id = node.node_id.partition(":")
+        wire = (
+            b"\x04"
+            + bytes([0x80 | 8])
+            + struct.pack("<II", int(msg_id), int(board_id))
+            + b"\x83\x85"
+        )
+        article = build_bbs_article_reply_payload(wire)[7:]
+        head, sep, body = article.partition(b"\n\n")
+        self.assertEqual(sep, b"\n\n")
+        self.assertIn(b"Subject: RE: RE: Yosemite\n", head)
+        self.assertEqual(body, _POST_BODY)
 
 
 if __name__ == "__main__":

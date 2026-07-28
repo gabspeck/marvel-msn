@@ -29,6 +29,13 @@ class BbsFields:
     # the RichEdit's default Courier New.
     body: str = ""
     body_format: str = "RTF"
+    # Verbatim body bytes, set only on a message that arrived over the post
+    # channel. The Compose window uploads its body already encoded — RTFCOMP
+    # (MAPI compressed RTF) or TEXT, per the X-MOS-Format it wrote — and the
+    # reader streams back whatever X-MOS-Format names, so the bytes round-trip
+    # untouched. When this is set it wins over `body`/BODY_ENCODERS, which
+    # exist to turn fixture-authored plain text into wire bytes.
+    body_raw: bytes | None = None
 
 
 @dataclass(frozen=True)
@@ -172,6 +179,7 @@ class ContentStore(Protocol):
     def get_children(self, node_id: str) -> list: ...
     def has_children(self, node_id: str) -> bool: ...
     def find_by_go_word(self, go_word: str) -> DirectoryNode | None: ...
+    def add_child(self, parent_id: str, node: DirectoryNode) -> None: ...
 
 
 class AccountStore(Protocol):

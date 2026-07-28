@@ -10,10 +10,9 @@ flat: every message is a direct child of the board and threading rides the `_P`
 property. The reader enumerates the board once and never asks a message for
 children, so a reply nested under its parent never reaches the list.
 
-Write/edit channel (TREEEDCL `CTreeEditClient`, selectors 0–12) is out of
-scope. A Compose first sends `GetTicket` (selector 12) to obtain a capability
-ticket; that selector falls into the unhandled bucket here, so a Compose
-attempt is logged and left unanswered rather than crashing or being misrouted.
+Posting rides the same message-content class (0x0B) as the article fetch, on
+methods 2/3/4/7 — a chunked upload driven by `FUN_7F5FB7CA` @ 0x7F5FB7CA. It
+is not the TREEEDCL write channel.
 """
 
 import datetime
@@ -21,17 +20,20 @@ import logging
 import struct
 
 from ..config import BBS_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE_SIGNAL, TAG_END_STATIC
-from ..models import VarParam
+from ..models import ByteParam, DwordParam, VarParam, WordParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
+    build_static_reply,
+    build_tagged_reply_byte,
     build_tagged_reply_dword,
     decode_dirsrv_request,
     parse_request_params,
 )
 from ..store import app_store as _default_store
+from ..store import build_bbs_post
 from ..store.base import BbsFields
 from . import dirsrv
 from ._dispatch import log_unhandled_selector
@@ -52,9 +54,33 @@ BBS_SELECTOR_GET_CHILDREN = 0x02
 BBS_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03
 BBS_SELECTOR_GET_SHABBY = 0x04
 
-# Message-content channel (class 0x0B) method index. Only one method exists:
-# fetch the article for the mnid the reader was opened on.
+# Message-content channel (class 0x0B) method indices.
+#
+# 0 fetches the article for the mnid the reader was opened on. 2/3/4/7 are the
+# Compose window's post upload, driven by `FUN_7F5FB7CA` @ 0x7F5FB7CA:
+# `FUN_7F5FC1D4` @ 0x7F5FC1D4 cuts the article into segments (the header block,
+# then the body stream, then one per attachment) and `FUN_7F5FC2D8` @
+# 0x7F5FC2D8 drains them in ≤1 MB chunks. The first chunk goes out on
+# POST_START, the chunk that empties the last segment on POST_COMMIT, and
+# anything between on POST_APPEND. A two-segment post with no attachments —
+# the common case — is therefore START then COMMIT, never APPEND.
 BBS_SELECTOR_GET_ARTICLE = 0x00
+BBS_SELECTOR_POST_START = 0x02
+BBS_SELECTOR_POST_APPEND = 0x03
+BBS_SELECTOR_POST_COMMIT = 0x04
+BBS_SELECTOR_POST_ABORT = 0x07
+
+# Every post request receives exactly one byte (request vtable +0x20). On
+# POST_START it is the upload handle, which POST_APPEND/COMMIT/ABORT send back
+# as their first parameter (vtable +0x30, wire tag 0x01). On the later methods
+# it is a per-chunk acknowledgement.
+#
+# Zero means failure in both roles: `FUN_7F5FB7CA` tests the received byte
+# (`CMP byte ptr [EBP-1],0x0` @ 0x7F5FBB1A and the matching test on [EBP-2])
+# and bails with 0x8B0B0001 when it is clear. So a handle is never 0.
+_POST_ACK_OK = 1
+_POST_HANDLE_MIN = 1
+_POST_HANDLE_MAX = 0xFF
 
 # `X-MOS-Format` values BBSNAV accepts, from the strcmp chain in the body
 # renderer `FUN_7F5FC56F` @ 0x7F5FC56F. It reads MAPI property 0x6801001E off
@@ -137,6 +163,12 @@ class BBSHandler:
     def __init__(self, pipe_idx, svc_name):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # In-flight post uploads, handle byte → PostUpload. A post runs
+        # START → [APPEND …] → COMMIT on one pipe, and the handler lives as
+        # long as that pipe (Connection._handle_pipe_open builds one per open),
+        # so the upload state belongs here rather than in a global.
+        self._uploads = {}
+        self._next_handle = _POST_HANDLE_MIN
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Advertise the generic TREENVCL tree IIDs plus the message channel.
@@ -154,15 +186,24 @@ class BBSHandler:
         """Dispatch a BBS request by (interface class, method selector).
 
         Two classes are served: the tree class (0x03) methods 0/2/3/4, and the
-        message-content class (0x0B) method 0. Everything else — GetParents (1),
-        the unimplemented enum/resolve slots, every TREEEDCL write selector
-        (0–12, incl. GetTicket) — is logged unhandled and left unanswered.
+        message-content class (0x0B) methods 0 (article fetch) and 2/3/4/7 (post
+        upload). Everything else — GetParents (1), the unimplemented
+        enum/resolve slots — is logged unhandled and left unanswered.
         """
         if msg_class == BBS_CLASS_MESSAGE:
-            if selector != BBS_SELECTOR_GET_ARTICLE:
+            if selector == BBS_SELECTOR_GET_ARTICLE:
+                reply_payload = build_bbs_article_reply_payload(payload)
+            elif selector == BBS_SELECTOR_POST_START:
+                reply_payload = self._post_start(payload)
+            elif selector in (BBS_SELECTOR_POST_APPEND, BBS_SELECTOR_POST_COMMIT):
+                reply_payload = self._post_chunk(
+                    payload, commit=selector == BBS_SELECTOR_POST_COMMIT
+                )
+            elif selector == BBS_SELECTOR_POST_ABORT:
+                reply_payload = self._post_abort(payload)
+            else:
                 log_unhandled_selector(log, msg_class, selector, request_id, payload)
                 return None
-            reply_payload = build_bbs_article_reply_payload(payload)
             host_block = build_host_block(msg_class, selector, request_id, reply_payload)
             return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
         if msg_class != BBS_CLASS_TREE:
@@ -183,6 +224,98 @@ class BBSHandler:
             return None
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+
+    def _post_start(self, payload):
+        """Method 2: open an upload and take its first chunk.
+
+        Answers with the handle the remaining methods quote back. Handles are
+        one byte, so they wrap; an upload still open on a reused handle is
+        replaced, which cannot happen in practice — the Compose window runs one
+        post at a time per pipe and 255 have to complete first.
+        """
+        request = decode_post_start_request(payload)
+        if request is None:
+            log.error("bbs_post_start undecodable payload_len=%d", len(payload))
+            return build_post_reply(0)
+        handle = self._take_handle()
+        self._uploads[handle] = PostUpload(
+            parent_msg_id=request.parent_msg_id,
+            board_id=request.board_id,
+            total_bytes=request.total_bytes,
+            chunks=[request.chunk],
+        )
+        log.info(
+            "bbs_post_start handle=%d parent=%d:%d total_bytes=%d chunk_bytes=%d attachments=%d",
+            handle,
+            request.parent_msg_id,
+            request.board_id,
+            request.total_bytes,
+            len(request.chunk),
+            request.attachment_count,
+        )
+        return build_post_reply(handle)
+
+    def _post_chunk(self, payload, *, commit):
+        """Methods 3 and 4: take one more chunk, and on 4 store the message.
+
+        A zero ack is the client's designed failure path — `FUN_7F5FB7CA` turns
+        it into 0x8B0B0001 and the Compose window reports the post failed. That
+        is the right answer for an unknown handle, and it beats the silence that
+        left the client waiting.
+        """
+        request = decode_post_chunk_request(payload)
+        upload = self._uploads.get(request.handle) if request else None
+        if upload is None:
+            log.error(
+                "bbs_post_chunk unknown_handle=%s commit=%s payload_len=%d",
+                request.handle if request else "?",
+                commit,
+                len(payload),
+            )
+            return build_post_reply(0)
+        upload.chunks.append(request.chunk)
+        if not commit:
+            log.info(
+                "bbs_post_append handle=%d chunk_bytes=%d received=%d/%d",
+                request.handle,
+                len(request.chunk),
+                upload.received_bytes,
+                upload.total_bytes,
+            )
+            return build_post_reply(_POST_ACK_OK)
+
+        del self._uploads[request.handle]
+        node = commit_post(upload)
+        log.info(
+            "bbs_post_commit handle=%d node=%s subject=%r parent=%d bytes=%d",
+            request.handle,
+            node.node_id,
+            node.content.name,
+            node.content.bbs.parent_subid,
+            upload.received_bytes,
+        )
+        return build_post_reply(_POST_ACK_OK)
+
+    def _post_abort(self, payload):
+        """Method 7: drop an upload the client gave up on.
+
+        Sent only when a post fails with 0x0B0B000D (the connection went away
+        mid-upload). `FUN_7F5FB7CA` dispatches it and releases the request
+        without waiting, and the request carries no receive descriptor, so the
+        reply is a bare end-of-static.
+        """
+        request = decode_post_chunk_request(payload)
+        handle = request.handle if request else None
+        dropped = self._uploads.pop(handle, None)
+        log.info("bbs_post_abort handle=%s known=%s", handle, dropped is not None)
+        return bytes([TAG_END_STATIC])
+
+    def _take_handle(self):
+        handle = self._next_handle
+        self._next_handle += 1
+        if self._next_handle > _POST_HANDLE_MAX:
+            self._next_handle = _POST_HANDLE_MIN
+        return handle
 
 
 def build_bbs_props(requested_props, node, *, is_children):
@@ -382,7 +515,10 @@ def build_bbs_article(node):
     """
     content = node.content
     bbs = content.bbs or _EMPTY_BBS
-    body = encode_body(bbs.body, bbs.body_format)
+    # A posted message already holds the bytes the Compose window uploaded, in
+    # the encoding X-MOS-Format names. Re-encoding is only for fixtures, whose
+    # bodies are authored as plain text.
+    body = bbs.body_raw if bbs.body_raw is not None else encode_body(bbs.body, bbs.body_format)
 
     headers = [
         ("Path", "msn"),
@@ -526,3 +662,192 @@ def _utc_offset_text(offset):
     sign = "-" if total < 0 else "+"
     total = abs(total)
     return f"{sign}{total // 3600:02d}{total % 3600 // 60:02d}"
+
+
+# --- Post channel (class 0x0B methods 2/3/4/7) ---
+
+# Headers the Compose window writes, in the order `FUN_7F5FBD4E` @ 0x7F5FBD4E
+# appends them. Each line is `Name: value` terminated by a bare LF (the
+# separator at 0x7F610C0C is a single 0x0A), and a second LF closes the block —
+# the same framing the reader expects coming back.
+#
+# Every value is a MAPI property read off the compose message; a property that
+# came back PT_ERROR (type 0x0A) writes an empty value rather than dropping its
+# line. `References` is the only conditional one: it appears only when the post
+# answers another message.
+#
+#   X-MOS-To:      0x6800001E   recipient/board text
+#   X-MOS-Parent:  0x68140003   message id this post answers, 0 for a new topic
+#   Subject:       0x0037001E
+#   References:    0x6809001E   present only when X-MOS-Parent is nonzero
+#   X-MOS-Icon:    literal 0
+#   X-MOS-Format:  "RTFCOMP" or "TEXT" — never plain "RTF" on this direction
+#   X-MOS-Attach:  attachment count
+#   X-MOS-Size:    body length in bytes
+#   X-MOS-CP:      GetACP()
+POST_HEADER_PARENT = "X-MOS-Parent"
+POST_HEADER_SUBJECT = "Subject"
+POST_HEADER_FORMAT = "X-MOS-Format"
+POST_HEADER_SIZE = "X-MOS-Size"
+
+# Subject stamped on a post whose header block carried none. The Compose window
+# always writes the line, but writes it empty when the property read back
+# PT_ERROR, and an empty `e` gives a nameless row in the reader.
+_POST_UNTITLED_SUBJECT = "(No subject)"
+
+
+class PostUpload:
+    """One in-flight post: where it goes, and the chunks received so far."""
+
+    def __init__(self, parent_msg_id, board_id, total_bytes, chunks):
+        self.parent_msg_id = parent_msg_id
+        self.board_id = board_id
+        self.total_bytes = total_bytes
+        self.chunks = chunks
+
+    @property
+    def received_bytes(self):
+        return sum(len(c) for c in self.chunks)
+
+    def article(self):
+        return b"".join(self.chunks)
+
+
+class PostStartRequest:
+    """Decoded method-2 parameters."""
+
+    def __init__(self, total_bytes, parent_msg_id, board_id, attachment_count, chunk):
+        self.total_bytes = total_bytes
+        self.parent_msg_id = parent_msg_id
+        self.board_id = board_id
+        self.attachment_count = attachment_count
+        self.chunk = chunk
+
+
+class PostChunkRequest:
+    """Decoded method-3/4/7 parameters."""
+
+    def __init__(self, handle, chunk):
+        self.handle = handle
+        self.chunk = chunk
+
+
+def decode_post_start_request(payload):
+    """Decode method 2 — `03 total | 04 mnid | 02 1 | 04 attach | 02 n | 04 chunk | 03 len | 81`.
+
+    Parameter order is fixed by the build sequence in `FUN_7F5FB7CA`
+    (0x7F5FB8FE onwards): total size, the 8-byte target, a constant word 1, the
+    attachment-id array, its count, the chunk, the chunk length, then the
+    receive byte.
+
+    The 8-byte target is `[parent message id][board id]` — the client fills it
+    from `param_1+0xA8`, whose halves are MAPI 0x68140003 (X-MOS-Parent) and the
+    high dword of 0x68160014. It packs like every other BBS mnid, so a reply to
+    message 0x200 on board 1 arrives as `(0x200, 1)`.
+
+    Returns None when the payload does not carry the three variable parameters,
+    which is the only shape this cannot work with.
+    """
+    send_params, _recv = parse_request_params(payload)
+    var_params = [p for p in send_params if isinstance(p, VarParam)]
+    dwords = [p for p in send_params if isinstance(p, DwordParam)]
+    words = [p for p in send_params if isinstance(p, WordParam)]
+    if len(var_params) < 3 or len(dwords) < 1:
+        return None
+    target = var_params[0].data
+    parent_msg_id, board_id = struct.unpack("<II", target[:8]) if len(target) >= 8 else (0, 0)
+    return PostStartRequest(
+        total_bytes=dwords[0].value,
+        parent_msg_id=parent_msg_id,
+        board_id=board_id,
+        attachment_count=words[1].value if len(words) > 1 else 0,
+        chunk=var_params[2].data,
+    )
+
+
+def decode_post_chunk_request(payload):
+    """Decode method 3/4 — `01 handle | 04 chunk | 03 len | 81` — or method 7's bare handle.
+
+    Method 7 sends the handle alone, so an absent chunk is not an error here.
+    """
+    send_params, _recv = parse_request_params(payload)
+    handles = [p for p in send_params if isinstance(p, ByteParam)]
+    chunks = [p for p in send_params if isinstance(p, VarParam)]
+    if not handles:
+        return None
+    return PostChunkRequest(
+        handle=handles[0].value,
+        chunk=chunks[0].data if chunks else b"",
+    )
+
+
+def build_post_reply(value):
+    """`0x81 <byte> 0x87` — the one byte every post method receives.
+
+    Zero is the failure signal: `FUN_7F5FB7CA` tests the byte and returns
+    0x8B0B0001 when it is clear, so the Compose window reports a failed post
+    instead of waiting.
+    """
+    return build_static_reply(build_tagged_reply_byte(value))
+
+
+def commit_post(upload):
+    """Turn a completed upload into a message node under its board.
+
+    The uploaded article splits the same way the reader splits a downloaded one
+    — at the first pair of adjacent LFs — into a header block and the body. The
+    body is already encoded as X-MOS-Format names, so it is stored verbatim and
+    goes back out untouched.
+    """
+    headers, body = parse_posted_article(upload.article())
+    board_key = f"0:{upload.board_id}"
+    node = build_bbs_post(
+        _next_message_id(board_key, upload.board_id),
+        upload.board_id,
+        subject=headers.get(POST_HEADER_SUBJECT) or _POST_UNTITLED_SUBJECT,
+        parent_subid=_header_int(headers, POST_HEADER_PARENT, upload.parent_msg_id),
+        body_raw=body,
+        body_format=headers.get(POST_HEADER_FORMAT) or BBS_FORMAT_TEXT,
+        size_bytes=_header_int(headers, POST_HEADER_SIZE, len(body)),
+    )
+    _default_store.content.add_child(board_key, node)
+    return node
+
+
+def parse_posted_article(article):
+    """Split an uploaded article into `({header: value}, body_bytes)`.
+
+    Header lines are `Name: value` with one space, terminated by a bare LF, and
+    a blank line ends the block — `FUN_7F5FBD4E` writes exactly that. A line
+    without the separator is skipped rather than failing the post; the client
+    has already committed the message by the time this runs.
+    """
+    head, _sep, body = article.partition(b"\n\n")
+    headers = {}
+    for line in head.decode("ascii", "replace").split("\n"):
+        name, sep, value = line.partition(_HEADER_SEP)
+        if sep:
+            headers[name] = value
+    return headers, body
+
+
+def _header_int(headers, name, default):
+    """A numeric header value, falling back when it is absent or not a number."""
+    try:
+        return int(headers[name])
+    except (KeyError, ValueError):
+        return default
+
+
+def _next_message_id(board_key, board_id):
+    """One past the highest message id on the board.
+
+    Message ids are the `field_8` half of the mnid and must be unique per board
+    — `_P` threading and the article fetch both key on them.
+    """
+    highest = 0
+    for child in _default_store.content.get_children(board_key):
+        msg_id, _sep, child_board = child.node_id.partition(":")
+        if child_board == str(board_id) and msg_id.isdigit():
+            highest = max(highest, int(msg_id))
+    return highest + 1
