@@ -522,10 +522,24 @@ MAPILogoff(session, ...)
 
 This emails a BBS post through the user's **local MAPI client** (Exchange). The
 MSN address-book provider `MOSABP32.DLL` participates as a MAPI AB provider
-loaded by the MAPI subsystem (not by BBSNAV directly — the string is present but
-unreferenced in BBSNAV code). **The gateway's own protocol (MAPI32 / MOSABP32
-internals) is deferred** — those callees are Windows/MSN components outside our
-binary set.
+loaded by the MAPI subsystem, not by BBSNAV directly — the string is present but
+unreferenced in BBSNAV code. **The gateway's own protocol (MAPI32) is
+deferred** — those callees are Windows components outside our binary set.
+
+### Member Properties (command `0x5B0`)
+
+Menu 103 also carries `Member &Properties...`, and that path *does* reach the
+wire. `FUN_7F604316` reads the reader's From box (control `0x3E9`), cuts at `@`,
+refuses any domain other than `msn.com`, and calls MOSABP32 ordinal 101
+`HrUserDetailsDlg`, which opens its own pipe on service `"MOSABP"`. Two
+consequences for the article this server writes:
+
+- The **`From:` value is the member key**. Whatever goes in that header is what
+  the address-book lookup receives.
+- A `From:` containing `@` must end in `msn.com` or the command fails silently
+  before any request, reporting string `0x1B6D`.
+
+Full contract in `docs/MOSABP.md`.
 
 ---
 

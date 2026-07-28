@@ -246,6 +246,18 @@ ONLSTMT_INTERFACE_GUIDS = [
     (_guid_le("00028BCA-0000-0000-C000-000000000046"), 0x1B),
 ]
 
+# MOSABP (MSN member address book — MOSABP32.DLL, the MAPI AB provider that
+# backs the BBS reader's "Member Properties..." sheet).
+# `CAbConnection::HrGetMethod` @ 0x7F4D4311 is the single call site that opens
+# this service, and it resolves exactly one IID: the pointer it hands the
+# marshaller's slot 0x24 is `&DAT_7F4E6330` = 00028B22.  The seven GUIDs that
+# follow it in .rdata are a contiguous run the DLL never resolves, so one entry
+# is the whole table.  Selector 0x01 makes the request class 0x01; the client
+# learns the number from this reply, so the value is ours to pick.
+MOSABP_INTERFACE_GUIDS = [
+    (_guid_le("00028B22-0000-0000-C000-000000000046"), 0x01),
+]
+
 # MEDVIEW (MedView title loader — MOSVIEW.EXE).  Client-side IID array at
 # MVTTL14C.DLL:0x7E84C1B0 — 42 IIDs consulted by hrAttachToService when
 # the factory resolves the service's interface table.  Selectors assigned

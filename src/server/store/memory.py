@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import struct
 
-from .base import AppStore
+from .base import AppStore, MemberProfile
 
 
 class InMemoryContentStore:
@@ -64,6 +64,22 @@ class InMemoryAccountStore:
         return self._profile
 
 
+class InMemoryMemberStore:
+    def __init__(self, profiles):
+        self._profiles = {p.member_id.casefold(): p for p in profiles}
+
+    def get_member(self, member_id):
+        # Case-insensitive: the key travels through the reader's From box and a
+        # member id is not case-sensitive on MSN. An unknown member still gets a
+        # profile — the sheet then shows the id with empty pages, which is what a
+        # member who published nothing looks like. Failing the request instead
+        # would put a MosError box in front of the user.
+        profile = self._profiles.get(member_id.casefold())
+        if profile is None:
+            return MemberProfile(member_id=member_id, display_name=member_id)
+        return profile
+
+
 class InMemoryStatementStore:
     def __init__(self, summary, transactions, subscriptions, plans):
         self._summary = summary
@@ -103,4 +119,5 @@ def build_app_store(seed):
             subscriptions=seed.subscriptions,
             plans=seed.plans,
         ),
+        member=InMemoryMemberStore(profiles=seed.member_profiles),
     )

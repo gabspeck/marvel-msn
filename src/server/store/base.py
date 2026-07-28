@@ -96,6 +96,41 @@ class BillingProfile:
 
 
 @dataclass(frozen=True)
+class MemberProfile:
+    """One member's self-published details, as the Member Properties sheet reads them.
+
+    Field names follow the labels on MOSABP32's three property pages (dialogs
+    100 "General", 101 "Personal", 102 "Professional"); see docs/MOSABP.md for
+    the tag each one serialises to. Everything is optional — a member who filled
+    in nothing still gets a sheet with their member id.
+
+    `country_code`, `marital_status_code` and `language_code` are numeric
+    catalogue ids, not text. The client renders them through validation lists it
+    caches from `GetValidationList` (method 1); with no cached list it leaves the
+    field blank, so the code that ships here is only meaningful once that
+    selector exists.
+    """
+
+    member_id: str
+    display_name: str = ""
+    first_name: str = ""
+    last_name: str = ""
+    city: str = ""
+    state: str = ""
+    country_code: int = 0
+    birth_date: str = ""
+    sex: str = ""
+    marital_status_code: int = 0
+    language_code: int = 0
+    interests: str = ""
+    job_description: str = ""
+    company_name: str = ""
+    work_city: str = ""
+    work_state: str = ""
+    work_country_code: int = 0
+
+
+@dataclass(frozen=True)
 class StatementSummary:
     balance_cents: int
     currency_iso: int
@@ -143,6 +178,10 @@ class AccountStore(Protocol):
     def get_billing_profile(self) -> BillingProfile: ...
 
 
+class MemberStore(Protocol):
+    def get_member(self, member_id: str) -> MemberProfile: ...
+
+
 class StatementStore(Protocol):
     def get_summary(self) -> StatementSummary: ...
     def get_transactions(self, period_index: int) -> list: ...
@@ -156,3 +195,4 @@ class AppStore:
     content: ContentStore
     account: AccountStore
     statement: StatementStore
+    member: MemberStore

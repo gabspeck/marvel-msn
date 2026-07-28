@@ -468,6 +468,30 @@ COM stub. Imports `CCAPI.DLL` + `SHELL32`/`COMCTL32` — classic Explorer proper
 
 **Ghidra status**: Not imported.
 
+### MOSABP32.DLL — *MSN Address Book Provider* (DLL, 105 KB)
+
+MAPI address-book provider plus the **Member Properties** sheet. **Ships with Windows 95 itself** (`WINDOWS\SYSTEM\`), not with the MSN client update — a `binaries/` tree built from the MSN files alone does not contain it. Extract it from a Win95 install or the WIN95 cabs.
+
+Wire client is the C++ class `CAbConnection` — all 34 members carry decorated names, so the class reads directly. It CoCreates the MPC marshaller, opens a pipe on service `"MOSABP"` version 3, resolves **one** IID (`00028B22`), and turns each operation into `GetMethod(<ServiceMethod>)`. Nine `ServiceMethod` values are used; only `GetUserDetails` (2 / 10) drives the sheet.
+
+Entry from the BBS reader is menu id `0x5B0` "Member Properties..." → `BBSNAV!FUN_7F604316` → ordinal 101 `HrUserDetailsDlg`. That handler reads the reader's From box, so the **`From:` header value is the lookup key**, and a `From:` carrying an `@` is accepted only when the domain is exactly `msn.com`.
+
+**Key exports**
+- `ABProviderInit` [100], `HrUserDetailsDlg` [101], `HrUserDetailsDlgHacct` [102]
+- `CAbConnection::HrGetUserDetails`, `HrUpdateUserDetails`, `HrGetValidationList`, `HrGetAbContainers`, `HrEnumDistList`, `HrQueryWWRows`, `HrQueryRestrictRows`, `HrQueryRowsMore`, `HrCloseTable`, `HrDisconnect`
+
+**Ghidra status**: Annotated — see `docs/MOSABP.md` for the full wire contract, the property blob format, and the tag→dialog-field map. Depends on `MOSMUTIL.DLL` for the `_usr_entryid` builders.
+
+### MOSMUTIL.DLL — *MOS MAPI Utilities* (DLL, 26 KB)
+
+Windows 95 companion to `MOSABP32.DLL`, also from `WINDOWS\SYSTEM\`. Holds the `_usr_entryid` constructors the address book keys its lookups on.
+
+**Key exports**
+- `HrBuildUeid` [15] — `(ueid, EIDTYPE, display_name, member_name)`; writes version `2` at `+0x14`, the type at `+0x18`, the display name at `+0x1C` (max 0x5B) and the member name at `+0x77` (max 0x41)
+- `HrBuildHacctUeid` — the account-handle form, `EIDTYPE` 4
+
+**Ghidra status**: Imported; `HrBuildUeid` decompiled for the entry-id layout, rest untouched.
+
 ---
 
 ## 5. MedView / Multimedia

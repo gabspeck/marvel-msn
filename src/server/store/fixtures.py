@@ -11,6 +11,7 @@ from .base import (
     BbsFields,
     BillingProfile,
     DirectoryNode,
+    MemberProfile,
     NodeContent,
     Plan,
     StatementSummary,
@@ -871,6 +872,76 @@ PLANS = [
 ]
 
 
+# Member Properties fixtures, keyed by the string BBSNAV hands MOSABP32.
+#
+# `FUN_7F604316` (the id-0x5B0 "Member Properties..." handler) reads the reader
+# window's From box (control 0x3E9), cuts at '@', rejects anything whose domain
+# is not "msn.com", and passes the local part to `HrUserDetailsDlg`. The From
+# header this server writes carries `BbsFields.author` verbatim, so the lookup
+# key is the author string as authored — not a separate account name.
+#
+# Details are invented. reference/screenshots/bbs.png shows the three authors in
+# the list pane and nothing about them, and no MSN member directory survives.
+MEMBER_PROFILES = [
+    MemberProfile(
+        member_id="Chris Hahn",
+        display_name="Chris Hahn",
+        first_name="Chris",
+        last_name="Hahn",
+        city="Seattle",
+        state="WA",
+        country_code=1,
+        birth_date="March 4, 1968",
+        sex="Male",
+        marital_status_code=2,
+        language_code=_LCID_EN_US,
+        interests="Climbing, backcountry skiing, photography",
+        job_description="Structural engineer",
+        company_name="Cascade Engineering",
+        work_city="Bellevue",
+        work_state="WA",
+        work_country_code=1,
+    ),
+    MemberProfile(
+        member_id="KEITH SUTTON",
+        display_name="KEITH SUTTON",
+        first_name="Keith",
+        last_name="Sutton",
+        city="Sheffield",
+        state="South Yorkshire",
+        country_code=44,
+        birth_date="November 19, 1961",
+        sex="Male",
+        marital_status_code=2,
+        language_code=0x0809,
+        interests="Gritstone, trad climbing, hillwalking",
+        job_description="Secondary school teacher",
+        work_city="Sheffield",
+        work_state="South Yorkshire",
+        work_country_code=44,
+    ),
+    MemberProfile(
+        member_id="Chris Shannon",
+        display_name="Chris Shannon",
+        first_name="Chris",
+        last_name="Shannon",
+        city="Fresno",
+        state="CA",
+        country_code=1,
+        birth_date="July 30, 1972",
+        sex="Female",
+        marital_status_code=1,
+        language_code=_LCID_EN_US,
+        interests="Big wall climbing, trail running",
+        job_description="Park ranger",
+        company_name="National Park Service",
+        work_city="Yosemite Village",
+        work_state="CA",
+        work_country_code=1,
+    ),
+]
+
+
 @dataclass
 class DefaultSeed:
     directory_nodes: list
@@ -881,6 +952,7 @@ class DefaultSeed:
     statement_transactions: list
     subscriptions: list
     plans: list
+    member_profiles: list
 
 
 def default_seed():
@@ -893,4 +965,5 @@ def default_seed():
         statement_transactions=STATEMENT_TRANSACTIONS,
         subscriptions=SUBSCRIPTIONS,
         plans=PLANS,
+        member_profiles=MEMBER_PROFILES,
     )

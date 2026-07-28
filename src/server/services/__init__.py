@@ -4,6 +4,7 @@ from .dirsrv import DIRSRVHandler
 from .ftm import FTMHandler
 from .logsrv import LOGSRVHandler
 from .medview import MEDVIEWHandler
+from .mosabp import MOSABPHandler
 from .olregsrv import OLREGSRVHandler
 from .onlstmt import OnlStmtHandler
 
@@ -15,6 +16,7 @@ SERVICE_HANDLERS = {
     "onlstmt": OnlStmtHandler,
     "medview": MEDVIEWHandler,
     "bbs": BBSHandler,
+    "mosabp": MOSABPHandler,
 }
 
 __all__ = ["SERVICE_HANDLERS", "log_unhandled_selector"]
