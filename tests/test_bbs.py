@@ -225,6 +225,26 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
     BBS_TAGS = "a\x00c\x00h\x00b\x00e\x00g\x00x\x00_a\x00_D\x00_P\x00_f\x00_t\x00p\x00_F\x00_I"
     DIRSRV_TAGS = "a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i"
 
+    def test_board_is_container_messages_are_not(self):
+        # `b` bit 0x01 is bbsnav's conversation test: FUN_7F5F1CAD sets bit 0
+        # of the ingest flag when (b & 1) == 0, and FUN_7F5F5DE4 counts a
+        # conversation only when that bit is clear. So the board must be a
+        # container (0x00) and every message a leaf (0x01) — including a
+        # conversation head that has replies.
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00b\x00e")
+        board = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        self.assertEqual(board["b"] & 0x01, 0x00)
+
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00b\x00e\x00_F")
+        for record in _walk_records(build_bbs_get_children_reply_payload(request)):
+            self.assertEqual(record["b"] & 0x01, 0x01, record["e"])
+        # Yosemite is a leaf `b` but still expandable: _F bit 0x1000 clear.
+        yosemite = next(
+            r for r in _walk_records(build_bbs_get_children_reply_payload(request))
+            if r["e"] == "Yosemite"
+        )
+        self.assertEqual(yosemite["_F"] & 0x1000, 0)
+
     def test_bbs_board_record_has_no_gaps(self):
         # The board has no author, topic or date — every one of those must
         # still ship a value.

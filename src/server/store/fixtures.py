@@ -383,6 +383,12 @@ def _bbs_node(
 ):
     """A BBS tree node (board / conversation / reply).
 
+    `is_container` means **board or folder**, not "has replies" — it drives `b`
+    bit 0x01 (CLEAR = container, SET = message), which is bbsnav's conversation
+    test. A conversation head is a message that has children, so it takes
+    is_container=False with has_children=True; `_F` carries the expand gate
+    independently.
+
     Rides DirectoryNode with app_id=APP_BBS_SERVICE and language=0; the
     BBS-specific tags (`_a/_D/_P/_t/_F`) live in the attached BbsFields, read by
     build_bbs_props and ignored by DIRSRV serialisation. `p` (Size) is the body
@@ -447,7 +453,7 @@ _BBS_YOSEMITE = _bbs_node(
     0,
     0x100,
     "Yosemite",
-    is_container=True,
+    is_container=False,
     author="Chris Shannon",
     date="May 16, 1995 10:12 AM",
     has_children=True,

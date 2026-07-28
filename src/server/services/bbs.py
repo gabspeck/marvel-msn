@@ -125,9 +125,17 @@ def build_bbs_props(requested_props, node, *, is_children):
         elif name == PROP_APP_ID:
             out.append((0x03, name, struct.pack("<I", node.app_id)))
         elif name == PROP_BROWSE_FLAGS:
-            # All BBS tree nodes browse (bit 0x01 clear). Opening a message in
-            # the reader is a bbsnav verb, not a 'b'-exec gate.
-            out.append((0x01, name, b"\x00"))
+            # Bit 0x01 CLEAR = container (board/folder), SET = message.
+            # This is the conversation test. FUN_7F5F1CAD @ 0x7F5F1CAD sets
+            # bit 0 of its out-byte when `(b & 1) == 0`; that byte becomes the
+            # ingest flag and lands in the store entry at +0x1C, and
+            # FUN_7F5F5DE4 @ 0x7F5F5DE4 increments the conversation counter
+            # (ctx+0xC14) only when the bit is CLEAR. Sending b=0 for every BBS
+            # node flagged all of them as containers → "0 conversations" and
+            # folder glyphs. Confirmed live: ingest hit with flag=0x01 on
+            # Yosemite (mnid field_8=0, field_c=0x100).
+            leaf = not node.is_container
+            out.append((0x01, name, bytes([0x01 if leaf else 0x00])))
         elif name == PROP_NAME:
             # Subject. 0x0A (ASCII cache) like DIRSRV `e`: column 0 and the
             # Properties dialog both read ANSI.

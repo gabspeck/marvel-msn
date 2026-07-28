@@ -58,9 +58,30 @@ BBS-specific opcode space.
 
 Threading is **the tree itself**: a reply is a child node of the message it
 answers, so `GetChildren` recursion yields the indented thread view. Each node
-*also* carries an explicit parent pointer in property `_P` (see §Property tags)
-used by `CBbsNavTreeNode_GetThreadParent` (`0x7F5F1C3E`) to jump to the parent
-message via `HrGetPMtn`.
+*also* carries an explicit parent pointer in `_P`, and its exact meaning is
+fixed by `CBbsNavTreeNode_GetThreadParent` (`0x7F5F1C3E`):
+
+```c
+memcpy(mnid, node+0x10, 24);          // the node's own 24-byte mnid
+if (mnid.field_8 == 0)      return 1; // no parent — this is a conversation head
+GetProperty("_P", &mnid.field_8, 4);  // _P OVERWRITES field_8
+if (mnid.field_8 == 0)      return 1; // _P == 0 — also a conversation head
+HrGetPMtn(mnid, &parent);             // parent = same mnid, field_8 := _P
+```
+
+So **`_P` is the parent's `field_8`**, and a parent must share the child's
+`field_0`, `field_c` and `field_10`. Two consequences: a node whose own
+`field_8` is 0 can never have a thread parent, and `_P` cannot address a parent
+that differs in any other mnid field.
+
+The return value is the conversation test. `FUN_7F5F2E6C` (view slot `+0x50`)
+calls it and passes "has a parent" as the ingest flag, which lands in the store
+entry at `+0x1C`. `FUN_7F5F5DE4` increments the conversation counter
+(`ctx+0xC14`) only when that bit is clear, and the status bar
+(`FUN_7F5F33C2`, slot `+0x68`) just formats the precomputed counters with
+string `0x1904 + view_mode` — it never counts rows itself. A board showing
+"0 conversations" means the ingest never ran or every entry was flagged as a
+reply.
 
 ---
 
@@ -86,6 +107,21 @@ order): `_a, _D, _P, _f, _t, p, _F, _I`.
 
 Synthesised / non-extra tags BBS also touches:
 
+- **`b`** (`0x01` byte) is the **conversation test**, not just a browse/exec
+  gate. `FUN_7F5F1CAD` (`0x7F5F1CAD`) reads it and sets bit 0 of its out-byte
+  when `(b & 1) == 0`. `FUN_7F5F2E6C` passes that byte as the ingest flag,
+  `FUN_7F5F8784` stores it at store-entry `+0x1C`, and `FUN_7F5F5DE4`
+  increments the conversation counter (`ctx+0xC14`) **only when the bit is
+  clear**. So:
+  - board / folder → `b` bit 0x01 **CLEAR** (container),
+  - conversation head and reply → `b` bit 0x01 **SET** (message).
+
+  A conversation head that has replies is still a message: it takes `b` bit
+  0x01 set and expresses "expandable" through `_F` bit `0x1000` CLEAR. Sending
+  `b = 0` for every node makes the reader draw folder glyphs, leave
+  Author/Size/Date blank, and report "0 conversations" while still listing the
+  rows. Confirmed live 2026-07-28 (`BPX 0x7F5F5DE4`, flag `0x01` on a node with
+  mnid `field_8=0, field_c=0x100`), and fixed by sending the leaf bit.
 - **`h`** (icon) is *not* taken from the wire. `CBbsNavTreeNode_GetProperty`
   (`0x7F5F1538`) intercepts `GetProperty("h")` and returns one of two local icon
   ids (`g_0x7F60D380` if node+0x18 == 0, else `g_0x7F60D35C`). Emit nothing for
