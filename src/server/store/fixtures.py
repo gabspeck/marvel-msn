@@ -422,9 +422,14 @@ def _bbs_node(
             u_value="",
             forum_mgr="",
             vendor_id=0,
-            owner="",
-            created="",
-            modified="",
+            owner=author,
+            # The Properties dialog fetches the shared MOS tree tags one at a
+            # time (`q,g` then `v,g` …), and build_bbs_props hands those to
+            # DIRSRV's serialiser. Mirror the post date into `created`/`modified`
+            # so the dialog shows the real timestamp instead of blanks; the
+            # listview Date column still comes from `_D`.
+            created=date,
+            modified=date,
             size_bytes=len(body),
             bbs=BbsFields(
                 author=author,

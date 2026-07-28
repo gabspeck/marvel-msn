@@ -169,7 +169,14 @@ def build_bbs_props(requested_props, node, *, is_children):
             # `_f` advertised but no BBSNAV read site; safe default DWORD 0.
             out.append((0x03, name, struct.pack("<I", 0)))
         else:
-            out.append((0x03, name, struct.pack("<I", 0)))
+            # Anything outside the BBS vocabulary is a shared MOS tree tag, and
+            # the Properties dialog fetches those one at a time as {name, 'g'}
+            # groups (observed live: `q,g` then `v,g` on a BBS node). Reuse
+            # DIRSRV's serialisation so each one gets its established wire type
+            # instead of a DWORD-0 stand-in — `q` in particular must be the
+            # 8-byte qword form, since a 4-byte value makes the client's
+            # `*(u32*)(value + 4)` LCID read run off the end.
+            out.extend(dirsrv.build_props([name], node, is_children=is_children))
     return out
 
 

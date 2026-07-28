@@ -122,6 +122,13 @@ Synthesised / non-extra tags BBS also touches:
   Author/Size/Date blank, and report "0 conversations" while still listing the
   rows. Confirmed live 2026-07-28 (`BPX 0x7F5F5DE4`, flag `0x01` on a node with
   mnid `field_8=0, field_c=0x100`), and fixed by sending the leaf bit.
+- **Shared MOS tree tags** (`q, j, k, ca, r, s, t, u, n, on, v, w, y, o, z`)
+  are fetched from a BBS node too, one at a time as `{name, 'g'}` groups, when
+  the Properties dialog opens — observed live as `q,g` then `v,g` on a message
+  node. They keep their DIRSRV wire types, notably `q` as the **8-byte** qword
+  `[u32 header][u32 lcid]`: a 4-byte `q` makes MCM's `*(u32*)(value + 4)` LCID
+  read run past the buffer. Answering any of them with a DWORD-0 stand-in
+  leaves the dialog blank or garbled.
 - **`h`** (icon) is *not* taken from the wire. `CBbsNavTreeNode_GetProperty`
   (`0x7F5F1538`) intercepts `GetProperty("h")` and returns one of two local icon
   ids (`g_0x7F60D380` if node+0x18 == 0, else `g_0x7F60D35C`). Emit nothing for

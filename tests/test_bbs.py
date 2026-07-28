@@ -278,6 +278,40 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
             self.assertEqual(set(record), set(self.DIRSRV_TAGS.split("\x00")))
 
 
+class TestBBSPropertiesDialogTags(unittest.TestCase):
+    """Shared MOS tree tags requested by the Properties dialog.
+
+    The dialog fetches them one at a time as `{name, 'g'}` groups — observed
+    live as `q,g` then `v,g` on node 0:256. build_bbs_props delegates anything
+    outside the BBS vocabulary to DIRSRV's serialiser so each tag keeps its
+    established wire type.
+    """
+
+    def test_language_is_the_eight_byte_qword_form(self):
+        # `q` must be type 0x04 (8 bytes): MCM reads the LCID as
+        # *(u32*)(value + 4), so a 4-byte value reads past the end.
+        request = DirsrvRequest(node_id=_YOSEMITE, prop_group="q\x00g")
+        payload = build_bbs_get_properties_reply_payload(request)
+        self.assertIn(b"\x04q\x00", payload)
+        self.assertNotIn(b"\x03q\x00", payload)
+        record = _walk_records(payload)[0]
+        self.assertEqual(record["q"] >> 32, 0)
+
+    def test_created_and_modified_carry_the_post_date(self):
+        request = DirsrvRequest(node_id=_YOSEMITE, prop_group="v\x00w\x00g")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        self.assertEqual(record["v"], "May 16, 1995 10:12 AM")
+        self.assertEqual(record["w"], "May 16, 1995 10:12 AM")
+
+    def test_dialog_tags_are_never_answered_with_a_dword_stand_in(self):
+        # Every string-shaped dialog tag must arrive as 0x0B, not DWORD 0.
+        tags = ["j", "k", "ca", "r", "s", "t", "u", "n", "on", "v", "w"]
+        request = DirsrvRequest(node_id=_YOSEMITE, prop_group="\x00".join(tags))
+        payload = build_bbs_get_properties_reply_payload(request)
+        for tag in tags:
+            self.assertIn(bytes([0x0B]) + tag.encode() + b"\x00", payload, tag)
+
+
 class TestBBSWriteSelectorDeferred(unittest.TestCase):
     def test_get_ticket_selector_is_unhandled(self):
         # Compose first sends GetTicket (sel 12) on the TREEEDCL edit channel.
