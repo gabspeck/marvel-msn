@@ -3,8 +3,8 @@
 Two call patterns are covered:
 
 - BILLADD's billing path: client sends FtmClientFileId with name="plans.txt"
-  and asks for one file.  Server echoes the name and returns an empty file
-  via the HrBillClient fast-path.
+  and asks for one file. Server echoes the name and serves it through the
+  HrBillClient fast path.
 
 - SIGNUP.EXE's signup path: client sends FtmClientFileId with
   name="LOGSRV" and a 4-iteration counter at CFI offset 40 (0..3).
@@ -12,6 +12,11 @@ Two call patterns are covered:
   its module (plans.txt / prodinfo.rtf / legalagr.rtf / newtips.rtf),
   overrides the echoed filename, and serves minimal placeholder content
   so the RTFs parse cleanly in RichEdit.
+
+- MOSAF's BBS attachment path: client sends name="BBS" plus a file
+  resource identifier for an attachment node. Server preserves MOSAF's
+  local filename and returns the uploaded MOS2 container for FTMAPI to
+  decompress.
 """
 
 import logging
@@ -28,6 +33,7 @@ from ..mpc import (
     build_tagged_reply_var,
     parse_request_params,
 )
+from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
@@ -44,17 +50,22 @@ FTM_REPLY_STATUS_OFFSET = 0x00
 FTM_REPLY_SIZE1_OFFSET = 0x08
 FTM_REPLY_SIZE2_OFFSET = 0x0C
 FTM_REPLY_FLAGS_OFFSET = 0x10
-FTM_REPLY_COMPRESSED_SIZE_OFFSET = 0x14
+FTM_REPLY_UNPACK_METHOD_OFFSET = 0x14
 
 FTM_BILL_CLIENT_REPLY_SIZE = 0x12
 FTM_BILL_CLIENT_PAYLOAD_SIZE_OFFSET = 0x10
 
-FTM_FLAG_HAS_COMPRESSED_SIZE = 0x01
+FTM_FLAG_HAS_UNPACK_METHOD = 0x01
 FTM_FLAG_FAST_PATH = 0x02
 FTM_FLAG_HAS_FILENAME = 0x08
-FTM_REQUEST_REPLY_FLAGS = FTM_FLAG_HAS_COMPRESSED_SIZE | FTM_FLAG_FAST_PATH | FTM_FLAG_HAS_FILENAME
+FTM_REQUEST_REPLY_FLAGS = (
+    FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH | FTM_FLAG_HAS_FILENAME
+)
 
 FTM_FALLBACK_FILENAME = "plans.txt"
+FTM_BBS_SOURCE = "BBS"
+FTM_BBS_FRI_KIND = 2
+FTM_BBS_UNPACK_METHOD = 3
 
 _SIGNUP_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "signup"
 
@@ -93,12 +104,22 @@ class FTMHandler:
         if selector == FTM_SELECTOR_REQUEST_DOWNLOAD:
             filename, content = _resolve_ftm_target(payload)
             log.info("request_download filename=%s content_len=%d", filename, len(content))
-            reply_payload = _build_request_download_reply(filename, len(content))
-            log.info(
-                "request_download_reply status=0 size=%d flags=0x%02x filename=%r",
-                len(content),
-                FTM_REQUEST_REPLY_FLAGS,
+            is_bbs_attachment = filename == FTM_BBS_SOURCE
+            reply_payload = _build_request_download_reply(
                 filename,
+                len(content),
+                unpack_method=FTM_BBS_UNPACK_METHOD if is_bbs_attachment else 0,
+                override_filename=not is_bbs_attachment,
+            )
+            flags = FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH
+            if not is_bbs_attachment:
+                flags |= FTM_FLAG_HAS_FILENAME
+            log.info(
+                "request_download_reply status=0 size=%d flags=0x%02x unpack=%d filename=%r",
+                len(content),
+                flags,
+                FTM_BBS_UNPACK_METHOD if is_bbs_attachment else 0,
+                None if is_bbs_attachment else filename,
             )
         elif selector == FTM_SELECTOR_BILL_CLIENT:
             _, content = _resolve_ftm_target(payload)
@@ -135,6 +156,8 @@ def _resolve_ftm_target(payload):
       counter, not a per-request filename, so we translate the counter
       via SIGNUP_LOGSRV_FILENAMES and then read that file from disk.
       Out-of-range counter falls back to an empty file named "LOGSRV".
+    - name="BBS" → resolve the four-dword file resource identifier to a
+      BBS attachment node, then serve its parent message's upload bytes.
     - Any other name → treat the name as a filename and serve it from
       server/data/signup/ if it exists; otherwise echo name + empty
       (billing's default is name="plans.txt", which maps straight to
@@ -158,10 +181,49 @@ def _resolve_ftm_target(payload):
                 return filename, content
         return source, b""
 
+    if source == FTM_BBS_SOURCE:
+        return source, _resolve_bbs_attachment(cfi)
+
     content = _read_signup_file(source)
     if content is not None:
         return source, content
     return source, b""
+
+
+def _resolve_bbs_attachment(cfi):
+    """Resolve MOSAF's BBS file resource identifier to its upload bytes.
+
+    BBSNAV FUN_7F5FC919 gives MOSAF `(kind=2, board_id, message_id+k)`;
+    MOSAF FUN_7F4C18B0 stores those values in the four-dword FRI that
+    FTMAPI SetFcfi copies to offsets 0x20..0x2f of the client file id.
+    """
+    kind, board_id, attachment_id, reserved = struct.unpack_from(
+        "<IIII", cfi, FTM_FILENAME_BYTES
+    )
+    log.info(
+        "resolve_bbs_attachment kind=%d board_id=%d attachment_id=%d reserved=%d",
+        kind,
+        board_id,
+        attachment_id,
+        reserved,
+    )
+    if kind != FTM_BBS_FRI_KIND or reserved != 0:
+        return b""
+
+    attachment = _default_store.content.get_node(f"{attachment_id}:{board_id}")
+    attachment_bbs = attachment.content.bbs if attachment is not None else None
+    if attachment_bbs is None or attachment_bbs.parent_subid == 0:
+        return b""
+
+    message_id = attachment_bbs.parent_subid
+    message = _default_store.content.get_node(f"{message_id}:{board_id}")
+    message_bbs = message.content.bbs if message is not None else None
+    if message_bbs is None:
+        return b""
+    attachment_index = attachment_id - message_id
+    if not 1 <= attachment_index <= message_bbs.attachment_count:
+        return b""
+    return message_bbs.attachment_data
 
 
 def _encode_reply_filename(filename):
@@ -172,37 +234,45 @@ def _encode_reply_filename(filename):
     return encoded + b"\x00"
 
 
-def _build_request_download_reply(filename, content_len):
+def _build_request_download_reply(
+    filename,
+    content_len,
+    *,
+    unpack_method=0,
+    override_filename=True,
+):
     """HrRequestDownload reply: 72 bytes inside a 0x84 variable tag.
 
       dword  0: HRESULT (0 = success)
       dword  1: echoed into param_1+0x260
       dword  2: size1 -> CXferFile+0x08 (FSetFileSize) — use content length
       dword  3: size2 -> CXferFile+0x0c  (<= 0x3ca triggers fast path) — same
-      dword  4: flags  -> CXferFile+0x10  (bit 0 = has compressed_size,
+      dword  4: flags  -> CXferFile+0x10  (bit 0 = has unpack method,
                                            bit 1 = fast path via HrBillClient,
                                            bit 3 = filename follows at +40)
-      dword  5: compressed_size -> CXferFile+0x14  (must be <= 3;
-                                                    0 = HrUnpack no-op)
+      dword  5: unpack method -> CXferFile+0x14  (0 = no-op,
+                                                  3 = HrMos2DecompFile)
       dword  6: -> CXferFile+0x18
       dword  7..9: misc fields echoed into FTM_REQUEST_INFO
       bytes 40..: filename (read only when flags bit 3 is set)
 
-    We use flags=0x0B (bits 0, 1, 3): fast path + has compressed_size +
-    has filename override.  compressed_size=0 keeps HrUnpack on its
-    close-handles-only branch.  The filename at offset 40 is copied into
-    FTM_REQUEST_INFO+0x24 via lstrcpyA; HrInit appends it to the
-    download dir to form "<dir>\\<filename>", so each iteration writes
-    to the right local file.
+    Signup downloads use flags=0x0B (bits 0, 1, 3): fast path + unpack
+    method + filename override. BBS downloads use 0x03 and unpack method
+    3: MOSAF already supplied the attachment filename, and the transferred
+    bytes are the MOS2 container uploaded by the Compose window.
     """
     buf = bytearray(FTM_REPLY_SIZE)
     struct.pack_into("<I", buf, FTM_REPLY_STATUS_OFFSET, 0)
     struct.pack_into("<I", buf, FTM_REPLY_SIZE1_OFFSET, content_len)
     struct.pack_into("<I", buf, FTM_REPLY_SIZE2_OFFSET, content_len)
-    struct.pack_into("<I", buf, FTM_REPLY_FLAGS_OFFSET, FTM_REQUEST_REPLY_FLAGS)
-    struct.pack_into("<I", buf, FTM_REPLY_COMPRESSED_SIZE_OFFSET, 0)
-    name_bytes = _encode_reply_filename(filename)
-    buf[FTM_REPLY_FILENAME_OFFSET : FTM_REPLY_FILENAME_OFFSET + len(name_bytes)] = name_bytes
+    flags = FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH
+    if override_filename:
+        flags |= FTM_FLAG_HAS_FILENAME
+    struct.pack_into("<I", buf, FTM_REPLY_FLAGS_OFFSET, flags)
+    struct.pack_into("<I", buf, FTM_REPLY_UNPACK_METHOD_OFFSET, unpack_method)
+    if override_filename:
+        name_bytes = _encode_reply_filename(filename)
+        buf[FTM_REPLY_FILENAME_OFFSET : FTM_REPLY_FILENAME_OFFSET + len(name_bytes)] = name_bytes
     return build_tagged_reply_var(0x84, bytes(buf))
 
 

@@ -46,6 +46,8 @@ from server.services.dirsrv import (
     build_property_record,
 )
 from server.services.ftm import (
+    FTM_BBS_SOURCE,
+    FTM_BBS_UNPACK_METHOD,
     FTM_CLIENT_FILE_ID_SIZE,
     FTM_COUNTER_OFFSET,
     FTM_FALLBACK_FILENAME,
@@ -1230,6 +1232,51 @@ class TestFTMSignupLogsrvMapping(unittest.TestCase):
         joined = b"".join(pkts)
         _, expected = _resolve_ftm_target(_make_logsrv_request(1))
         self.assertIn(expected, joined)
+
+
+def _make_bbs_attachment_request(attachment_id=0x202, board_id=1):
+    """Synthesize MOSAF's BBS FRI for one attachment node."""
+    cfi = bytearray(FTM_CLIENT_FILE_ID_SIZE)
+    cfi[: len(FTM_BBS_SOURCE)] = FTM_BBS_SOURCE.encode("ascii")
+    struct.pack_into("<IIII", cfi, 32, 2, board_id, attachment_id, 0)
+    return build_tagged_reply_var(0x04, bytes(cfi)) + b"\x84"
+
+
+class TestFTMBbsAttachment(unittest.TestCase):
+    def test_bbs_fri_resolves_the_fixture_upload(self):
+        filename, content = _resolve_ftm_target(_make_bbs_attachment_request())
+        self.assertEqual(filename, FTM_BBS_SOURCE)
+        self.assertEqual(len(content), 175)
+        self.assertEqual(content[:4], b"MOS2")
+
+    def test_reply_preserves_mosaf_filename_and_selects_mos2_unpack(self):
+        payload = _build_request_download_reply(
+            FTM_BBS_SOURCE,
+            175,
+            unpack_method=FTM_BBS_UNPACK_METHOD,
+            override_filename=False,
+        )
+        reply = payload[2:]
+        self.assertEqual(struct.unpack_from("<I", reply, 0x08)[0], 175)
+        self.assertEqual(struct.unpack_from("<I", reply, 0x0C)[0], 175)
+        self.assertEqual(struct.unpack_from("<I", reply, 0x10)[0], 0x03)
+        self.assertEqual(
+            struct.unpack_from("<I", reply, 0x14)[0],
+            FTM_BBS_UNPACK_METHOD,
+        )
+        self.assertEqual(reply[0x28:], b"\x00" * 32)
+
+    def test_bill_client_carries_the_mos2_container(self):
+        handler = FTMHandler(5, "FTM")
+        pkts = handler.handle_request(
+            0x01,
+            0x03,
+            1,
+            _make_bbs_attachment_request(),
+            10,
+            10,
+        )
+        self.assertIn(b"MOS2", b"".join(pkts))
 
 
 class TestPropertyRecord(unittest.TestCase):
