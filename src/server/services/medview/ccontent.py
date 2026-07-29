@@ -23,7 +23,7 @@ style-handle table) is out of scope here — see
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -79,10 +79,58 @@ class TextRunsContent:
 
 
 @dataclass(frozen=True)
+class TextTreeNode:
+    """One `CElementNode` record.
+
+    Wire form, pinned against `story_title.ttl 6/0`, `story_test.ttl
+    8/2` and `8/6`:
+
+        u16 tag                    element tag; 0xFFFF = text/data leaf
+        u8  version
+        version == 2:  4 fixed bytes
+        version == 3:  CElementData length + that many bytes
+        version == 5:  u16 prop_count, then prop_count Pascal-string
+                       name/value pairs (`CLSID`/`PICTURE.PictureCtrl.1`,
+                       `CX`/`1500`, `FILE`/`DATA1`, …)
+        u16 child_count, then that many nodes
+
+    A styled paragraph is a version-1 node holding one 0xFFFF child:
+    `07 00 01 01 00  FF FF 03 0B "Story title" 00 00` is
+    `<H1>Story title</H1>` — tag 7, one child, and the child is a
+    version-3 leaf carrying 11 bytes and no children of its own.
+    """
+    tag: int
+    version: int
+    props: tuple[tuple[str, str], ...] = ()
+    data: bytes = b""
+    children: tuple[TextTreeNode, ...] = ()
+
+    @property
+    def is_text(self) -> bool:
+        return self.tag == TEXT_NODE_TAG
+
+    @property
+    def text(self) -> str:
+        """Prose under this node — every version-3 text leaf in document
+        order, concatenated. Version-2 dwords and the binary leaves of a
+        picture intrusion (DATA1 / RSLT1) drop out."""
+        if self.is_text:
+            if self.version != _NODE_VERSION_DATA:
+                return ""
+            try:
+                return self.data.decode("ascii")
+            except UnicodeDecodeError:
+                return ""
+        return "".join(child.text for child in self.children)
+
+
+@dataclass(frozen=True)
 class TextTreeContent:
     """Decoded CContent payload for a `TextTree` typed body.
 
-    Partial decoder surface:
+    Decoder surface:
+      - `root`: the parsed `CElementNode` tree, or None when the body
+        does not parse (callers fall back to `segments`).
       - `text`: concatenation of every `[0x03 length text]` segment
         in document order, joined by `'\\n'`.
       - `segments`: per-segment `(byte_offset, text)` tuples for
@@ -99,10 +147,24 @@ class TextTreeContent:
     style_runs: tuple[StyleRun, ...] = ()
     picture_refs: tuple[PictureRef, ...] = ()
     raw_payload: bytes = b""
+    root: TextTreeNode | None = None
 
 
 _TEXTTREE_MAGIC = bytes.fromhex("0105")
 _TEXT_SEGMENT_OPCODE = 0x03
+
+# `0x01` is the stream version; the root `CElementNode` starts at +1,
+# so the `01 05` magic is really `[u8 version=1][u16 tag=5 …]` — the
+# root element of every observed body is tag 5 (the BBML document).
+_TEXTTREE_ROOT_OFFSET = 1
+
+TEXT_NODE_TAG = 0xFFFF
+_NODE_VERSION_DWORD = 2
+_NODE_VERSION_DATA = 3
+_NODE_VERSION_PROPS = 5
+_NODE_DWORD_SIZE = 4
+# Bounds the recursion and the child loop on a malformed body.
+_MAX_NODE_DEPTH = 64
 
 # Match CLSID-bearing strings observed in TextTree picture INTRUDE
 # records (e.g. `PICTURE.PictureCtrl.1`). Detection is on the raw
@@ -272,6 +334,84 @@ def _scan_picture_refs(payload: bytes) -> list[PictureRef]:
     return refs
 
 
+def _read_pascal_string(data: bytes, offset: int) -> tuple[str, int]:
+    """`[u8 length][length B ASCII]`. Returns `(text, next_offset)`."""
+    if offset >= len(data):
+        raise ValueError("truncated Pascal string")
+    length = data[offset]
+    end = offset + 1 + length
+    if end > len(data):
+        raise ValueError("Pascal string runs past the body")
+    return data[offset + 1:end].decode("ascii", errors="replace"), end
+
+
+def _parse_node(data: bytes, offset: int, depth: int) -> tuple[TextTreeNode, int]:
+    """Parse one `CElementNode` at `offset`. Returns `(node, next_offset)`
+    and raises ValueError on anything that does not fit the grammar."""
+    if depth > _MAX_NODE_DEPTH:
+        raise ValueError("element tree nested past the depth bound")
+    if offset + 3 > len(data):
+        raise ValueError("truncated element header")
+    tag = int.from_bytes(data[offset:offset + 2], "little")
+    version = data[offset + 2]
+    pos = offset + 3
+
+    payload = b""
+    props: list[tuple[str, str]] = []
+    if version == _NODE_VERSION_DWORD:
+        # Fixed 4-byte payload. `story_test.ttl 8/6` puts one of these
+        # in the empty `<P>` ahead of each list (0 before the bulleted
+        # list, 1 before the numbered one).
+        if pos + _NODE_DWORD_SIZE > len(data):
+            raise ValueError("truncated element dword")
+        payload = data[pos:pos + _NODE_DWORD_SIZE]
+        pos += _NODE_DWORD_SIZE
+    elif version == _NODE_VERSION_DATA:
+        length, consumed = _read_celementdata_length(data, pos)
+        if consumed == 0 or pos + consumed + length > len(data):
+            raise ValueError("truncated element data")
+        pos += consumed
+        payload = data[pos:pos + length]
+        pos += length
+    elif version == _NODE_VERSION_PROPS:
+        if pos + 2 > len(data):
+            raise ValueError("truncated property count")
+        prop_count = int.from_bytes(data[pos:pos + 2], "little")
+        pos += 2
+        for _ in range(prop_count):
+            name, pos = _read_pascal_string(data, pos)
+            value, pos = _read_pascal_string(data, pos)
+            props.append((name, value))
+
+    if pos + 2 > len(data):
+        raise ValueError("truncated child count")
+    child_count = int.from_bytes(data[pos:pos + 2], "little")
+    pos += 2
+    children: list[TextTreeNode] = []
+    for _ in range(child_count):
+        child, pos = _parse_node(data, pos, depth + 1)
+        children.append(child)
+
+    return (
+        TextTreeNode(
+            tag=tag, version=version, props=tuple(props),
+            data=payload, children=tuple(children),
+        ),
+        pos,
+    )
+
+
+def parse_element_tree(raw: bytes) -> TextTreeNode | None:
+    """Parse a `01 05`-prefixed TextTree body into its element tree, or
+    None when the body does not fit the grammar. Bodies carrying picture
+    intrusions parse too — their DATA/RSLT blobs ride version-3 leaves."""
+    try:
+        root, _ = _parse_node(raw, _TEXTTREE_ROOT_OFFSET, 0)
+    except (ValueError, IndexError, RecursionError):
+        return None
+    return root
+
+
 def decode_texttree(raw: bytes) -> TextTreeContent:
     """Decode a `01 05`-prefixed TextTree CContent body.
 
@@ -304,6 +444,7 @@ def decode_texttree(raw: bytes) -> TextTreeContent:
         style_runs=(),
         picture_refs=tuple(picture_refs),
         raw_payload=payload,
+        root=parse_element_tree(raw),
     )
 
 

@@ -8,11 +8,13 @@ import olefile
 
 from scripts.inspect_blackbird_title import maybe_decompress_ck
 from server.services.medview.ccontent import (
+    TEXT_NODE_TAG,
     PictureRef,
     StyleRun,
     decode_textruns,
     decode_texttree,
     is_texttree,
+    parse_element_tree,
 )
 
 
@@ -168,6 +170,77 @@ class TestStyleRunDataclass(unittest.TestCase):
         self.assertEqual(run.char_offset, 10)
         self.assertEqual(run.char_length, 5)
         self.assertEqual(run.style_id, 2)
+
+
+class TestElementTree(unittest.TestCase):
+    """`CElementNode` grammar: `[u16 tag][u8 version]` then a
+    version-dependent payload, then `[u16 child_count]` children.
+    Version 2 is a fixed dword, 3 a CElementData blob, 5 a Pascal-string
+    property list."""
+
+    def test_paragraph_holds_one_text_leaf(self):
+        # `<H1>Story title</H1>`: tag 7, one child, and the child is a
+        # version-3 leaf carrying 11 bytes.
+        body = bytes.fromhex("01") + bytes.fromhex("0700010100") + (
+            bytes.fromhex("ffff030b") + b"Story title" + bytes.fromhex("0000")
+        )
+        root = parse_element_tree(body)
+        self.assertIsNotNone(root)
+        self.assertEqual((root.tag, root.version), (0x07, 1))
+        self.assertEqual(len(root.children), 1)
+        leaf = root.children[0]
+        self.assertEqual(leaf.tag, TEXT_NODE_TAG)
+        self.assertTrue(leaf.is_text)
+        self.assertEqual(leaf.data, b"Story title")
+        self.assertEqual(root.text, "Story title")
+
+    def test_childless_element_has_no_text(self):
+        root = parse_element_tree(bytes.fromhex("01") + bytes.fromhex("0600010000"))
+        self.assertEqual(root.tag, 0x06)
+        self.assertEqual(root.children, ())
+        self.assertEqual(root.text, "")
+
+    def test_version_two_dword_leaf_is_not_prose(self):
+        # `story_test.ttl 8/6` puts one of these in the empty `<P>`
+        # ahead of each list.
+        body = bytes.fromhex("01") + bytes.fromhex("0600010100") + \
+            bytes.fromhex("ffff02") + bytes.fromhex("01000000") + bytes.fromhex("0000")
+        root = parse_element_tree(body)
+        leaf = root.children[0]
+        self.assertEqual((leaf.version, leaf.data), (2, b"\x01\x00\x00\x00"))
+        self.assertEqual(root.text, "")
+
+    def test_version_five_carries_pascal_property_pairs(self):
+        body = (
+            bytes.fromhex("01")
+            + bytes.fromhex("2e0005") + bytes.fromhex("0200")
+            + bytes([5]) + b"CLSID" + bytes([21]) + b"PICTURE.PictureCtrl.1"
+            + bytes([2]) + b"CX" + bytes([4]) + b"1500"
+            + bytes.fromhex("0000")
+        )
+        root = parse_element_tree(body)
+        self.assertEqual(root.tag, 0x2E)
+        self.assertEqual(
+            root.props,
+            (("CLSID", "PICTURE.PictureCtrl.1"), ("CX", "1500")),
+        )
+
+    def test_truncated_body_returns_none(self):
+        self.assertIsNone(parse_element_tree(bytes.fromhex("010500")))
+        self.assertIsNone(parse_element_tree(b""))
+
+    def test_msn_today_plain_story_round_trips(self):
+        raw = _load_ttl_object("tests/assets/story_test.ttl", "8/2/\x03object")
+        decoded = decode_texttree(raw)
+        root = decoded.root
+        self.assertIsNotNone(root)
+        self.assertEqual(root.tag, 0x05)
+        head, body = root.children
+        self.assertEqual((head.tag, head.children), (0x0B, ()))
+        self.assertEqual([c.tag for c in body.children], [0x07, 0x06])
+        self.assertEqual(body.children[0].text, "Calendar of Events")
+        # The scanner's flattened `text` stays the same view.
+        self.assertIn("Calendar of Events", decoded.text)
 
 
 class TestPictureRefDataclass(unittest.TestCase):
