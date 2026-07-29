@@ -3,6 +3,7 @@
 import pathlib
 import struct
 import unittest
+from unittest.mock import patch
 
 from server.config import (
     DIRSRV_INTERFACE_GUIDS,
@@ -20,10 +21,10 @@ from server.config import (
     MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
     MEDVIEW_SELECTOR_VA_RESOLVE,
     OLREGSRV_INTERFACE_GUIDS,
-    SASRV_INTERFACE_GUIDS,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_LAST_DATA,
+    SASRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
@@ -40,6 +41,7 @@ from server.services.dirsrv import (
     DS_E_NOT_FOUND,
     SUPPORTED_BROWSE_LCIDS,
     DIRSRVHandler,
+    build_add_node_reply_payload,
     build_dirsrv_service_map_payload,
     build_get_children_reply_payload,
     build_get_datasets_reply_payload,
@@ -71,6 +73,7 @@ from server.services.olregsrv import (
     build_olregsrv_service_map_payload,
 )
 from server.services.sasrv import SASRVHandler, build_sasrv_service_map_payload
+from server.store import default_seed
 from server.transport import parse_packet
 from server.wire import decode_header_byte
 
@@ -1064,6 +1067,99 @@ class TestDIRSRVGetDataSets(unittest.TestCase):
         self.assertTrue(parsed.crc_ok)
         # header + size prefix + routing + class + selector + one-byte VLI
         self.assertEqual(parsed.payload[8:], build_get_datasets_reply_payload())
+
+
+class _AddNodeContentStore:
+    def __init__(self):
+        parent = next(
+            node for node in default_seed().directory_nodes
+            if node.node_id == "1:16"
+        )
+        self.nodes = {parent.node_id: parent}
+        self.children = {parent.node_id: []}
+
+    def get_node(self, node_id):
+        return self.nodes.get(node_id)
+
+    def get_children(self, node_id):
+        return [self.nodes[child_id] for child_id in self.children.get(node_id, [])]
+
+    def add_child(self, parent_id, node):
+        self.nodes[node.node_id] = node
+        self.children.setdefault(node.node_id, [])
+        self.children.setdefault(parent_id, []).append(node.node_id)
+
+
+class TestDIRSRVAddNode(unittest.TestCase):
+    @staticmethod
+    def _tagged_var(value):
+        return b"\x04" + bytes([0x80 | len(value)]) + value
+
+    def test_creates_child_and_returns_completed_operation(self):
+        properties = build_property_record(
+            [
+                (0x0F, "h", struct.pack("<I", 0x059B)),
+                (0x03, "c", struct.pack("<I", 1)),
+                (0x03, "g", struct.pack("<I", 1)),
+                (0x01, "b", b"\x00"),
+                (0x03, "m", struct.pack("<I", 0)),
+                (0x0A, "ca", b"\x01\x00"),
+                (0x03, "o", struct.pack("<I", 0)),
+                (0x10, "q", struct.pack("<II", 1, 0x0409)),
+                (0x0A, "tp", b"\x01Folder\x00"),
+                (0x0B, "f", b"\x01New Folder\x00"),
+            ]
+        )
+        request = (
+            self._tagged_var(b"\x02\x00")
+            + self._tagged_var(struct.pack("<II", 1, 16))
+            + self._tagged_var(properties)
+            + b"\x83\x83\x84"
+        )
+        self.assertEqual(len(request), 108)
+        store = _AddNodeContentStore()
+
+        reply = build_add_node_reply_payload(request, store)
+
+        new_mnid = struct.pack("<II", 1, 17)
+        self.assertEqual(
+            reply,
+            b"\x83\x00\x00\x00\x00"
+            b"\x83\x00\x00\x00\x00"
+            b"\x87\x84\x88"
+            + new_mnid,
+        )
+        node = store.get_node("1:17")
+        self.assertEqual(store.children["1:16"], ["1:17"])
+        self.assertEqual(node.content.name, "New Folder")
+        self.assertEqual(node.content.type_str, "Folder")
+        self.assertEqual(node.content.language, 0x0409)
+        self.assertTrue(node.is_container)
+
+    def test_rejects_the_read_side_receive_shape(self):
+        store = _AddNodeContentStore()
+        reply = build_add_node_reply_payload(b"\x83\x85", store)
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
+        self.assertEqual(store.children["1:16"], [])
+
+    def test_edit_class_selector_two_does_not_fall_through_to_get_children(self):
+        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
+        with patch(
+            "server.services.dirsrv.build_add_node_reply_payload",
+            return_value=b"\x83\x00\x00\x00\x00",
+        ) as build_reply:
+            packets = handler.handle_request(
+                msg_class=0x04,
+                selector=0x02,
+                request_id=2,
+                payload=b"add-node",
+                server_seq=0,
+                client_ack=0,
+            )
+
+        build_reply.assert_called_once_with(b"add-node")
+        parsed = parse_packet(packets[0][:-1])
+        self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
 
 
 class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):

@@ -25,6 +25,7 @@ from ..mpc import (
     decode_dirsrv_request,
     parse_request_params,
 )
+from ..store import DirectoryNode, NodeContent
 from ..store import app_store as _default_store
 from . import shabby
 from ._dispatch import log_unhandled_selector
@@ -40,6 +41,7 @@ DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWor
 # (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
 DIRSRV_SELECTOR_GET_SHABBY = 0x04
 TREEEDCL_CLASS_EDIT = 0x04
+TREEEDCL_SELECTOR_ADD_NODE = 0x02
 TREEEDCL_SELECTOR_GET_DATASETS = 0x0B
 TREEEDCL_SELECTOR_GET_TICKET = 0x0C
 
@@ -116,7 +118,9 @@ class DIRSRVHandler:
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Handle a DIRSRV request — dispatch by selector."""
-        if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
+        if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_NODE:
+            reply_payload = build_add_node_reply_payload(payload)
+        elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
             reply_payload = build_get_ticket_reply_payload()
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
             reply_payload = build_get_datasets_reply_payload()
@@ -691,6 +695,238 @@ def build_get_datasets_reply_payload():
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + datasets
     )
+
+
+def build_add_node_reply_payload(payload, content_store=None):
+    """Create one child for a TREEEDCL AddNode request.
+
+    CTreeEditClient::PrivateAddNode sends three variable fields: the capability
+    ticket, the 8-byte parent MNID, and a compressed CServiceProperties record.
+    Its receive descriptors are two DWORDs and one variable field. A completed
+    operation therefore replies with status 0, operation id 0, and the new
+    8-byte MNID.
+    """
+    if content_store is None:
+        content_store = _default_store.content
+
+    send_params, recv_descriptors = parse_request_params(payload)
+    fields = [param.data for param in send_params if isinstance(param, VarParam)]
+    if len(fields) != 3 or recv_descriptors != [0x83, 0x83, 0x84]:
+        log.warning(
+            "add_node invalid request fields=%d recv=%s payload=%s",
+            len(fields),
+            [f"0x{tag:02x}" for tag in recv_descriptors],
+            payload.hex(),
+        )
+        return _build_add_node_result(0x101, b"\x00" * 8)
+
+    ticket, parent_mnid, property_record = fields
+    if (
+        len(ticket) < 2
+        or struct.unpack_from("<H", ticket)[0] != len(ticket)
+        or len(parent_mnid) != 8
+    ):
+        log.warning(
+            "add_node invalid ticket_or_parent ticket=%s parent=%s",
+            ticket.hex(),
+            parent_mnid.hex(),
+        )
+        return _build_add_node_result(0x101, b"\x00" * 8)
+
+    parent_f0, parent_f8 = struct.unpack("<II", parent_mnid)
+    parent_id = f"{parent_f0}:{parent_f8}"
+    parent = content_store.get_node(parent_id)
+    if parent is None or parent.node_id != parent_id:
+        log.warning("add_node unknown parent=%s", parent_id)
+        return _build_add_node_result(0x101, b"\x00" * 8)
+
+    try:
+        properties = _decode_property_record(property_record)
+        new_mnid = _allocate_child_mnid(content_store, parent_id, parent_mnid)
+    except ValueError as exc:
+        log.warning("add_node invalid properties parent=%s error=%s", parent_id, exc)
+        return _build_add_node_result(0x101, b"\x00" * 8)
+
+    browse_flags = _property_int(properties, PROP_BROWSE_FLAGS, 0)
+    language_values = _property_value(properties, PROP_LANGUAGE, [])
+    language = language_values[0] if language_values else parent.content.language
+    name = (
+        _property_text(properties, "f")
+        or _property_text(properties, PROP_NAME)
+        or "New Item"
+    )
+    new_field_0, new_field_8 = struct.unpack("<II", new_mnid)
+    node = DirectoryNode(
+        node_id=f"{new_field_0}:{new_field_8}",
+        is_container=not bool(browse_flags & DIRSRV_BROWSE_FLAGS_LEAF),
+        app_id=_property_int(properties, PROP_APP_ID, parent.app_id),
+        mnid_a=new_mnid,
+        content=NodeContent(
+            name=name,
+            go_word=_property_text(properties, PROP_GO_WORD),
+            category=_property_text(properties, PROP_CATEGORY),
+            type_str=_property_text(properties, PROP_TYPE) or "Folder",
+            price_dword=_property_int(properties, PROP_PRICE, 0),
+            rating_dword=_property_int(properties, PROP_RATING, 0),
+            description=_property_text(properties, PROP_DESCRIPTION),
+            language=language,
+            topics=_property_text(properties, PROP_TOPICS),
+            people=_property_text(properties, PROP_PEOPLE),
+            place=_property_text(properties, PROP_PLACE),
+            u_value=_property_text(properties, PROP_MAYBE_HIDDEN_U),
+            forum_mgr=_property_text(properties, PROP_FORUM_MANAGER),
+            vendor_id=_property_int(properties, PROP_VENDOR_ID, 0),
+            owner=_property_text(properties, PROP_OWNER),
+            created=_property_text(properties, PROP_CREATED),
+            modified=_property_text(properties, PROP_LAST_CHANGED),
+            size_bytes=_property_int(properties, PROP_MAYBE_SIZE_OR_LEGACY_TITLE, 0),
+        ),
+        browse_flags=browse_flags,
+        delegate=bool(browse_flags & DIRSRV_BROWSE_FLAGS_DELEGATE),
+    )
+    content_store.add_child(parent_id, node)
+    log.info(
+        "add_node status=0 parent=%s node=%s name=%r type=%r app_id=%d",
+        parent_id,
+        node.node_id,
+        node.content.name,
+        node.content.type_str,
+        node.app_id,
+    )
+    return _build_add_node_result(0, new_mnid)
+
+
+def _build_add_node_result(status, new_mnid):
+    return (
+        build_tagged_reply_dword(status)
+        + build_tagged_reply_dword(0)
+        + bytes([TAG_END_STATIC])
+        + build_tagged_reply_var(0x84, new_mnid)
+    )
+
+
+def _decode_property_record(record):
+    if len(record) < 6:
+        raise ValueError("record is shorter than its header")
+    total_size, property_count = struct.unpack_from("<IH", record)
+    if total_size != len(record):
+        raise ValueError(f"record size is {len(record)}, expected {total_size}")
+
+    properties = {}
+    pos = 6
+    fixed_sizes = {
+        0x01: 1,
+        0x02: 2,
+        0x03: 4,
+        0x04: 8,
+        0x05: 1,
+        0x06: 2,
+        0x07: 4,
+        0x08: 8,
+        0x09: 8,
+        0x0C: 8,
+        0x0D: 4,
+        0x0F: 4,
+        0x11: 4,
+    }
+    for _ in range(property_count):
+        if pos >= total_size:
+            raise ValueError("property header is truncated")
+        property_type = record[pos]
+        pos += 1
+        name_end = record.find(b"\x00", pos, total_size)
+        if name_end < 0:
+            raise ValueError("property name is not terminated")
+        name = record[pos:name_end].decode("ascii")
+        pos = name_end + 1
+
+        if property_type in fixed_sizes:
+            value_size = fixed_sizes[property_type]
+            if pos + value_size > total_size:
+                raise ValueError(f"property {name!r} is truncated")
+            value = int.from_bytes(record[pos : pos + value_size], "little")
+            pos += value_size
+        elif property_type == 0x0E:
+            if pos + 4 > total_size:
+                raise ValueError(f"property {name!r} has no blob length")
+            value_size = struct.unpack_from("<I", record, pos)[0]
+            pos += 4
+            if pos + value_size > total_size:
+                raise ValueError(f"property {name!r} blob is truncated")
+            value = record[pos : pos + value_size]
+            pos += value_size
+        elif property_type == 0x10:
+            if pos + 4 > total_size:
+                raise ValueError(f"property {name!r} has no array count")
+            value_count = struct.unpack_from("<I", record, pos)[0]
+            pos += 4
+            value_size = value_count * 4
+            if pos + value_size > total_size:
+                raise ValueError(f"property {name!r} array is truncated")
+            value = list(struct.unpack_from(f"<{value_count}I", record, pos))
+            pos += value_size
+        elif property_type in (0x0A, 0x0B):
+            value, pos = _decode_property_string(record, pos, total_size, name)
+        else:
+            raise ValueError(f"property {name!r} has unknown type 0x{property_type:02x}")
+        properties[name] = (property_type, value)
+
+    if pos != total_size:
+        raise ValueError(f"record has {total_size - pos} trailing bytes")
+    return properties
+
+
+def _decode_property_string(record, pos, limit, name):
+    if pos >= limit:
+        raise ValueError(f"property {name!r} has no string flags")
+    flags = record[pos]
+    pos += 1
+    if flags & 0x02:
+        return "", pos
+    if flags & 0x01:
+        end = record.find(b"\x00", pos, limit)
+        if end < 0:
+            raise ValueError(f"property {name!r} string is not terminated")
+        return record[pos:end].decode("ascii", errors="replace"), end + 1
+
+    end = pos
+    while end + 1 < limit and record[end : end + 2] != b"\x00\x00":
+        end += 2
+    if end + 1 >= limit:
+        raise ValueError(f"property {name!r} wide string is not terminated")
+    return record[pos:end].decode("utf-16le", errors="replace"), end + 2
+
+
+def _allocate_child_mnid(content_store, parent_id, parent_mnid):
+    field_0, parent_field_8 = struct.unpack("<II", parent_mnid)
+    used_field_8 = [parent_field_8]
+    for child in content_store.get_children(parent_id):
+        child_field_0, child_field_8 = struct.unpack("<II", child.mnid_a)
+        if child_field_0 == field_0:
+            used_field_8.append(child_field_8)
+
+    field_8 = max(used_field_8) + 1
+    while field_8 <= 0xFFFFFFFF:
+        node_id = f"{field_0}:{field_8}"
+        existing = content_store.get_node(node_id)
+        if existing is None or existing.node_id != node_id:
+            return struct.pack("<II", field_0, field_8)
+        field_8 += 1
+    raise ValueError("no free child MNID remains")
+
+
+def _property_value(properties, name, default):
+    return properties.get(name, (None, default))[1]
+
+
+def _property_int(properties, name, default):
+    value = _property_value(properties, name, default)
+    return value if isinstance(value, int) else default
+
+
+def _property_text(properties, name):
+    value = _property_value(properties, name, "")
+    return value if isinstance(value, str) else ""
 
 
 # --- Payload builders used by tests ---
