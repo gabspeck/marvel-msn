@@ -7,6 +7,7 @@ from .medview import MEDVIEWHandler
 from .mosabp import MOSABPHandler
 from .olregsrv import OLREGSRVHandler
 from .onlstmt import OnlStmtHandler
+from .sasrv import SASRVHandler
 
 SERVICE_HANDLERS = {
     "logsrv": LOGSRVHandler,
@@ -17,6 +18,7 @@ SERVICE_HANDLERS = {
     "medview": MEDVIEWHandler,
     "bbs": BBSHandler,
     "mosabp": MOSABPHandler,
+    "sasrv": SASRVHandler,
 }
 
 __all__ = ["SERVICE_HANDLERS", "log_unhandled_selector"]

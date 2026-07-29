@@ -20,6 +20,7 @@ from server.config import (
     MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
     MEDVIEW_SELECTOR_VA_RESOLVE,
     OLREGSRV_INTERFACE_GUIDS,
+    SASRV_INTERFACE_GUIDS,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_LAST_DATA,
@@ -69,6 +70,7 @@ from server.services.olregsrv import (
     OLREGSRVHandler,
     build_olregsrv_service_map_payload,
 )
+from server.services.sasrv import SASRVHandler, build_sasrv_service_map_payload
 from server.transport import parse_packet
 from server.wire import decode_header_byte
 
@@ -248,6 +250,26 @@ class TestDIRSRVServiceMap(unittest.TestCase):
             record = payload[i * 17 : (i + 1) * 17]
             self.assertEqual(record[:16], guid_bytes)
             self.assertEqual(record[16], selector)
+
+
+class TestSASRVServiceMap(unittest.TestCase):
+    def test_catalog_matches_saclient_table(self):
+        self.assertEqual(len(SASRV_INTERFACE_GUIDS), 29)
+        self.assertEqual(
+            [selector for _guid, selector in SASRV_INTERFACE_GUIDS],
+            list(range(1, 30)),
+        )
+
+    def test_guid_records_match_catalog(self):
+        payload = build_sasrv_service_map_payload()
+        for i, (guid_bytes, selector) in enumerate(SASRV_INTERFACE_GUIDS):
+            record = payload[i * 17 : (i + 1) * 17]
+            self.assertEqual(record, guid_bytes + bytes([selector]))
+
+    def test_produces_discovery_packet(self):
+        packets = SASRVHandler(5, "SASRV").build_discovery_packet(4, 4)
+        parsed = parse_packet(packets[0][:-1])
+        self.assertTrue(parsed.crc_ok)
 
 
 def _walk_get_children_records(payload):

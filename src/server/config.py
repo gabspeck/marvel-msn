@@ -272,6 +272,22 @@ MOSABP_INTERFACE_GUIDS = [
     (_guid_le("00028B22-0000-0000-C000-000000000046"), 0x01),
 ]
 
+# SASRV (system-administration service).  SACLIENT.DLL's
+# CSysAdminClient::CSysAdminClient at 0x7F3410F1 passes the 29-entry IID table
+# at 0x7F347570 to MPCCL while opening service "SASRV", version 4.
+SASRV_INTERFACE_GUIDS = [
+    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
+    for sel, xx in enumerate(
+        (
+            0x8B, 0x8C, 0x8D, 0x8E, 0x8F, 0x90, 0x91,
+            0xA0, 0xA1,
+            0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8,
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA,
+        ),
+        start=0x01,
+    )
+]
+
 # MEDVIEW (MedView title loader — MOSVIEW.EXE).  Client-side IID array at
 # MVTTL14C.DLL:0x7E84C1B0 — 42 IIDs consulted by hrAttachToService when
 # the factory resolves the service's interface table.  Selectors assigned
