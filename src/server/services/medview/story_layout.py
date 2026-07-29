@@ -23,10 +23,18 @@ its client area):
   list styles set) draws its bullet at `left_indent - indent_by` — 0
   for those styles, i.e. flush with the margin, as the render shows —
   and its text at `left_indent`.
-- The bullet is a filled square, not a glyph: the render's is a solid
+- The bullet is drawn as a filled square. Which glyph BBVIEW uses is
+  not recoverable from the style sheet — `CParaProps::IsBullet @
+  0x40727338` is `GetRecurseBool(10)`, so the style says only whether
+  a paragraph carries a marker — and the render's marker is a solid
   8x8 screen-pixel block, ~4.9 px on the page, its bottom edge half a
   side above the baseline. `_BULLET_SIDE_DIVISOR` and
-  `_BULLET_RISE_DIVISOR` reproduce that from the paragraph's em size.
+  `_BULLET_RISE_DIVISOR` reproduce that from the paragraph's em size:
+  at 11 pt they give a 5 px square, the closest integer. MOSVIEW
+  scales the page to its window (~1.64x in the reference capture), so
+  the square lands on 8-9 device pixels depending on where the edges
+  round — that last pixel cannot be pre-compensated here, because the
+  zoom is chosen at display time.
 - An element with no prose contributes nothing, not even a blank line:
   the render's two empty `<P>`s leave no gap around the lists.
 """

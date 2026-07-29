@@ -65,6 +65,14 @@ measures 24 px on the page in the BBVIEW reference render of
 Both list styles set hanging, so their first line — the one carrying the
 bullet — starts at `left_indent - indent_by`, which for them is 0.
 
+`bullet` is a boolean, not a character code: `CParaProps::IsBullet @
+0x40727338` is `GetRecurseBool(10)` over the same property
+`CParaProps::EGetBullet` reads. The style says only *whether* a
+paragraph carries a marker — the glyph is the renderer's own choice and
+is not recoverable from the style sheet. BBVIEW draws a small filled
+square, 8 px wide in the reference render at its 1.64x scale, i.e.
+about 4.9 px on the page.
+
 ### Character attributes (`+0x0C`)
 
 The word packs value and mask: `[u8 unset_mask][u8 values]`.
