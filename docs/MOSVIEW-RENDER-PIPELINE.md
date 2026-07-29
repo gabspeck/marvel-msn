@@ -242,6 +242,56 @@ Each calls selector 0x15 separately, and both PlayMetaFile bm0
 draw at distinct pane origins — the same caption text appears in
 both panes.
 
+### 5.1 No OLE system-color resolution
+
+Caption colors are authored as OLE_COLOR. A system-color OLE_COLOR
+carries high byte `0x80` and a `GetSysColor` index in the low byte
+(e.g. `0x8000000C` = COLOR_APPWORKSPACE). BBVIEW resolves these at
+draw time, because it hosts the real `BBCTL.OCX` and its `OnDraw`
+calls `OleTranslateColor`.
+
+MOSVIEW performs no equivalent step. The kind=8 metafile reaches GDI
+byte-for-byte:
+
+```
+MVCL14N!MVCreateHmetafileFromBaggage (0x7e8870a0)
+└─ GlobalSize → GlobalLock → SetMetaFileBitsEx → GlobalUnlock
+MVCL14N!MVPaintBitmapRecord         (0x7e887180)   [sole PlayMetaFile caller in MVCL14N]
+└─ SaveDC → SetMapMode → SetViewportOrgEx → PlayMetaFile → RestoreDC
+```
+
+`MVPaintBitmapRecord` never inspects a record inside the metafile.
+Evidence that no translation can occur on this path:
+
+- `MVCL14N.DLL` imports 124 symbols (KERNEL32, GDI32, USER32, WINMM,
+  MVUT14N). No OLEAUT32, no OLEPRO32, no `OleTranslateColor`.
+- `MOSVIEW.EXE` imports 178 symbols (USER32, GDI32, KERNEL32, MCM,
+  MVCL14N, MMVDIB12, MOSCOMP, CCAPI). No OLE32 at all, so it cannot
+  host `BBCTL.OCX`.
+- The only `GetSysColor` in MVCL14N is in `lpMVNew` (0x7e8824c0):
+  fixed indices 8 (COLOR_WINDOWTEXT) and 5 (COLOR_WINDOW), read once
+  at viewer construction into `viewer+0x8c` / `viewer+0x90`. No index
+  is ever taken from wire data. `MVPaintBitmapRecord` pushes those two
+  fields into the DC via `SetTextColor` / `SetBkColor` before playback;
+  the metafile's own color records then override them.
+- MOSVIEW's four `GetSysColor` sites (`MosViewShellWindowProc`,
+  `ApplyMosViewBackgroundColor`, `MosViewSessionWindowProc`,
+  `CreateMediaViewWindow`) are window chrome and pane background,
+  upstream of title content.
+
+Consequence: an unresolved system-color OLE_COLOR in a metafile brush
+reaches GDI with a stray `0x80` high byte, which GDI drops.
+`0x8000000C` therefore paints as `RGB(0x0C, 0, 0)` — near black.
+Confirmed empirically: a MOSVIEW render of the Captions Test title
+paints that caption's rect at exactly `RGB(12, 0, 0)`.
+
+The resolved RGB is fixed at bake time and cannot track the viewer's
+active scheme. COLOR_APPWORKSPACE is `RGB(128,128,128)` under Windows
+Standard and `RGB(225,224,210)` under Desert.
+
+Not verified: whether `MMVDIB12.DLL` has its own metafile playback
+path or any OLE color import.
+
 ---
 
 ## 6. Verbs and command interpreter
