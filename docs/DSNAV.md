@@ -315,6 +315,12 @@ DWORD 0, end-static `0x87`, single-shot dynamic tag `0x86`, then an opaque
 ticket whose first `u16` is its total byte length. Fixtures return the minimal
 valid ticket `02 00`.
 
+Editor enumeration then calls `CTreeEditClient::GetDataSets` with DIRSRV class
+`0x04`, selector `0x0B`, the ticket, a service name such as `BBS`, and a DWORD
+query value. The dynamic reply is a compressed `CServiceProperties` record.
+Fixtures return the valid empty record `{total_size=6, prop_count=0}`; omitting
+the reply blocks the same UI thread immediately after `GetTicket`.
+
 ### 8.1 Build — slot 81 `BuildServicesMenu` @ `0x7F5819D7`
 
 First call (when `g_DsNavAppMenuBuilt == 0`):

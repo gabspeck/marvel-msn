@@ -715,6 +715,24 @@ leaves the category view blank and Explorer unresponsive.
 allocates that many bytes, and copies the blob without further validation.
 The fixture server returns the minimal opaque ticket `02 00`.
 
+#### 7.2.9 TREEEDCL GetDataSets (class 0x04, selector 0x0B)
+
+During node-editor enumeration, DSNED follows `GetTicket` with `GetDataSets`.
+The observed request carries the ticket, a service name such as `BBS`, a DWORD
+query value, then `83 85` for a status DWORD and dynamic blob.
+`CTreeEditClient::PrivateGetDataSets` passes the dynamic bytes to
+`SVCPROP!FDecompressPropClnt`, using the blob's first DWORD as its total size.
+The fixture response is:
+
+```
+ [0x83][u32 status=0]
+ [0x87][0x86]
+ [u32 total_size=6][u16 prop_count=0]
+```
+
+An unanswered request blocks Explorer's UI thread immediately after the
+ticket exchange.
+
 ### 7.3 FTM
 
 Both selectors use the `FtmClientFileId` 60-byte CFI buffer via tag `0x04`:

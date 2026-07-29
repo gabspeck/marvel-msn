@@ -40,6 +40,7 @@ DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWor
 # (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
 DIRSRV_SELECTOR_GET_SHABBY = 0x04
 TREEEDCL_CLASS_EDIT = 0x04
+TREEEDCL_SELECTOR_GET_DATASETS = 0x0B
 TREEEDCL_SELECTOR_GET_TICKET = 0x0C
 
 # Status returned in GetDeidFromGoWord's reply for an unrecognised go-word.
@@ -117,6 +118,8 @@ class DIRSRVHandler:
         """Handle a DIRSRV request — dispatch by selector."""
         if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
             reply_payload = build_get_ticket_reply_payload()
+        elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
+            reply_payload = build_get_datasets_reply_payload()
         elif selector == DIRSRV_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
             reply_payload = build_get_properties_reply_payload(request)
@@ -673,6 +676,22 @@ def build_get_ticket_reply_payload():
         build_tagged_reply_dword(0)
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + ticket
+    )
+
+
+def build_get_datasets_reply_payload():
+    """Return an empty TREEEDCL dataset property bag.
+
+    DSNED requests datasets while enumerating node-editor menu entries.
+    CTreeEditClient::PrivateGetDataSets passes the dynamic reply directly to
+    SVCPROP!FDecompressPropClnt, so it must contain a complete compressed
+    property record even when no datasets are available.
+    """
+    datasets = build_property_record([])
+    return (
+        build_tagged_reply_dword(0)
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+        + datasets
     )
 
 

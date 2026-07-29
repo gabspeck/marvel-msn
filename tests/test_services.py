@@ -41,6 +41,7 @@ from server.services.dirsrv import (
     DIRSRVHandler,
     build_dirsrv_service_map_payload,
     build_get_children_reply_payload,
+    build_get_datasets_reply_payload,
     build_get_deid_from_go_word_reply_payload,
     build_get_properties_reply_payload,
     build_get_ticket_reply_payload,
@@ -1015,6 +1016,31 @@ class TestDIRSRVGetTicket(unittest.TestCase):
         self.assertTrue(parsed.crc_ok)
         # header + size prefix + routing + class + selector + one-byte VLI
         self.assertEqual(parsed.payload[8:], build_get_ticket_reply_payload())
+
+
+class TestDIRSRVGetDataSets(unittest.TestCase):
+    def test_empty_dataset_reply_contains_complete_property_record(self):
+        self.assertEqual(
+            build_get_datasets_reply_payload(),
+            b"\x83\x00\x00\x00\x00\x87\x86\x06\x00\x00\x00\x00\x00",
+        )
+
+    def test_edit_channel_selector_returns_dataset_packet(self):
+        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
+        packets = handler.handle_request(
+            msg_class=0x04,
+            selector=0x0B,
+            request_id=1,
+            payload=bytes.fromhex("04 82 02 00 04 84 42 42 53 00 03 04 00 00 00 83 85"),
+            server_seq=0,
+            client_ack=0,
+        )
+
+        self.assertIsNotNone(packets)
+        parsed = parse_packet(packets[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        # header + size prefix + routing + class + selector + one-byte VLI
+        self.assertEqual(parsed.payload[8:], build_get_datasets_reply_payload())
 
 
 class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
