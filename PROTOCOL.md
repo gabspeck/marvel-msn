@@ -617,7 +617,7 @@ Both tab requests use `dword_0=1` (GetChildren-shape) against the leaf.
 | `v`  | 0x0B | dlg-context | Created | Timestamp string |
 | `w`  | 0x0B | dlg-context | Last changed | Timestamp string |
 | `wv` | **0x03** | nav | **Secondary icon (GetShabby slot A, `req_id=1`)** | Shabby ID DWORD `(format<<24) \| content_id`. Fires GetShabby before `mf` does — likely the list-view/small-icon variant (exact consumer not yet isolated). Same 0x0E blob pitfall as `mf` |
-| `x`  | 0x0E | nav | — | Cmdline args for `HRMOSExec(c, args)`. Empty → length-1 NUL |
+| `x`  | **0x03** | nav + authoring | Rights mask | DWORD checked by `CMosTreeNode::HasRights(requested_mask)`. The check succeeds when `x & requested_mask` is nonzero. `CMosViewWnd::AddMenus` requests `0x70` before merging File → New/Delete/Unlink; fixtures emit `0x70`. `CMosTreeNode::Exec` reads its command string from the separate `ri` property. |
 | `y`  | 0x03 | dlg-context | (VendorID, hidden) | `SetDlgItemInt` on item 0x79, not laid out |
 | `z`  | 0x03 | dlg-general | Price | DWORD 0 → "Free" |
 

@@ -74,9 +74,15 @@ PROP_MAYBE_HIDDEN_U = "u"
 PROP_CREATED = "v"
 PROP_LAST_CHANGED = "w"
 PROP_SECONDARY_ICON_ALT = "wv"
-PROP_EXEC_ARGS = "x"
+PROP_RIGHTS = "x"
 PROP_VENDOR_ID = "y"
 PROP_PRICE = "z"
+
+# CMosViewWnd::AddMenus asks CMosTreeNode::HasRights for mask 0x70 before
+# merging File > New/Delete/Unlink. HasRights reads wire property `x` as a
+# DWORD and succeeds when any requested bit is present. Fixtures grant the
+# complete authoring-menu mask.
+DIRSRV_RIGHTS_AUTHORING = 0x70
 
 # Browse-language LCIDs advertised in GetChildren replies with propList=["q"].
 # Each value becomes a row in the View > Options > General "Content view"
@@ -300,8 +306,8 @@ def build_props(requested_props, node, *, is_children):
                     struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_ICO, 1)),
                 )
             )
-        elif name == PROP_EXEC_ARGS:
-            out.append((0x0E, PROP_EXEC_ARGS, struct.pack("<I", 1) + b"\x00"))
+        elif name == PROP_RIGHTS:
+            out.append((0x03, PROP_RIGHTS, struct.pack("<I", DIRSRV_RIGHTS_AUTHORING)))
         elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
             # `p` = byte count, read inline as DWORD. Feeds MOSSHELL
             # FormatSizeString (listview Size column + Properties dialog Size

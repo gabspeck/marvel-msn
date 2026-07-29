@@ -298,7 +298,14 @@ influence is the advertised tag set:
   child's cache via `MOSSHELL!CMosTreeNode::SetPropertyGroupFromPsp`
   (ord 0x75).
 
-## 8. "Services" top-level menu
+## 8. File → New authoring menu
+
+MOSSHELL exposes the authoring commands only when the current node passes
+`CMosTreeNode::HasRights(0x70)`. `HasRights` reads the node's `x` property as
+a DWORD and succeeds when `x & 0x70` is nonzero. MOSSHELL then merges its MENU
+0x82, which contains New, Delete, and Unlink. DSNAV receives the New submenu
+and populates it from the registered node editors. The fixture server grants
+the complete mask with `x = 0x70` on every node.
 
 ### 8.1 Build — slot 81 `BuildServicesMenu` @ `0x7F5819D7`
 
@@ -458,7 +465,7 @@ generally produces blank columns rather than a broken listview.
 | `e`  | default | `0x0A` ASCIIZ | **Yes** | display name; icon label AND explorer titlebar both consume ANSI cache. | Blank title/label. | `0x0B` truncates to "M" (see `project_dirsrv_nav_e_encoding`). |
 | `g`  | default | `0x03` DWORD | No | unresolved ("unknown g" — sentinel sweeps ruled out icon slot). Safe wire value is 0. | No observable effect. | — |
 | `h`  | default | `0x03` DWORD | *Conditional* | secondary icon shabby_id; if present, `FUN_7F404786` kicks off the per-item ICO `ExtractIconEx` path (see `project_dirsrv_h_property_icon_path`). | `iImage=0` → forbidden-glyph default icon. | Non-DWORD breaks the shabby-id readback. |
-| `x`  | default | `0x0E` blob | No | exec-args; consumed only by launcher paths, not the listview. | — | — |
+| `x`  | default | `0x03` DWORD | **Yes for authoring** | Per-node rights mask. MOSSHELL calls `HasRights(0x70)` before adding File → New/Delete/Unlink; any matching bit passes the menu gate. Fixtures emit the complete `0x70` mask. | Authoring commands are absent. | A non-DWORD value makes the rights read fail, so the commands remain absent. |
 | `mf` | DSNAV | `0x03` DWORD | *Conditional* | primary icon (banner); MOSSHELL `FUN_7F405018` reads as DWORD and feeds `GetShabbyToFile`. **Must be inline 0x03** — 0x0E blob stores a pointer and the low-4 become garbage. | Blank banner. | Wrong bytes → wrong shabby, banner loads fail. |
 | `wv` | DSNAV | `0x03` DWORD | No | secondary icon variant shabby_id. Same encoding rule as `mf`. | Fallback to base icon. | As `mf`. |
 | `tp` | DSNAV | `0x0A` ASCIIZ | No | "Type" column text (column 1 in RCDATA 0x81). | Blank "Type" cell. | Wrong type → truncation or cache miss. |

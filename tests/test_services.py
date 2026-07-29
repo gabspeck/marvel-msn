@@ -359,6 +359,22 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Categories (US)", payload)
         self.assertIn(b"Categorias (BR)", payload)
 
+    def test_all_children_grant_authoring_rights(self):
+        request = DirsrvRequest(
+            dword_0=1,
+            dword_1=14,
+            prop_group="a\x00e\x00x",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = build_get_children_reply_payload(request)
+        records = _walk_get_children_records(payload)
+
+        self.assertGreater(len(records), 0)
+        for record in records:
+            self.assertEqual(record["x"], struct.pack("<I", 0x70))
+        self.assertIn(b"\x03x\x00\x70\x00\x00\x00", payload)
+        self.assertNotIn(b"\x0ex\x00", payload)
+
     def test_get_properties_returns_self_record_only(self):
         # GetProperties (selector 0x00) is always a single-record query for
         # the requested node's own props. SetPropertyGroupFromPsp on the

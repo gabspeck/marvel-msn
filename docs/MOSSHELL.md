@@ -257,7 +257,7 @@ From `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md § Property tag request lists`:
 | `h`  | 0x03 DWORD (ICO shabby_id) | `CacheNodeIconsIntoImageLists` @ `0x7F4047C2` → `FetchShabbyIconToTempAndExtract` @ `0x7F4049F9`. | Per-item listview icon (`ExtractIconExA` on downloaded ICO/EXE/DLL). Missing → forbidden-glyph default icon. |
 | `mf` | 0x03 DWORD (BMP/WMF/EMF shabby_id, packed `fmt<<24 \| content_id24`) | `LoadShabbyIconForNode` @ `0x7F405018`. Slot `+0x40`, cap 4, type 0. | Banner + primary-icon paint. Format byte selects loader: `1`=EMF, `3`=raw WMF, `4`=placeable WMF, `5`=BMP. |
 | `wv` | 0x03 DWORD | — (handed to `LoadShabbyIconForNode`-style paths by plug-ins via `GetShabbyProp`) | Variant icon. |
-| `x`  | 0x0E blob | — | Consumed by launcher paths (`CMosTreeNode::Exec` slot `+0xCC` implementations). |
+| `x`  | 0x03 DWORD | `CMosTreeNode::HasRights` @ `0x7F3FF99E`. Slot `+0x40`, cap 4, fetch-if-missing 1. | Per-node rights mask. `HasRights(mask)` succeeds when `x & mask` is nonzero. |
 | `_F` | 0x01 byte (sub-object flag) | `GetDisplayNameOf` via `GetRealNode` (vtable `+0xC4`). Cap 2, type 2. | Bit `0x20` triggers STRINGTABLE 0x88 suffix append to the `e` string. |
 | `tp` | 0x0A ASCIIZ (DSNAV contract) | `CDsNavTreeNode::GetDetailsStruct` (DSNAV §10) | "Type" column — tag travels through MOSSHELL only as an opaque cache slot. |
 | `p`  | 0x03 DWORD | Properties dialog `FUN_7F3FBA69` special branch | Formats as "Size" via `FormatSizeString`; see §4.3 for the `pInner` delegation that leaves the dialog field blank on `app_id=1` nodes. |
@@ -266,7 +266,14 @@ From `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md § Property tag request lists`:
 
 **Full server cross-check is in `docs/DSNAV.md` §12 and §14.2.** MOSSHELL
 itself is tag-agnostic for everything except `a`, `b`, `c`, `e`, `h`, `mf`,
-and `_F` — the rest flow through to plug-ins or column descriptors.
+`x`, and `_F` — the rest flow through to plug-ins or column descriptors.
+
+`CMosViewWnd::AddMenus` @ `0x7F3F7903` calls the current node's
+`HasRights(0x70)`. On success it merges MENU 0x82 into File, adding the
+New submenu plus Delete and Unlink. DSNAV then fills New from the registered
+`Node Editor App #` plug-ins. A missing `x`, a non-DWORD value, or a mask with
+none of bits `0x70` leaves the authoring commands absent. The fixture server
+emits `x = 0x70` for every node.
 
 ### 4.3 `p` rendering in the Properties dialog
 
