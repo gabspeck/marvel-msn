@@ -422,17 +422,15 @@ def build_props(requested_props, node, *, is_children):
         elif name == PROP_CREATED:
             out.append((0x0B, PROP_CREATED, _sz(content.created)))
         elif name == PROP_LANGUAGE:
-            # Wire 'q' is an 8-byte qword: [unknown_header:u32][lcid:u32].
-            # MCM's browse-language worker (MCM!FUN_0410438e) reads the
-            # LCID as `*(u32*)(value + 4)`, so the DWORD at offset 0 is a
-            # header we don't yet understand (pack 0 until an on-wire
-            # capture settles it). Type 0x04 = 8-byte qword per SVCPROP's
-            # DecodePropertyValue dispatch; type 0x03 would only allocate
-            # a 4-byte buffer and the client's +4 read would pick up
-            # adjacent heap bytes (the root cause of the garbage combobox
-            # in View > Options > General "Content view").
+            # Wire 'q' uses the 8-byte transport type 0x04, but its value is a
+            # counted DWORD array: [count:u32][lcid:u32]. MCM's browse-language
+            # worker (MCM!FUN_0410438e) reads the LCID at offset 4. DSNED copies
+            # the bytes into a CServiceProperties type-0x10 value for a new node.
+            # CServiceProperties::FSet requires `length == count * 4 + 4`;
+            # count 0 with one trailing LCID makes it reject the value and
+            # DSNED reports the rejection as E_OUTOFMEMORY.
             out.append(
-                (0x04, PROP_LANGUAGE, struct.pack("<II", 0, content.language))
+                (0x04, PROP_LANGUAGE, struct.pack("<II", 1, content.language))
             )
         elif name == PROP_VENDOR_ID:
             out.append((0x03, PROP_VENDOR_ID, struct.pack("<I", content.vendor_id)))
@@ -504,7 +502,7 @@ def _collect_children_records(request, requested_props):
         return [
             (
                 f"lang:0x{lcid:04x}",
-                [(0x04, PROP_LANGUAGE, struct.pack("<II", 0, lcid))],
+                [(0x04, PROP_LANGUAGE, struct.pack("<II", 1, lcid))],
             )
             for lcid in SUPPORTED_BROWSE_LCIDS
         ]

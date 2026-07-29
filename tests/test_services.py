@@ -926,7 +926,7 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"\x0bw\x00\x01April 15, 2026\x00", payload)
         self.assertIn(b"\x0bj\x00\x01Your daily window to MSN.\x00", payload)
 
-    def test_language_prop_ships_as_qword_with_lcid_at_offset_four(self):
+    def test_language_prop_ships_as_counted_lcid_array(self):
         # Per-node `q` lookup (not the 0:0 language-list short-circuit):
         # MSN Today's language travels on the wire as type 0x04 qword
         # so the client's `*(u32*)(value + 4)` read lands on the LCID
@@ -942,8 +942,9 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
         payload = build_get_properties_reply_payload(request)
-        # Wire: type 0x04, name "q\0", 8-byte qword = [header_u32][lcid_u32].
-        self.assertIn(b"\x04q\x00" + struct.pack("<II", 0, 1033), payload)
+        # DSNED stores q as SVCPROP type 0x10, whose size invariant is
+        # `length == count * 4 + 4`. One LCID therefore starts with count 1.
+        self.assertIn(b"\x04q\x00" + struct.pack("<II", 1, 1033), payload)
         # Regression guard: the old 4-byte DWORD emit must be gone.
         self.assertNotIn(b"\x03q\x00" + struct.pack("<I", 1033), payload)
 
@@ -966,7 +967,7 @@ class TestDIRSRVReply(unittest.TestCase):
             payload = build_get_children_reply_payload(request)
             for lcid in SUPPORTED_BROWSE_LCIDS:
                 self.assertIn(
-                    b"\x04q\x00" + struct.pack("<II", 0, lcid),
+                    b"\x04q\x00" + struct.pack("<II", 1, lcid),
                     payload,
                     f"LCID 0x{lcid:04x} missing when dword_0={dword_0}",
                 )
@@ -987,7 +988,7 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Categories (US)", addrbar_payload)
         for lcid in SUPPORTED_BROWSE_LCIDS:
             self.assertNotIn(
-                b"\x04q\x00" + struct.pack("<II", 0, lcid), addrbar_payload
+                b"\x04q\x00" + struct.pack("<II", 1, lcid), addrbar_payload
             )
 
 
