@@ -13,9 +13,10 @@ state needed by selectors that don't have a static answer:
 Cache-miss group (`0x05`/`0x06`/`0x07`/`0x15`/`0x16`) emits a bare-ack
 synchronous reply followed by an async push frame on the matching
 notification iterator. Type-3 (va resolution) pushes resolve to zero
-(va=addr=0); selector 0x15 HfcNear pushes a case-3 BF chunk (BBDESIGN-
-authored TTL with captions, bm0 carries the kind=8 WMF) when a TTL is
-loaded, else an empty case-1 BF chunk.
+(va=addr=0); selector 0x15 HfcNear pushes a case-3 BF chunk when the
+loaded TTL draws anything — that is what makes the engine fetch `bm0`,
+whose kind=8 WMF carries the whole page — else an empty case-1 BF
+chunk.
 
 OpenTitle resolves the title by deid: `{deid}.ttl` under
 `resources/titles/` wins when present; missing/malformed files fall
@@ -28,22 +29,11 @@ import logging
 import pathlib
 
 from ...blackbird.wire import (
-    StyledSegment,
     build_case1_bf_chunk,
     build_case3_bf_chunk,
-    build_styled_case1_chunk,
     build_type0_status_record,
     build_type3_op4_frame,
 )
-from .ccontent import TextRunsContent, TextTreeContent
-
-# TextRuns CContent stores a flat list of prose blobs with no inline
-# style metadata (the per-segment style info lives in the parallel
-# TextTree stream — see `docs/MEDVIEW-TEXT-ENCODING.md` §7.3). Until
-# the TextTree document-level walker pins each blob's style index,
-# every TextRuns blob ships with `style_id = 0` (the title's default
-# CStyleSheet entry).
-_TEXTRUNS_DEFAULT_STYLE_ID = 0
 from ...config import (
     MEDVIEW_ATTACH_SESSION,
     MEDVIEW_CLOSE_REMOTE_HFS_FILE,
@@ -125,6 +115,10 @@ _BAGGAGE_HANDLE_BASE = _BAGGAGE_HANDLE_BM0
 # line bounded for big bodies (TitleOpen ~6 KB, baggage chunks up to
 # 60 KB) without losing the front matter that identifies the shape.
 _LOG_HEX_LIMIT = 96
+
+# `MVBuildLayoutLine`'s switch byte inside a 0xBF chunk: 4-byte header
+# plus name_buf[0x26].
+_BF_DISPATCH_OFFSET = 4 + 0x26
 
 # Symbolic names for human-readable request/reply log lines.
 _SELECTOR_NAMES: dict[int, str] = {
@@ -392,9 +386,13 @@ def _format_push_chunk(chunk: bytes) -> str:
         title = chunk[1]
         name_size = int.from_bytes(chunk[2:4], "little")
         key = int.from_bytes(chunk[12:16], "little")
+        # `MVBuildLayoutLine` switches on name_buf[0x26]: 1 = text row,
+        # 3 = bitmap cell (the one that fetches `bm<n>` baggage).
+        dispatch = chunk[_BF_DISPATCH_OFFSET] if len(chunk) > _BF_DISPATCH_OFFSET else 0
         return (
-            f"case1_bf{{title=0x{title:02x}, name_size=0x{name_size:04x}, "
-            f"key=0x{key:08x}, chunk_len={len(chunk)}}}"
+            f"case{dispatch}_bf{{title=0x{title:02x}, "
+            f"name_size=0x{name_size:04x}, key=0x{key:08x}, "
+            f"chunk_len={len(chunk)}}}"
         )
 
     return _format_payload_hex(chunk)
@@ -427,54 +425,16 @@ def _push_type3_op4(selector: int):
     return build
 
 
-def _collect_styled_segments(title) -> list[StyledSegment]:
-    """Walk every page's StoryControls; gather styled segments from
-    both TextRunsContent (one segment per CElementData blob) and
-    TextTreeContent (segmented text).
-
-    Order is preserved across pages and stories so the on-wire text
-    matches document order. Per
-    `docs/MEDVIEW-TEXT-ENCODING.md` §7.3, a Story persists as
-    parallel TextTree + TextRuns CContent streams — the chase in
-    `ttl_loader._chase_story_content` prefers TextRuns when both
-    exist (its blob list is the displayable prose).
-
-    Every segment ships with `style_id =
-    _TEXTRUNS_DEFAULT_STYLE_ID = 0` for now: TextRuns has no inline
-    style metadata, and the TextTree document-level walker that
-    would resolve per-segment styles has not been pinned (see §7.5).
-    Once that walker lands, this collector will map each segment to
-    its real CStyleSheet slot.
-    """
-    out: list[StyledSegment] = []
-    for page in title.pages:
-        for ctrl in page.controls:
-            content = getattr(ctrl, "content", None)
-            if isinstance(content, TextRunsContent):
-                if content.blobs:
-                    for prose in content.blobs:
-                        if not prose:
-                            continue
-                        out.append(StyledSegment(
-                            text=prose,
-                            style_id=_TEXTRUNS_DEFAULT_STYLE_ID,
-                        ))
-                elif content.text:
-                    # Fallback for short/malformed payloads where the
-                    # CTypedPtrArray decode produced no blobs.
-                    out.append(StyledSegment(
-                        text=content.text,
-                        style_id=_TEXTRUNS_DEFAULT_STYLE_ID,
-                    ))
-            elif isinstance(content, TextTreeContent):
-                for _, segment_text in content.segments:
-                    if not segment_text:
-                        continue
-                    out.append(StyledSegment(
-                        text=segment_text,
-                        style_id=_TEXTRUNS_DEFAULT_STYLE_ID,
-                    ))
-    return out
+def _page_draws_anything(page) -> bool:
+    """True when a page contributes ink to its `bm<n>` metafile — the
+    same condition `build_bm_baggage` uses to emit a kind=8 WMF rather
+    than the blank kind=5 raster."""
+    if page.captions:
+        return True
+    return any(
+        getattr(ctrl, "element_tree", None) is not None
+        for ctrl in page.controls
+    )
 
 
 def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
@@ -482,32 +442,26 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
 
     Dispatch by loaded title content:
 
-      1. Title with TextTree stories (Blackbird-authored prose) →
-         styled case-1 chunk carrying the concatenated text via
-         `build_styled_case1_chunk`. The text walker emits the prose
-         via slot tag 1; no kind=8 fallback runs.
+      1. Title with anything to draw — captions, a resolved Story, or
+         both → case-3 (bitmap cell), so the engine loads `bm0`
+         baggage at the slot origin and `PlayMetaFile` lowers the
+         kind=8 WMF. That metafile carries the whole page: caption
+         TextOuts plus the Story's flowed paragraphs. The client has
+         no layout engine, so every position is baked there.
 
-      2. Title with captions (BBDESIGN-authored caption controls) →
-         case-3 (bitmap cell) so the engine paints `bm0` baggage at
-         the slot origin and `PlayMetaFile` lowers the kind=8 WMF
-         carrying caption TextOuts.
-
-      3. Otherwise → empty case-1 ("skip-row" / layout walker's
+      2. Otherwise → empty case-1 ("skip-row" / layout walker's
          return-5 fast path). Used when no title is loaded. Without
          it the engine paints the cached chunk into many rows to
          fill the pane.
+
+    The styled case-1 text-row path (`build_styled_case1_chunk`) is
+    not used: its layout pass is RE'd but its paint pass is not, and a
+    title routed to it never fetches baggage at all — the client sits
+    at 0x15/0x16 and paints nothing.
     """
     title = handler.loaded_title
-    if title is not None:
-        if any(page.captions for page in title.pages):
-            return build_case3_bf_chunk(title_slot, key)
-        styled_segments = _collect_styled_segments(title)
-        if styled_segments:
-            return build_styled_case1_chunk(
-                styled_segments,
-                title_byte=title_slot,
-                key=key,
-            )
+    if title is not None and any(_page_draws_anything(p) for p in title.pages):
+        return build_case3_bf_chunk(title_slot, key)
     return build_case1_bf_chunk(
         text="", title_byte=title_slot, key=key, initial_font_style=None,
     )

@@ -1820,28 +1820,37 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         self.assertEqual(struct.unpack("<I", push[13:17])[0], key)
         self.assertEqual(push[1 + 0x2A], 0x01)
 
-    def test_va_resolve_pushes_styled_case1_for_texttree(self):
-        # Construct a LoadedTitle whose page-0 Story carries a
-        # TextTreeContent with two segments. The handler should ship a
-        # styled case-1 chunk (dispatch byte 0x01) — not case-3 — so
-        # the engine renders the prose via slot tag 1.
-        from server.services.medview.ccontent import TextTreeContent
+    def test_va_resolve_pushes_case3_when_a_story_resolves(self):
+        # A page whose Story resolved to an element tree draws through
+        # `bm0`, exactly like a caption page: the 0x15 push must be
+        # case-3 so the engine fetches that baggage. A styled case-1
+        # chunk here would leave the client at 0x15/0x16 with nothing
+        # painted — it never asks for baggage on that path.
+        from server.services.medview.ccontent import (
+            TextTreeContent,
+            parse_element_tree,
+        )
         from server.services.medview.ttl_loader import (
             LoadedPage,
             LoadedTitle,
             StoryControl,
         )
 
+        raw = (
+            bytes.fromhex("01") + bytes.fromhex("0700010100")
+            + bytes.fromhex("ffff030b") + b"Story title" + bytes.fromhex("0000")
+        )
         story = StoryControl(
             seq=0,
             flags=0,
             name="Story1R",
-            rect_himetric=(0, 0, 0, 0),
+            rect_himetric=(0, 0, 12700, 12700),
             raw_block=b"",
-            content_proxy_ref=0x1500,
+            content_proxy_ref=0x1400,
             content=TextTreeContent(
-                text="Alpha\nBeta",
-                segments=((2, "Alpha"), (10, "Beta")),
+                text="Story title",
+                segments=((2, "Story title"),),
+                root=parse_element_tree(raw),
             ),
         )
         page = LoadedPage(
@@ -1866,91 +1875,15 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         handler.loaded_title = title
         self._subscribe(handler, 0, 3)
-        key = 0xDEADBEEF
-        req = b"\x01\x01\x03" + struct.pack("<I", key)
+        req = b"\x01\x01\x03" + struct.pack("<I", 0xDEADBEEF)
         pkts = handler.handle_request(
             0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
         )
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[0], 0x85)
         self.assertEqual(push[1], 0xBF)
-        # Case-1 dispatch byte at name_buf[0x26].
-        self.assertEqual(push[1 + 0x2A], 0x01)
-        # Control stream begins at chunk_offset + 3 (preamble) + 6
-        # (null TLV) = chunk_offset + 9; in the wire frame this is
-        # at push[1 + 0x33]. Two segments → two `0x80 <u16 style>`
-        # controls + one trailing `0xFF`.
-        control_start = 1 + 0x33
-        self.assertEqual(
-            push[control_start:control_start + 7],
-            bytes.fromhex("80 00 00 80 00 00 ff".replace(" ", "")),
-        )
-        # Text region: leading NUL + "Alpha" + NUL + "Beta" + NUL = 12 B.
-        text_start = control_start + 7
-        self.assertEqual(
-            push[text_start:text_start + 12],
-            b"\x00Alpha\x00Beta\x00",
-        )
-
-    def test_va_resolve_pushes_styled_case1_for_textruns_blobs(self):
-        # TextRuns with two CElementData blobs should ship a styled
-        # case-1 chunk where each blob becomes one segment. Per
-        # `docs/MEDVIEW-TEXT-ENCODING.md` §7.3, TextRuns has no
-        # inline style metadata — every segment uses style_id=0
-        # until the parallel TextTree walker pins each segment's
-        # style.
-        from server.services.medview.ccontent import TextRunsContent
-        from server.services.medview.ttl_loader import (
-            LoadedPage,
-            LoadedTitle,
-            StoryControl,
-        )
-
-        story = StoryControl(
-            seq=0, flags=0, name="Story1R",
-            rect_himetric=(0, 0, 0, 0), raw_block=b"",
-            content_proxy_ref=0x1500,
-            content=TextRunsContent(
-                text="",
-                style_runs=(),
-                header_version=2,
-                header_byte_1=0,
-                raw_payload=b"",
-                blobs=("Hello", "Goodbye"),
-            ),
-        )
-        page = LoadedPage(
-            name="p0", section_name="TextRuns Test",
-            cbform_table=0, cbform_slot=0, cvform_handle=None,
-            page_bg=0xFFFFFF, page_pixel_w=640, page_pixel_h=480,
-            scrollbar_flags=0, controls=(story,),
-        )
-        title = LoadedTitle(
-            title_name="TextRuns Test", caption="TextRuns Test",
-            window_rect=(0, 0, 640, 480), font_table=(), pages=(page,),
-        )
-        handler = MEDVIEWHandler(5, "MEDVIEW")
-        handler.loaded_title = title
-        self._subscribe(handler, 0, 3)
-        req = b"\x01\x01\x03" + struct.pack("<I", 0xCAFE)
-        pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
-        )
-        push = parse_packet(pkts[1][:-1]).payload[8:]
-        self.assertEqual(push[1], 0xBF)
-        self.assertEqual(push[1 + 0x2A], 0x01)
-        # Control stream: two `0x80 00 00` (style 0) controls + `0xFF`.
-        control_start = 1 + 0x33
-        self.assertEqual(
-            push[control_start:control_start + 7],
-            bytes.fromhex("80 00 00 80 00 00 ff".replace(" ", "")),
-        )
-        # Text region: \x00 Hello \x00 Goodbye \x00 = 15 B.
-        text_start = control_start + 7
-        self.assertEqual(
-            push[text_start:text_start + 15],
-            b"\x00Hello\x00Goodbye\x00",
-        )
+        # Case-3 dispatch byte at name_buf[0x26].
+        self.assertEqual(push[1 + 0x2A], 0x03)
 
     def test_va_resolve_pushes_case3_when_ttl_captions_present(self):
         # OpenTitle with `:2[4]0` loads 4.ttl (a TTL with 1 caption) →
