@@ -1846,6 +1846,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         )
         page = LoadedPage(
             name="page0",
+            section_name="TextTree Test",
             cbform_table=0,
             cbform_slot=0,
             cvform_handle=None,
@@ -1919,7 +1920,8 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             ),
         )
         page = LoadedPage(
-            name="p0", cbform_table=0, cbform_slot=0, cvform_handle=None,
+            name="p0", section_name="TextRuns Test",
+            cbform_table=0, cbform_slot=0, cvform_handle=None,
             page_bg=0xFFFFFF, page_pixel_w=640, page_pixel_h=480,
             scrollbar_flags=0, controls=(story,),
         )

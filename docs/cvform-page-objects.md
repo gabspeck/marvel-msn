@@ -320,21 +320,55 @@ the Caption's data is inline (collapsed format, `4.ttl` single-Caption
 pages) or carried in the multi-caption shared record buffer
 (`4.ttl` page 0 with 3 captions).
 
+### Dynamic caption tags
+
+`idTag` values `0x1900..0x1903` mark the caption as *dynamic*: the
+viewer computes the string at draw time and ignores `strCaption`.
+BBDESIGN still persists a `strCaption` — the tag's design-time label —
+so the authoring canvas has something to show.
+
+The resolver is `VIEWDLL.DLL!FUN_407128b4` (BBVIEW's `CBViewer` tag
+dispatch). It branches on the tag into four vtable slots at
+`0x40752bb0 + 0x0C..0x18`:
+
+| `idTag` | Label | Slot | Runtime value |
+| --- | --- | --- | --- |
+| `0x1900` | Current section | `+0x0C` @ `0x4071279a` | `CBViewer::GetCurSectionName` — name of the section holding the displayed page |
+| `0x1901` | First section | `+0x10` @ `0x407478a3` | first section whose entry `+0x2c` flag is set → `CBViewer::GetSectionName` |
+| `0x1902` | Current date | `+0x14` @ `0x407479aa` | `GetDateFormatA(LOCALE_USER_DEFAULT, DATE_LONGDATE, NULL, NULL, …)` |
+| `0x1903` | Current time | `+0x18` @ `0x40747a15` | `GetTimeFormatA(LOCALE_USER_DEFAULT, TIME_NOSECONDS, NULL, NULL, …)` |
+
+`CTitle` derives from `CSection`, so a page hung off `CTitle.base_forms`
+belongs to the title's own root section and both section tags resolve to
+the `CTitle` `name` property. `captions_test.ttl` is that shape: its four
+dynamic captions render as a long date, "Captions Test", a short time and
+"Captions Test".
+
+Off the design-time branch (`param_1[5] == 0`) the same function returns
+the label strings instead, read out of VIEWDLL's string table in tag
+order — "Current section", "First section", "Current date", "Current
+time".
+
+For en-US, `LOCALE_SLONGDATE` does not zero-pad the day
+(`dddd, MMMM d, yyyy`): the reference render at
+`tests/assets/captions_test_reference.png` reads "Sunday, May 1", which a
+`dd` picture would have clipped to "Sunday, May 0" at the caption's
+103 px width. `TIME_NOSECONDS` drops the seconds group from
+`h:mm:ss tt`, giving "1:39 PM".
+
 ### Caption interactivity (deferred)
 
-`idTag` indexes into a per-title script table that binds Click /
-RightClick events to script macros. The event entry points are pinned
-via string refs in BBCTL.OCX:
+Outside the dynamic-tag range, `idTag` indexes a per-title script table
+that binds Click / RightClick events to script macros. The event entry
+points are pinned via string refs in BBCTL.OCX:
 
 - `"Click"` @ `0x4002b298`
 - `"RightClick"` @ `0x4002b2d0`
 
-These are MFC OLE event names (`COleControl::FireEvent`). When
-`idTag >= 0`, the event handler looks up the macro via the title's
-script table (storage path not yet RE'd — likely a `CDPO` / CScript
-object reachable from `CSection`). Lowering click → macro dispatch to
-the MEDVIEW wire is a separate RE pass; the current decoder just
-surfaces `id_tag` as a tagged LONG for offline inspection.
+These are MFC OLE event names (`COleControl::FireEvent`). The script
+table's storage path is not yet RE'd — likely a `CDPO` / CScript object
+reachable from `CSection`. Lowering click → macro dispatch is a separate
+RE pass.
 
 ## Walker output (current parser)
 

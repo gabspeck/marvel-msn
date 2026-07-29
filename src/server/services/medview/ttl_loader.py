@@ -10,6 +10,7 @@ both to per-page emission.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import pathlib
 import re
@@ -140,7 +141,9 @@ class CaptionControl(Control):
     bevel_hilight: int = 0xFFFFFF            # COLORREF (v ≥ 3)
     bevel_shadow: int = 0                    # COLORREF (v ≥ 3)
     frame_color: int = 0                     # COLORREF (v ≥ 2)
-    id_tag: int = -1                         # LONG; -1 = no script binding
+    id_tag: int = -1                         # LONG; -1 = plain caption,
+                                             # 0x1900..0x1903 = dynamic tag,
+                                             # else script binding
     word_wrap: bool = False                  # BOOL (post-strCaption, default-only)
     auto_size: bool = False                  # BOOL (post-strCaption, default-only)
     alignment: int = 0                       # LONG (post-strCaption, default-only)
@@ -238,6 +241,7 @@ class LoadedPage:
     """One CBForm-rooted page. Per-page state lives here; title-level
     state (caption / window_rect / font_table) stays on `LoadedTitle`."""
     name: str                                # CBForm.<table>/<slot> properties.name
+    section_name: str                        # owning CSection name; CTitle name at root
     cbform_table: int
     cbform_slot: int
     cvform_handle: int | None
@@ -266,6 +270,14 @@ class LoadedTitle:
     window_rect: tuple[int, int, int, int]   # CBFrame (left, top, width, height) pixels
     font_table: tuple[FaceEntry, ...]
     pages: tuple[LoadedPage, ...] = field(default_factory=tuple)
+
+    @property
+    def first_section_name(self) -> str:
+        """What BBVIEW resolves for the `First section` caption tag: the
+        first entry of `CBViewer`'s flattened section array that carries
+        content. Pages arrive in section-tree DFS order, so page 0's
+        owning section is that entry."""
+        return self.pages[0].section_name if self.pages else self.title_name
 
 
 _STDFONT_CLSID = bytes.fromhex("0352e30b918fce119de300aa004bb851")
@@ -1292,11 +1304,33 @@ def _read_page_name(ole, table: int, slot: int) -> str:
     return str(props.get("name", ""))
 
 
+def _section_name(
+    ole,
+    section_path: tuple[int, int] | None,
+    title_name: str,
+) -> str:
+    """Name of the CSection that owns a page — what BBVIEW resolves for
+    the `Current section` caption tag.
+
+    CTitle derives from CSection, so a page hung off `CTitle.base_forms`
+    belongs to the title's own root section and takes the CTitle `name`.
+    Confirmed against `captions_test.ttl`, whose single root-hung page
+    renders both section tags as "Captions Test"."""
+    if section_path is None:
+        return title_name
+    try:
+        props = _read_properties(ole, section_path[0], section_path[1])
+    except (OSError, ValueError):
+        return title_name
+    return str(props.get("name", title_name))
+
+
 def _build_page(
     ole,
     cbform_ref: _CBFormRef,
     handles_by_storage: dict[tuple[int, int], tuple[int, ...]],
     cvform_table: int,
+    section_name: str,
 ) -> LoadedPage:
     cbform_path = (cbform_ref.table, cbform_ref.slot)
     cbform_body = ole.openstream(_ole_path(cbform_path, "\x03object")).read()
@@ -1313,6 +1347,7 @@ def _build_page(
             controls = _decode_controls(maybe_decompress_ck(cvform_body_raw))
     return LoadedPage(
         name=_read_page_name(ole, cbform_path[0], cbform_path[1]),
+        section_name=section_name,
         cbform_table=cbform_path[0],
         cbform_slot=cbform_path[1],
         cvform_handle=cvform_handle,
@@ -1361,6 +1396,7 @@ def _attach_story_content(
                 new_controls.append(c)
         out.append(LoadedPage(
             name=page.name,
+            section_name=page.section_name,
             cbform_table=page.cbform_table,
             cbform_slot=page.cbform_slot,
             cvform_handle=page.cvform_handle,
@@ -1438,7 +1474,10 @@ def load_title(path: pathlib.Path) -> LoadedTitle | None:
             )]
 
         pages = [
-            _build_page(ole, ref, handles_by_storage, cvform_table)
+            _build_page(
+                ole, ref, handles_by_storage, cvform_table,
+                _section_name(ole, ref.owning_section_path, title_name),
+            )
             for ref in cbform_refs
         ]
         pages = _attach_story_content(
@@ -1692,12 +1731,100 @@ def _twips_to_pixels(twips: int) -> int:
     return (twips * 96) // 1440
 
 
-def build_bm_baggage(page: LoadedPage, font_table: tuple[FaceEntry, ...]) -> bytes:
+# ---------------------------------------------------------------------------
+# Dynamic caption tags
+# ---------------------------------------------------------------------------
+
+# A Caption whose `idTag` falls in 0x1900..0x1903 draws a runtime-computed
+# string instead of its authored `strCaption`. BBDESIGN persists the tag's
+# design-time label ("Current date", "Current section", …) as the caption
+# text so the authoring canvas has something to show.
+#
+# Resolver pinned in VIEWDLL.DLL `FUN_407128b4` (BBVIEW's CBViewer tag
+# dispatch). It branches on the tag into four vtable slots at
+# `0x40752bb0+0x0C..+0x18`:
+#
+#   0x1900 CURRENT_SECTION  0x4071279a  CBViewer::GetCurSectionName
+#   0x1901 FIRST_SECTION    0x407478a3  first section passing the +0x2c
+#                                       filter → CBViewer::GetSectionName
+#   0x1902 CURRENT_DATE     0x407479aa  GetDateFormatA(LOCALE_USER_DEFAULT,
+#                                       DATE_LONGDATE, NULL, NULL, …)
+#   0x1903 CURRENT_TIME     0x40747a15  GetTimeFormatA(LOCALE_USER_DEFAULT,
+#                                       TIME_NOSECONDS, NULL, NULL, …)
+#
+# Off the design-time branch (`param_1[5] == 0`) the same function returns
+# the label string resources instead, in the order 0x1900 → "Current
+# section", 0x1901 → "First section", 0x1902 → "Current date", 0x1903 →
+# "Current time" — the four UTF-16 strings in VIEWDLL's string table.
+#
+# MOSVIEW replays a pre-baked WMF and has no tag dispatch of its own, so
+# the substitution happens here, on the server, at bake time.
+_TAG_CURRENT_SECTION = 0x1900
+_TAG_FIRST_SECTION = 0x1901
+_TAG_CURRENT_DATE = 0x1902
+_TAG_CURRENT_TIME = 0x1903
+
+# en-US LOCALE_SLONGDATE / LOCALE_STIMEFORMAT as Win95 ships them. The day
+# is not zero-padded ("dddd, MMMM d, yyyy"): the reference BBVIEW render at
+# `tests/assets/captions_test_reference.png` reads "Sunday, May 1" where a
+# `dd` picture would have clipped to "Sunday, May 0" at the 103 px caption
+# width. TIME_NOSECONDS drops the seconds group from "h:mm:ss tt".
+_WEEKDAY_NAMES = (
+    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+)
+_MONTH_NAMES = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+
+def _format_long_date(now: datetime.datetime) -> str:
+    """`GetDateFormatA(LOCALE_USER_DEFAULT, DATE_LONGDATE, …)`, en-US."""
+    return (
+        f"{_WEEKDAY_NAMES[now.weekday()]}, {_MONTH_NAMES[now.month - 1]} "
+        f"{now.day}, {now.year}"
+    )
+
+
+def _format_short_time(now: datetime.datetime) -> str:
+    """`GetTimeFormatA(LOCALE_USER_DEFAULT, TIME_NOSECONDS, …)`, en-US."""
+    hour = now.hour % 12 or 12
+    meridiem = "AM" if now.hour < 12 else "PM"
+    return f"{hour}:{now.minute:02d} {meridiem}"
+
+
+def _resolve_caption_text(
+    cap: CaptionControl,
+    page: LoadedPage,
+    first_section_name: str,
+    now: datetime.datetime,
+) -> str:
+    """Caption text as BBVIEW draws it: the dynamic tag's value when
+    `idTag` names one, the authored `strCaption` otherwise."""
+    if cap.id_tag == _TAG_CURRENT_SECTION:
+        return page.section_name
+    if cap.id_tag == _TAG_FIRST_SECTION:
+        return first_section_name
+    if cap.id_tag == _TAG_CURRENT_DATE:
+        return _format_long_date(now)
+    if cap.id_tag == _TAG_CURRENT_TIME:
+        return _format_short_time(now)
+    return cap.text
+
+
+def build_bm_baggage(
+    page: LoadedPage,
+    font_table: tuple[FaceEntry, ...],
+    first_section_name: str = "",
+    now: datetime.datetime | None = None,
+) -> bytes:
     """Per-page baggage container.
 
     Sources:
     - CaptionControl text: rect_himetric → pixel coords, drawn via the
-      kind=8 WMF TextOut path.
+      kind=8 WMF TextOut path. Captions carrying a dynamic `idTag`
+      (`_resolve_caption_text`) bake the tag's value, not the authored
+      placeholder.
     - StoryControl content (TextRuns body resolved by PR1's chase):
       placed at the Story's `xy_twips → pixels` top-left, single string.
 
@@ -1713,6 +1840,7 @@ def build_bm_baggage(page: LoadedPage, font_table: tuple[FaceEntry, ...]) -> byt
     HfcStartCacheFetch.
     """
     items: list[TextItem] = []
+    now = now or datetime.datetime.now()
 
     for cap in page.captions:
         left = _himetric_to_pixels(cap.rect_himetric[0])
@@ -1722,7 +1850,7 @@ def build_bm_baggage(page: LoadedPage, font_table: tuple[FaceEntry, ...]) -> byt
         items.append(TextItem(
             x=left,
             y=top,
-            text=cap.text,
+            text=_resolve_caption_text(cap, page, first_section_name, now),
             font_face=cap.font_name or "Times New Roman",
             font_height=-(cap.size_pt * 96 // 72) if cap.size_pt else -16,
             font_weight=cap.weight or 400,
@@ -1771,12 +1899,22 @@ def build_bm_baggage(page: LoadedPage, font_table: tuple[FaceEntry, ...]) -> byt
     )
 
 
-def build_all_bm_baggage(title: LoadedTitle) -> dict[str, bytes]:
+def build_all_bm_baggage(
+    title: LoadedTitle,
+    now: datetime.datetime | None = None,
+) -> dict[str, bytes]:
     """Per-title baggage map: `{f"bm{i}": baggage_bytes for i, page}`.
     Handler keys baggage requests by the canonical name extracted from
-    the engine's `wsprintfA("|bm%d", idx)` probe."""
+    the engine's `wsprintfA("|bm%d", idx)` probe.
+
+    Every page bakes its dynamic captions against one `now`, so a title
+    whose pages both carry a `Current time` caption cannot straddle a
+    minute boundary."""
+    now = now or datetime.datetime.now()
     return {
-        f"bm{i}": build_bm_baggage(page, title.font_table)
+        f"bm{i}": build_bm_baggage(
+            page, title.font_table, title.first_section_name, now,
+        )
         for i, page in enumerate(title.pages)
     }
 

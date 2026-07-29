@@ -17,6 +17,7 @@ Coverage:
   per page; verifies the CSection-tree DFS walk.
 """
 
+import datetime
 import pathlib
 import unittest
 
@@ -38,6 +39,9 @@ from server.services.medview.ttl_loader import (
     ShortcutControl,
     StoryControl,
     UnknownControl,
+    _format_long_date,
+    _format_short_time,
+    _resolve_caption_text,
     build_all_bm_baggage,
     build_bm0_baggage,
     load_title,
@@ -455,6 +459,92 @@ class TestBaggageCarriesNewStyling(unittest.TestCase):
         self.assertIn(b"\x04\x00\x00\x00\x27\x01", bag)
 
 
+class TestDynamicCaptions(unittest.TestCase):
+    """Captions whose `idTag` is 0x1900..0x1903 draw a runtime value, not
+    the authored placeholder. Values match the BBVIEW reference render at
+    `reference/screenshots/captions_test_reference_render.png`, captured
+    Wednesday 29 July 2026 at 8:14 AM: "Wednesday, Ju[ly 29, 2026]" /
+    "Captions Test" / "8:14 AM" / "Captions Test"."""
+
+    _NOW = datetime.datetime(2026, 7, 29, 8, 14, 30)
+
+    def _captions_by_tag(self):
+        t = load_title(_TITLE_4)
+        return t, {c.id_tag: c for c in t.pages[0].captions}
+
+    def test_authored_text_is_the_design_time_label(self):
+        _, by_tag = self._captions_by_tag()
+        self.assertEqual(by_tag[0x1900].text, "Current section")
+        self.assertEqual(by_tag[0x1901].text, "First section")
+        self.assertEqual(by_tag[0x1902].text, "Current date")
+        self.assertEqual(by_tag[0x1903].text, "Current time")
+
+    def test_root_hung_page_takes_the_title_name_as_section(self):
+        t = load_title(_TITLE_4)
+        self.assertEqual(t.pages[0].section_name, "Captions Test")
+        self.assertEqual(t.first_section_name, "Captions Test")
+
+    def test_section_name_comes_from_the_owning_csection(self):
+        t = load_title(_TITLE_MSN_TODAY)
+        self.assertEqual(t.pages[0].section_name, "Section 1")
+        self.assertEqual(t.first_section_name, "Section 1")
+
+    def test_tags_resolve_to_runtime_values(self):
+        t, by_tag = self._captions_by_tag()
+        page = t.pages[0]
+        resolve = {
+            tag: _resolve_caption_text(
+                cap, page, t.first_section_name, self._NOW,
+            )
+            for tag, cap in by_tag.items()
+        }
+        self.assertEqual(resolve[0x1900], "Captions Test")
+        self.assertEqual(resolve[0x1901], "Captions Test")
+        self.assertEqual(resolve[0x1902], "Wednesday, July 29, 2026")
+        self.assertEqual(resolve[0x1903], "8:14 AM")
+
+    def test_untagged_caption_keeps_its_authored_text(self):
+        t, by_tag = self._captions_by_tag()
+        plain = by_tag[-1]
+        self.assertEqual(
+            _resolve_caption_text(plain, t.pages[0], "S", self._NOW),
+            plain.text,
+        )
+
+    def test_long_date_does_not_zero_pad_the_day(self):
+        # LOCALE_SLONGDATE is "dddd, MMMM d, yyyy": the reference render
+        # reads "Sunday, May 1", which a `dd` picture would have clipped
+        # to "Sunday, May 0" at the 103 px caption width.
+        self.assertEqual(
+            _format_long_date(datetime.datetime(2022, 5, 1, 13, 39)),
+            "Sunday, May 1, 2022",
+        )
+
+    def test_short_time_drops_seconds_and_pads_only_minutes(self):
+        self.assertEqual(
+            _format_short_time(datetime.datetime(2022, 5, 1, 13, 39, 59)),
+            "1:39 PM",
+        )
+        self.assertEqual(
+            _format_short_time(datetime.datetime(2022, 5, 1, 0, 5)),
+            "12:05 AM",
+        )
+        self.assertEqual(
+            _format_short_time(datetime.datetime(2022, 5, 1, 12, 0)),
+            "12:00 PM",
+        )
+
+    def test_baggage_bakes_the_resolved_text_not_the_placeholder(self):
+        t = load_title(_TITLE_4)
+        bag = build_all_bm_baggage(t, now=self._NOW)["bm0"]
+        self.assertIn(b"Wednesday, July 29, 2026", bag)
+        self.assertIn(b"8:14 AM", bag)
+        self.assertNotIn(b"Current date", bag)
+        self.assertNotIn(b"Current time", bag)
+        self.assertNotIn(b"Current section", bag)
+        self.assertNotIn(b"First section", bag)
+
+
 class TestBuildBm0Baggage(unittest.TestCase):
     def test_kind8_metafile_when_captions_present(self):
         title = load_title(_TITLE_4)
@@ -473,6 +563,7 @@ class TestBuildBm0Baggage(unittest.TestCase):
             font_table=(),
             pages=(LoadedPage(
                 name="",
+                section_name="Empty",
                 cbform_table=5,
                 cbform_slot=0,
                 cvform_handle=None,

@@ -136,6 +136,12 @@ Event entry points (string refs):
 These bind script macros via `idTag`. Lowering of Click → script
 dispatch is deferred (script table storage path not yet RE'd).
 
+`idTag` values `0x1900..0x1903` are not script bindings — they mark the
+caption as dynamic (current section / first section / current date /
+current time) and the viewer computes the text at draw time, ignoring
+`strCaption`. Resolver pinned in VIEWDLL.DLL, see
+`docs/cvform-page-objects.md` §"Dynamic caption tags".
+
 ### Other classes — TODO
 
 Per-class persist-stream layouts for `CQtxtCtrl` (Story),
