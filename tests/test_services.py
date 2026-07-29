@@ -1836,7 +1836,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             seq=0,
             flags=0,
             name="Story1R",
-            xy_twips=(0, 0),
+            rect_himetric=(0, 0, 0, 0),
             raw_block=b"",
             content_proxy_ref=0x1500,
             content=TextTreeContent(
@@ -1908,7 +1908,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
 
         story = StoryControl(
             seq=0, flags=0, name="Story1R",
-            xy_twips=(0, 0), raw_block=b"",
+            rect_himetric=(0, 0, 0, 0), raw_block=b"",
             content_proxy_ref=0x1500,
             content=TextRunsContent(
                 text="",

@@ -7,8 +7,14 @@ Coverage:
   frame_color / transparent / word_wrap. Layout matches
   `tests/assets/captions_test_reference.png`.
 - `tests/assets/story_test.ttl` — Story + Shortcut single-page,
-  CK-deflated CStyleSheet with 7 font slots + 54 styles; Story content
-  body is TextRuns at 8/7 ("This is an example of content...").
+  CK-deflated CStyleSheet with 7 font keys + 54 overridden styles;
+  Story content body is the TextTree at 8/6, whose heading carries a
+  PICTURE.PictureCtrl.1 intrusion.
+- `tests/assets/story_title.ttl` — root-hung single page whose Story
+  resolves through CTitle's own contents list. Its CStyleSheet
+  overrides no style, so every paragraph paints from VIEWDLL's
+  built-in table. Layout matches `reference/screenshots/story
+  title.png`.
 - `tests/assets/all_controls.ttl` — single-page "All Controls
   Showcase" with 9 controls covering every BBCTL.OCX site class
   (Story / Outline / Caption / Picture / Shortcut / DynamicStory /
@@ -51,6 +57,7 @@ from server.services.medview.ttl_loader import (
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _TITLE_4 = _REPO_ROOT / "tests" / "assets" / "captions_test.ttl"
 _TITLE_MSN_TODAY = _REPO_ROOT / "tests" / "assets" / "story_test.ttl"
+_TITLE_STORY_TITLE = _REPO_ROOT / "tests" / "assets" / "story_title.ttl"
 _TITLE_ALL_CONTROLS = _REPO_ROOT / "tests" / "assets" / "all_controls.ttl"
 _TITLE_MULTI_PAGE = _REPO_ROOT / "tests" / "assets" / "multi_page_title.ttl"
 
@@ -83,13 +90,15 @@ class TestCaptionsTestFixture(unittest.TestCase):
         self.assertEqual(page.scrollbar_flags, 3)
 
     def test_font_table_has_three_faces(self):
+        # Keys are the ones VIEWDLL's built-in style table indexes:
+        # `Normal` asks for font 1, the headings for 2, `Code` for 3.
         t = load_title(_TITLE_4)
         self.assertEqual(
             t.font_table,
             (
-                FaceEntry(slot=2, face_name="Courier New"),
-                FaceEntry(slot=1, face_name="Arial"),
-                FaceEntry(slot=0, face_name="Times New Roman"),
+                FaceEntry(slot=3, face_name="Courier New"),
+                FaceEntry(slot=2, face_name="Arial"),
+                FaceEntry(slot=1, face_name="Times New Roman"),
             ),
         )
 
@@ -227,11 +236,11 @@ class TestMsnTodayDecodes(unittest.TestCase):
         self.assertIsInstance(controls[0], StoryControl)
         self.assertEqual(controls[0].name, "Story1R")
         self.assertEqual(controls[0].seq, 1)
-        self.assertEqual(controls[0].xy_twips, (3810, 0))
+        self.assertEqual(controls[0].rect_himetric, (3810, 0, 16933, 12700))
         self.assertIsInstance(controls[1], ShortcutControl)
         self.assertEqual(controls[1].name, "Shortcut1=R")
         self.assertEqual(controls[1].seq, 2)
-        self.assertEqual(controls[1].xy_twips, (211, 1481))
+        self.assertEqual(controls[1].rect_himetric, (211, 1481, 3598, 2963))
 
     def test_per_control_raw_blocks_carry_proxy_refs(self):
         # Property region is sliced in seq order using descriptor `size`.
@@ -299,13 +308,19 @@ class TestAllControlsShowcase(unittest.TestCase):
             ],
         )
 
-    def test_compound_xy_twips(self):
+    def test_compound_rect_himetric(self):
+        # Compound sites carry the same LTRB HIMETRIC rect Caption1
+        # does, at the same inline_tail offset.
         controls = {c.name: c for c in self.title.pages[0].controls}
-        self.assertEqual(controls["Story1R"].xy_twips, (1058, 2540))
-        self.assertEqual(controls["Outline1"].xy_twips, (6773, 2540))
-        self.assertEqual(controls["Audio1R"].xy_twips, (1905, 635))
-        self.assertEqual(controls["Shortcut1-V"].xy_twips, (1270, 9736))
-        self.assertEqual(controls["CaptionButton1"].xy_twips, (6773, 423))
+        self.assertEqual(controls["Story1R"].rect_himetric, (1058, 2540, 5715, 8890))
+        self.assertEqual(controls["Outline1"].rect_himetric, (6773, 2540, 9313, 5927))
+        self.assertEqual(controls["Audio1R"].rect_himetric, (1905, 635, 5503, 2116))
+        self.assertEqual(
+            controls["Shortcut1-V"].rect_himetric, (1270, 9736, 4656, 11006),
+        )
+        self.assertEqual(
+            controls["CaptionButton1"].rect_himetric, (6773, 423, 9525, 1693),
+        )
 
     def test_caption1_rect_and_font(self):
         controls = {c.name: c for c in self.title.pages[0].controls}
@@ -324,16 +339,22 @@ class TestLowerToPayload(unittest.TestCase):
         self.assertIn(b"Captions Test\x00", self.body)
 
     def test_section0_face_table_contains_all_fonts(self):
+        # Entries sit at the CStyleSheet font key, so slot 0 stays blank
+        # and Times/Arial/Courier land at keys 1/2/3.
         sec0_off = 2                         # leading u16 length prefix
         face_table_off = sec0_off + 0x12
         self.assertEqual(
-            self.body[face_table_off:face_table_off + 15], b"Times New Roman",
+            self.body[face_table_off:face_table_off + 15], b"\x00" * 15,
         )
         self.assertEqual(
-            self.body[face_table_off + 0x20:face_table_off + 0x20 + 5], b"Arial",
+            self.body[face_table_off + 0x20:face_table_off + 0x20 + 15],
+            b"Times New Roman",
         )
         self.assertEqual(
-            self.body[face_table_off + 0x40:face_table_off + 0x40 + 11], b"Courier New",
+            self.body[face_table_off + 0x40:face_table_off + 0x40 + 5], b"Arial",
+        )
+        self.assertEqual(
+            self.body[face_table_off + 0x60:face_table_off + 0x60 + 11], b"Courier New",
         )
 
     def test_sec06_record_contains_caption_at_offset_0x15(self):
@@ -611,10 +632,9 @@ class TestCaptionsTestSinglePage(unittest.TestCase):
 
 class TestMsnTodayStoryContentChase(unittest.TestCase):
     """story_test.ttl's Story1R chases the Pascal-prefixed `Homepage.bdf`
-    reference in its raw_block → CProxyTable@7/0 → TextRuns CContent
-    at 8/7 ("This is an example of content..."). The leading 'S' before
-    the prose body is unexplained empirical noise (PR2 BBCTL.OCX RE will
-    pin it); the chase still succeeds and exposes content_proxy_ref."""
+    reference in its raw_block → CProxyTable@7/0 → the TextTree CContent
+    at 8/6, which holds the prose. The parallel TextRuns stream at 8/7
+    carries paragraph markers only."""
 
     def setUp(self):
         self.title = load_title(_TITLE_MSN_TODAY)
@@ -622,20 +642,30 @@ class TestMsnTodayStoryContentChase(unittest.TestCase):
         self.story = self.title.pages[0].controls[0]
         self.assertIsInstance(self.story, StoryControl)
 
-    def test_content_proxy_ref_is_textruns_key(self):
-        # CProxyTable@7/0 maps proxy_key 0x00001500 → CContent at 8/7
-        # (TextRuns) and 0x00001400 → 8/6 (TextTree); the chase picks
-        # the TextRuns target.
-        self.assertEqual(self.story.content_proxy_ref, 0x00001500)
+    def test_content_proxy_ref_is_texttree_key(self):
+        # CProxyTable@7/0 maps proxy_key 0x00001400 → CContent at 8/6
+        # (TextTree) and 0x00001500 → 8/7 (TextRuns).
+        self.assertEqual(self.story.content_proxy_ref, 0x00001400)
 
-    def test_content_text_starts_with_authored_body(self):
+    def test_content_text_is_the_authored_body(self):
         self.assertIsNotNone(self.story.content)
-        self.assertIn("This is an example of content", self.story.content.text)
+        self.assertIn("MSN Today (update test)", self.story.content.text)
+        self.assertIn("Here's an unordered list:", self.story.content.text)
 
-    def test_textruns_header_pinned(self):
-        # 8/7 first two bytes are `02 00`; the rest is the prose run.
-        self.assertEqual(self.story.content.header_version, 0x02)
-        self.assertEqual(self.story.content.header_byte_1, 0x00)
+    def test_element_tree_survives_the_picture_intrusion(self):
+        # 8/6's heading holds a PICTURE.PictureCtrl.1 intrusion whose
+        # DATA1 / RSLT1 blobs ride version-3 leaves.
+        root = self.story.element_tree
+        self.assertIsNotNone(root)
+        body = root.children[1]
+        self.assertEqual(body.tag, 0x0C)
+        heading = body.children[0]
+        self.assertEqual(heading.tag, 0x07)
+        self.assertEqual(heading.text, "MSN Today (update test)")
+        intrusion = heading.children[0]
+        self.assertEqual(
+            dict(intrusion.props)["CLSID"], "PICTURE.PictureCtrl.1",
+        )
 
 
 class TestLowerToPayloadMultiPage(unittest.TestCase):
@@ -758,6 +788,117 @@ class TestMultiPageTitle(unittest.TestCase):
             self.assertEqual(page.page_pixel_h, 480)
 
 
+class TestStoryTitleFixture(unittest.TestCase):
+    """story_title.ttl authors one Story on a page hung straight off
+    CTitle. The Story resolves through CTitle's own contents list, and
+    every paragraph paints from VIEWDLL's built-in style table because
+    the title's CStyleSheet overrides nothing."""
+
+    def setUp(self):
+        self.title = load_title(_TITLE_STORY_TITLE)
+        self.assertIsNotNone(self.title)
+        self.page = self.title.pages[0]
+        self.story = self.page.controls[0]
+        self.assertIsInstance(self.story, StoryControl)
+
+    def test_title_top_level(self):
+        self.assertEqual(self.title.title_name, "Story Title")
+        self.assertEqual(self.title.window_rect, (0, 0, 640, 480))
+        self.assertEqual(self.page.name, "Page #1")
+        self.assertEqual(self.page.page_pixel_w, 640)
+        self.assertEqual(self.page.page_pixel_h, 480)
+        self.assertEqual(self.page.page_bg, 0x00A5BFC2)
+
+    def test_root_hung_page_still_resolves_its_story(self):
+        # The page has no enclosing CSection; the CProxyTable named
+        # `Story.bdf` hangs off CTitle.base_contents.
+        self.assertEqual(self.story.rect_himetric, (2328, 635, 15240, 11853))
+        self.assertEqual(self.story.content_proxy_ref, 0x00001400)
+        self.assertIsNotNone(self.story.element_tree)
+
+    def test_element_tree_matches_the_authored_bbml(self):
+        # Story.bdf's BODY stream is
+        # `<H1>…</H1><P>…</P><H2>…</H2><P>…</P><OL>×3</OL><P></P>
+        #  <UL>×3</UL><P></P>`.
+        root = self.story.element_tree
+        self.assertEqual(root.tag, 0x05)
+        head, body = root.children
+        self.assertEqual((head.tag, head.children), (0x0B, ()))
+        self.assertEqual(
+            [c.tag for c in body.children],
+            [0x07, 0x06, 0x08, 0x06, 0x1D, 0x06, 0x1C, 0x06],
+        )
+        self.assertEqual(body.children[0].text, "Story title")
+        self.assertEqual(
+            [c.text for c in body.children[4].children],
+            ["Numbered list item", "Item ", "Item"],
+        )
+
+    def test_paragraphs_take_the_builtin_styles(self):
+        from server.services.medview import story_layout
+        font_map = {f.slot: f.face_name for f in self.title.font_table}
+        got = [
+            (p.style.name, p.style.font_face, p.style.pt_size, p.style.bold, p.text)
+            for p in story_layout.flatten_paragraphs(
+                self.story.element_tree, font_map,
+            )
+        ]
+        self.assertEqual(got, [
+            ("Heading 1", "Arial", 22, True, "Story title"),
+            ("Normal", "Times New Roman", 11, False, "Story body here "),
+            ("Heading 2", "Arial", 18, True, "Second heading"),
+            ("Normal", "Times New Roman", 11, False,
+             "Some more content blah bla blah"),
+            ("List Number", "Times New Roman", 11, False, "Numbered list item"),
+            ("List Number", "Times New Roman", 11, False, "Item "),
+            ("List Number", "Times New Roman", 11, False, "Item"),
+            ("List Bullet", "Times New Roman", 11, False, "Bullet list"),
+            ("List Bullet", "Times New Roman", 11, False, "second level"),
+            ("List Bullet", "Times New Roman", 11, False, "third level"),
+        ])
+
+    def test_layout_matches_the_bbview_reference(self):
+        """Positions against `reference/screenshots/story title.png`.
+        The capture is BBVIEW scaling the 640x480 page ~1.64x to fill
+        its client, so the reference values below are the measured ink
+        divided back down; the tolerance covers that scale estimate."""
+        from server.services.medview import story_layout
+        from server.services.medview.ttl_loader import _himetric_to_pixels
+
+        font_map = {f.slot: f.face_name for f in self.title.font_table}
+        rect = tuple(_himetric_to_pixels(v) for v in self.story.rect_himetric)
+        self.assertEqual(rect, (87, 24, 576, 447))
+        items = story_layout.layout_story(
+            self.story.element_tree, rect, font_map,
+        )
+
+        background = items[0]
+        self.assertEqual((background.x, background.y), (87, 24))
+        self.assertEqual((background.rect_w, background.rect_h), (489, 423))
+        self.assertFalse(background.transparent)
+        self.assertEqual(background.back_color, 0xFFFFFF)
+
+        text = [i for i in items if i.text]
+        # Body text sits 10 pt inside the rect; list text a further
+        # 18 pt in, which the render measures as 24 px.
+        self.assertEqual([i.x for i in text[:4]], [100, 100, 100, 100])
+        self.assertEqual([i.x for i in text[4:]], [124] * 6)
+        # Reference ink tops, page pixels: 66.6 / 98.1 / 154.2 / 180.1
+        # then a 33 px list pitch from 213.5.
+        tops = [i.y for i in text]
+        self.assertEqual(tops[:4], [61, 95, 147, 175])
+        pitches = {b - a for a, b in zip(tops[4:-1], tops[5:], strict=True)}
+        self.assertEqual(pitches, {33})
+
+        bullets = [i for i in items[1:] if not i.text]
+        self.assertEqual(len(bullets), 6)
+        # Flush with the margin (hanging indent == left indent), a
+        # solid ~5 px square, its bottom half a side above the baseline.
+        self.assertEqual({b.x for b in bullets}, {100})
+        self.assertEqual({(b.rect_w, b.rect_h) for b in bullets}, {(5, 5)})
+        self.assertTrue(all(not b.transparent for b in bullets))
+
+
 class TestBuildAllBmBaggage(unittest.TestCase):
     """Per-page bm baggage. Each page produces a `bm<idx>` entry; pages
     with captions or resolved Story text get a kind=8 metafile,
@@ -773,9 +914,20 @@ class TestBuildAllBmBaggage(unittest.TestCase):
         t = load_title(_TITLE_MSN_TODAY)
         bags = build_all_bm_baggage(t)
         self.assertIn("bm0", bags)
-        # Resolved TextRuns body's prose substring lands inside the
-        # kind=8 metafile's TextOut payload.
-        self.assertIn(b"This is an example of content", bags["bm0"])
+        # The Story's flowed paragraphs land in the kind=8 metafile as
+        # one TextOut per line, heading first.
+        self.assertIn(b"MSN Today (update test)", bags["bm0"])
+        self.assertIn(b"An item!", bags["bm0"])
+
+    def test_story_title_bm0_carries_every_paragraph(self):
+        t = load_title(_TITLE_STORY_TITLE)
+        bags = build_all_bm_baggage(t)
+        for phrase in (
+            b"Story title", b"Story body here", b"Second heading",
+            b"Some more content blah bla blah", b"Numbered list item",
+            b"Bullet list", b"third level",
+        ):
+            self.assertIn(phrase, bags["bm0"])
 
     def test_legacy_build_bm0_baggage_is_page0(self):
         t = load_title(_TITLE_4)

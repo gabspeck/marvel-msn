@@ -586,6 +586,10 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
         lines = _wrap_item_lines(item)
         line_h = _item_line_height(item) if len(lines) > 1 else 0
         for line_idx, line in enumerate(lines):
+            # Text-less items exist to paint their rect (the Story
+            # background, a list bullet) — they emit no TextOut.
+            if not line:
+                continue
             records += _wmf_textout(anchor_x, int(item.y) + line_idx * line_h, line)
         if has_clip:
             records += _wmf_restoredc(-1)

@@ -27,6 +27,7 @@ from ...blackbird.wire import (
     build_text_metafile,
     build_trailer,
 )
+from . import story_layout
 from .ccontent import (
     TextRunsContent,
     TextTreeContent,
@@ -154,11 +155,13 @@ class CaptionControl(Control):
 @dataclass(frozen=True)
 class _CompoundControl(Control):
     """Helper base for compound BBCTL controls (Story / Audio /
-    CaptionButton / Outline / Shortcut). `xy_twips` is the (x, y) top-
-    left from the inline tail; `raw_block` is the descriptor's inline
-    tail bytes (decoders that aren't yet RE'd carry the bytes through
-    for offline inspection)."""
-    xy_twips: tuple[int, int]
+    CaptionButton / Outline / Shortcut).
+
+    `rect_himetric` is the site rect, `i32[4]` LTRB in HIMETRIC at
+    `inline_tail[0..16]` — the same landmark `_decode_caption` reads.
+    `raw_block` is the descriptor's inline tail (decoders that aren't
+    yet RE'd carry the bytes through for offline inspection)."""
+    rect_himetric: tuple[int, int, int, int]
     raw_block: bytes
 
 
@@ -174,6 +177,12 @@ class StoryControl(_CompoundControl):
     decoding remains TODO (see `docs/re-passes/BBCTL.OCX.md`)."""
     content_proxy_ref: int | None = None
     content: TextRunsContent | TextTreeContent | None = None
+
+    @property
+    def element_tree(self):
+        """Parsed `CElementNode` root when the resolved content is a
+        TextTree that decoded, else None."""
+        return getattr(self.content, "root", None)
 
 
 @dataclass(frozen=True)
@@ -336,25 +345,30 @@ def _parse_cbframe(buf: bytes) -> tuple[str, tuple[int, int, int, int]]:
 def _parse_cstylesheet(buf: bytes) -> tuple[FaceEntry, ...]:
     """CStyleSheet font table.
 
-    Wire shape (4.ttl): `[u8 version=9][u16 font_count][u16 style_count]
-    { [u8 namelen][ASCII name][u16 key] }*font_count [u8 trailer]`.
-    style_count tolerates non-zero values (tests/assets/story_test.ttl:
-    54 styles after the font table; unused here).
+    Wire shape: `[u8 version=9][u16 font_count]
+    { [u16 key][u8 namelen][ASCII name] }*font_count [u16 style_count]…`.
+
+    The key leads its name. `story_title.ttl` reads
+    `09 | 03 00 | 03 00 0B "Courier New" | 02 00 05 "Arial" |
+    01 00 0F "Times New Roman" | 00 00`, and those three keys are the
+    ones VIEWDLL's built-in style table indexes (see `bbstyles`:
+    `Normal` asks for font 1, the headings for 2, `Code` for 3).
+    `story_test.ttl` follows its 7 fonts with `36 00` — the 54 styles
+    it overrides, which this parser stops short of.
     """
     if buf[0] != 0x09:
         raise ValueError(f"unsupported CStyleSheet version: {buf[0]}")
     pos = 1
     font_count = struct.unpack_from("<H", buf, pos)[0]
     pos += 2
-    pos += 2                                               # style_count (unused)
     faces: list[FaceEntry] = []
     for _ in range(font_count):
+        slot = struct.unpack_from("<H", buf, pos)[0]
+        pos += 2
         namelen = buf[pos]
         pos += 1
         name = buf[pos:pos + namelen].decode("ascii", errors="replace")
         pos += namelen
-        slot = struct.unpack_from("<H", buf, pos)[0]
-        pos += 2
         faces.append(FaceEntry(slot=slot, face_name=name))
     return tuple(faces)
 
@@ -868,21 +882,22 @@ def _decode_compound(
     property_block: bytes,
 ) -> _CompoundControl:
     """Compound BBCTL decoder. Names ≤ 7 chars get NUL-padded to 8 B in
-    the name field; (x_twips, y_twips) read at the first 4-byte-aligned
-    offset within inline_tail. Other property fields TBD — carried as
-    `raw_block` (the seq-ordered slice from the property region) until
-    BBCTL.OCX persist functions are RE'd."""
+    the name field; the LTRB HIMETRIC site rect is read at the first
+    4-byte-aligned offset within inline_tail. Other property fields TBD
+    — carried as `raw_block` (the seq-ordered slice from the property
+    region) until BBCTL.OCX persist functions are RE'd."""
     buf = desc.inline_tail
     base = 1 if buf[:1] == b"\x00" else 0
-    if len(buf) >= base + 8:
-        x_twips, y_twips = struct.unpack_from("<ii", buf, base)
-    else:
-        x_twips, y_twips = 0, 0
+    rect = (
+        struct.unpack_from("<iiii", buf, base)
+        if len(buf) >= base + 16
+        else (0, 0, 0, 0)
+    )
     return ctor(
         seq=desc.seq,
         flags=desc.flags,
         name=desc.name,
-        xy_twips=(x_twips, y_twips),
+        rect_himetric=rect,
         raw_block=bytes(property_block) or bytes(buf),
     )
 
@@ -1165,20 +1180,28 @@ def _extract_proxy_name(raw_block: bytes) -> str | None:
     return None
 
 
-def _find_textruns_target(
+# A Story's prose lives in the TextTree stream; the parallel TextRuns
+# stream carries paragraph markers and is empty in titles that never
+# override a style (`story_title.ttl 6/1` is the two-byte placeholder).
+# Prefer TextTree and keep TextRuns as the fallback.
+_CONTENT_TYPE_PREFERENCE = ("TextTree", "TextRuns")
+
+
+def _find_content_target(
     ole,
     proxy_path: tuple[int, int],
     proxy_handles: tuple[int, ...],
     content_class_table: int,
 ) -> tuple[int, tuple[int, int]] | None:
-    """Walk a CProxyTable's entries and return `(proxy_key, content_path)`
-    for the first entry pointing at a CContent stream whose properties
-    advertise `type = TextRuns`. Returns None when no TextRuns target
-    is present (e.g. msn_today CProxyTable@7/2 holds only the
-    ImageProxy WaveletImage)."""
+    """Walk a CProxyTable's entries and return `(proxy_key,
+    content_path)` for the entry pointing at the Story's text body.
+
+    Returns None when the table holds no text content at all (e.g.
+    msn_today CProxyTable@7/2, which is only the ImageProxy
+    WaveletImage)."""
     proxy_body = ole.openstream(_ole_path(proxy_path, "\x03object")).read()
-    entries = parse_proxy_table(proxy_body, proxy_handles)
-    for entry in entries:
+    by_type: dict[str, tuple[int, tuple[int, int]]] = {}
+    for entry in parse_proxy_table(proxy_body, proxy_handles):
         if entry.content_handle is None:
             continue
         c_table, c_slot = _handle_to_storage_slot(entry.content_handle)
@@ -1188,8 +1211,12 @@ def _find_textruns_target(
             props = _read_properties(ole, c_table, c_slot)
         except (OSError, ValueError):
             continue
-        if props.get("type") == "TextRuns":
-            return entry.proxy_key, (c_table, c_slot)
+        content_type = str(props.get("type", ""))
+        if content_type in _CONTENT_TYPE_PREFERENCE:
+            by_type.setdefault(content_type, (entry.proxy_key, (c_table, c_slot)))
+    for content_type in _CONTENT_TYPE_PREFERENCE:
+        if content_type in by_type:
+            return by_type[content_type]
     return None
 
 
@@ -1208,8 +1235,8 @@ def _chase_story_content(
        "Homepage.bdf"). Bail if absent.
     2. Walk `section.contents` (typed CProxyTable refs). For each:
        a. Read its properties — match `name` against the Pascal name.
-    3. On match, walk the CProxyTable's entries; pick the first whose
-       target CContent has `type == "TextRuns"`.
+    3. On match, walk the CProxyTable's entries and pick the text body
+       (`_find_content_target`).
     4. CK-decompress the CContent body and decode.
 
     Failures at any step → `content_proxy_ref = None`, `content = None`
@@ -1230,7 +1257,7 @@ def _chase_story_content(
         if props.get("name") != proxy_name:
             continue
         try:
-            target = _find_textruns_target(
+            target = _find_content_target(
                 ole,
                 proxy_path,
                 handles_by_storage.get(proxy_path, ()),
@@ -1244,7 +1271,7 @@ def _chase_story_content(
             return story
         if target is None:
             log.info(
-                "story_chase section=%d/%d proxy=%s no_textruns_target",
+                "story_chase section=%d/%d proxy=%s no_text_target",
                 section_path[0], section_path[1], proxy_name,
             )
             return story
@@ -1273,7 +1300,7 @@ def _chase_story_content(
             return story
         return StoryControl(
             seq=story.seq, flags=story.flags, name=story.name,
-            xy_twips=story.xy_twips, raw_block=story.raw_block,
+            rect_himetric=story.rect_himetric, raw_block=story.raw_block,
             content_proxy_ref=proxy_key, content=decoded,
         )
     log.info(
@@ -1365,31 +1392,36 @@ def _attach_story_content(
     cbform_refs: list[_CBFormRef],
     handles_by_storage: dict[tuple[int, int], tuple[int, ...]],
     content_class_table: int | None,
+    base_section_path: tuple[int, int],
+    base_section: SectionRecord,
 ) -> list[LoadedPage]:
     """Replace each page's StoryControl with one carrying the resolved
-    content + proxy_ref. Pages whose owning section is unknown
-    (CTitle.base_forms case in 4.ttl, where there's no enclosing
-    CSection) keep their Stories as-is — there's no proxy table to
-    consult."""
+    content + proxy_ref.
+
+    A page hung straight off `CTitle.base_forms` has no enclosing
+    CSection, but CTitle derives from CSection and carries its own
+    `contents` list — `story_title.ttl` puts its `Story.bdf`
+    CProxyTable there — so the root section stands in."""
     if content_class_table is None:
         return pages
     out: list[LoadedPage] = []
     for page, ref in zip(pages, cbform_refs, strict=True):
+        section_path = ref.owning_section_path or base_section_path
         if ref.owning_section_path is None:
-            out.append(page)
-            continue
-        try:
-            section = _read_section(
-                ole, handles_by_storage, ref.owning_section_path,
-            )
-        except (OSError, ValueError):
-            out.append(page)
-            continue
+            section = base_section
+        else:
+            try:
+                section = _read_section(
+                    ole, handles_by_storage, ref.owning_section_path,
+                )
+            except (OSError, ValueError):
+                out.append(page)
+                continue
         new_controls: list[Control] = []
         for c in page.controls:
             if isinstance(c, StoryControl):
                 new_controls.append(_chase_story_content(
-                    ole, ref.owning_section_path, section,
+                    ole, section_path, section,
                     handles_by_storage, content_class_table, c,
                 ))
             else:
@@ -1482,6 +1514,7 @@ def load_title(path: pathlib.Path) -> LoadedTitle | None:
         ]
         pages = _attach_story_content(
             ole, pages, cbform_refs, handles_by_storage, content_class_table,
+            (title_table, 0), base_section,
         )
     except Exception as exc:
         log.info("load_title path=%s parse_failed=%r", path, exc)
@@ -1825,14 +1858,14 @@ def build_bm_baggage(
       kind=8 WMF TextOut path. Captions carrying a dynamic `idTag`
       (`_resolve_caption_text`) bake the tag's value, not the authored
       placeholder.
-    - StoryControl content (TextRuns body resolved by PR1's chase):
-      placed at the Story's `xy_twips → pixels` top-left, single string.
+    - StoryControl content: the resolved TextTree flowed into its site
+      rect by `story_layout.layout_story`, which resolves each
+      element's built-in style, wraps, and positions.
 
     Pages without any caption or resolved Story text fall back to the
     kind=5 1bpp white raster sized to the page. The kind=5 + authored
     trailer attempt (rolled back 2026-05-13) caused the engine to hang
-    post-`MVBuildLayoutLine`; kind=8 stays the working baseline. PR3
-    extends kind=8 to carry per-page Story text alongside captions.
+    post-`MVBuildLayoutLine`; kind=8 stays the working baseline.
 
     UNVERIFIED: per-page bm baggage emission is structural — 86Box
     verification deferred to a follow-up pass. The naming convention
@@ -1873,17 +1906,15 @@ def build_bm_baggage(
             auto_size=cap.auto_size,
         ))
 
+    font_map = {face.slot: face.face_name for face in font_table}
     for c in page.controls:
-        if isinstance(c, StoryControl) and c.content is not None and c.content.text:
-            face = font_table[0].face_name if font_table else "Times New Roman"
-            items.append(TextItem(
-                x=_twips_to_pixels(c.xy_twips[0]),
-                y=_twips_to_pixels(c.xy_twips[1]),
-                text=c.content.text,
-                font_face=face,
-                font_height=-16,
-                font_weight=400,
-            ))
+        if not isinstance(c, StoryControl) or c.element_tree is None:
+            continue
+        items.extend(story_layout.layout_story(
+            c.element_tree,
+            tuple(_himetric_to_pixels(v) for v in c.rect_himetric),
+            font_map,
+        ))
 
     if not items:
         return _empty_kind5_raster(page.page_pixel_w, page.page_pixel_h)

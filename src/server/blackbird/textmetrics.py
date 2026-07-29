@@ -89,17 +89,20 @@ def _resolve_file(face: str, bold: bool, italic: bool) -> str:
 
 
 class _BitmapStrike:
-    """One FNT strike: per-character widths + cell height. `getlength`
-    sums the `dfCharTable` advance of each character (default-char width
-    for anything outside dfFirstChar..dfLastChar), matching GDI.
+    """One FNT strike: per-character widths + cell height + ascent.
+    `getlength` sums the `dfCharTable` advance of each character
+    (default-char width for anything outside dfFirstChar..dfLastChar),
+    matching GDI.
     """
 
-    __slots__ = ("widths", "default_width", "pix_height")
+    __slots__ = ("widths", "default_width", "pix_height", "ascent")
 
-    def __init__(self, widths: dict[int, int], default_width: int, pix_height: int):
+    def __init__(self, widths: dict[int, int], default_width: int,
+                 pix_height: int, ascent: int = 0):
         self.widths = widths
         self.default_width = default_width
         self.pix_height = pix_height
+        self.ascent = ascent or pix_height
 
     def getlength(self, text: str) -> int:
         w = self.widths
@@ -139,6 +142,7 @@ def _parse_fon(path: str) -> dict[int, _BitmapStrike]:
     for off in offsets:
         ver = struct.unpack_from("<H", data, off)[0]
         points = struct.unpack_from("<H", data, off + 0x44)[0]
+        ascent = struct.unpack_from("<H", data, off + 0x4A)[0]   # dfAscent
         pix_height = struct.unpack_from("<H", data, off + 0x58)[0]
         first = data[off + 0x5F]
         last = data[off + 0x60]
@@ -153,7 +157,7 @@ def _parse_fon(path: str) -> dict[int, _BitmapStrike]:
         for i, ch in enumerate(range(first, last + 1)):
             widths[ch] = struct.unpack_from("<H", data, off + tbl + i * stride)[0]
         default_width = widths.get(default_char, widths.get(0x20, 0))
-        strikes[points] = _BitmapStrike(widths, default_width, pix_height)
+        strikes[points] = _BitmapStrike(widths, default_width, pix_height, ascent)
     return strikes
 
 
@@ -164,7 +168,8 @@ def _load_fon(path: str) -> dict[int, _BitmapStrike]:
 
 @lru_cache(maxsize=256)
 def _load(face: str, px_height: int, bold: bool, italic: bool):
-    """Return `(font, line_height)` where `font` has `getlength(str)->int`.
+    """Return `(font, line_height, ascent)` where `font` has
+    `getlength(str)->int`.
 
     `px_height` is the pixel em-height (LOGFONT `lfHeight` magnitude).
     """
@@ -179,7 +184,7 @@ def _load(face: str, px_height: int, bold: bool, italic: bool):
             if best is None:
                 best = min(strikes.values(),
                            key=lambda s: abs(round(s.pix_height * 72 / 96) - points))
-            return best, best.pix_height
+            return best, best.pix_height, best.ascent
         # Unparseable .FON → fall back to the default scalable face.
         path = str(_FONT_DIR / _FONT_FILES[_DEFAULT_FACE][(False, False)])
 
@@ -187,7 +192,7 @@ def _load(face: str, px_height: int, bold: bool, italic: bool):
 
     font = ImageFont.truetype(path, px)
     asc, desc = font.getmetrics()
-    return font, asc + desc
+    return font, asc + desc, asc
 
 
 def measure_text(face: str, px_height: int, bold: bool, italic: bool, text: str) -> int:
@@ -196,7 +201,7 @@ def measure_text(face: str, px_height: int, bold: bool, italic: bool, text: str)
     """
     if not text:
         return 0
-    font, _ = _load(face, px_height, bold, italic)
+    font, _, _ = _load(face, px_height, bold, italic)
     return round(font.getlength(text))
 
 
@@ -204,14 +209,22 @@ def line_height(face: str, px_height: int, bold: bool, italic: bool) -> int:
     """Cell height in pixels — GDI's `tmHeight` (raster `dfPixHeight`),
     used as the per-line vertical advance for wrapped text.
     """
-    _, lh = _load(face, px_height, bold, italic)
+    _, lh, _ = _load(face, px_height, bold, italic)
     return round(lh)
+
+
+def ascent(face: str, px_height: int, bold: bool, italic: bool) -> int:
+    """Baseline offset from the top of the cell — GDI's `tmAscent`
+    (raster `dfAscent`). A TextOut anchored TA_TOP puts the baseline
+    this far below its y."""
+    _, _, asc = _load(face, px_height, bold, italic)
+    return round(asc)
 
 
 def text_measurer(face: str, px_height: int, bold: bool,
                   italic: bool) -> Callable[[str], int]:
     """A `measure(s) -> int` closure bound to one font, for `drawtext`."""
-    font, _ = _load(face, px_height, bold, italic)
+    font, _, _ = _load(face, px_height, bold, italic)
 
     def measure(s: str) -> int:
         return round(font.getlength(s)) if s else 0

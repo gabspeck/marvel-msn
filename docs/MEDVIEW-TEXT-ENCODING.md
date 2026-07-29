@@ -556,16 +556,18 @@ serializer layouts (all in VIEWDLL.DLL):
 | TextRuns CElementData blob (§7.4)                         | `0x80 <style_id u16>` control + NUL + prose in case-1 |
 | `CStyleSheet` font key (CStyleSheet's font_entries array) | Section-0 face slot index (per `docs/mosview-authored-text-and-font-re.md` §"Section 0 Font Table") |
 
-### 8.2 Per-segment style_id resolution — external
+### 8.2 Per-segment style_id resolution
 
-TextRuns has no inline style metadata (§7.4) and TextTree's
-opcode-level interleaving is owned by an external COM component
-(§7.5). Until the COM parser is RE'd or runtime-profiled, every
-case-1 segment ships with `style_id = 0` (the title's default
-CStyleSheet entry). The server's `_collect_styled_segments`
-defaults to that value; the wire encoder accepts arbitrary
-style_id values, so future style resolution slots in without
-changing the lowering path.
+TextRuns has no inline style metadata (§7.4). The style comes from
+the TextTree instead: each `CElementNode` carries a BBML element tag,
+and the tag selects a style out of the title's `CStyleSheet` — or, for
+a title that overrides nothing, out of VIEWDLL's built-in table. The
+node grammar is in `docs/ccontent.md`; the table and the tag-to-style
+map are in `docs/blackbird-style-sheet.md`.
+
+Only the tags the fixtures exercise are pinned (`P`, `H1`, `H2`, `LI`
+under `UL` / `OL`); the rest of the BBML DTD's element numbering is
+still open, so an unrecognised tag falls back to `Normal`.
 
 ## 9. Multi-Chunk Topic Navigation
 
@@ -668,8 +670,9 @@ Implementer's checklist. Each encoder must satisfy:
 | Fixture path                                        | Path exercised                                                       |
 |-----------------------------------------------------|----------------------------------------------------------------------|
 | `tests/assets/story_test.ttl` `8/7` (TextRuns 122 B) | TextRuns decoder + case-3 (BBDESIGN captions fallback)               |
-| `tests/assets/story_test.ttl` `8/2` (TextTree 85 B) | TextTree text-segment decode (2 segments, no picture)                |
-| `tests/assets/story_test.ttl` `8/6` (TextTree 1516 B) | TextTree text-segment decode + picture INTRUDE detection             |
+| `tests/assets/story_test.ttl` `8/2` (TextTree 85 B) | CElementNode tree, heading + paragraph spine                         |
+| `tests/assets/story_test.ttl` `8/6` (TextTree 1516 B) | CElementNode tree with a version-5 picture INTRUDE and version-2 list markers |
+| `tests/assets/story_title.ttl` `6/0` (TextTree 279 B) | Headings, paragraphs, `OL` / `UL` against VIEWDLL's built-in styles  |
 | `tests/assets/all_controls.ttl`                     | BBCTL site coverage (captions / shortcuts / outlines / audio / buttons) |
 | `tests/assets/captions_test.ttl`                    | BBDESIGN caption-only title (case-3 + kind=8 WMF baggage)            |
 | `tests/assets/multi_page_title.ttl`                 | Multi-page lower (per-page bm baggage map)                           |

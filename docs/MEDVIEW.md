@@ -579,8 +579,10 @@ engine probes via `wsprintfA("|bm%d", idx)` and the handler dispatches
 by canonical name out of a `dict[str, bytes]` populated at OpenTitle
 time. Each page's baggage carries:
 - CaptionControl text drawn via the kind=8 WMF TextOut path (existing).
-- Story content (PR1's TextRuns chase) at the Story's
-  `xy_twips → pixels` top-left.
+- Story content: the resolved TextTree flowed into the Story's site
+  rect (`rect_himetric → pixels`), one TextOut per wrapped line, with
+  each element's style taken from VIEWDLL's built-in table (see
+  `docs/blackbird-style-sheet.md`).
 - Pages without text → kind=5 1bpp white raster sized to the page.
 
 UNVERIFIED in PR3 (no 86Box round-trip):

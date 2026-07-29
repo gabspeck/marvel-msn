@@ -188,7 +188,7 @@ CATEGORY_DEFS = (
 # `%X` path instead of `%X%8X`.
 MEDVIEW_TEST_LEAF_DEFS = (
     (0x1000, "Captions Test"),
-    (0x1001, "Story Test"),
+    (0x1001, "Story Title"),
     (0x1002, "Multi-page Title"),
     (0x1003, "All Controls"),
 )

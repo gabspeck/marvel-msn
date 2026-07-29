@@ -203,8 +203,9 @@ of an already-tiled-bg baseline so the BMP is a constant.
   `7/1` (single Caption "This is another page" / Comic Sans MS).
   The other four currently carry through as `raw_block` bytes on
   `StoryControl` / `AudioControl` / `CaptionButtonControl` /
-  `OutlineControl` / `ShortcutControl`; only the descriptor's
-  `xy_twips` is decoded.
+  `OutlineControl` / `ShortcutControl`; only the descriptor's LTRB
+  HIMETRIC site rect is decoded, at the same `inline_tail[0..16]`
+  landmark Caption1 uses.
 
 ## Caption1 property block
 
@@ -498,16 +499,15 @@ CLSID → site class name map (pinned from
 The `_SiteDescriptor` dataclass gains `class_index` and
 `clsid: bytes | None`; the `UnknownControl` dataclass also carries
 `clsid` for offline inspection. Per-control compound decoders
-(StoryControl etc.) currently surface only what PR1 already extracted
-(xy_twips + raw_block + Story content chase). Deep persist-stream
+(StoryControl etc.) currently surface only the site rect, the
+`raw_block` bytes, and the Story content chase. Deep persist-stream
 field decoding per control is a follow-up pass documented in
 `docs/re-passes/BBCTL.OCX.md` §IPersistStreamInit::Save per class.
 
-## Story content_proxy_ref chase (PR1 heuristic)
+## Story content_proxy_ref chase (heuristic)
 
-`StoryControl.content_proxy_ref: int | None` and
-`StoryControl.content: TextRunsContent | None` are populated by an
-empirical chase in `load_title()`:
+A Story's text body is reached by an empirical chase from the site's
+`raw_block`:
 
 1. **Find a Pascal-prefixed ASCII name in `raw_block`.** Pattern:
    `[u8 pascal_len in 4..127][N printable ASCII]` (greedy printable run
@@ -521,16 +521,22 @@ empirical chase in `load_title()`:
    Each CProxyTable carries a `name` property — match it against the
    Pascal name. CProxyTable / CContent property streams are
    MSZIP-wrapped (`maybe_decompress_ck` strips the envelope).
-3. **Walk the matched CProxyTable's entries.** Pick the first whose
-   target CContent's `type` property is `"TextRuns"` (skips
-   `TextTree`, `ImageProxy`, `WaveletImage`, etc.). The matched
-   `proxy_key` becomes `StoryControl.content_proxy_ref` (e.g.
-   `0x00001500` for msn_today's Homepage.bdf).
-4. **Decode the CContent payload** via `decode_textruns`
-   (`ccontent.py`). See `docs/ccontent.md` for the body shape and
-   PR1 caveats.
 
-Failures at any step set `content_proxy_ref = None` and
-`content = None` (logged at INFO `story_chase ...`). 4.ttl pages have
-no owning CSection (`CTitle.base_forms` path) and no Story controls;
-the chase short-circuits.
+   A page hung straight off `CTitle.base_forms` has no enclosing
+   CSection, but CTitle derives from CSection and carries its own
+   contents list. `story title.ttl` puts its `Story.bdf` CProxyTable
+   there, so the root section stands in for those pages.
+3. **Walk the matched CProxyTable's entries.** Prefer the target whose
+   CContent `type` property is `"TextTree"`, falling back to
+   `"TextRuns"`; skip `ImageProxy` / `WaveletImage`. The prose lives in
+   the TextTree — `story title.ttl`'s parallel TextRuns stream at 6/1
+   is the two-byte empty placeholder, because the title overrides no
+   style. The matched `proxy_key` is the Story's content ref
+   (`0x00001400` for TextTree, `0x00001500` for TextRuns).
+4. **Decode the CContent payload** — `decode_texttree` when the body
+   carries the `01 05` magic, `decode_textruns` otherwise. See
+   `docs/ccontent.md` for both body shapes.
+
+Failures at any step leave the Story's content ref and content unset
+(logged at INFO `story_chase ...`). `captions_test.ttl` has no Story
+controls, so the chase short-circuits there.
