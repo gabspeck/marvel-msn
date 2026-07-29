@@ -48,9 +48,57 @@ checking `param_1+0x48 != 0` for "sec06 present". Field offsets within the recor
 | `+0x8C` | i32 | `top_band.h` | top child band rect h |
 
 After read each rect goes through one of:
-- `MosView_RectFromContainer(hwnd, &x, &y, &w, &h, !(flags & 8))` — outer rect; chrome-compensated
-- `FUN_7f3c5e1c(&x, &y, &w, &h, hwnd)` — fractional /0x400 (top band when `(flags & 1) == 0`)
-- `FUN_7f3c5ea5(&x, &y, &w, &h, hwnd)` — absolute, add parent origin (top band when `(flags & 1) != 0`)
+- `ComputeMosViewClientFromAuthoredRect(hwnd, &x, &y, &w, &h, !(flags & 8))` — outer rect; chrome-compensated
+- `ScalePerMilleRectToWindow(&x, &y, &w, &h, hwnd)` @ `0x7f3c5e1c` — fractional /0x400, applied to the top band only when `(flags & 1) == 0`. When the bit is set there is no else branch: the authored values are used as-is.
+- `OffsetPointByWindowOrigin(&x, &y, &w, &h, hwnd)` @ `0x7f3c5ea5` — absolute, add parent origin. Not reached from the top-band path; it is the `else` arm of the popup-record block, keyed off that record's own style byte bit `0x08`.
+
+Every rect except the outer one is then scaled by `DAT_7f3cd310 / 0x60`
+(LOGPIXELSX / 96). The outer rect does its DPI scaling inside
+`ComputeMosViewClientFromAuthoredRect` instead.
+
+### Outer rect → client area: the `(-4, -23)` deficit
+
+`ComputeMosViewClientFromAuthoredRect @ 0x7f3c1fd5` is called from
+`CreateMosViewWindowHierarchy @ 0x7f3c6790`, and its result is passed
+straight to `MoveWindow`. The sixth argument `(flags & 8) == 0` selects
+only how the *input* rect is read (per-mille vs absolute) — **chrome
+compensation runs on both branches**:
+
+```c
+GetWindowRect(hwnd,&win);  GetClientRect(hwnd,&cli);  MapWindowPoints(...);
+local_10 = win.right  - cli.right;     // right frame
+local_8  = cli.top    - win.top;       // top frame (border+caption+menu)
+local_c  = win.bottom - cli.bottom;    // bottom frame
+iVar1   = (cli.left - win.left) < 5 ? 0 : (cli.left - win.left) - 4;
+local_8 = local_8 < 0x18 ? 0 : local_8 - 0x17;
+*pw = (*pw - 8)    * dpi/96 + iVar1   + local_10 + 8;
+*ph = (*ph - 0x1b) * dpi/96 + local_8 + local_c   + 0x1b;
+```
+
+Converting that outer size back to a client size at 96 dpi, the frame
+terms cancel:
+
+```
+client_w = W + iVar1   - left_frame  →  W - 4   (left_frame >= 5; else W - left_frame)
+client_h = H + local_8 - top_frame   →  H - 23  (top_frame  >= 23)
+```
+
+The result is independent of the chrome — a menu bar makes no
+difference. So MOSVIEW never makes the client area equal the authored
+rect: the `8`/`27` subtracted and the `4`/`23` added back encode a fixed
+reference chrome (4 px border, 23 px border+caption), which makes the
+authored rect an **outer window** measurement.
+
+Consequence: a page bitmap sized to the CBFrame extents overflows the
+client area by exactly (4, 23), so both scrollbars appear and cannot be
+dismissed. Verified live 2026-07-29 on the Captions Test title —
+authored 640×480 gave `viewer+0x28`/`+0x2C` = 636×457 against a
+640×480 content slot. Fitting a `W × H` page needs an authored rect of
+`(W+4, H+23)`.
+
+BBVIEW uses the opposite convention: it sizes the client area to the
+page, and `CBFrame.border_style = 0` ("Single fixed") gives the window
+no sizing border and no maximize box, so nothing scrolls there.
 
 Then each component is scaled by `DAT_7f3cd310 / 0x60` (LOGPIXELSY / 96 — DPI scaling).
 

@@ -301,7 +301,13 @@ def _parse_title_name(stream: bytes) -> str:
 
 
 def _parse_cbframe(buf: bytes) -> tuple[str, tuple[int, int, int, int]]:
-    """CBFrame: version=2, frame_name, caption, (left, top, width, height)."""
+    """CBFrame: version=2, frame_name, caption, (left, top, right, bottom).
+
+    The rect is LTRB, not left/top/width/height: `CBFrame::SetDefaults`
+    initialises `this+0x10..+0x1C` to 0 / 0 / 640 / 480. Callers that
+    want extents must subtract. Every current fixture authors the frame
+    at the origin, so the two readings coincide there.
+    """
     if buf[0] != 0x02:
         raise ValueError(f"unsupported CBFrame version: {buf[0]}")
     pos = 1
@@ -1444,11 +1450,11 @@ def load_title(path: pathlib.Path) -> LoadedTitle | None:
     finally:
         ole.close()
 
-    left, top, width, height = rect
+    left, top, right, bottom = rect
     return LoadedTitle(
         title_name=title_name,
         caption=caption,
-        window_rect=(left, top, width, height),
+        window_rect=(left, top, right - left, bottom - top),
         font_table=font_table,
         pages=tuple(pages),
     )
@@ -1464,11 +1470,17 @@ _SEC0_DESCRIPTOR_SIZE = 0x2A
 _SEC0_POINTER_ENTRY_SIZE = 0x04
 
 _SEC06_RECORD_SIZE = 0x98
-# Bit 0x08 = inner-pane rect at +0x80..+0x8F is absolute pixels.
+# Bit 0x01 = inner/top-band rect mode for +0x80..+0x8F (set = absolute,
+# clear = per-mille via ScalePerMilleRectToWindow).
+# Bit 0x08 = OUTER rect mode for +0x49..+0x55 (set = absolute, clear =
+# per-mille). CreateMosViewWindowHierarchy@0x7f3c6790 passes
+# `(sec06[0x48] & 8) == 0` as the per-mille selector to
+# ComputeMosViewClientFromAuthoredRect@0x7f3c1fd5. The bit only picks
+# the input interpretation — chrome compensation runs on both branches.
 # Bit 0x40 = NSR y-anchor (NavigateMosViewPane: NSR.+0x9c = 1 → NSR pinned
 # to the bottom of the union, SR claims the top — i.e. SR.top = (0, 0).
 # CreateMosViewWindowHierarchy@0x7f3c6b32, NavigateMosViewPane@0x7f3c3670.
-_SEC06_FLAG_INNER_RECT_ABSOLUTE = 0x08
+_SEC06_FLAG_OUTER_RECT_ABSOLUTE = 0x08
 _SEC06_FLAG_NSR_ANCHOR_BOTTOM = 0x40
 _SEC06_RECT_INHERIT = (-1, -1, -1, -1)
 # u16 size field on section 3 caps total record count at this many.
@@ -1578,31 +1590,36 @@ def _scrollbar_flags_to_sec06_flag(scrollbar_flags: int) -> int:
     - `1` (H only): MOSVIEW ignores H entirely; log + degrade to V-mode.
     """
     if scrollbar_flags == 0:
-        return _SEC06_FLAG_INNER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
+        return _SEC06_FLAG_OUTER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
     if scrollbar_flags & 0x02:                             # V (or V|H)
-        return _SEC06_FLAG_INNER_RECT_ABSOLUTE
+        return _SEC06_FLAG_OUTER_RECT_ABSOLUTE
     if scrollbar_flags & 0x01:                             # H only — degrade to V
         log.info(
             "scrollbar_flags=H_only is unmodeled by MOSVIEW; degrading to V",
         )
-        return _SEC06_FLAG_INNER_RECT_ABSOLUTE
-    return _SEC06_FLAG_INNER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
+        return _SEC06_FLAG_OUTER_RECT_ABSOLUTE
+    return _SEC06_FLAG_OUTER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
 
 
 def _build_sec06_record(page: LoadedPage, title: LoadedTitle) -> bytes:
-    """One sec06 record per `LoadedPage`. Caption / window position come
-    from the title-level CBFrame; geometry / colors / scrollbar flag
-    come from the page. `outer_rect` (left, top) is the desktop window
-    position; (w, h) is the authored content size — chrome is added by
-    the engine's compensation helper."""
+    """One sec06 record per `LoadedPage`. Caption and the outer window
+    rect come from the title-level CBFrame; colors and the scrollbar
+    flag come from the page.
+
+    `outer_rect` at +0x49..+0x55 is the whole CBFrame rect. MOSVIEW
+    feeds it to `ComputeMosViewClientFromAuthoredRect@0x7f3c1fd5`, which
+    yields a client area of `(w - 4, h - 23)` at 96 dpi — the frame
+    terms cancel, so the result does not depend on the chrome. A page
+    whose bitmap matches the CBFrame extents therefore overflows the
+    client area by exactly (4, 23) and both scrollbars appear. Verified
+    live 2026-07-29: authored 640x480 → client 636x457, slot 640x480.
+    """
     record = bytearray(_SEC06_RECORD_SIZE)
     caption_bytes = title.caption.encode("ascii", errors="replace") + b"\x00"
     record[0x15:0x15 + len(caption_bytes)] = caption_bytes
     record[0x48] = _scrollbar_flags_to_sec06_flag(page.scrollbar_flags)
-    left, top, _, _ = title.window_rect
-    struct.pack_into(
-        "<iiii", record, 0x49, left, top, page.page_pixel_w, page.page_pixel_h,
-    )
+    left, top, width, height = title.window_rect
+    struct.pack_into("<iiii", record, 0x49, left, top, width, height)
     struct.pack_into("<I", record, 0x5B, page.page_bg)
     struct.pack_into("<II", record, 0x78, page.page_bg, page.page_bg)
     struct.pack_into("<iiii", record, 0x80, *_SEC06_RECT_INHERIT)

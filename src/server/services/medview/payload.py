@@ -168,11 +168,16 @@ def _build_section0() -> bytes:
 # created and always claims its 40% slice of the union.
 
 _SEC06_RECORD_SIZE = 0x98
-# Bit 0x01 = outer-rect mode (set = absolute, clear = per-mille).
-# Bit 0x08 = inner-pane rect mode (set = absolute pixels at +0x80..+0x8F,
+# Bit 0x01 = inner/top-band rect mode for +0x80..+0x8F (set = absolute,
 #            clear = per-mille via ScalePerMilleRectToWindow).
+# Bit 0x08 = OUTER rect mode for +0x49..+0x55 (set = absolute, clear =
+#            per-mille). CreateMosViewWindowHierarchy@0x7f3c6790 passes
+#            `(sec06[0x48] & 8) == 0` to
+#            ComputeMosViewClientFromAuthoredRect@0x7f3c1fd5; the bit
+#            picks the input interpretation only — chrome compensation
+#            runs on both branches.
 # Bit 0x40 = forces NSR's `MosPaneState+0x9C` no-scroll flag to 1.
-_SEC06_FLAG_INNER_RECT_ABSOLUTE = 0x08
+_SEC06_FLAG_OUTER_RECT_ABSOLUTE = 0x08
 _SEC06_COLOR_INHERIT = 0xFFFFFFFF
 _SEC06_RECT_INHERIT = (-1, -1, -1, -1)
 
@@ -181,7 +186,7 @@ def _build_sec06_record() -> bytes:
     record = bytearray(_SEC06_RECORD_SIZE)
     caption = b"MSN Today\x00"
     record[0x15:0x15 + len(caption)] = caption
-    record[0x48] = _SEC06_FLAG_INNER_RECT_ABSOLUTE
+    record[0x48] = _SEC06_FLAG_OUTER_RECT_ABSOLUTE
     struct.pack_into("<iiii", record, 0x49, 0, 0, 640, 480)
     struct.pack_into("<I", record, 0x5B, _SEC06_COLOR_INHERIT)
     struct.pack_into("<II", record, 0x78, _SEC06_COLOR_INHERIT, _SEC06_COLOR_INHERIT)

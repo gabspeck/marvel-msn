@@ -578,7 +578,7 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
 
     def test_scrollbar_flag_on_only_page(self):
         from server.services.medview.ttl_loader import (
-            _SEC06_FLAG_INNER_RECT_ABSOLUTE,
+            _SEC06_FLAG_OUTER_RECT_ABSOLUTE,
             _SEC06_RECORD_SIZE,
             _build_sec06_record,
         )
@@ -586,7 +586,7 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
         records = [_build_sec06_record(p, t) for p in t.pages]
         self.assertEqual(len(records), 1)
         # Single Page (scrollbar_flags=3 → both): absolute inner rect.
-        self.assertEqual(records[0][0x48], _SEC06_FLAG_INNER_RECT_ABSOLUTE)
+        self.assertEqual(records[0][0x48], _SEC06_FLAG_OUTER_RECT_ABSOLUTE)
         self.assertEqual(len(records[0]), _SEC06_RECORD_SIZE)
 
 
