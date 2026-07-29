@@ -307,6 +307,14 @@ a DWORD and succeeds when `x & 0x70` is nonzero. MOSSHELL then merges its MENU
 and populates it from the registered node editors. The fixture server grants
 the complete mask with `x = 0x70` on every node.
 
+Granting the mask also makes DSNAV initialize the editor channel while it
+builds the menu. `CTreeEditClient::GetTicket` sends DIRSRV class `0x04`,
+selector `0x0C` and waits on the Explorer UI thread. The server must answer
+before the view and toolbar can finish initializing. Its reply is status
+DWORD 0, end-static `0x87`, single-shot dynamic tag `0x86`, then an opaque
+ticket whose first `u16` is its total byte length. Fixtures return the minimal
+valid ticket `02 00`.
+
 ### 8.1 Build — slot 81 `BuildServicesMenu` @ `0x7F5819D7`
 
 First call (when `g_DsNavAppMenuBuilt == 0`):

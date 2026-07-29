@@ -39,6 +39,8 @@ DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWor
 # Slot 4 (IID 00028B28) is GetShabby — CTreeNavClient::GetShabby
 # (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
 DIRSRV_SELECTOR_GET_SHABBY = 0x04
+TREEEDCL_CLASS_EDIT = 0x04
+TREEEDCL_SELECTOR_GET_TICKET = 0x0C
 
 # Status returned in GetDeidFromGoWord's reply for an unrecognised go-word.
 # MCM!FGetGoWord (0x0410423f) compares the wire status DWORD against three
@@ -113,7 +115,9 @@ class DIRSRVHandler:
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Handle a DIRSRV request — dispatch by selector."""
-        if selector == DIRSRV_SELECTOR_GET_PROPERTIES:
+        if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
+            reply_payload = build_get_ticket_reply_payload()
+        elif selector == DIRSRV_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
             reply_payload = build_get_properties_reply_payload(request)
         elif selector == DIRSRV_SELECTOR_GET_CHILDREN:
@@ -650,6 +654,25 @@ def build_get_shabby_reply_payload(payload):
         build_tagged_reply_dword(0)
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + blob
+    )
+
+
+def build_get_ticket_reply_payload():
+    """Return a minimal TREEEDCL capability ticket for fixture authoring.
+
+    Enabling wire property `x` makes DSNAV initialize its node editors while
+    building File > New. CTreeEditClient::GetTicket sends class 0x04,
+    selector 0x0C and waits synchronously for a status DWORD plus a
+    single-shot dynamic blob. SECURCL!HrDecodeTicket reads the blob's first
+    u16 as its total length, allocates that many bytes, and copies it without
+    interpreting any other fields. A two-byte self-length is therefore the
+    smallest valid opaque ticket.
+    """
+    ticket = struct.pack("<H", 2)
+    return (
+        build_tagged_reply_dword(0)
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+        + ticket
     )
 
 

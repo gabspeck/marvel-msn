@@ -696,6 +696,25 @@ not `0x85` (length-prefixed dynamic-start). `0x85` hangs
 **Slot B:** a second GetShabby fires per node with `req_id=9`. Which
 property drives it is unresolved — see §11.
 
+#### 7.2.8 TREEEDCL GetTicket (class 0x04, selector 0x0C)
+
+When property `x` grants authoring rights, DSNAV initializes the registered
+node editors while constructing File → New. `CTreeEditClient::GetTicket`
+sends `83 85` and waits synchronously on the Explorer UI thread:
+
+```
+ request: [0x83][0x85]              — receive status DWORD + dynamic blob
+ reply:   [0x83][u32 status=0]
+          [0x87][0x86]
+          [ticket bytes]
+```
+
+The `0x86` tag signals single-shot dynamic completion. Omitting the reply
+leaves the category view blank and Explorer unresponsive.
+`SECURCL!HrDecodeTicket` treats the ticket's first `u16` as its total byte length,
+allocates that many bytes, and copies the blob without further validation.
+The fixture server returns the minimal opaque ticket `02 00`.
+
 ### 7.3 FTM
 
 Both selectors use the `FtmClientFileId` 60-byte CFI buffer via tag `0x04`:

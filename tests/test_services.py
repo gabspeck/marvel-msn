@@ -43,6 +43,7 @@ from server.services.dirsrv import (
     build_get_children_reply_payload,
     build_get_deid_from_go_word_reply_payload,
     build_get_properties_reply_payload,
+    build_get_ticket_reply_payload,
     build_property_record,
 )
 from server.services.ftm import (
@@ -989,6 +990,31 @@ class TestDIRSRVUnhandledSelector(unittest.TestCase):
             )
         self.assertIsNone(result)
         self.assertTrue(any("unhandled" in m for m in cap.output))
+
+
+class TestDIRSRVGetTicket(unittest.TestCase):
+    def test_minimal_ticket_reply_shape(self):
+        self.assertEqual(
+            build_get_ticket_reply_payload(),
+            b"\x83\x00\x00\x00\x00\x87\x86\x02\x00",
+        )
+
+    def test_edit_channel_selector_returns_ticket_packet(self):
+        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
+        packets = handler.handle_request(
+            msg_class=0x04,
+            selector=0x0C,
+            request_id=0,
+            payload=b"\x83\x85",
+            server_seq=0,
+            client_ack=0,
+        )
+
+        self.assertIsNotNone(packets)
+        parsed = parse_packet(packets[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        # header + size prefix + routing + class + selector + one-byte VLI
+        self.assertEqual(parsed.payload[8:], build_get_ticket_reply_payload())
 
 
 class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
