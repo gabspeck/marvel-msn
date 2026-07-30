@@ -836,7 +836,11 @@ Parameters:
 - `notifyPayload: PictureStartPayload`.
 
 Returns:
-- `ack`.
+- `status:i32`. Zero accepts the batch.
+- The server publishes one type-3 subtype-1 `TransferStatusById` record for
+  each accepted entry, followed by type-4 opcode-3 `TransferChunk` records
+  beginning at `currentSize`. If the type-4 subscription is being reset, the
+  chunks wait until the replacement subscription is active.
 
 ### Opcode `0x05` `ForceRefreshTransferNames`
 
@@ -1145,6 +1149,13 @@ Known subtypes:
 - `1` `TransferStatusById`. Fields:
   `targetBytes:u32`, `stateKind:u16`, `metric0:u32`, `metric1:u32`,
   `metricDivisorOrAux:u32`, `auxStatus:u32`, `objectId:u32`.
+  `PictureDownload_StartOrRefresh @ 0x7E8486B1` waits for this record after
+  `StartTransferBatch`. `NotificationType3_ApplyObjectStatus @ 0x7E846BB1`
+  resolves `objectId`, stores `targetBytes`, and marks the transfer object
+  valid. Until that happens, the caller polls for up to 100 seconds. For BMP
+  pictures, a nonzero `stateKind` exposes `metric0` / `metric1` as the natural
+  width / height through `GetPictureInfo @ 0x7E847408`; zero retains the
+  renderer's 20×20 fallback.
 - `2` `TransferStatusByName`. Same fields as subtype `1`, then
   `objectKind:u8`, `objectName:cstring`.
 - `4` `AddressConversionResult`. Populates one cache entry with
@@ -1180,7 +1191,8 @@ Known opcode:
   `buffer + chunkOffset`, advances the committed-byte cursor `+0x38`, and posts
   `WM_USER+0x0e` (0x40e) to each attached sink HWND (or `DAT_7e84e330` for the
   marker-buffer special case). Chunks with `chunkOffset > +0x38` are ignored
-  (gap-tolerance is the caller's responsibility).
+  (gap-tolerance is the caller's responsibility). The transfer completes when
+  the committed cursor equals the `targetBytes` supplied by type 3.
 
 ## Value Type `FixedRecord`
 

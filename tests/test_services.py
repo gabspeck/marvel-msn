@@ -2237,6 +2237,41 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
 
 
 class TestMEDVIEWTitlePreNotify(unittest.TestCase):
+    @staticmethod
+    def _subscribe(handler, notification_type, request_id):
+        handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+            request_id,
+            bytes([0x01, notification_type, 0x85]),
+            5,
+            5,
+        )
+
+    @staticmethod
+    def _picture_start_request(
+        *,
+        transfer_id,
+        name="albi.bmp",
+        current_size=0,
+        mode=0,
+    ):
+        start_payload = (
+            bytes([1, mode])
+            + struct.pack("<II", current_size, transfer_id)
+            + b"\x00"
+            + name.encode("ascii")
+            + b"\x00"
+        )
+        return (
+            b"\x01\x01"
+            b"\x02\x04\x00"
+            b"\x04"
+            + bytes([0x80 | len(start_payload)])
+            + start_payload
+            + b"\x83"
+        )
+
     def test_pre_notify_reply_ships_status_dword(self):
         # Spec §0x1E (post-update): `PreNotifyTitle` returns
         # `status:i32` = 0 for queued+acked. Wire bytes:
@@ -2268,6 +2303,87 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         self.assertEqual(reply[0], 0x83)
         self.assertEqual(struct.unpack("<I", reply[1:5])[0], 0)
         self.assertEqual(reply[5], TAG_END_STATIC)
+
+    def test_picture_start_pushes_status_then_file_bytes(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        picture = (
+            b"BM"
+            + b"\x00" * 12
+            + struct.pack("<Iii", 40, 113, 95)
+            + b"\x00" * 12
+        )
+        handler.baggage_map = {"albi.bmp": picture}
+        self._subscribe(handler, 3, 3)
+        self._subscribe(handler, 4, 4)
+
+        pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            5,
+            self._picture_start_request(transfer_id=0x12345678),
+            10,
+            5,
+        )
+        self.assertEqual(len(pkts), 3)
+
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x87")
+
+        status_push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(status_push[0], TAG_DYNAMIC_PARTIAL)
+        self.assertEqual(
+            struct.unpack("<HHIHIIIII", status_push[1:31]),
+            (1, 30, len(picture), 1, 113, 95, 0, 0, 0x12345678),
+        )
+
+        chunk_push = parse_packet(pkts[2][:-1]).payload[8:]
+        self.assertEqual(chunk_push[0], TAG_DYNAMIC_PARTIAL)
+        self.assertEqual(
+            struct.unpack("<HHII", chunk_push[1:13]),
+            (3, 12 + len(picture), 0x12345678, 0),
+        )
+        self.assertEqual(chunk_push[13:], picture)
+
+    def test_picture_chunks_wait_for_type4_subscription(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        picture = b"BMresume-data"
+        handler.baggage_map = {"albi.bmp": picture}
+        self._subscribe(handler, 3, 3)
+
+        start_pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            5,
+            self._picture_start_request(
+                transfer_id=7,
+                current_size=2,
+                mode=1,
+            ),
+            10,
+            5,
+        )
+        self.assertEqual(len(start_pkts), 2)
+        status_push = parse_packet(start_pkts[1][:-1]).payload[8:]
+        self.assertEqual(
+            struct.unpack("<HHIHIIIII", status_push[1:31]),
+            (1, 30, len(picture), 0, 0, 0, 0, 0, 7),
+        )
+
+        subscribe_pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+            4,
+            b"\x01\x04\x85",
+            20,
+            5,
+        )
+        self.assertEqual(len(subscribe_pkts), 2)
+        chunk_push = parse_packet(subscribe_pkts[1][:-1]).payload[8:]
+        self.assertEqual(
+            struct.unpack("<HHII", chunk_push[1:13]),
+            (3, 12 + len(picture) - 2, 7, 2),
+        )
+        self.assertEqual(chunk_push[13:], picture[2:])
 
 
 class TestMEDVIEWSubscribeNotification(unittest.TestCase):

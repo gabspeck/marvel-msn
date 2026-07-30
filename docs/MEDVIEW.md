@@ -746,13 +746,23 @@ Request:
 | `0x02` | 2 LE | `opcode` (low 16 bits of `param_2`) |
 | `0x04` | var | Opcode-specific payload (for opcode 10: 6 bytes sourced from `DAT_7e84e2ec`, observed all zeros) |
 
-Reply: none of substance. The client's `slot 0x48` waits for completion,
-then immediately releases the reply handle (`slot 8`). A trivial
-`0x87`-only reply (no body) is sufficient. The server can also drop the
-message on the floor if the client's timeout tolerates it — but the clean
-path is to ack.
+Reply: tagged `status:i32`, followed by `0x87` end-of-static. Status zero
+accepts the notification.
 
-**MVP contract**: reply static-only with `0x87` end-of-static.
+For opcode `0x04`, the synchronous reply only accepts the transfer batch.
+The server must then send, for each requested object:
+
+1. A type-3 subtype-1 status record containing the object transfer ID and
+   target byte count. `PictureDownload_StartOrRefresh @ 0x7E8486B1` polls
+   until `NotificationType3_ApplyObjectStatus @ 0x7E846BB1` consumes this
+   record and marks the transfer object valid.
+2. Contiguous type-4 opcode-3 records containing the same transfer ID,
+   byte offset, and file bytes. The first offset is the request's
+   `currentSize`; completion occurs when the committed byte count equals
+   the type-3 target byte count.
+
+Initial/offline mode can replace the type-4 subscriber while the request
+is in flight. Queue the chunks until that subscription is active.
 
 Additionally, `lMVTitleGetInfo` maps 5/6 in OpenMediaTitleSession to two
 more wire-path `info_kind`s — the **title name** is `info_kind=1`
@@ -1063,7 +1073,7 @@ notification type index sent on selector `0x17`:
 | 0 | `HfcCache_DispatchContentNotification` | Topic metadata / string attachments (opcodes `0xBF`, `0xA5`, `0x37`) — **opcode 0xBF inserts into HfcNear's per-title cache** at `title+4` via `HfcCache_InsertOrdered`. Driven by HfcNear's own retry loop (`MVPumpHfcContentNotifications` → `MVPumpNotificationType(idx=0, …)` → `MVAsyncSubscriberPumpNotifications` → `MVAsyncSubscriberDispatchChunk` → `HfcCache_DispatchContentNotification`), no pump thread required (`param_3 = 0` to `MVAsyncNotifyDispatch`). |
 | 1 | `WordWheelCache_DispatchNotification @ 0x7E849251` | **Word-wheel result records.** Each record header is 11 bytes (u16 recordSize, u8 wordWheelId, u8 pendingFlag, u32 ordinal, u8 reserved, u16 payloadCount) followed by `payloadCount × u32` payload DWORDs and an optional ASCIIZ name. Per-record side-effect: writes `ordinal` and `pendingFlag` into the per-wordwheel slot at `DAT_7e84e668[DAT_7e850258[wordWheelId] × 0x1c]`, then prepends a 0x24-byte cache record via `WordWheelCache_InsertEntry`. `pendingFlag==0xFF` is a synthetic "request-done" sentinel (slot+9 zeroed, probe-match forced). Caller can pass `{u8 wordWheelId; u8[3] pad; u32 ordinal}` via the subscriber context to break the dispatch loop on the matching record (OR 0x80000000 into the consume count). |
 | 2 | `HighlightCache_DeserializeAndRegister` | Context-string / global-state updates (writes `DAT_7e84d02c`-family tables) |
-| 3 | `NotificationType3_DispatchRecord` | **va / addr cache pushes** (populates `PTR_DAT_7e84e130` global kind-0/1/2 cache via op-code 4 → `NotificationType3_ApplyAddressConversionResult`). **Different cache from HfcNear's `title+4` tree.** |
+| 3 | `NotificationType3_DispatchRecord` | **Transfer status and va / addr cache pushes.** Opcode 1 validates a transfer object and sets its target byte count. Opcode 4 populates `PTR_DAT_7e84e130` global kind-0/1/2 cache via `NotificationType3_ApplyAddressConversionResult`. **Different cache from HfcNear's `title+4` tree.** |
 | 4 | `NotificationType4_ApplyChunkedBuffer @ 0x7E8468D5` | **Picture / media transfer chunks.** Opcode-3 frames carry `{u16 op=3, u16 frameBytes, u32 transferId, u32 chunkOffset, u8 data[frameBytes-0xc]}`. The callback resolves `transferId` against the active media-transfer list at `PTR_DAT_7e84e628+0x1c`, lazily allocates / grows the `+0x30` buffer to `chunkOffset + payloadBytes`, copies the chunk in, advances the committed byte cursor `+0x38`, and posts `WM_USER+0x0e` (0x40e) to each attached sink HWND (or the global notify window `DAT_7e84e330` for the marker-buffer case). Other opcodes 1, 2, 4, 5 are accepted but discarded; opcode 0 or >5 returns frameBytes without inspection. |
 
 ### Type-3 frame format (cache push)
@@ -1081,10 +1091,32 @@ Op-code dispatch inside type-3:
 
 | op_code | Dispatch | Handles |
 |--------:|----------|---------|
-| 1, 2 | `NotificationType3_ApplyObjectStatus` | Topic / hash invalidation |
+| 1, 2 | `NotificationType3_ApplyObjectStatus` | Transfer status by ID / name |
 | 3 | — (silently skipped, length still consumed) | Reserved |
 | **4** | `NotificationType3_ApplyAddressConversionResult` | **va / addr cache insert** |
 | 5 | `NotificationType3_ApplyInfo6eCacheRecord @ 0x7E8424F5` | **MVTTL info-kind 0x6e string cache push.** 17-byte header `{u8 titleId, u24+u8 infoKind, u24+u8 resultLength, u24+u8 bufCtl, u24+u8 payloadBytes}` followed by `payloadBytes` of value bytes (or the inline 4-byte value at offset +13 when `payloadBytes==0`). Routes to `MVCacheInfo6eString @ 0x7E842267` only when the title-byte resolves an attached title state and `infoKind == 0x6e`. Other infoKinds are accepted on the wire but discarded. |
+
+Opcode 1 is a 30-byte frame:
+
+```
++0x00  u16 opcode = 1
++0x02  u16 frameBytes = 30
++0x04  u32 targetBytes
++0x08  u16 stateKind
++0x0A  u32 metric0
++0x0E  u32 metric1
++0x12  u32 metricDivisorOrAux
++0x16  u32 auxStatus
++0x1A  u32 transferId
+```
+
+For picture downloads, `targetBytes` establishes the completion size and
+`transferId` selects the object created before `TitlePreNotify(0x04)`.
+For a plain BMP transfer, `stateKind` must be nonzero and `metric0` /
+`metric1` carry its natural width / height. `GetPictureInfo @ 0x7E847408`
+only publishes those metrics when `stateKind != 0`; otherwise the WLT
+renderer keeps its 20×20 fallback. `metricDivisorOrAux` and `auxStatus`
+can be zero.
 
 ### Op-code 4 payload (14 bytes)
 

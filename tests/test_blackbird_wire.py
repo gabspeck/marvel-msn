@@ -27,6 +27,8 @@ from src.server.blackbird.wire import (
     build_text_metafile,
     build_trailer,
     build_type0_status_record,
+    build_type3_transfer_status_frame,
+    build_type4_transfer_chunk_frame,
     decode_case1_tlv,
     encode_byte_or_ushort_varint,
     encode_case1_preamble,
@@ -550,6 +552,38 @@ class TestType0StatusRecord(unittest.TestCase):
         # 30 s wait loop when no adjacent body is available.
         rec = build_type0_status_record(title_byte=1, status=0, contents_token=0x1000)
         self.assertEqual(rec, bytes.fromhex("a501000000100000"))
+
+
+class TestPictureTransferFrames(unittest.TestCase):
+    def test_type3_status_marks_transfer_valid_and_sets_target_size(self):
+        frame = build_type3_transfer_status_frame(
+            transfer_id=0x12345678,
+            target_size=0x2F44,
+            state_kind=1,
+            metric0=113,
+            metric1=95,
+        )
+        self.assertEqual(len(frame), 30)
+        self.assertEqual(
+            struct.unpack("<HHIHIIIII", frame),
+            (1, 30, 0x2F44, 1, 113, 95, 0, 0, 0x12345678),
+        )
+
+    def test_type4_chunk_carries_transfer_id_offset_and_bytes(self):
+        frame = build_type4_transfer_chunk_frame(
+            transfer_id=0x12345678,
+            chunk_offset=0x400,
+            chunk_data=b"bitmap",
+        )
+        self.assertEqual(
+            struct.unpack("<HHII", frame[:12]),
+            (3, len(frame), 0x12345678, 0x400),
+        )
+        self.assertEqual(frame[12:], b"bitmap")
+
+    def test_type4_chunk_rejects_oversized_frame(self):
+        with self.assertRaises(ValueError):
+            build_type4_transfer_chunk_frame(1, 0, b"\x00" * 0xFFF4)
 
 
 class TestCase1BfChunkLegacy0x40(unittest.TestCase):

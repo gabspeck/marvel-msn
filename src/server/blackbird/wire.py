@@ -944,6 +944,60 @@ def build_type3_op4_frame(title_byte: int, kind: int, key: int, va: int, addr: i
     )
 
 
+def build_type3_transfer_status_frame(
+    transfer_id: int,
+    target_size: int,
+    *,
+    state_kind: int = 0,
+    metric0: int = 0,
+    metric1: int = 0,
+    metric_divisor: int = 0,
+    aux_status: int = 0,
+) -> bytes:
+    """Build a type-3 subtype-1 transfer-status frame (30 bytes).
+
+    ``PictureDownload_StartOrRefresh`` polls notification type 3 until
+    ``NotificationType3_ApplyObjectStatus`` finds the transfer id and marks
+    its object valid. The same record establishes the target byte count used
+    to detect completion of the type-4 chunk stream.
+    """
+    return struct.pack(
+        "<HHIHIIIII",
+        1,
+        30,
+        target_size & 0xFFFFFFFF,
+        state_kind & 0xFFFF,
+        metric0 & 0xFFFFFFFF,
+        metric1 & 0xFFFFFFFF,
+        metric_divisor & 0xFFFFFFFF,
+        aux_status & 0xFFFFFFFF,
+        transfer_id & 0xFFFFFFFF,
+    )
+
+
+def build_type4_transfer_chunk_frame(
+    transfer_id: int,
+    chunk_offset: int,
+    chunk_data: bytes,
+) -> bytes:
+    """Build one type-4 opcode-3 contiguous transfer chunk."""
+    frame_size = 12 + len(chunk_data)
+    if frame_size > 0xFFFF:
+        raise ValueError(
+            f"type-4 transfer frame exceeds u16 size: {frame_size}"
+        )
+    return (
+        struct.pack(
+            "<HHII",
+            3,
+            frame_size,
+            transfer_id & 0xFFFFFFFF,
+            chunk_offset & 0xFFFFFFFF,
+        )
+        + chunk_data
+    )
+
+
 def encode_null_tlv() -> bytes:
     """Encode the minimum-viable TLV: length=0, presence bitmap=0.
 

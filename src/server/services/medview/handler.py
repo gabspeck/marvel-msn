@@ -25,12 +25,15 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import struct
 
 from ...blackbird.wire import (
     build_case1_bf_chunk,
     build_case1_stream_bf_chunk,
     build_type0_status_record,
     build_type3_op4_frame,
+    build_type3_transfer_status_frame,
+    build_type4_transfer_chunk_frame,
 )
 from ...config import (
     MEDVIEW_ATTACH_SESSION,
@@ -107,6 +110,9 @@ log = logging.getLogger(__name__)
 # host block through ARENA.MOS before MPCCL can consume it. Larger logical
 # reads continue with tag 0x85 and finish once with tag 0x86.
 _HFS_DYNAMIC_BLOCK_DATA_MAX = 0x4000
+# Keep each type-4 record within one MPCCL dynamic-buffer growth unit,
+# including its 12-byte frame header and the outer 0x85 stream tag.
+_PICTURE_CHUNK_DATA_MAX = 0x3F00
 _BAGGAGE_HANDLE_BM0 = 0x42
 # Per-page baggage handle base. Engine treats handles as opaque u8;
 # `0x42` is the bm0 sentinel kept for log continuity. Subsequent pages
@@ -376,6 +382,34 @@ def _format_push_chunk(chunk: bytes) -> str:
             f"va=0x{va:08x}, addr=0x{addr:08x}}}"
         )
 
+    if len(chunk) >= 30 and int.from_bytes(chunk[0:2], "little") == 1:
+        (
+            subtype,
+            length,
+            target_size,
+            state_kind,
+            _metric0,
+            _metric1,
+            _metric_divisor,
+            _aux_status,
+            transfer_id,
+        ) = struct.unpack_from("<HHIHIIIII", chunk)
+        return (
+            f"type3_transfer_status{{subtype={subtype}, length={length}, "
+            f"transfer_id=0x{transfer_id:08x}, target_size={target_size}, "
+            f"state_kind={state_kind}}}"
+        )
+
+    if len(chunk) >= 12 and int.from_bytes(chunk[0:2], "little") == 3:
+        opcode, length, transfer_id, chunk_offset = struct.unpack_from(
+            "<HHII", chunk,
+        )
+        return (
+            f"type4_transfer_chunk{{opcode={opcode}, length={length}, "
+            f"transfer_id=0x{transfer_id:08x}, offset={chunk_offset}, "
+            f"data_len={max(0, len(chunk) - 12)}}}"
+        )
+
     if chunk[0] == 0xA5 and len(chunk) >= 8:
         title = chunk[1]
         status = int.from_bytes(chunk[2:4], "little")
@@ -582,6 +616,71 @@ def _extract_hfs_read_args(payload: bytes) -> tuple[int | None, int, int]:
     return (handle, count, offset)
 
 
+def _extract_pre_notify_args(
+    payload: bytes,
+) -> tuple[int | None, int | None, bytes]:
+    """Pull ``(title_slot, notify_op, notify_payload)`` from selector 0x1E."""
+    send_params, _ = parse_request_params(payload)
+    title_slot = next(
+        (p.value for p in send_params if isinstance(p, ByteParam)),
+        None,
+    )
+    notify_op = next(
+        (p.value for p in send_params if isinstance(p, WordParam)),
+        None,
+    )
+    notify_payload = next(
+        (p.data for p in send_params if isinstance(p, VarParam)),
+        b"",
+    )
+    return title_slot, notify_op, notify_payload
+
+
+def _parse_picture_start_payload(
+    payload: bytes,
+) -> tuple[int, list[tuple[int, int, int, str]]] | None:
+    """Decode ``PictureStartPayload`` from PreNotifyTitle opcode 0x04."""
+    if len(payload) < 2:
+        return None
+    entry_count = payload[0]
+    mode_byte = payload[1]
+    pos = 2
+    entries = []
+    for _ in range(entry_count):
+        if pos + 9 > len(payload):
+            return None
+        current_size, transfer_id = struct.unpack_from("<II", payload, pos)
+        state_flags = payload[pos + 8]
+        name_start = pos + 9
+        name_end = payload.find(b"\x00", name_start)
+        if name_end < 0:
+            return None
+        name = payload[name_start:name_end].decode(
+            "cp1252",
+            errors="replace",
+        )
+        entries.append((current_size, transfer_id, state_flags, name))
+        pos = name_end + 1
+    return mode_byte, entries
+
+
+def _picture_status_metrics(data: bytes) -> tuple[int, int, int]:
+    """Return the nonzero picture-info kind and natural BMP dimensions."""
+    if len(data) < 26 or data[:2] != b"BM":
+        return 0, 0, 0
+    dib_size = struct.unpack_from("<I", data, 14)[0]
+    if dib_size == 12:
+        width, height = struct.unpack_from("<HH", data, 18)
+    elif dib_size >= 40:
+        width, height = struct.unpack_from("<ii", data, 18)
+        height = abs(height)
+    else:
+        return 0, 0, 0
+    if width <= 0 or height <= 0:
+        return 0, 0, 0
+    return 1, width, height
+
+
 class MEDVIEWHandler:
     """Per-pipe MEDVIEW handler."""
 
@@ -598,6 +697,9 @@ class MEDVIEWHandler:
         self.title_body: bytes = TITLE_OPEN_BODY
         self.baggage_map: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
         self.title_metadata: TitleOpenMetadata = TITLE_OPEN_METADATA
+        self._pending_picture_transfers: dict[
+            int, tuple[str, int, bytes]
+        ] = {}
 
     # --- BootstrapDiscovery ----------------------------------------
 
@@ -628,6 +730,10 @@ class MEDVIEWHandler:
             return self._handle_cache_miss(
                 msg_class, selector, request_id, payload, server_seq, client_ack,
             )
+        if selector == MEDVIEW_PRE_NOTIFY_TITLE:
+            return self._handle_pre_notify(
+                msg_class, request_id, payload, server_seq, client_ack,
+            )
 
         reply_payload = self._dispatch(msg_class, selector, request_id, payload)
         if reply_payload is None:
@@ -648,9 +754,20 @@ class MEDVIEWHandler:
                 client_ack,
             )
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(
+        reply_packets = build_service_packet(
             self.pipe_idx, host_block, server_seq, client_ack,
         )
+        if (
+            selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+            and len(payload) >= 2
+            and payload[1] == 4
+        ):
+            push_packets = self._flush_pending_picture_chunks(
+                (server_seq + len(reply_packets)) & 0x7F,
+                client_ack,
+            )
+            return reply_packets + push_packets
+        return reply_packets
 
     def _build_hfs_read_reply_packets(
         self,
@@ -734,9 +851,6 @@ class MEDVIEWHandler:
         if selector == MEDVIEW_QUERY_TOPICS:
             log.info("query_topics req_id=%d", request_id)
             return replies.query_topics()
-        if selector == MEDVIEW_PRE_NOTIFY_TITLE:
-            log.info("pre_notify_title req_id=%d", request_id)
-            return replies.pre_notify_title()
 
         # WordWheelService
         if selector == MEDVIEW_OPEN_WORD_WHEEL:
@@ -895,7 +1009,195 @@ class MEDVIEWHandler:
                 self.baggage_map = {"bm0": BM0_BAGGAGE}
                 self.title_metadata = TITLE_OPEN_METADATA
                 self._baggage_handles = {_BAGGAGE_HANDLE_BM0: "bm0"}
+                self._pending_picture_transfers.clear()
         return replies.close_title()
+
+    def _handle_pre_notify(
+        self,
+        msg_class,
+        request_id,
+        payload,
+        server_seq,
+        client_ack,
+    ):
+        title_slot, notify_op, notify_payload = _extract_pre_notify_args(
+            payload,
+        )
+        log.info(
+            "pre_notify_title req_id=%d slot=%r op=%r",
+            request_id, title_slot, notify_op,
+        )
+        reply_payload = replies.pre_notify_title()
+        log.info(
+            "reply selector=%s(0x%02x) req_id=%d %s",
+            _selector_name(MEDVIEW_PRE_NOTIFY_TITLE),
+            MEDVIEW_PRE_NOTIFY_TITLE,
+            request_id,
+            _format_reply_payload(MEDVIEW_PRE_NOTIFY_TITLE, reply_payload),
+        )
+        host_block = build_host_block(
+            msg_class,
+            MEDVIEW_PRE_NOTIFY_TITLE,
+            request_id,
+            reply_payload,
+        )
+        packets = build_service_packet(
+            self.pipe_idx, host_block, server_seq, client_ack,
+        )
+        if notify_op != 4:
+            return packets
+
+        parsed = _parse_picture_start_payload(notify_payload)
+        if parsed is None:
+            log.info(
+                "picture_transfer_start req_id=%d malformed payload_len=%d",
+                request_id, len(notify_payload),
+            )
+            return packets
+        mode_byte, entries = parsed
+        log.info(
+            "picture_transfer_start req_id=%d mode=%d entries=%d",
+            request_id, mode_byte, len(entries),
+        )
+        next_seq = (server_seq + len(packets)) & 0x7F
+        for current_size, transfer_id, state_flags, name in entries:
+            canonical = name.lstrip("|!").lower()
+            data = self.baggage_map.get(canonical)
+            if data is None:
+                log.info(
+                    "picture_transfer_missing req_id=%d transfer_id=0x%08x "
+                    "name=%r canonical=%r",
+                    request_id, transfer_id, name, canonical,
+                )
+                continue
+            if current_size > len(data):
+                log.info(
+                    "picture_transfer_restart req_id=%d transfer_id=0x%08x "
+                    "current=%d target=%d",
+                    request_id, transfer_id, current_size, len(data),
+                )
+                current_size = 0
+
+            self._pending_picture_transfers[transfer_id] = (
+                canonical,
+                current_size,
+                data,
+            )
+            log.info(
+                "picture_transfer_queue req_id=%d transfer_id=0x%08x "
+                "name=%r current=%d target=%d flags=0x%02x",
+                request_id,
+                transfer_id,
+                canonical,
+                current_size,
+                len(data),
+                state_flags,
+            )
+            state_kind, metric0, metric1 = _picture_status_metrics(data)
+            status_frame = build_type3_transfer_status_frame(
+                transfer_id,
+                len(data),
+                state_kind=state_kind,
+                metric0=metric0,
+                metric1=metric1,
+            )
+            status_packets = self._build_notification_push_packets(
+                3,
+                status_frame,
+                next_seq,
+                client_ack,
+            )
+            packets.extend(status_packets)
+            next_seq = (next_seq + len(status_packets)) & 0x7F
+
+        chunk_packets = self._flush_pending_picture_chunks(
+            next_seq,
+            client_ack,
+        )
+        packets.extend(chunk_packets)
+        return packets
+
+    def _build_notification_push_packets(
+        self,
+        notification_type,
+        frame,
+        server_seq,
+        client_ack,
+    ):
+        sub = self._subscriptions.get(notification_type)
+        if sub is None:
+            log.info(
+                "picture_transfer_push_dropped type=%d reason=no_subscriber",
+                notification_type,
+            )
+            return []
+        sub_class, sub_req_id = sub
+        push_payload = bytes([TAG_DYNAMIC_PARTIAL]) + frame
+        push_host = build_host_block(
+            sub_class,
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            sub_req_id,
+            push_payload,
+        )
+        log.info(
+            "picture_transfer_push type=%d sub_req_id=%d %s",
+            notification_type,
+            sub_req_id,
+            _format_push_payload(push_payload),
+        )
+        return build_service_packet(
+            self.pipe_idx,
+            push_host,
+            server_seq,
+            client_ack,
+        )
+
+    def _flush_pending_picture_chunks(self, server_seq, client_ack):
+        if 4 not in self._subscriptions:
+            if self._pending_picture_transfers:
+                log.info(
+                    "picture_transfer_chunks_queued count=%d reason=no_type4_subscriber",
+                    len(self._pending_picture_transfers),
+                )
+            return []
+
+        packets = []
+        for transfer_id, (name, current_size, data) in list(
+            self._pending_picture_transfers.items()
+        ):
+            transfer_packet_start = len(packets)
+            offset = current_size
+            chunk_count = 0
+            while offset < len(data):
+                chunk_data = data[
+                    offset : offset + _PICTURE_CHUNK_DATA_MAX
+                ]
+                frame = build_type4_transfer_chunk_frame(
+                    transfer_id,
+                    offset,
+                    chunk_data,
+                )
+                chunk_packets = self._build_notification_push_packets(
+                    4,
+                    frame,
+                    (server_seq + len(packets)) & 0x7F,
+                    client_ack,
+                )
+                packets.extend(chunk_packets)
+                offset += len(chunk_data)
+                chunk_count += 1
+            del self._pending_picture_transfers[transfer_id]
+            log.info(
+                "picture_transfer_complete_push transfer_id=0x%08x "
+                "name=%r start=%d target=%d chunks=%d transport_fragments=%d",
+                transfer_id,
+                name,
+                current_size,
+                len(data),
+                chunk_count,
+                len(packets) - transfer_packet_start,
+            )
+        return packets
 
     def _handle_get_title_info_remote(self, request_id, payload) -> bytes:
         info_kind, info_arg, caller_cookie = _extract_get_info_args(payload)
