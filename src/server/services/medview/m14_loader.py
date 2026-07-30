@@ -48,6 +48,9 @@ _PARA_CENTER_ALIGNED = 0x0800
 
 _SEC06_RECORD_SIZE = 0x98
 _SEC06_OUTER_RECT_ABSOLUTE = 0x08
+# PopupPaneRecord: 31 bytes, name is an inline cstring[9] at +0x02.
+_SEC08_RECORD_SIZE = 0x1F
+_SEC08_NAME_SIZE = 9
 _COLOR_INHERIT = 0xFFFFFFFF
 _CACHE_PROJECTION_VERSION = 2
 
@@ -92,6 +95,8 @@ class M14Topic:
     next_topic: int
     non_scroll_background: int | None
     scroll_background: int | None
+    popup_background: int | None
+    popup_window: str
     displays: tuple[M14DisplayRecord, ...]
 
 
@@ -153,6 +158,19 @@ class LoadedM14:
             _COLOR_INHERIT,
         )
         return non_scroll, scroll
+
+    @property
+    def popup_pane(self) -> tuple[int, str] | None:
+        """Authored popup background and the window that declares it.
+
+        `BackColorPopup` is per authored window, and every window in a
+        title normally repeats the same value, so the first declaration
+        stands for the title. Returns ``None`` when nothing declares one.
+        """
+        for topic in self.topics:
+            if topic.popup_background is not None:
+                return topic.popup_background, topic.popup_window
+        return None
 
     def display_at(self, topic_pos: int) -> M14DisplayRecord | None:
         for topic in self.topics:
@@ -230,6 +248,8 @@ class _TopicBuilder:
     next_topic: int
     non_scroll_background: int | None
     scroll_background: int | None
+    popup_background: int | None
+    popup_window: str
     displays: list[M14DisplayRecord]
 
 
@@ -576,20 +596,37 @@ def _parse_topic_color(value: str) -> int | None:
         return None
 
 
-def _parse_topic_properties(data: bytes) -> tuple[int | None, int | None]:
+def _parse_topic_properties(
+    data: bytes,
+) -> tuple[int | None, int | None, int | None, str]:
+    """Decode the `<window>.<Property>=<value>` list in a TOPICHEADER.
+
+    Returns the NSR, SR and popup backgrounds plus the window id that
+    declared the popup colour. The id becomes the `PopupPaneRecord`
+    name, which must not be empty: a NUL-empty name leaves
+    `MosPaneState+0x68` NULL, and `MOSVIEW!FindMosViewSessionByName`
+    passes that pointer straight to `lstrcmpiA` when a named popup verb
+    searches the array.
+    """
     non_scroll = None
     scroll = None
+    popup = None
+    popup_window = ""
     text = data.decode("cp1252", errors="replace")
     for assignment in text.split(";"):
         name, separator, value = assignment.partition("=")
         if not separator:
             continue
-        name = name.rsplit(".", 1)[-1]
+        window, _, name = name.rpartition(".")
         if name == "BackColorNSR" and non_scroll is None:
             non_scroll = _parse_topic_color(value)
         elif name == "BackColorSR" and scroll is None:
             scroll = _parse_topic_color(value)
-    return non_scroll, scroll
+        elif name == "BackColorPopup" and popup is None:
+            popup = _parse_topic_color(value)
+            if popup is not None:
+                popup_window = window
+    return non_scroll, scroll, popup, popup_window
 
 
 def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
@@ -606,9 +643,12 @@ def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
     ) = struct.unpack_from("<iiiiIII", data1, 0)
     title_bytes, separator, properties = data2.partition(b"\x00")
     title = title_bytes.decode("cp1252", errors="replace")
-    non_scroll_background, scroll_background = _parse_topic_properties(
-        properties if separator else b"",
-    )
+    (
+        non_scroll_background,
+        scroll_background,
+        popup_background,
+        popup_window,
+    ) = _parse_topic_properties(properties if separator else b"")
     return _TopicBuilder(
         title=title,
         topic_number=topic_number,
@@ -617,6 +657,8 @@ def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
         next_topic=next_topic,
         non_scroll_background=non_scroll_background,
         scroll_background=scroll_background,
+        popup_background=popup_background,
+        popup_window=popup_window,
         displays=[],
     )
 
@@ -785,6 +827,8 @@ def _parse_topics(
             next_topic=builder.next_topic,
             non_scroll_background=builder.non_scroll_background,
             scroll_background=builder.scroll_background,
+            popup_background=builder.popup_background,
+            popup_window=builder.popup_window,
             displays=tuple(builder.displays),
         )
         converted[id(builder)] = topic
@@ -904,6 +948,39 @@ def _build_section0(m14: LoadedM14) -> bytes:
     return bytes(header) + face_table + descriptors + b"\x00" * (4 * len(m14.font_faces))
 
 
+def _build_sec08(m14: LoadedM14) -> bytes:
+    """Project the authored `BackColorPopup` into one PopupPaneRecord.
+
+    Field layout per `docs/medview-service-contract.md` "PopupPaneRecord",
+    pinned at `MOSVIEW!CreateMosViewWindowHierarchy @ 0x7F3C6E51`. The
+    rect is left at `-1`, which defaults the popup to the container's
+    client area.
+
+    Scope: `CreateMosViewWindowHierarchy` builds `popupCount + 1` panes
+    and appends its own "[The Default Popup]" as the last one, while
+    `FindMosViewSessionByName` selects index `count - 1` whenever the
+    caller passes no pane name. A bare `0xE2` popup hotspot passes NULL
+    (`HandleMediaTitleCommand @ 0x7F3C5C9C`), so it always lands on that
+    synthetic pane, whose colour is the hardcoded `-1` at `0x7F3C71C2`
+    (`GetSysColor(COLOR_WINDOW)`). This record is therefore reachable
+    only through the named-window popup tags `0xEA` / `0xEE`, which
+    carry a window name string.
+    """
+    popup = m14.popup_pane
+    if popup is None:
+        return b""
+    background, window = popup
+    record = bytearray(_SEC08_RECORD_SIZE)
+    # An unprefixed property names the title's main window, authored as
+    # window 0. The name must stay non-empty — see _parse_topic_properties.
+    name = (window or "0").encode("cp1252", errors="replace")
+    name = name[:_SEC08_NAME_SIZE - 1]
+    record[0x02 : 0x02 + len(name)] = name
+    struct.pack_into("<iiii", record, 0x0B, -1, -1, -1, -1)
+    struct.pack_into("<I", record, 0x1B, background)
+    return bytes(record)
+
+
 def _build_sec06(m14: LoadedM14) -> bytes:
     record = bytearray(_SEC06_RECORD_SIZE)
     caption = m14.title.encode("cp1252", errors="replace")[:50] + b"\x00"
@@ -958,7 +1035,7 @@ def lower_m14_to_payload(m14: LoadedM14, deid: str) -> bytes:
         [
             _length_prefixed(_build_section0(m14)),
             b"\x00\x00",  # sec07: no additional MOSVIEW child panes
-            b"\x00\x00",  # sec08: no MOSVIEW popups
+            _length_prefixed(_build_sec08(m14)),
             _length_prefixed(_build_sec06(m14)),
             _length_prefixed(title),
             _length_prefixed(copyright_text),

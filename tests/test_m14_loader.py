@@ -122,9 +122,17 @@ class TestM14Loader(unittest.TestCase):
         self.assertIn(b"Times New Roman\x00", font_blob)
         self.assertIn(b"Wingdings\x00", font_blob)
 
-        for _record_size in (0x2B, 0x1F):
-            section, offset = _read_blob(payload, offset)
-            self.assertEqual(section, b"")
+        child_panes, offset = _read_blob(payload, offset)
+        self.assertEqual(child_panes, b"")
+        # One PopupPaneRecord carrying the authored BackColorPopup. The
+        # rect stays -1 so MOSVIEW defaults it to the container client
+        # area, and the name is the authoring window id ("0" when the
+        # property carries no window prefix).
+        popups, offset = _read_blob(payload, offset)
+        self.assertEqual(len(popups), 0x1F)
+        self.assertEqual(popups[0x02:0x0B], b"0\x00\x00\x00\x00\x00\x00\x00\x00")
+        self.assertEqual(struct.unpack_from("<iiii", popups, 0x0B), (-1, -1, -1, -1))
+        self.assertEqual(struct.unpack_from("<I", popups, 0x1B)[0], 0x00FFFFFF)
         windows, offset = _read_blob(payload, offset)
         self.assertEqual(len(windows), 0x98)
         self.assertEqual(struct.unpack_from("<I", windows, 0x78)[0], 0x00C0FFFF)
@@ -202,6 +210,22 @@ class TestM14Loader(unittest.TestCase):
             struct.unpack_from("<I", chunk, 4 + name_size + 0x14)[0],
             0xFFFFFFFF,
         )
+
+    def test_popup_background_is_parsed_from_topic_properties(self):
+        """`BackColorPopup` is a distinct property from the pane colours.
+
+        France declares it per authoring window (`12.BackColorPopup=`),
+        Handbook without a prefix. Both author white, which is also what
+        MOSVIEW's synthetic default popup resolves to, so this changes
+        no pixels today — it stops the value being dropped.
+        """
+        france = load_m14(_FRANCE)
+        handbook = load_m14(_HANDBOOK)
+        self.assertEqual(france.pane_backgrounds, (0x00C0FFFF, 0x00FFFFFF))
+        self.assertEqual(france.popup_pane, (0x00FFFFFF, "12"))
+        self.assertEqual(handbook.popup_pane, (0x00FFFFFF, ""))
+        # The popup colour must not be confused with the NSR yellow.
+        self.assertNotEqual(france.popup_pane[0], france.pane_backgrounds[0])
 
     def test_edge_tokens_never_span_a_real_display(self):
         """Topic-edge cache tokens must sit adjacent to their own record.

@@ -1267,7 +1267,28 @@ Fields (31 bytes / `0x1F`; offsets verified at
   `-1` defaults the whole rect to the container's client area.
 - `+0x1B..+0x1E` `backgroundColor:u32` (`COLORREF`). Applied via
   `ApplyMosViewBackgroundColor(MosPaneState+0x40, record+0x1B)`. The
-  synthetic trailing popup record forces `0xFFFFFFFF` (transparent).
+  synthetic trailing popup record forces `0xFFFFFFFF`, and
+  `ApplyMosViewBackgroundColor @ 0x7F3C1F86` maps that to
+  `GetSysColor(COLOR_WINDOW)` — white under the stock Win95 scheme.
+
+Reachability: an authored record is used only when the popup verb names
+a window. `CreateMosViewWindowHierarchy` creates `popupCount + 1` panes
+and appends its own `"[The Default Popup]"` last, while
+`FindMosViewSessionByName @ 0x7F3C5EE0` selects index `count - 1`
+whenever `paneName` is NULL. The bare popup tags `0xE0` / `0xE2` /
+`0xE6` push `paneName = NULL` (`HandleMediaTitleCommand @ 0x7F3C5C9C`),
+so they always land on the synthetic pane and paint
+`GetSysColor(COLOR_WINDOW)` regardless of what the title authors. Only
+`0xEA` / `0xEE`, whose payload carries a window-name string, can select
+an authored record.
+
+This is a real divergence from the standalone Media View viewer, which
+paints popups in the topic's `BackColorNSR`. Observed 2026-07-30 on the
+France title: MVIEWER renders the "Fate of the Albigensians" popup pale
+yellow (`&HC0FFFF`), MOSVIEW renders the same popup white. The title
+itself authors `BackColorPopup=&HFFFFFF` in all 21 of its windows, so
+MOSVIEW's white matches the authored value and MVIEWER's yellow does
+not.
 
 ### `WindowScaffoldRecord`
 
