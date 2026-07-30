@@ -8,6 +8,8 @@ import unittest
 from server.blackbird.wire import (
     build_case1_stream_bf_chunk,
     decode_case1_tlv,
+    encode_case1_preamble,
+    encode_text_item_tlv,
 )
 from server.services.medview.m14_loader import load_m14, lower_m14_to_payload
 
@@ -164,6 +166,7 @@ class TestM14Loader(unittest.TestCase):
             display.text_data,
             title_byte=1,
             key=display.topic_pos,
+            topic_length=display.topic_length,
             tlv_fields=display.fields_dict(),
             tab_stops=list(display.tab_stops),
             non_scroll=display.non_scroll,
@@ -173,10 +176,23 @@ class TestM14Loader(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<I", chunk, 12)[0], 0xA7)
         self.assertEqual(struct.unpack_from("<I", chunk, 8)[0], 1)
         self.assertEqual(struct.unpack_from("<I", chunk, 16)[0], 1)
-        self.assertEqual(chunk[0x2A], 1)
-        fields, tlv_size = decode_case1_tlv(chunk[0x2D:])
+        tlv = encode_text_item_tlv(
+            display.fields_dict(),
+            tab_stops=list(display.tab_stops),
+        )
+        preamble = encode_case1_preamble(
+            len(tlv) + len(display.control_stream),
+            type_tag=0x20,
+            prefix_u16=display.topic_length,
+        )
+        self.assertEqual(
+            chunk[0x2A : 0x2A + len(preamble)],
+            preamble,
+        )
+        tlv_offset = 0x2A + len(preamble)
+        fields, tlv_size = decode_case1_tlv(chunk[tlv_offset:])
         self.assertEqual(fields[0x0C], 2)
-        control_offset = 0x2D + tlv_size
+        control_offset = tlv_offset + tlv_size
         self.assertEqual(
             chunk[control_offset : control_offset + len(display.control_stream)],
             display.control_stream,
@@ -214,12 +230,23 @@ class TestM14Loader(unittest.TestCase):
             non_scroll.text_data,
             title_byte=1,
             key=non_scroll.topic_pos,
+            topic_length=non_scroll.topic_length,
             tlv_fields=non_scroll.fields_dict(),
             tab_stops=list(non_scroll.tab_stops),
             non_scroll=non_scroll.non_scroll,
             scroll=non_scroll.scroll,
         )
-        fields, _tlv_size = decode_case1_tlv(chunk[0x2D:])
+        preamble = encode_case1_preamble(
+            len(encode_text_item_tlv(
+                non_scroll.fields_dict(),
+                tab_stops=list(non_scroll.tab_stops),
+            )) + len(non_scroll.control_stream),
+            type_tag=0x20,
+            prefix_u16=non_scroll.topic_length,
+        )
+        fields, _tlv_size = decode_case1_tlv(
+            chunk[0x2A + len(preamble):],
+        )
         self.assertEqual(fields[0x12], 1)
         self.assertEqual(fields[0x16], 240)
         self.assertEqual(fields[0x18], 60)

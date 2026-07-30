@@ -854,14 +854,13 @@ def encode_case1_preamble(
     immediately after both.
 
     Wide tag (0x20..0x24): the extra PackedUnsignedSmall is stored at
-    `entry+0x1e` and contributes to `extent_total = entry+0x1e +
-    entry+0x22 + 1` (chunk-handle field_1c). For single-chunk text
-    bodies the default `prefix_u16=0` matches the narrow form's
-    behaviour; callers shaping multi-chunk text streams set it
-    explicitly. Note: narrow vs wide TAG is independent of narrow vs
-    wide SIGNED-INT VARINT — text bodies > 0x3FFF bytes are served by
-    the wide signed-int varint (already supported) and need not flip
-    to a wide tag.
+    the parsed slot's `+0x1e`. `MVFindSlotForY` excludes slots where
+    this value is zero, so interactive native displays must preserve
+    their nonzero TopicLength here. Narrow type `0x01` remains suitable
+    for synthetic, noninteractive text. Narrow vs wide TAG is
+    independent of narrow vs wide SIGNED-INT VARINT — text bodies
+    larger than 0x3FFF bytes use the wide signed-int form and need not
+    change item type for that reason.
 
     Raw-pair tags 0x02 / 0x21 (short-circuit branch of MVDecodeTopicItemPrefix
     — verbatim u32 + optional u16 copy with no varint decode) are not
@@ -1430,6 +1429,7 @@ def build_case1_stream_bf_chunk(
     title_byte: int,
     key: int,
     *,
+    topic_length: int,
     tlv_fields: dict[int, int] | None = None,
     tab_stops: list[tuple[int, int]] | None = None,
     non_scroll: int = -1,
@@ -1443,7 +1443,9 @@ def build_case1_stream_bf_chunk(
     `MVDispatchControlRun`: LinkData1 ends with the control stream and
     LinkData2 carries its NUL-separated text strings. Only the paragraph
     header differs from the online cache representation, so callers pass
-    its decoded fields for re-encoding as the wire TLV. The companion block
+    its decoded fields for re-encoding as the wire TLV. The widened 0x20
+    item prefix preserves the display's TopicLength, which the client uses
+    to admit the resulting slot to point hit-testing. The companion block
     carries the topic's non-scroll and scroll bounds; the name buffer links
     adjacent display records within the topic.
     """
@@ -1456,7 +1458,8 @@ def build_case1_stream_bf_chunk(
     preamble_length_value = len(tlv) + len(control_stream)
     preamble = encode_case1_preamble(
         length_value=preamble_length_value,
-        type_tag=0x01,
+        type_tag=0x20,
+        prefix_u16=topic_length,
     )
 
     required_name_size = (

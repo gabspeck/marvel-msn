@@ -141,15 +141,12 @@ forced to 0 by the decoder.
 Wire bytes: `[tag][PackedWideScalar length_value][PackedUnsignedSmall prefix_u16]`.
 
 `prefix_u16` is consumer-stored at the per-chunk cache entry +0x1e
-(`MVParseLayoutChunk` writes `entry+0x1e = (uint)local_f`). The
-function computes `local_18 = entry+0x1e + entry+0x22 + 1` (where
-`entry+0x22` is the chunk-handle's field_1c) but **does not use
-local_18 in any subsequent expression** — it's a dead store. All
-five callers of `MVParseLayoutChunk` (MVScanHotspotsForIndexOrCount,
-MVRealizeView, MVApplyAbsoluteScrollPosition,
-MVSeekVerticalLayoutSlots, MVCopyMediaToClipboard) were audited and
-none read `entry+0x1e`. The field is effectively unused in MSN's
-MVCL14N.DLL build. Wire chunks can encode `prefix_u16 = 0` safely.
+(`MVParseLayoutChunk` writes `entry+0x1e = (uint)local_f`).
+`MVFindSlotForY` admits a slot to mouse hit-testing only when this
+field is nonzero. Native M14 display records use widened item type
+`0x20` and preserve their `TopicLength` as `prefix_u16`; changing them
+to narrow type `0x01` still paints but makes their text and hotspots
+noninteractive.
 
 ### 3.3 `length_value` semantics
 
@@ -698,9 +695,9 @@ streams through the online case-1 cache grammar.
 All previously-open questions for this doc are now resolved within
 the static-RE-of-MSN-binaries scope:
 
-- §3.2 (prefix_u16): Closed. Field is a dead write in
-  `MVParseLayoutChunk` — no caller reads `entry+0x1e`. Safe to
-  encode as 0.
+- §3.2 (prefix_u16): Closed. `MVFindSlotForY` reads the stored value at
+  slot `+0x1e` as its hit-test admission gate. Native display records
+  preserve `TopicLength`; zero-valued synthetic slots are paint-only.
 - §7.2 (picture INTRUDE): Closed. `PictureRef.iuid` is the COM
   control instance ID; resolution to bitmap CContent is positional
   via the title's resource folder, not key-based via CProxyTable.

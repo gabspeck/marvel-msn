@@ -49,6 +49,7 @@ _PARA_CENTER_ALIGNED = 0x0800
 _SEC06_RECORD_SIZE = 0x98
 _SEC06_OUTER_RECT_ABSOLUTE = 0x08
 _COLOR_INHERIT = 0xFFFFFFFF
+_CACHE_PROJECTION_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -126,7 +127,11 @@ class LoadedM14:
 
     def cache_tuple(self, title_payload: bytes) -> tuple[int, int]:
         first = self.generated_at or len(self.archive_bytes)
-        second = zlib.crc32(title_payload, zlib.crc32(self.archive_bytes))
+        projection = struct.pack("<I", _CACHE_PROJECTION_VERSION)
+        second = zlib.crc32(
+            projection,
+            zlib.crc32(title_payload, zlib.crc32(self.archive_bytes)),
+        )
         return first & 0xFFFFFFFF, second & 0xFFFFFFFF
 
     @property

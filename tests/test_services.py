@@ -2154,7 +2154,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[0], 0x85)
         self.assertEqual(push[1], 0xBF)
-        self.assertEqual(push[1 + 0x2A], 0x01)
+        self.assertEqual(push[1 + 0x2A], 0x20)
         self.assertIn(b"MVIMG,MVIMAGE, !homed.SHG\x00", push)
 
     def test_fetch_adjacent_topic_pushes_type0_a5(self):

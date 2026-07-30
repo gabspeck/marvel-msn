@@ -67,14 +67,10 @@ builder dispatched — see §"Layout Walker AV Conditions".
 
 Widened-form `prefix_u16` consumer: `MVParseLayoutChunk` reads it as
 `local_f` from the normalized prefix block and stores it at the chunk
-record offset `+0x1e`. The downstream code computes
-`extent_total = chunk+0x1e + chunk+0x22 + 1`, where `chunk+0x22` is the
-chunk-handle's `field_1c` (set by `MVChunkHandleGetField1c`). This pins
-the widened prefix_u16 as a per-chunk extent contribution (an
-inline-resource size or trailing-blob length); its exact semantic in the
-extent math is not yet pinned beyond the additive role. For first plain
-text emission the narrow `0x01` form (which forces `prefix_u16 = 0`) is
-sufficient.
+record offset `+0x1e`. `MVFindSlotForY` skips records whose value is
+zero. The narrow `0x01` form therefore paints but does not participate
+in mouse hit-testing. Native M14 display records use item type `0x20`
+and carry their `TopicLength` in this field.
 
 Packed integer forms used by the text path:
 

@@ -593,9 +593,14 @@ France hash `0x6348` maps to `va=0x4696, addr=0x8338`.
 
 Each selector-`0x15` reply carries the matching M14 display record. The
 server re-encodes its paragraph fields as a cache TLV and copies its
-native control and text streams. Companion offsets `+0x14` and `+0x18`
+native control and text streams. The widened item prefix preserves
+`TopicLength` at the parsed slot's `+0x1E`; `MVFindSlotForY` requires a
+nonzero value before mouse hit-testing the slot. Companion offsets
+`+0x14` and `+0x18`
 carry the topic's `NonScroll` and `Scroll` TOPICPOS values. The client
 uses them to direct its two panes to the correct display records.
+The TitleOpen cache-validation CRC includes a projection version so a
+changed online cache encoding invalidates previously stored records.
 M14 paragraph flag `0x0001` gates the metric-mode value encoded at
 cache TLV offset `+0x12`. Both sample titles set it to `1`, selecting
 the client's 1440-unit twips scale. Omitting this value selects the

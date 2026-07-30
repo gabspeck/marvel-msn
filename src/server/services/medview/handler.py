@@ -460,6 +460,7 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
                 display.text_data,
                 title_slot,
                 key,
+                topic_length=display.topic_length,
                 tlv_fields=display.fields_dict(),
                 tab_stops=list(display.tab_stops),
                 non_scroll=display.non_scroll,
