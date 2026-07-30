@@ -553,6 +553,13 @@ The server reads `HANDBOOK.M14` and `FRANCE.M14` from `resources/titles/`.
 `|SYSTEM` supplies the title metadata and contents address. `|FONT`
 supplies face names and `0x2A`-byte style records.
 
+The `|SYSTEM` DLLMAP records populate the info-kind `0x13` module
+table. `TitleLoadDLL @ 0x7E843785` matches the requested alias, skips
+the two Win16 names, and loads the Win32 retail name. The M14 image
+aliases `MVIMG` and `MVIMAGE` resolve to MSN's installed image renderer,
+`MVPR14N`; without this mapping the client falls back to the absent
+`MVIMG.DLL` and displays its loader-failure placeholder.
+
 The current fixtures emit one **152-byte sec06 record** for the outer
 MOSVIEW window. They leave sec07 and sec08 empty because the two M14
 samples do not identify a direct projection for those wire tables.
@@ -560,6 +567,12 @@ samples do not identify a direct projection for those wire tables.
 The TitleOpen `topicUpperBound` comes from the M14 `|SYSTEM` topic-count
 record. The home cache key comes from the display TOPICPOS selected by
 the `|SYSTEM` contents offset.
+
+On initial open, `CreateMosViewWindowHierarchy` passes an empty context
+string through `vaMVConvertHash`. Media View hashes that string to `1`.
+The selector-`0x06` kind-1 result therefore maps hash `1` to the home
+display TOPICPOS and the `|SYSTEM` contents offset. A zero result makes
+MOSVIEW request selector `0x15` for key `0`, leaving the pane blank.
 
 Each selector-`0x15` reply carries the matching M14 display record. The
 server re-encodes its paragraph fields as a cache TLV and copies its
@@ -1432,6 +1445,33 @@ Reply: `0x81 <status> 0x87 0x86 <bytes>` — bit-identical to DIRSRV
 blob — NOT a `0x88` stream-end iterator. Position advances by the
 returned length. Standard fragmentation applies (>1024 B requires
 chunking through `build_service_packet`).
+
+One client read can exceed the pipe frame's 16-bit total-data length.
+In that case the reply is a sequence of host blocks with the same
+class, selector, and request ID:
+
+```
+81 00 87 85 <first raw bytes>
+             85 <middle raw bytes>   # zero or more
+             86 <final raw bytes>
+```
+
+`MPCCL!ProcessTaggedServiceReply @ 0x04604F26` routes both `0x85` and
+`0x86` through `ReadDynamicSectionRawData @ 0x04605809`. Each tag
+consumes the rest of its host block without a length prefix. `0x85`
+accumulates bytes without signaling completion; the final `0x86`
+publishes the combined length and wakes `LcbReadHf`. Returning a short
+`0x86` response is not continuation: `LcbReadHf` treats it as the
+completed read and does not request the missing remainder.
+
+Limit each host block to `0x4000` raw dynamic bytes. Static analysis
+shows that MPCCL grows the accumulated buffer in `0x4000`-byte steps,
+while MOSCP first queues each complete host block through `ARENA.MOS`.
+Live-client observation on 2026-07-30 validated this block size: a
+single `0xF000`-byte block made MOSCP close the MEDVIEW pipe before
+MPCCL received it. Splitting France's 184,459-byte `homem.SHG` read
+into 12 host blocks completed the request, rendered the title, and
+produced the expected selector `0x1C` close for its remote handle.
 
 ### `0x1C` HfCloseHf — request / reply
 

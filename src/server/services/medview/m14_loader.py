@@ -28,6 +28,7 @@ _RECORD_TITLE = 1
 _RECORD_COPYRIGHT = 2
 _RECORD_CONTENTS = 3
 _RECORD_TOPIC_COUNT = 11
+_RECORD_DLL_MAP = 19
 
 _TOPIC_HEADER = 0x02
 _TOPIC_DISPLAY = 0x20
@@ -54,6 +55,15 @@ _COLOR_INHERIT = 0xFFFFFFFF
 class M14InternalFile:
     name: str
     body: bytes
+
+
+@dataclass(frozen=True)
+class M14DllMap:
+    alias: str
+    win16_retail: str
+    win16_debug: str
+    win32_retail: str
+    win32_debug: str
 
 
 @dataclass(frozen=True)
@@ -88,6 +98,7 @@ class LoadedM14:
     generated_at: int
     font_faces: tuple[str, ...]
     font_descriptors: tuple[bytes, ...]
+    dll_maps: tuple[M14DllMap, ...]
     topic_count: int
     topics: tuple[M14Topic, ...]
     home_topic: M14Topic
@@ -150,6 +161,7 @@ class _SystemInfo:
     minor: int
     flags: int
     topic_count_hint: int
+    dll_maps: tuple[M14DllMap, ...]
 
 
 def _read_internal_file(buf: bytes, offset: int) -> bytes:
@@ -221,6 +233,7 @@ def _parse_system(data: bytes) -> _SystemInfo:
     copyright_text = ""
     contents_offset = 0
     topic_count_hint = 0
+    dll_maps: list[M14DllMap] = []
     pos = 12
     while pos + 4 <= len(data):
         record_type, size = struct.unpack_from("<HH", data, pos)
@@ -244,6 +257,15 @@ def _parse_system(data: bytes) -> _SystemInfo:
             contents_offset = struct.unpack_from("<I", payload, 0)[0]
         elif record_type == _RECORD_TOPIC_COUNT and minor == 27 and len(payload) == 4:
             topic_count_hint = struct.unpack_from("<I", payload, 0)[0]
+        elif record_type == _RECORD_DLL_MAP:
+            fields = payload.split(b"\x00")
+            if len(fields) < 6:
+                raise ValueError("|SYSTEM DLLMAP record has fewer than five strings")
+            decoded = [
+                field.decode("cp1252", errors="replace")
+                for field in fields[:5]
+            ]
+            dll_maps.append(M14DllMap(*decoded))
 
     return _SystemInfo(
         title=title,
@@ -253,6 +275,7 @@ def _parse_system(data: bytes) -> _SystemInfo:
         minor=minor,
         flags=flags,
         topic_count_hint=topic_count_hint,
+        dll_maps=tuple(dll_maps),
     )
 
 
@@ -642,6 +665,7 @@ def load_m14(path: pathlib.Path) -> LoadedM14 | None:
             generated_at=system.generated_at,
             font_faces=faces,
             font_descriptors=descriptors,
+            dll_maps=system.dll_maps,
             topic_count=system.topic_count_hint or max(len(topics), 1),
             topics=topics,
             home_topic=home_topic,
@@ -695,6 +719,30 @@ def _build_sec06(title: str) -> bytes:
     return bytes(record)
 
 
+def _build_sec13(m14: LoadedM14) -> bytes:
+    """Project M14 DLLMAP records into TitleLoadDLL's module table."""
+    entries = bytearray()
+    for dll_map in m14.dll_maps:
+        win32_retail = dll_map.win32_retail
+        if dll_map.alias.upper() in {"MVIMG", "MVIMAGE"}:
+            win32_retail = "MVPR14N"
+        fields = (
+            dll_map.alias,
+            dll_map.win16_retail,
+            dll_map.win16_debug,
+            win32_retail,
+            dll_map.win32_debug,
+        )
+        entry = b"\x00".join(
+            field.encode("cp1252", errors="replace")
+            for field in fields
+        ) + b"\x00"
+        entries += struct.pack("<H", len(entry)) + entry
+    if not entries:
+        return b"\x00\x00"
+    return struct.pack("<HH", len(entries), len(m14.dll_maps)) + entries
+
+
 def lower_m14_to_payload(m14: LoadedM14, deid: str) -> bytes:
     """Build the nine-section TitleOpen body from an M14 title."""
     title = m14.title.encode("cp1252", errors="replace") + b"\x00"
@@ -711,7 +759,7 @@ def lower_m14_to_payload(m14: LoadedM14, deid: str) -> bytes:
             _length_prefixed(title),
             _length_prefixed(copyright_text),
             _length_prefixed(title_id),
-            b"\x00\x00",  # sec13: no auxiliary counted strings
+            _build_sec13(m14),
             b"\x00\x00",  # sec04: no MOSVIEW host strings
         ]
     )

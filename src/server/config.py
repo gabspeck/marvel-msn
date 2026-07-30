@@ -46,6 +46,7 @@ ROUTING_PIPE_OPEN = 0x0000
 # an iterator yields zero records; 0x88 never fires +0x24 so Wait() blocks
 # until the pipe closes and returns 0x8B0B0005.
 TAG_END_STATIC = 0x87               # End of static section marker
+TAG_DYNAMIC_PARTIAL = 0x85          # raw dynamic chunk, does not signal completion
 TAG_DYNAMIC_COMPLETE_SIGNAL = 0x86  # single-shot dynamic blob, signals Wait()
 TAG_DYNAMIC_STREAM_END = 0x88       # iterator stream end, signals +0x28/+0x2c
 

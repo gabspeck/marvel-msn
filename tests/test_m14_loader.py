@@ -53,6 +53,8 @@ class TestM14Loader(unittest.TestCase):
             ("Times New Roman", "Arial", "Helv", "Wingdings"),
         )
         self.assertTrue(all(len(descriptor) == 0x2A for descriptor in title.font_descriptors))
+        self.assertEqual(title.dll_maps[2].alias, "MVIMG")
+        self.assertEqual(title.dll_maps[2].win32_retail, "MVMG14N")
 
         display = title.home_display
         self.assertEqual(display.topic_pos, 0xA7)
@@ -113,7 +115,24 @@ class TestM14Loader(unittest.TestCase):
             "© 1996 Centric Development, Inc.\x00".encode("cp1252"),
         )
         self.assertEqual(title_id, b"4\x00")
-        self.assertEqual(payload[offset:], b"\x00\x00\x00\x00")
+
+        entry_bytes = struct.unpack_from("<H", payload, offset)[0]
+        entry_count = struct.unpack_from("<H", payload, offset + 2)[0]
+        entries_end = offset + 4 + entry_bytes
+        self.assertEqual(entry_count, 6)
+        entries = []
+        offset += 4
+        for _ in range(entry_count):
+            entry_size = struct.unpack_from("<H", payload, offset)[0]
+            offset += 2
+            entries.append(payload[offset : offset + entry_size])
+            offset += entry_size
+        self.assertEqual(offset, entries_end)
+        self.assertIn(
+            b"MVIMG\x00MVMG14W\x00MVMG14W\x00MVPR14N\x00MVMG14N\x00",
+            entries,
+        )
+        self.assertEqual(payload[offset:], b"\x00\x00")
 
     def test_native_display_stream_is_preserved_in_case1_cache_record(self):
         title = load_m14(_HANDBOOK)

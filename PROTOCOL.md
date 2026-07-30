@@ -344,10 +344,10 @@ have bit 7 set. Low nibble = type.
 | 0x02 | 0x82 | word | 2 LE |
 | 0x03 | 0x83 | dword | 4 LE |
 | 0x04 | 0x84 | variable | length-prefixed |
-| 0x05 | 0x85 | dynamic-start | length-prefixed |
-|      | 0x86 | dynamic-more | length-prefixed |
-|      | 0x87 | dynamic-last / end-of-static | 0 |
-|      | 0x88 | dynamic-complete (rest of host block is raw) | — |
+| 0x05 | 0x85 | chunked request reference / dynamic reply partial | request reference / reply raw-to-end |
+|      | 0x86 | dynamic complete, single-shot waiter | rest of host block is raw |
+|      | 0x87 | end-of-static | 0 |
+|      | 0x88 | dynamic complete, iterator waiter | rest of host block is raw |
 |      | 0x8F | error code | 4 LE |
 
 In a client request, send tags with data come first, followed by **receive
@@ -355,7 +355,13 @@ descriptors** — bit-7-set tags with no data declaring expected reply types.
 Up to 16 send and 16 receive descriptors per request. The client auto-adds
 a final `0x84` completion slot — server must **not** send data for it.
 
-### 6.2 Length encoding (tags 0x84–0x88)
+`0x85`, `0x86`, and `0x88` dynamic reply tags have no length prefix.
+`MPCCL!ReadDynamicSectionRawData @ 0x04605809` consumes all bytes left in
+that host block. `0x85` accumulates a partial chunk without completing the
+request; `0x86` and `0x88` finalize the accumulated bytes and wake different
+client waiters.
+
+### 6.2 Variable-field length encoding
 
 | Byte 0 bit 7 | Format |
 |--------------|--------|

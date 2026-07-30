@@ -265,15 +265,16 @@ def baggage_chunk(
     name: str,
     offset: int,
     count: int,
-    max_chunk: int,
     baggage_map: dict[str, bytes] | None = None,
 ) -> bytes:
-    """Slice `baggage_map[name][offset : offset + min(count, max_chunk)]`.
-    Returns empty bytes when `name` is missing — caller should reject
-    the read with `read_remote_hfs_file_error()` in that case."""
+    """Slice `baggage_map[name][offset : offset + count]`.
+
+    Returns empty bytes when `name` is missing. The handler splits a large
+    logical read across dynamic-reply host blocks without shortening it.
+    """
     bm = baggage_map if baggage_map is not None else _DEFAULT_BAGGAGE_MAP
     container = bm.get(name)
     if container is None:
         return b""
-    end = min(offset + min(count, max_chunk), len(container))
+    end = min(offset + count, len(container))
     return container[offset:end]

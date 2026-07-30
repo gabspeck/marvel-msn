@@ -65,6 +65,8 @@ from ...config import (
     MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS,
     MEDVIEW_VALIDATE_TITLE,
     MPC_CLASS_ONEWAY_MASK,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_PARTIAL,
 )
 from ...models import (
     ByteParam,
@@ -100,7 +102,11 @@ _M14_FIXTURE_FILES = {
 log = logging.getLogger(__name__)
 
 
-_HFS_READ_CHUNK_MAX = 0xF000
+# Maximum raw dynamic data in one HFS reply host block. MPCCL's dynamic
+# receiver grows in 0x4000-byte increments, and MOSCP must copy each complete
+# host block through ARENA.MOS before MPCCL can consume it. Larger logical
+# reads continue with tag 0x85 and finish once with tag 0x86.
+_HFS_DYNAMIC_BLOCK_DATA_MAX = 0x4000
 _BAGGAGE_HANDLE_BM0 = 0x42
 # Per-page baggage handle base. Engine treats handles as opaque u8;
 # `0x42` is the bm0 sentinel kept for log continuity. Subsequent pages
@@ -416,8 +422,18 @@ _TYPE3_KIND_BY_SELECTOR = {
 def _push_type3_op4(selector: int):
     kind = _TYPE3_KIND_BY_SELECTOR[selector]
 
-    def build(_handler, title_slot: int, key: int) -> bytes:
-        return build_type3_op4_frame(title_slot, kind, key, va=0, addr=0)
+    def build(handler, title_slot: int, key: int) -> bytes:
+        va = addr = 0
+        title = handler.loaded_m14
+        if (
+            title is not None
+            and selector == MEDVIEW_CONVERT_HASH_TO_VA
+            and key == 1
+        ):
+            # MOSVIEW hashes the empty initial context string to 1.
+            va = title.contents_va
+            addr = title.contents_offset
+        return build_type3_op4_frame(title_slot, kind, key, va=va, addr=addr)
 
     return build
 
@@ -605,10 +621,79 @@ class MEDVIEWHandler:
             _selector_name(selector), selector, request_id,
             _format_reply_payload(selector, reply_payload),
         )
+        if selector == MEDVIEW_READ_REMOTE_HFS_FILE:
+            return self._build_hfs_read_reply_packets(
+                msg_class,
+                selector,
+                request_id,
+                reply_payload,
+                server_seq,
+                client_ack,
+            )
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(
             self.pipe_idx, host_block, server_seq, client_ack,
         )
+
+    def _build_hfs_read_reply_packets(
+        self,
+        msg_class,
+        selector,
+        request_id,
+        reply_payload,
+        server_seq,
+        client_ack,
+    ):
+        dynamic = reply_payload[4:]
+        if (
+            len(reply_payload) <= 4 + _HFS_DYNAMIC_BLOCK_DATA_MAX
+            or reply_payload[:4]
+            != bytes([0x81, 0x00, 0x87, TAG_DYNAMIC_COMPLETE_SIGNAL])
+        ):
+            host_block = build_host_block(
+                msg_class, selector, request_id, reply_payload,
+            )
+            return build_service_packet(
+                self.pipe_idx, host_block, server_seq, client_ack,
+            )
+
+        packets = []
+        block_count = (
+            len(dynamic) + _HFS_DYNAMIC_BLOCK_DATA_MAX - 1
+        ) // _HFS_DYNAMIC_BLOCK_DATA_MAX
+        for block_index in range(block_count):
+            start = block_index * _HFS_DYNAMIC_BLOCK_DATA_MAX
+            end = start + _HFS_DYNAMIC_BLOCK_DATA_MAX
+            chunk = dynamic[start:end]
+            is_first = block_index == 0
+            is_last = block_index == block_count - 1
+            block_payload = (
+                (reply_payload[:3] if is_first else b"")
+                + bytes([
+                    TAG_DYNAMIC_COMPLETE_SIGNAL if is_last else TAG_DYNAMIC_PARTIAL
+                ])
+                + chunk
+            )
+            host_block = build_host_block(
+                msg_class, selector, request_id, block_payload,
+            )
+            block_packets = build_service_packet(
+                self.pipe_idx,
+                host_block,
+                (server_seq + len(packets)) & 0x7F,
+                client_ack,
+            )
+            packets.extend(block_packets)
+
+        log.info(
+            "read_remote_hfs_file_stream req_id=%d bytes=%d host_blocks=%d "
+            "transport_fragments=%d",
+            request_id,
+            len(dynamic),
+            block_count,
+            len(packets),
+        )
+        return packets
 
     def _dispatch(self, msg_class, selector, request_id, payload) -> bytes | None:
         # SessionService
@@ -844,8 +929,7 @@ class MEDVIEWHandler:
             )
             return replies.read_remote_hfs_file_error()
         chunk = replies.baggage_chunk(
-            name, offset, count, _HFS_READ_CHUNK_MAX,
-            baggage_map=self.baggage_map,
+            name, offset, count, baggage_map=self.baggage_map,
         )
         log.info(
             "read_remote_hfs_file req_id=%d handle=%r name=%r count=%d "

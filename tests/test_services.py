@@ -25,6 +25,7 @@ from server.config import (
     PIPE_LAST_DATA,
     SASRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_PARTIAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
@@ -34,6 +35,7 @@ from server.mpc import (
     build_host_block,
     build_service_packet,
     build_tagged_reply_var,
+    parse_host_block,
     parse_tagged_params,
 )
 from server.services.dirsrv import (
@@ -1995,10 +1997,7 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
 
 class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
     """Selectors 0x05 / 0x06 / 0x07 / 0x15 / 0x16 ack synchronously and
-    push the resolved entry on the matching notification iterator. With
-    no on-disk topic catalog, type-3 frames carry va=addr=0 and type-0
-    pushes are 0xA5 status records — both safe for the empty MSN Today
-    path."""
+    push the resolved entry on the matching notification iterator."""
 
     @staticmethod
     def _subscribe(handler, notification_type, request_id):
@@ -2030,7 +2029,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
                 f"selector 0x{selector:02x} ack mismatch",
             )
 
-    def test_convert_hash_pushes_type3_frame_with_va_zero(self):
+    def test_unknown_hash_pushes_type3_frame_with_va_zero(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._subscribe(handler, 3, 2)
         key = 0xCAFEBABE
@@ -2047,6 +2046,35 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             struct.unpack("<HHBBIII", push[1:19]),
             (4, 18, 0x01, 1, key, 0, 0),
         )
+
+    def test_empty_context_hash_resolves_to_m14_contents(self):
+        for deid, expected_va, expected_addr in (
+            ("4", 0xA7, 0),
+            ("1001", 0xC930, 0x18699),
+        ):
+            handler = MEDVIEWHandler(5, "MEDVIEW")
+            token = f":2[{deid}]0".encode("ascii") + b"\x00"
+            open_req = (
+                b"\x04"
+                + bytes([0x80 | len(token)])
+                + token
+                + b"\x03\x00\x00\x00\x00"
+                + b"\x03\x00\x00\x00\x00"
+                + b"\x81\x81\x83\x83\x83\x83\x83"
+            )
+            handler.handle_request(
+                0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5,
+            )
+            self._subscribe(handler, 3, 2)
+            hash_req = b"\x01\x01\x03\x01\x00\x00\x00"
+            pkts = handler.handle_request(
+                0x01, MEDVIEW_SELECTOR_VA_CONVERT_HASH, 9, hash_req, 5, 5,
+            )
+            push = parse_packet(pkts[1][:-1]).payload[8:]
+            self.assertEqual(
+                struct.unpack("<HHBBIII", push[1:19]),
+                (4, 18, 0x01, 1, 1, expected_va, expected_addr),
+            )
 
     def test_convert_topic_pushes_type3_kind_0(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
@@ -2656,9 +2684,8 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertEqual(chunk, b"\x00" * 7)
 
     def test_hfs_read_bm0_full_request_is_pipe_safe(self):
-        # Single read for the full container exceeds the 0xF000 chunk
-        # cap; the handler returns up to 0xF000 in one reply. Subsequent
-        # reads from the engine fetch the remainder.
+        # The full bm0 fits in one host block but requires transport
+        # fragmentation. Every transport packet remains within PacketSize.
         read_req = (
             b"\x01\x42"
             + b"\x03" + struct.pack("<I", self._BM0_CONTAINER_LEN)
@@ -2729,6 +2756,76 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
             read_reply[4:36],
             handler.baggage_map["homed.shg"][:32],
         )
+
+    def test_large_hfs_read_streams_all_bytes_before_completion(self):
+        handler = self._open_handler()
+        name = b"!homed.SHG\x00"
+        open_req = (
+            b"\x01\x01\x04"
+            + bytes([0x80 | len(name)])
+            + name
+            + b"\x01\x02\x81\x83"
+        )
+        open_pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 21, open_req, 5, 5,
+        )
+        handle = parse_packet(open_pkts[0][:-1]).payload[10]
+        baggage = handler.baggage_map["homed.shg"]
+        offset = 5
+        read_req = (
+            b"\x01"
+            + bytes([handle])
+            + b"\x03" + struct.pack("<I", len(baggage) - offset)
+            + b"\x03" + struct.pack("<I", offset)
+            + b"\x81\x85"
+        )
+        packets = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_HFS_READ, 22, read_req, 5, 5,
+        )
+
+        dynamic_block_max = 0x4000
+        pipe_blocks = []
+        current = bytearray()
+        expected_size = None
+        for packet in packets:
+            parsed = parse_packet(packet[:-1])
+            self.assertTrue(parsed.crc_ok)
+            header = decode_header_byte(parsed.payload[0])
+            if expected_size is None:
+                expected_size = struct.unpack_from("<H", parsed.payload, 1)[0]
+                current.extend(parsed.payload[3:])
+            else:
+                current.extend(parsed.payload[1:])
+            if header & PIPE_LAST_DATA:
+                self.assertEqual(len(current), expected_size)
+                pipe_blocks.append(bytes(current))
+                current = bytearray()
+                expected_size = None
+
+        self.assertEqual(
+            len(pipe_blocks),
+            (len(baggage[offset:]) + dynamic_block_max - 1)
+            // dynamic_block_max,
+        )
+        replies = []
+        for pipe_block in pipe_blocks:
+            self.assertEqual(struct.unpack_from("<H", pipe_block)[0], 5)
+            host_block = parse_host_block(pipe_block[2:])
+            self.assertIsNotNone(host_block)
+            self.assertEqual(host_block.request_id, 22)
+            replies.append(host_block.payload)
+
+        self.assertEqual(replies[0][:4], b"\x81\x00\x87" + bytes([TAG_DYNAMIC_PARTIAL]))
+        for reply in replies[1:-1]:
+            self.assertEqual(reply[0], TAG_DYNAMIC_PARTIAL)
+        self.assertEqual(replies[-1][0], TAG_DYNAMIC_COMPLETE_SIGNAL)
+        self.assertLessEqual(len(replies[0][4:]), dynamic_block_max)
+        self.assertTrue(
+            all(len(reply[1:]) <= dynamic_block_max for reply in replies[1:]),
+        )
+        received = replies[0][4:] + b"".join(reply[1:] for reply in replies[1:])
+        self.assertEqual(received, baggage[offset:])
+        self.assertTrue(all(len(packet) <= 1024 for packet in packets))
 
 
 if __name__ == "__main__":
