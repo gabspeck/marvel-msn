@@ -2076,6 +2076,32 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
                 (4, 18, 0x01, 1, 1, expected_va, expected_addr),
             )
 
+    def test_m14_link_hash_resolves_through_context_btree(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        token = b":2[1001]0\x00"
+        open_req = (
+            b"\x04"
+            + bytes([0x80 | len(token)])
+            + token
+            + b"\x03\x00\x00\x00\x00"
+            + b"\x03\x00\x00\x00\x00"
+            + b"\x81\x81\x83\x83\x83\x83\x83"
+        )
+        handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5,
+        )
+        self._subscribe(handler, 3, 2)
+        key = 0x6348
+        hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_VA_CONVERT_HASH, 9, hash_req, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(
+            struct.unpack("<HHBBIII", push[1:19]),
+            (4, 18, 0x01, 1, key, 0x4696, 0x8338),
+        )
+
     def test_convert_topic_pushes_type3_kind_0(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._subscribe(handler, 3, 2)
@@ -2145,6 +2171,48 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[0], 0x85)
         self.assertEqual(push[1], 0xA5)
+
+    def test_m14_topic_chunks_carry_pane_bounds_and_adjacent_records(self):
+        from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        token = b":2[1001]0\x00"
+        open_req = (
+            b"\x04"
+            + bytes([0x80 | len(token)])
+            + token
+            + b"\x03\x00\x00\x00\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x81\x81\x83\x83\x83\x83\x83"
+        )
+        handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5)
+        self._subscribe(handler, 0, 1)
+
+        req_payload = b"\x01\x01\x03" + struct.pack("<I", 0x4696) + b"\x01\x01"
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_FETCH_ADJACENT_TOPIC, 11, req_payload, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        chunk = push[1:]
+        name_size = struct.unpack_from("<H", chunk, 2)[0]
+        self.assertEqual(chunk[0], 0xBF)
+        self.assertEqual(struct.unpack_from("<III", chunk, 8), (1, 0x4696, 0x46D3))
+        self.assertEqual(
+            struct.unpack_from("<II", chunk, 4 + name_size + 0x14),
+            (0x4696, 0x46D3),
+        )
+
+        req_payload = b"\x01\x01\x03" + struct.pack("<I", 0x46D3) + b"\x01\x01"
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_FETCH_ADJACENT_TOPIC, 12, req_payload, 5, 5,
+        )
+        push = parse_packet(pkts[1][:-1]).payload[8:]
+        chunk = push[1:]
+        self.assertEqual(chunk[0], 0xBF)
+        self.assertEqual(
+            struct.unpack_from("<III", chunk, 8),
+            (0x4696, 0x46D3, 0x4968),
+        )
+        self.assertIn(b"The Cathars were followers", chunk)
 
     def test_load_topic_highlights_returns_empty_dynbytes(self):
         # Selector 0x10 (LoadTopicHighlights) returns synchronous

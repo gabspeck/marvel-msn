@@ -13,8 +13,8 @@ state needed by selectors that don't have a static answer:
 Cache-miss group (`0x05`/`0x06`/`0x07`/`0x15`/`0x16`) emits a bare-ack
 synchronous reply followed by an async push frame on the matching
 notification iterator. Type-3 (va resolution) pushes resolve to zero
-(va=addr=0); selector 0x15 HfcNear wraps the loaded M14 topic's native
-Media View control stream in a case-1 BF cache record.
+without a loaded M14. Selectors 0x15 and 0x16 wrap loaded M14 display
+records in case-1 BF cache records.
 
 OpenTitle maps the title deid to a compiled M14 file under
 `resources/titles/`. Missing or malformed files fall through to the
@@ -428,11 +428,15 @@ def _push_type3_op4(selector: int):
         if (
             title is not None
             and selector == MEDVIEW_CONVERT_HASH_TO_VA
-            and key == 1
         ):
-            # MOSVIEW hashes the empty initial context string to 1.
-            va = title.contents_va
-            addr = title.contents_offset
+            if key == 1:
+                # MOSVIEW hashes the empty initial context string to 1.
+                va = title.contents_va
+                addr = title.contents_offset
+            else:
+                context = title.context_at(key)
+                if context is not None:
+                    va, addr = context
         return build_type3_op4_frame(title_slot, kind, key, va=va, addr=addr)
 
     return build
@@ -450,6 +454,7 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
     if title is not None:
         display = title.display_at(key)
         if display is not None:
+            previous, following = title.display_neighbors(key)
             return build_case1_stream_bf_chunk(
                 display.control_stream,
                 display.text_data,
@@ -458,6 +463,9 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
                 tlv_fields=display.fields_dict(),
                 tab_stops=list(display.tab_stops),
                 non_scroll=display.non_scroll,
+                scroll=display.scroll,
+                previous=previous,
+                following=following,
             )
     return build_case1_bf_chunk(
         text="", title_byte=title_slot, key=key, initial_font_style=None,
@@ -474,7 +482,7 @@ def _push_type0_a5_status(_handler, title_slot: int, key: int) -> bytes:
     edges report 0x3F3 and `currentTailGapY < 0` — clears
     `viewer[+0x84]` so the V-scroll bar disappears. The companion-side
     of this contract is `_stamp_chain_terminators` in `blackbird/wire.py`,
-    which writes `0xFFFFFFFE` into BF chunks' prev/next contentsToken
+    which writes `1` into BF chunks' prev/next contentsToken
     fields so the engine's HfcNextPrevHfc path misses cache and reaches
     this 0x16 reply."""
     return build_type0_status_record(
@@ -482,12 +490,20 @@ def _push_type0_a5_status(_handler, title_slot: int, key: int) -> bytes:
     )
 
 
+def _push_adjacent_topic(handler, title_slot: int, key: int) -> bytes:
+    if handler.loaded_m14 is not None:
+        display = handler.loaded_m14.display_at(key)
+        if display is not None:
+            return _push_va_resolve(handler, title_slot, key)
+    return _push_type0_a5_status(handler, title_slot, key)
+
+
 _PUSH_DISPATCH: dict[int, tuple[int, callable]] = {
     MEDVIEW_CONVERT_ADDRESS_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_ADDRESS_TO_VA)),
     MEDVIEW_CONVERT_HASH_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_HASH_TO_VA)),
     MEDVIEW_CONVERT_TOPIC_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_TOPIC_TO_VA)),
     MEDVIEW_FETCH_NEARBY_TOPIC: (0, _push_va_resolve),
-    MEDVIEW_FETCH_ADJACENT_TOPIC: (0, _push_type0_a5_status),
+    MEDVIEW_FETCH_ADJACENT_TOPIC: (0, _push_adjacent_topic),
 }
 
 
@@ -829,9 +845,9 @@ class MEDVIEWHandler:
         title_file = _M14_FIXTURE_FILES.get(deid, f"{deid}.m14")
         title = load_m14(_TITLES_DIR / title_file) if deid else None
         if title is not None:
-            cache0, cache1 = title.cache_tuple
             self.loaded_m14 = title
             self.title_body = lower_m14_to_payload(title, deid)
+            cache0, cache1 = title.cache_tuple(self.title_body)
             self.baggage_map = title.baggage_map()
             self.title_metadata = TitleOpenMetadata(
                 title_slot=TITLE_OPEN_METADATA.title_slot,

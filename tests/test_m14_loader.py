@@ -58,7 +58,7 @@ class TestM14Loader(unittest.TestCase):
 
         display = title.home_display
         self.assertEqual(display.topic_pos, 0xA7)
-        self.assertEqual(display.tlv_fields, ((0x0C, 2),))
+        self.assertEqual(display.tlv_fields, ((0x0C, 2), (0x12, 1)))
         self.assertEqual(
             display.control_stream,
             b"\x80\x01\x00"
@@ -83,11 +83,30 @@ class TestM14Loader(unittest.TestCase):
         )
         self.assertEqual(title.home_topic.title, "Home Page")
         self.assertEqual(title.home_display.topic_pos, 0xC930)
+        self.assertEqual(title.pane_backgrounds, (0x00C0FFFF, 0x00FFFFFF))
         self.assertIn(
             b"MVIMG,MVIMAGE, !homem.SHG\x00",
             title.home_display.control_stream,
         )
         self.assertTrue(title.baggage_map()["homem.shg"].startswith(b"\x6c\x70\x01\x00"))
+
+    def test_context_hashes_resolve_to_native_topic_positions(self):
+        france = load_m14(_FRANCE)
+        handbook = load_m14(_HANDBOOK)
+        self.assertIsNotNone(france)
+        self.assertIsNotNone(handbook)
+        self.assertEqual(
+            france.context_at(0x6348),
+            (0x4696, 0x8338),
+        )
+        self.assertEqual(
+            france.context_at(0x10ACC4),
+            (0xCF0A, 0x186C1),
+        )
+        self.assertEqual(
+            handbook.context_at(0x2CD6150),
+            (0x1A6, 0x4),
+        )
 
     def test_title_open_payload_uses_m14_system_and_font_data(self):
         title = load_m14(_HANDBOOK)
@@ -106,6 +125,8 @@ class TestM14Loader(unittest.TestCase):
             self.assertEqual(section, b"")
         windows, offset = _read_blob(payload, offset)
         self.assertEqual(len(windows), 0x98)
+        self.assertEqual(struct.unpack_from("<I", windows, 0x78)[0], 0x00C0FFFF)
+        self.assertEqual(struct.unpack_from("<I", windows, 0x7C)[0], 0x00FFFFFF)
         title_text, offset = _read_blob(payload, offset)
         copyright_text, offset = _read_blob(payload, offset)
         title_id, offset = _read_blob(payload, offset)
@@ -150,6 +171,8 @@ class TestM14Loader(unittest.TestCase):
 
         self.assertEqual(chunk[:2], b"\xbf\x01")
         self.assertEqual(struct.unpack_from("<I", chunk, 12)[0], 0xA7)
+        self.assertEqual(struct.unpack_from("<I", chunk, 8)[0], 1)
+        self.assertEqual(struct.unpack_from("<I", chunk, 16)[0], 1)
         self.assertEqual(chunk[0x2A], 1)
         fields, tlv_size = decode_case1_tlv(chunk[0x2D:])
         self.assertEqual(fields[0x0C], 2)
@@ -163,3 +186,42 @@ class TestM14Loader(unittest.TestCase):
             struct.unpack_from("<I", chunk, 4 + name_size + 0x14)[0],
             0xFFFFFFFF,
         )
+
+    def test_cathar_display_chain_preserves_nsr_and_scroll_regions(self):
+        title = load_m14(_FRANCE)
+        self.assertIsNotNone(title)
+        non_scroll = title.display_at(0x4696)
+        scroll = title.display_at(0x46D3)
+        self.assertIsNotNone(non_scroll)
+        self.assertIsNotNone(scroll)
+        self.assertEqual((non_scroll.non_scroll, non_scroll.scroll), (0x4696, 0x46D3))
+        self.assertEqual(title.display_neighbors(0x4696), (1, 0x46D3))
+        self.assertEqual(title.display_neighbors(0x46D3), (0x4696, 0x4968))
+        self.assertEqual(title.display_neighbors(0x4A17), (0x4968, 1))
+        self.assertEqual(
+            non_scroll.fields_dict(),
+            {
+                0x12: 1,
+                0x16: 240,
+                0x18: 60,
+                0x1C: 72,
+                0x1E: 72,
+            },
+        )
+
+        chunk = build_case1_stream_bf_chunk(
+            non_scroll.control_stream,
+            non_scroll.text_data,
+            title_byte=1,
+            key=non_scroll.topic_pos,
+            tlv_fields=non_scroll.fields_dict(),
+            tab_stops=list(non_scroll.tab_stops),
+            non_scroll=non_scroll.non_scroll,
+            scroll=non_scroll.scroll,
+        )
+        fields, _tlv_size = decode_case1_tlv(chunk[0x2D:])
+        self.assertEqual(fields[0x12], 1)
+        self.assertEqual(fields[0x16], 240)
+        self.assertEqual(fields[0x18], 60)
+        self.assertEqual(fields[0x1C], 72)
+        self.assertEqual(fields[0x1E], 72)

@@ -616,12 +616,13 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         expected[2:4] = bytes.fromhex("4000")
         # Prev/next contentsToken sentinels — see `_stamp_chain_terminators`.
         # name_buf[+4] (= chunk[8:12]) is read by HfcNextPrevHfc on leading
-        # probes; name_buf[+0xC] (= chunk[16:20]) on trailing probes. 0xFFFFFFFE
-        # forces cache miss → 0x16 RPC → 0xA5/0x3F3 reply → seek loop sees
-        # leading-end and clears the V scrollbar.
-        expected[8:12] = b"\xFE\xFF\xFF\xFF"
+        # probes; name_buf[+0xC] (= chunk[16:20]) on trailing probes. Token 1
+        # is below every valid TOPICPOS and forces cache miss → 0x16 RPC →
+        # 0xA5/0x3F3 reply → seek loop sees leading-end and clears the
+        # V scrollbar.
+        expected[8:12] = b"\x01\x00\x00\x00"
         expected[12:16] = struct.pack("<I", 0xCAFEBABE)
-        expected[16:20] = b"\xFE\xFF\xFF\xFF"
+        expected[16:20] = b"\x01\x00\x00\x00"
         expected[4 + 0x26:4 + 0x29] = bytes.fromhex("010e80")
         expected[4 + 0x29:4 + 0x2F] = bytes.fromhex("008000000000")
         expected[4 + 0x2F] = 0xFF
@@ -634,13 +635,13 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         self.assertEqual(chunk, bytes(expected))
 
     def test_chunk_stamps_chain_terminators(self):
-        # Prev/next contentsToken fields must be 0xFFFFFFFE so the engine's
-        # HfcNextPrevHfc walk misses cache and reaches the server's 0x16
-        # 0xA5/0x3F3 reply (instead of hitting the chunk's own key=0 entry
-        # and re-parsing the same slot forever).
+        # Prev/next contentsToken fields must be below every valid TOPICPOS
+        # so HfcNear cannot treat this chunk as the range containing another
+        # topic. The token remains nonzero so HfcNextPrevHfc reaches the
+        # server's 0x16 0xA5/0x3F3 reply.
         chunk = self._chunk(key=0xCAFEBABE)
-        self.assertEqual(chunk[8:12], b"\xFE\xFF\xFF\xFF")
-        self.assertEqual(chunk[16:20], b"\xFE\xFF\xFF\xFF")
+        self.assertEqual(chunk[8:12], b"\x01\x00\x00\x00")
+        self.assertEqual(chunk[16:20], b"\x01\x00\x00\x00")
 
     def test_chunk_content_block_is_zero_except_nsr_sentinel(self):
         chunk = self._chunk()
@@ -741,8 +742,8 @@ class TestCase3BfChunk(unittest.TestCase):
         # See TestCase1BfChunkLegacy0x40.test_chunk_stamps_chain_terminators
         # for the rationale — case-3 stamps the same sentinels.
         chunk = build_case3_bf_chunk(title_byte=0x01, key=0xCAFEBABE)
-        self.assertEqual(chunk[8:12], b"\xFE\xFF\xFF\xFF")
-        self.assertEqual(chunk[16:20], b"\xFE\xFF\xFF\xFF")
+        self.assertEqual(chunk[8:12], b"\x01\x00\x00\x00")
+        self.assertEqual(chunk[16:20], b"\x01\x00\x00\x00")
 
 
 class TestTextMetafileBorderAndFill(unittest.TestCase):
@@ -1125,9 +1126,9 @@ class TestStyledCase1Chunk(unittest.TestCase):
         styled = build_styled_case1_chunk(
             [("X", 0)], title_byte=0x01, key=0x00,
         )
-        # wire+0x8 and wire+0x10 are chain terminators = 0xFFFFFFFE.
-        self.assertEqual(struct.unpack("<I", styled[8:12])[0], 0xFFFFFFFE)
-        self.assertEqual(struct.unpack("<I", styled[16:20])[0], 0xFFFFFFFE)
+        # wire+0x8 and wire+0x10 are chain terminators below valid TOPICPOS.
+        self.assertEqual(struct.unpack("<I", styled[8:12])[0], 1)
+        self.assertEqual(struct.unpack("<I", styled[16:20])[0], 1)
         # content_block +0x14 NSR sentinel = 0xFFFFFFFF.
         name_size = struct.unpack("<H", styled[2:4])[0]
         nsr_off = 4 + name_size + 0x14

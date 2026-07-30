@@ -1291,11 +1291,11 @@ Fields (152 bytes / `0x98`; offsets verified at
 - `+0x5B..+0x5E` `containerControl:i32`. Stored at `MosViewContainer+0x20`
   via `*(int *)(this + 0x20) = *(int *)(record + 0x5B)` when the value
   is not `-1`.
-- `+0x78..+0x7B` `scrollingPaneBackground:COLORREF`. Applied to the
-  scrolling (second-created) `MosChildView` via
+- `+0x78..+0x7B` `nonScrollingPaneBackground:COLORREF`. Applied to the
+  non-scrolling (second-created) `MosChildView` via
   `ApplyMosViewBackgroundColor(MosPaneState+0x40, record+0x78)`.
-- `+0x7C..+0x7F` `nonScrollingPaneBackground:COLORREF`. Applied to the
-  non-scrolling (first-created) `MosChildView` via
+- `+0x7C..+0x7F` `scrollingPaneBackground:COLORREF`. Applied to the
+  scrolling (first-created) `MosChildView` via
   `ApplyMosViewBackgroundColor(MosPaneState+0x40, record+0x7C)`.
 - `+0x80..+0x8F` `innerPaneRect`. `left:i32` `+0x80`, `top:i32`
   `+0x84`, `width:i32` `+0x88`, `height:i32` `+0x8C`. Defines the
@@ -1309,7 +1309,7 @@ Fields (152 bytes / `0x98`; offsets verified at
 The historical field names `topBandBackground` / `scrollingHostBackground`
 / `topBandRect` in earlier doc revisions were guesses; the consumer-side
 RE shows the two COLORREFs are simply the two MosChildView backgrounds
-(non-scrolling at `+0x7C`, scrolling at `+0x78`), and there is no
+(non-scrolling at `+0x78`, scrolling at `+0x7C`), and there is no
 separate "top band" rect in the record.
 
 ## Runtime Handle Shapes

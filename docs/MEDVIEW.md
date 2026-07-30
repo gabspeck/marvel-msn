@@ -563,6 +563,16 @@ aliases `MVIMG` and `MVIMAGE` resolve to MSN's installed image renderer,
 The current fixtures emit one **152-byte sec06 record** for the outer
 MOSVIEW window. They leave sec07 and sec08 empty because the two M14
 samples do not identify a direct projection for those wire tables.
+The first available `TOPICHEADER.BackColorNSR` value supplies the
+non-scrolling pane background at sec06 `+0x78`; `BackColorSR` supplies
+the scrolling pane background at `+0x7C`. Both sample titles specify
+`0x00C0FFFF` for the non-scrolling pane and `0x00FFFFFF` for the
+scrolling pane.
+
+The black outer frame and separator in standalone Media Viewer are
+host chrome, not M14 title data. MOSVIEW creates both `MosChildView`
+windows without `WS_BORDER`, and sec06 has no border or separator
+field.
 
 The TitleOpen `topicUpperBound` comes from the M14 `|SYSTEM` topic-count
 record. The home cache key comes from the display TOPICPOS selected by
@@ -574,9 +584,26 @@ The selector-`0x06` kind-1 result therefore maps hash `1` to the home
 display TOPICPOS and the `|SYSTEM` contents offset. A zero result makes
 MOSVIEW request selector `0x15` for key `0`, leaving the pane blank.
 
+Embedded links carry native context hashes. The M14 `|CONTEXT` B-tree
+maps each hash to a TOPICOFFSET: the high bits select a `|TOPIC` block
+and the low 15 bits select a character position within that block. The
+server locates the display whose character range contains the offset
+and returns its TOPICPOS as the selector-`0x06` va. For example,
+France hash `0x6348` maps to `va=0x4696, addr=0x8338`.
+
 Each selector-`0x15` reply carries the matching M14 display record. The
 server re-encodes its paragraph fields as a cache TLV and copies its
-native control and text streams.
+native control and text streams. Companion offsets `+0x14` and `+0x18`
+carry the topic's `NonScroll` and `Scroll` TOPICPOS values. The client
+uses them to direct its two panes to the correct display records.
+M14 paragraph flag `0x0001` gates the metric-mode value encoded at
+cache TLV offset `+0x12`. Both sample titles set it to `1`, selecting
+the client's 1440-unit twips scale. Omitting this value selects the
+144-unit scale and expands paragraph spacing and indents by 10.
+Prev/next cache tokens name neighboring display records in the topic;
+selector `0x16` returns those records. Topic endpoints use token `1`,
+an invalid TOPICPOS below every real record. A larger terminator would
+make `HfcNear` reuse the endpoint record for lower VAs.
 
 RemoteFileService exposes each non-system HFS file by name. This path
 serves the bitmap and hotspot baggage referenced by the native M14
@@ -927,7 +954,8 @@ with HGLOBAL handles that wrap the variable-length **body** and
 |-------:|------:|-------|--------|
 | `+0x00..+0x13` | 20 bytes | wire-metadata head | raw-copied from notifyBuf; consumed by the picture/glyph rendering path via `viewer+0x38..+0x4B` |
 | **`+0x14`** | **u32** | **nsr-low-va (`viewer+0x4c` mirror)** | **`0xFFFFFFFF` = no NSR region; any other value = NSR present at that va. See §6b.1.4.1.** |
-| `+0x18..+0x2B` | 20 bytes | wire-metadata tail | raw-copied from notifyBuf; client-opaque to MVTTL14C |
+| **`+0x18`** | **u32** | **scroll-low-va (`viewer+0x50` mirror)** | **Start of the topic's scrolling region. `fMVSetAddress` selects this VA for the scrolling pane.** |
+| `+0x1C..+0x2B` | 16 bytes | wire-metadata tail | raw-copied from notifyBuf; client-opaque to MVTTL14C |
 | `+0x2C` | HGLOBAL | `bodyHandle` | `GlobalAlloc(GMEM_FIXED, bodyByteCount+1)`, locked, filled from notifyBuf body region, NUL-terminated |
 | `+0x30` | u32 | `bodyByteCount` | raw-copied from wire (drives the GlobalAlloc size) |
 | `+0x34` | HGLOBAL | `nameHandle` | `GlobalAlloc(GMEM_FIXED, nameLen)`, locked, filled from the trailing ASCIIZ name in notifyBuf |
@@ -952,7 +980,7 @@ chain: kind `0xBF` records carry `[u16 payloadSize][...payload...][60-byte metad
 metadata token at `entry+0x18` status path; kind `0x37` records carry
 incremental trailers for a previously-started `0xBF` entry.
 
-##### 6b.1.4.1 NSR-collapse signal (`companion+0x14` → `viewer+0x4c`)
+##### 6b.1.4.1 Pane bounds (`companion+0x14/+0x18` → `viewer+0x4c/+0x50`)
 
 `MVCL14N!fMVHasNSR @ 0x7E8835B0` is one line:
 
@@ -982,13 +1010,14 @@ at `viewer+0x4c` on every cache hit.
 
 Native MV's authoring pipeline propagates `TOPICHEADER.NonScroll` from
 `|TOPIC` into companion+0x14: `0xFFFFFFFF` means "no NSR region", any
-other value is the TOPICPOS where NSR starts. MSN MOSVIEW doesn't read
-TOPICHEADER bytes from the wire — the 60-byte companion is the
-authoring-side signal carried verbatim through `HfcCache_*` into the
-viewer.
+other value is the TOPICPOS where NSR starts. It propagates
+`TOPICHEADER.Scroll` into companion+0x18. `fMVSetAddress @ 0x7E883600`
+loads both values after `HfcNear`: pane type 0 starts at `viewer+0x4c`
+and pane type 1 starts at `viewer+0x50`. MOSVIEW passes the same target
+VA to both panes, so both fields are required.
 
-The M14 fixture loader copies `TOPICHEADER.NonScroll` into the case-1
-companion block. The synthetic builders still write `FFFFFFFF` when
+The M14 fixture loader copies both TOPICHEADER values into the case-1
+companion block. Synthetic builders write `FFFFFFFF` at +0x14 when
 they have no M14 topic header.
 
 ## 6b. Content selectors (va / addr / highlight resolution)
@@ -1312,6 +1341,10 @@ above.
    `va@+8` to the calling `vaConvertHash`. With a real va the engine
    resumes its render path; without one, `vaConvertHash` times out
    after 30 s and returns `0xFFFFFFFF`.
+3. For an M14 title, resolve nonzero link hashes through `|CONTEXT` and
+   translate the stored TOPICOFFSET to the containing display's
+   TOPICPOS. Hash `1` is the empty initial context and maps to the
+   `|SYSTEM` contents location.
 
 ### 6b.3. ConvertTopicToVa (selector `0x07`)
 
@@ -2246,8 +2279,9 @@ Encoded by `src/server/blackbird/wire.py`'s `encode_signed_int_varint`,
 The DPI scale pass (`MVScaleTextMetrics`) immediately after parse rescales
 `+0x16..+0x22` and each pair entry's first ushort by
 `(devCaps × field × dpi_scale) / (base × 100)`, where `base = 144`
-when `TLV[0x12] & 1 == 0` else `1440`. Suggests fields are
-sub-pixel layout values in points×10 / twips.
+when `TLV[0x12] & 1 == 0` else `1440`. Compiled M14 paragraph flag
+`0x0001` supplies `TLV[0x12]`; the sample titles use value `1` for
+twips-based layout metrics.
 
 #### Slot tag-1 emission (`MVTextLayoutFSM` / `MVEmitTextRunSlot`)
 

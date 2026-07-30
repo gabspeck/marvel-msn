@@ -34,7 +34,7 @@ _TOPIC_HEADER = 0x02
 _TOPIC_DISPLAY = 0x20
 _TOPIC_TABLE = 0x23
 
-_PARA_UNKNOWN = 0x0001
+_PARA_METRIC_MODE = 0x0001
 _PARA_SPACE_ABOVE = 0x0002
 _PARA_SPACE_BELOW = 0x0004
 _PARA_SPACE_LINES = 0x0008
@@ -70,11 +70,13 @@ class M14DllMap:
 class M14DisplayRecord:
     topic_pos: int
     topic_length: int
+    address: int
     control_stream: bytes
     text_data: bytes
     tlv_fields: tuple[tuple[int, int], ...]
     tab_stops: tuple[tuple[int, int], ...]
     non_scroll: int
+    scroll: int
 
     def fields_dict(self) -> dict[int, int]:
         return dict(self.tlv_fields)
@@ -87,6 +89,8 @@ class M14Topic:
     non_scroll: int
     scroll: int
     next_topic: int
+    non_scroll_background: int | None
+    scroll_background: int | None
     displays: tuple[M14DisplayRecord, ...]
 
 
@@ -99,6 +103,7 @@ class LoadedM14:
     font_faces: tuple[str, ...]
     font_descriptors: tuple[bytes, ...]
     dll_maps: tuple[M14DllMap, ...]
+    context_map: tuple[tuple[int, int, int], ...]
     topic_count: int
     topics: tuple[M14Topic, ...]
     home_topic: M14Topic
@@ -119,17 +124,59 @@ class LoadedM14:
     def contents_va(self) -> int:
         return self.home_display.topic_pos
 
-    @property
-    def cache_tuple(self) -> tuple[int, int]:
+    def cache_tuple(self, title_payload: bytes) -> tuple[int, int]:
         first = self.generated_at or len(self.archive_bytes)
-        second = zlib.crc32(self.archive_bytes)
+        second = zlib.crc32(title_payload, zlib.crc32(self.archive_bytes))
         return first & 0xFFFFFFFF, second & 0xFFFFFFFF
+
+    @property
+    def pane_backgrounds(self) -> tuple[int, int]:
+        non_scroll = next(
+            (
+                topic.non_scroll_background
+                for topic in self.topics
+                if topic.non_scroll_background is not None
+            ),
+            _COLOR_INHERIT,
+        )
+        scroll = next(
+            (
+                topic.scroll_background
+                for topic in self.topics
+                if topic.scroll_background is not None
+            ),
+            _COLOR_INHERIT,
+        )
+        return non_scroll, scroll
 
     def display_at(self, topic_pos: int) -> M14DisplayRecord | None:
         for topic in self.topics:
             for display in topic.displays:
                 if display.topic_pos == topic_pos:
                     return display
+        return None
+
+    def display_neighbors(self, topic_pos: int) -> tuple[int, int]:
+        for topic in self.topics:
+            for index, display in enumerate(topic.displays):
+                if display.topic_pos == topic_pos:
+                    previous = (
+                        topic.displays[index - 1].topic_pos
+                        if index
+                        else 1
+                    )
+                    following = (
+                        topic.displays[index + 1].topic_pos
+                        if index + 1 < len(topic.displays)
+                        else 1
+                    )
+                    return previous, following
+        return 1, 1
+
+    def context_at(self, context_hash: int) -> tuple[int, int] | None:
+        for candidate_hash, topic_pos, address in self.context_map:
+            if candidate_hash == context_hash:
+                return topic_pos, address
         return None
 
     def baggage_map(self) -> dict[str, bytes]:
@@ -149,6 +196,8 @@ class _TopicBuilder:
     non_scroll: int
     scroll: int
     next_topic: int
+    non_scroll_background: int | None
+    scroll_background: int | None
     displays: list[M14DisplayRecord]
 
 
@@ -329,6 +378,46 @@ def _parse_font(data: bytes) -> tuple[tuple[str, ...], tuple[bytes, ...]]:
     return tuple(faces), descriptors
 
 
+def _parse_context(data: bytes) -> tuple[tuple[int, int], ...]:
+    if len(data) < 38:
+        raise ValueError("|CONTEXT is shorter than its B-tree header")
+    magic, _flags, page_size = struct.unpack_from("<HHH", data, 0)
+    if magic != _BTREE_MAGIC:
+        raise ValueError(f"|CONTEXT B-tree magic mismatch: 0x{magic:04x}")
+    root_page = struct.unpack_from("<H", data, 26)[0]
+    level_count = struct.unpack_from("<H", data, 32)[0]
+    if level_count != 1:
+        raise NotImplementedError(
+            f"|CONTEXT B-tree with {level_count} levels is unsupported",
+        )
+
+    records: list[tuple[int, int]] = []
+    page = root_page
+    visited: set[int] = set()
+    while page != 0xFFFF:
+        if page in visited:
+            raise ValueError("|CONTEXT leaf chain contains a cycle")
+        visited.add(page)
+        start = 38 + page * page_size
+        end = start + page_size
+        if end > len(data):
+            raise ValueError(f"|CONTEXT page {page} overruns file")
+        _unused, count, _previous, next_page = struct.unpack_from(
+            "<HHhh",
+            data,
+            start,
+        )
+        pos = start + 8
+        if pos + count * 8 > end:
+            raise ValueError(f"|CONTEXT page {page} records overrun page")
+        records.extend(
+            struct.unpack_from("<II", data, pos + index * 8)
+            for index in range(count)
+        )
+        page = 0xFFFF if next_page < 0 else next_page
+    return tuple(records)
+
+
 def _compressed_ushort(buf: bytes, pos: int) -> tuple[int, int]:
     first = buf[pos]
     if first & 1:
@@ -446,6 +535,31 @@ def _read_topic_link(
     )
 
 
+def _parse_topic_color(value: str) -> int | None:
+    if not value.lower().startswith("&h"):
+        return None
+    try:
+        return int(value[2:], 16) & 0xFFFFFF
+    except ValueError:
+        return None
+
+
+def _parse_topic_properties(data: bytes) -> tuple[int | None, int | None]:
+    non_scroll = None
+    scroll = None
+    text = data.decode("cp1252", errors="replace")
+    for assignment in text.split(";"):
+        name, separator, value = assignment.partition("=")
+        if not separator:
+            continue
+        name = name.rsplit(".", 1)[-1]
+        if name == "BackColorNSR" and non_scroll is None:
+            non_scroll = _parse_topic_color(value)
+        elif name == "BackColorSR" and scroll is None:
+            scroll = _parse_topic_color(value)
+    return non_scroll, scroll
+
+
 def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
     if len(data1) < 28:
         raise ValueError("M14 TOPICHEADER data is shorter than 28 bytes")
@@ -458,13 +572,19 @@ def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
         scroll,
         next_topic,
     ) = struct.unpack_from("<iiiiIII", data1, 0)
-    title = data2.split(b"\x00", 1)[0].decode("cp1252", errors="replace")
+    title_bytes, separator, properties = data2.partition(b"\x00")
+    title = title_bytes.decode("cp1252", errors="replace")
+    non_scroll_background, scroll_background = _parse_topic_properties(
+        properties if separator else b"",
+    )
     return _TopicBuilder(
         title=title,
         topic_number=topic_number,
         non_scroll=non_scroll,
         scroll=scroll,
         next_topic=next_topic,
+        non_scroll_background=non_scroll_background,
+        scroll_background=scroll_background,
         displays=[],
     )
 
@@ -480,8 +600,8 @@ def _parse_paragraph(
     pos += 2
 
     fields: dict[int, int] = {}
-    if bits & _PARA_UNKNOWN:
-        _unused, pos = _compressed_long(data1, pos)
+    if bits & _PARA_METRIC_MODE:
+        fields[0x12], pos = _compressed_long(data1, pos)
     for bit, field_offset in (
         (_PARA_SPACE_ABOVE, 0x16),
         (_PARA_SPACE_BELOW, 0x18),
@@ -526,9 +646,11 @@ def _display_topic_length(data1: bytes) -> int:
 
 def _parse_display(
     topic_pos: int,
+    address: int,
     data1: bytes,
     data2: bytes,
     non_scroll: int,
+    scroll: int,
 ) -> M14DisplayRecord:
     _topic_size, pos = _compressed_long(data1, 0)
     topic_length, pos = _compressed_ushort(data1, pos)
@@ -539,11 +661,13 @@ def _parse_display(
     return M14DisplayRecord(
         topic_pos=topic_pos,
         topic_length=topic_length,
+        address=address,
         control_stream=control_stream,
         text_data=data2 or b"\x00",
         tlv_fields=tuple(sorted(fields.items())),
         tab_stops=tab_stops,
         non_scroll=non_scroll,
+        scroll=scroll,
     )
 
 
@@ -592,9 +716,11 @@ def _parse_topics(
             if current_topic is not None and record_type == _TOPIC_DISPLAY:
                 display = _parse_display(
                     current_pos,
+                    (block_index << 15) | character_count,
                     data1,
                     data2,
                     current_topic.non_scroll,
+                    current_topic.scroll,
                 )
                 current_topic.displays.append(display)
                 if (
@@ -625,11 +751,45 @@ def _parse_topics(
             non_scroll=builder.non_scroll,
             scroll=builder.scroll,
             next_topic=builder.next_topic,
+            non_scroll_background=builder.non_scroll_background,
+            scroll_background=builder.scroll_background,
             displays=tuple(builder.displays),
         )
         converted[id(builder)] = topic
         topics.append(topic)
     return tuple(topics), converted[id(home_builder)]
+
+
+def _resolve_context_map(
+    records: tuple[tuple[int, int], ...],
+    topics: tuple[M14Topic, ...],
+) -> tuple[tuple[int, int, int], ...]:
+    displays = tuple(
+        display
+        for topic in topics
+        for display in topic.displays
+    )
+    resolved = []
+    for context_hash, address in records:
+        block = address >> 15
+        character = address & 0x7FFF
+        target = next(
+            (
+                display
+                for display in displays
+                if display.address >> 15 == block
+                and display.address & 0x7FFF
+                <= character
+                < (display.address & 0x7FFF) + max(1, display.topic_length)
+            ),
+            None,
+        )
+        if target is None:
+            raise ValueError(
+                f"|CONTEXT hash 0x{context_hash:08x} points outside |TOPIC",
+            )
+        resolved.append((context_hash, target.topic_pos, address))
+    return tuple(resolved)
 
 
 def load_m14(path: pathlib.Path) -> LoadedM14 | None:
@@ -657,6 +817,10 @@ def load_m14(path: pathlib.Path) -> LoadedM14 | None:
         system = _parse_system(by_name["|SYSTEM"])
         faces, descriptors = _parse_font(by_name["|FONT"])
         topics, home_topic = _parse_topics(by_name["|TOPIC"], system)
+        context_map = _resolve_context_map(
+            _parse_context(by_name["|CONTEXT"]),
+            topics,
+        )
         title = system.title or path.stem.title()
         return LoadedM14(
             title=title,
@@ -666,6 +830,7 @@ def load_m14(path: pathlib.Path) -> LoadedM14 | None:
             font_faces=faces,
             font_descriptors=descriptors,
             dll_maps=system.dll_maps,
+            context_map=context_map,
             topic_count=system.topic_count_hint or max(len(topics), 1),
             topics=topics,
             home_topic=home_topic,
@@ -707,14 +872,21 @@ def _build_section0(m14: LoadedM14) -> bytes:
     return bytes(header) + face_table + descriptors + b"\x00" * (4 * len(m14.font_faces))
 
 
-def _build_sec06(title: str) -> bytes:
+def _build_sec06(m14: LoadedM14) -> bytes:
     record = bytearray(_SEC06_RECORD_SIZE)
-    caption = title.encode("cp1252", errors="replace")[:50] + b"\x00"
+    caption = m14.title.encode("cp1252", errors="replace")[:50] + b"\x00"
     record[0x15 : 0x15 + len(caption)] = caption
     record[0x48] = _SEC06_OUTER_RECT_ABSOLUTE
     struct.pack_into("<iiii", record, 0x49, 0, 0, 640, 480)
     struct.pack_into("<I", record, 0x5B, _COLOR_INHERIT)
-    struct.pack_into("<II", record, 0x78, _COLOR_INHERIT, _COLOR_INHERIT)
+    non_scroll_background, scroll_background = m14.pane_backgrounds
+    struct.pack_into(
+        "<II",
+        record,
+        0x78,
+        non_scroll_background,
+        scroll_background,
+    )
     struct.pack_into("<iiii", record, 0x80, -1, -1, -1, -1)
     return bytes(record)
 
@@ -755,7 +927,7 @@ def lower_m14_to_payload(m14: LoadedM14, deid: str) -> bytes:
             _length_prefixed(_build_section0(m14)),
             b"\x00\x00",  # sec07: no additional MOSVIEW child panes
             b"\x00\x00",  # sec08: no MOSVIEW popups
-            _length_prefixed(_build_sec06(m14.title)),
+            _length_prefixed(_build_sec06(m14)),
             _length_prefixed(title),
             _length_prefixed(copyright_text),
             _length_prefixed(title_id),

@@ -725,12 +725,10 @@ def _stamp_no_nsr(chunk: bytearray, name_size: int) -> None:
 
 
 # Sentinel contentsToken stamped into the prev/next link fields of every
-# self-contained BF chunk. Must be != 0 (avoid collision with the initial
-# va key) and != 0xFFFFFFFF (HfcCache_FindEntryAndPromote early-returns
-# NULL on that, leaving the engine spinning in HfcNextPrevHfc's retry
-# wait with errOut=0). Any other unused token works; 0xFFFFFFFE is
-# unambiguous.
-CHAIN_TERMINATOR_TOKEN = 0xFFFFFFFE
+# self-contained BF chunk. It must be nonzero, not 0xFFFFFFFF, and lower
+# than every valid TOPICPOS. HfcCache_FindEntryAndPromote also treats the
+# next-token field as the cached record's upper range during near lookups.
+CHAIN_TERMINATOR_TOKEN = 1
 
 
 def _stamp_chain_terminators(chunk: bytearray) -> None:
@@ -746,7 +744,7 @@ def _stamp_chain_terminators(chunk: bytearray) -> None:
     appends a duplicate slot to the layout (visible as ever-growing
     scrollbar range with each scroll click).
 
-    With wire+0x8 / wire+0x10 = 0xFFFFFFFE: cache miss → 0x16 wire RPC →
+    With wire+0x8 / wire+0x10 = 1: cache miss → 0x16 wire RPC →
     server replies `0xA5` with status `0x3F3` → seek loop sets
     `hitLeadingEnd = true` → `viewer[+0x84]` (V-scroll flag) is cleared
     when `currentTailGapY < 0`.
@@ -1435,6 +1433,9 @@ def build_case1_stream_bf_chunk(
     tlv_fields: dict[int, int] | None = None,
     tab_stops: list[tuple[int, int]] | None = None,
     non_scroll: int = -1,
+    scroll: int = -1,
+    previous: int = CHAIN_TERMINATOR_TOKEN,
+    following: int = CHAIN_TERMINATOR_TOKEN,
 ) -> bytes:
     """Wrap one native Media View display record in a type-0 0xBF chunk.
 
@@ -1442,7 +1443,9 @@ def build_case1_stream_bf_chunk(
     `MVDispatchControlRun`: LinkData1 ends with the control stream and
     LinkData2 carries its NUL-separated text strings. Only the paragraph
     header differs from the online cache representation, so callers pass
-    its decoded fields for re-encoding as the wire TLV.
+    its decoded fields for re-encoding as the wire TLV. The companion block
+    carries the topic's non-scroll and scroll bounds; the name buffer links
+    adjacent display records within the topic.
     """
     if not control_stream or control_stream[-1] != 0xFF:
         raise ValueError("Media View control stream must end with 0xFF")
@@ -1480,10 +1483,13 @@ def build_case1_stream_bf_chunk(
     text_offset = control_offset + len(control_stream)
     chunk[text_offset:text_offset + len(text_data)] = text_data
 
-    _stamp_chain_terminators(chunk)
+    chunk[8:12] = struct.pack("<I", previous & 0xFFFFFFFF)
+    chunk[16:20] = struct.pack("<I", following & 0xFFFFFFFF)
     nsr_offset = 4 + name_size + 0x14
-    chunk[nsr_offset:nsr_offset + 4] = struct.pack(
-        "<I", non_scroll & 0xFFFFFFFF,
+    chunk[nsr_offset:nsr_offset + 8] = struct.pack(
+        "<II",
+        non_scroll & 0xFFFFFFFF,
+        scroll & 0xFFFFFFFF,
     )
     return bytes(chunk)
 

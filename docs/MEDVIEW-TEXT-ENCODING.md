@@ -92,7 +92,7 @@ name_size).
 | after preamble    | 6+        | packed text header TLV | §4                                                      |
 | after TLV         | variable  | control stream + text  | §5; terminated by `0xFF`                                |
 | pad to `+0x04+name_size` | 0+ | zero pad           | unused remainder of `name_buf`                          |
-| `+0x04+name_size` | 60        | content_block          | NSR sentinel at offset +0x14 (= 0xFFFFFFFF for no NSR)  |
+| `+0x04+name_size` | 60        | content_block          | Native records carry NonScroll at +0x14 and Scroll at +0x18; synthetic records put 0xFFFFFFFF at +0x14 |
 
 Dispatch on `name_buf[0x26]`:
 
@@ -592,10 +592,18 @@ Sentinel values:
 | `0xFFFFFFFF`   | `HfcCache_FindEntryAndPromote` early-returns NULL → engine spins in HfcNextPrevHfc's retry wait with `errOut=0`. Avoid. |
 | any other      | Cache lookup; on miss → `0x16` RPC.                                |
 
-Recommended terminator: `0xFFFFFFFE` (unambiguous, neither sentinel
-nor collision with key=0). This forces the cache lookup to miss,
-firing a `0x16` RPC, and the server's `0xA5` reply (status `0x3F3`)
-terminates the seek loop.
+Recommended terminator: `0x00000001`. It is below the minimum valid
+M14 TOPICPOS (`12`), is not the initial synthetic key (`0`), and is not
+the `0xFFFFFFFF` early-return sentinel. This forces the cache lookup to
+miss, firing a `0x16` RPC, and the server's `0xA5` reply (status
+`0x3F3`) terminates the seek loop. A high terminator is invalid because
+`HfcCache_FindEntryAndPromote` also treats the next-token field as the
+cached record's upper range during near lookups.
+
+Native M14 records use neighboring display TOPICPOS values between the
+topic endpoints. On a cache miss, selector `0x16` returns the referenced
+display record. Only the first record's previous token and the last
+record's next token use the terminator.
 
 ### 9.2 wire+0x8 / wire+0x10 cache probes
 
@@ -660,7 +668,7 @@ Implementer's checklist. Each encoder must satisfy:
    inside the text emits a `0x80` control plus a NUL in the text
    walker (to cede to the control walker).
 4. **topic_chain_terminator()** — stamps wire+0x8 / wire+0x10 with
-   `0xFFFFFFFE` so adjacent-chunk seeks terminate cleanly via the
+   `0x00000001` so adjacent-chunk seeks terminate cleanly via the
    server's `0xA5` reply.
 5. **content_block_no_nsr()** — stamps the 60-byte content_block's
    offset +0x14 with `0xFFFFFFFF` so per-topic NSR pane collapses.
