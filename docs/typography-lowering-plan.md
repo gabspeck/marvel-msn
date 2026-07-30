@@ -150,7 +150,7 @@ Helpers ready:
 
 ## Verification
 
-1. **Round-trip the wire bytes**: load `resources/titles/4.ttl`,
+1. **Round-trip the wire bytes**: load `tests/assets/captions_test.ttl`,
    build the new section-0, parse it back through
    `m14_parse.parse_payload`, assert face table entries, descriptor
    count, and per-descriptor LOGFONTA bytes match expectations.

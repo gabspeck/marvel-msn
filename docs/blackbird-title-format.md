@@ -145,7 +145,7 @@ slot     = handle & 0x1FFFFF
 for `table_id` (max observed = `0xa = 10` for `CContent`) and 21 for
 `slot` (max observed = `0x7`).
 
-Verified across the reference Marvel TTL (`resources/titles/4.ttl`,
+Verified across the reference Blackbird TTL (`tests/assets/captions_test.ttl`,
 15 handles) and the older Blackbird sample
 (`/var/share/drop/first title.ttl`, 21 handles) — 36/36
 round-trip cleanly. Helpers `decode_handle` / `encode_handle` in

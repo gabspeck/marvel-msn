@@ -472,9 +472,9 @@ stream**. Ground-truth from the `MVTTL14C!TitleOpenEx @ 0x7E842D4E` and
      | `+0x0E`| i16    | reserved (client-opaque, same verification) | — |
      | `+0x10`| i16    | hfontSlotArrayOffset        | `ResolveTextStyleFromViewer @ 0x7E896650`; base for the `u32[hfontSlotCount]` HFONT-wrapper pointer array. Slot lookup: `*(u32*)(base + hfontSlotArrayOffset + resolved_style[0] * 4)`. Slot+`0x16` dword is cached into `viewer+0xB4` for the layout engine. |
 
-     The on-disk authoring source (`Blackbird.gpr / BBVIEW.EXE`) is
-     `CFontTable` / `CFontDescriptor`; cross-reference is queued in
-     §13 of `docs/BLACKBIRD.md` (Phase 5 cross-ref pass).
+     Compiled M14 `|FONT` data uses the same `0x2A` descriptor width.
+     The server copies those descriptors and the M14 face names into
+     this section.
 3. `TitleGetInfo` walks the remaining 8 sections on demand to answer
    field queries. Its `param_2` argument is the **selector kind**, not
    a section index — the dispatch table maps selector → section.
@@ -498,24 +498,14 @@ Section 7's empty form is just `[u16 size=0]` (the walker uses
 `[u16 size][size bytes]`. Section 8 alone has no `size` — its header
 is a direct string count.
 
-The 43/31/152-byte record sizes are hard-coded inside `TitleGetInfo`
-and come from the 1996 server's lowering of an authored Blackbird title
-into the MedView wire body (see `docs/BLACKBIRD.md` §4.4). MVTTL14C
-never touches `ole32`'s `IStorage` APIs — the section stream is the MSN
-wire format; the OLE2 compound file is purely the authoring-side /
-Local-target artifact.
+The 43/31/152-byte record sizes are hard-coded inside `TitleGetInfo`.
+The section stream is the MSN wire format. The server projects compiled
+M14 data into this stream.
 
-These record shapes are wire-only facts, not proven direct dumps of one
-Blackbird class. Current RE no longer supports flattening raw
-`CSection` bodies into section 1: the sampled `CSection` serialization
-is authored section membership data (form refs + top-level content/proxy
-refs), while selectors `7` / `8` / `6` are consumed as separate
-child-pane / popup / scaffold tables by MOSVIEW. The wire-side field
-layouts of selectors `7`/`8`/`6` are fully pinned via
+These record shapes are wire-only facts. The wire-side field layouts of
+selectors `7`/`8`/`6` are fully pinned via
 `MOSVIEW!CreateMosViewWindowHierarchy @ 0x7F3C6790` (see contract
-`ChildPaneRecord`, `PopupPaneRecord`, `WindowScaffoldRecord`); the
-on-disk BDF → wire compilation in `PUBLISH.DLL` is BDF-format work
-out of scope for the protocol docs.
+`ChildPaneRecord`, `PopupPaneRecord`, `WindowScaffoldRecord`).
 
 **Empty-but-valid body** (18 bytes): `00 00 × 8` (sections 0-7 all
 empty) followed by `00 00` (section 8 count=0). The first `u16 == 0`
@@ -557,46 +547,27 @@ for the extra `u16` reads `TitleGetInfo` makes past the declared end.
 Prefer the 18-byte form — it exercises the same code paths without
 relying on allocator behaviour.
 
-### 4.4.1 Multi-page bodies (PR3)
+### 4.4.1 M14 projection
 
-For BBDESIGN-authored TTLs with more than one CBForm reachable from
-`CTitle.base_forms` / `CSection.forms` (4.ttl: 3 pages; showcase:
-2 pages; msn_today: 1 page — see
-`docs/cvform-page-objects.md` §Multi-page enumeration), the server
-emits one **152-B sec06 record per page** concatenated into the title
-body's section 3. Each record sources caption / outer-rect from the
-title-level CBFrame and inner geometry / background / scrollbar flag
-from the page's CVForm Page block. See
-`docs/cbframe-cbform-sec06-mapping.md` §Multi-page lowering for the
-per-page field rules and scrollbar collapse table.
+The server reads `HANDBOOK.M14` and `FRANCE.M14` from `resources/titles/`.
+`|SYSTEM` supplies the title metadata and contents address. `|FONT`
+supplies face names and `0x2A`-byte style records.
 
-The TitleOpen reply's `topicUpperBound` (formerly `topic_count` in
-this doc) is set to `max(1, len(pages))` —
-`docs/MEDVIEW.md:389` notes that `0` stalls the client.
+The current fixtures emit one **152-byte sec06 record** for the outer
+MOSVIEW window. They leave sec07 and sec08 empty because the two M14
+samples do not identify a direct projection for those wire tables.
 
-Per-page baggage is `bm0`, `bm1`, …, `bm<N-1>` (one per page) — the
-engine probes via `wsprintfA("|bm%d", idx)` and the handler dispatches
-by canonical name out of a `dict[str, bytes]` populated at OpenTitle
-time. Each page's baggage carries:
-- CaptionControl text drawn via the kind=8 WMF TextOut path (existing).
-- Story content: the resolved TextTree flowed into the Story's site
-  rect (`rect_himetric → pixels`), one TextOut per wrapped line, with
-  each element's style taken from VIEWDLL's built-in table (see
-  `docs/blackbird-style-sheet.md`).
-- Pages without text → kind=5 1bpp white raster sized to the page.
+The TitleOpen `topicUpperBound` comes from the M14 `|SYSTEM` topic-count
+record. The home cache key comes from the display TOPICPOS selected by
+the `|SYSTEM` contents offset.
 
-UNVERIFIED in PR3 (no 86Box round-trip):
-- Per-page sec06 stride / order is structural; MOSVIEW's expected
-  topic→page mapping isn't pinned.
-- Baggage handle allocation per page (`0x42` for bm0 stays for log
-  continuity; subsequent pages allocate `0x43`+).
-- `cache_header0/1` values are deterministic hashes of
-  `(title_name, page_count, page_pixel_w, page_pixel_h)` — they pass
-  the engine's nonzero check but the real
-  `MVCache_<title>.tmp` derivation is unconfirmed for
-  server-synthesised titles.
-- Topic-navigation push frames (`MEDVIEW_CONVERT_TOPIC_TO_VA` / 0x15
-  / 0x16) keep the page-0 va; per-page va dispatch was deferred.
+Each selector-`0x15` reply carries the matching M14 display record. The
+server re-encodes its paragraph fields as a cache TLV and copies its
+native control and text streams.
+
+RemoteFileService exposes each non-system HFS file by name. This path
+serves the bitmap and hotspot baggage referenced by the native M14
+embedded-object controls.
 
 ### 4.5 Title spec format
 
@@ -614,17 +585,9 @@ standard `HRMOSExec(c=6, deid, …)` path it's the deid formatted via
 nodes like MSN Today (`4:0`) it reduces to the decimal deid (`"4"`)
 with no hex width.
 
-The display name the authoring tool intends to surface here is
-`CTitle.name` — a single ASCIIZ in the CTitle storage's
-`\x03properties` stream inside the authored `.ttl` compound file
-(`docs/BLACKBIRD.md` §3.1.2). The MedView viewer reads it via
-`TitleGetInfo(info_kind=1)` against section 4 of the 9-section body
-(§4.4) and runs it through `UnquoteCommandArgument` before storing at
-`title+0x58` as the window caption. Rich title content comes from a
-server-side lowering step over authored object streams such as
-`CBForm`, `CVForm`, `CProxyTable`, and `CContent`; the fixed record
-arrays in the 9-section body are not a proven direct dump of one on-disk
-class (`docs/BLACKBIRD.md` §3.1.3 and §7).
+The display name comes from the M14 `|SYSTEM` title record. The server
+places it in section 4 of the nine-section body. The MedView viewer reads
+it with `TitleGetInfo(info_kind=1)`.
 
 ### 4.6 Layout walker dispatch byte is engine-internal, not on-disk
 
@@ -1011,14 +974,9 @@ TOPICHEADER bytes from the wire — the 60-byte companion is the
 authoring-side signal carried verbatim through `HfcCache_*` into the
 viewer.
 
-**Blackbird-authored titles never carry an NSR region**, so the
-server-side encoder (`src/server/blackbird/wire.py:_stamp_no_nsr`)
-unconditionally writes `FF FF FF FF` at `chunk[4 + name_size + 0x14]`
-on every 0xBF builder (`build_case1_bf_chunk` /
-`build_case2_topic_header_chunk` / `build_case3_bf_chunk`). The
-empty case-1 skip-row fallback still carries the stamp but the HfcNear
-copy is suppressed there (no slots → `entry[5] == 0`); the first
-slot-emitting push propagates it.
+The M14 fixture loader copies `TOPICHEADER.NonScroll` into the case-1
+companion block. The synthetic builders still write `FFFFFFFF` when
+they have no M14 topic header.
 
 ## 6b. Content selectors (va / addr / highlight resolution)
 

@@ -48,7 +48,7 @@ i32 y_twips           ; control top-left Y in twips
 
 **Note on `size`.** Empirically:
 
-- For a CBForm whose only descriptor is a Caption (4.ttl: `size=121`),
+- For a CBForm whose only descriptor is a Caption (captions_test.ttl: `size=121`),
   the descriptor's inline tail carries the full property block plus
   some trailer; `size` is not the inline tail's length.
 - For mixed pages (showcase: Story / Caption / Audio / CaptionButton /
@@ -198,7 +198,7 @@ of an already-tiled-bg baseline so the BMP is a constant.
   site descriptor. Pinning these from BBCTL.OCX would let the parser
   identify control types instead of relying on name-suffix parsing.
 - **CaptionButton / Audio / Outline / Shortcut property layouts** —
-  Caption1 is pinned below by hex-diffing `4.ttl` (single Caption
+  Caption1 is pinned below by hex-diffing `captions_test.ttl` (single Caption
   "Test caption" / MS Sans Serif) against `first title.ttl` slot
   `7/1` (single Caption "This is another page" / Comic Sans MS).
   The other four currently carry through as `raw_block` bytes on
@@ -276,11 +276,11 @@ single descriptor's inline_tail for single-caption pages):
 The `font_pre_clsid` (`+0x36..+0x3B`) is a 6-byte wrapper around the
 stock `back_color` COLORREF: `[u8 0][u32 COLORREF][u8 0]`. Observed
 values: `0xC8D0D8` (default, COLOR_3DFACE), `0x0000FF` (red), `0xFFF0FF`
-(ivory) — confirmed across `4.ttl` page 0 Caption 1/2/3.
+(ivory) — confirmed across `captions_test.ttl` page 0 Caption 1/2/3.
 
 The font_attrs byte at `+0x4F` packs StdFont's `fItalic` /
 `fUnderline` / `fStrikethrough` bits — pinned by hex-diff of
-`4.ttl` page 0 captions (default styling vs italic Comic Sans MS at
+`captions_test.ttl` page 0 captions (default styling vs italic Comic Sans MS at
 0x02 vs underline+strikethrough Garamond at 0x0C).
 
 ### Post-strCaption block (10 bytes, layout pinned)
@@ -309,7 +309,7 @@ Pinned in two places that agree:
   (right); `simple_center` (seq 3) is `00 00 02 00 00 00 01 00 00 00`
   → iAlignment=2 (centre); `auto_resize_caption_` (seq 20) is
   `01 01 00 00 00 00 01 00 00 00` → fWordWrap=1, fAutoSize=1.
-  Default-valued captions across `4.ttl`, `multi_page_title.ttl`, and
+  Default-valued captions across `captions_test.ttl`, `multi_page_title.ttl`, and
   `captions_test.ttl` share `00 00 00 00 00 00 01 00 00 00`
   (= MFC defaults).
 
@@ -317,9 +317,9 @@ Parser implementation: `_walk_cbform` + `_decode_caption` +
 `_decode_label_persist` in `src/server/services/medview/ttl_loader.py`.
 The decoder anchors on the StdFont CLSID landmark
 (`0352e30b918fce119de300aa004bb851`) so the same offsets apply whether
-the Caption's data is inline (collapsed format, `4.ttl` single-Caption
+the Caption's data is inline (collapsed format, `captions_test.ttl` single-Caption
 pages) or carried in the multi-caption shared record buffer
-(`4.ttl` page 0 with 3 captions).
+(`captions_test.ttl` page 0 with 3 captions).
 
 ### Dynamic caption tags
 
@@ -417,7 +417,7 @@ body; PR3 drops the shims when both lift to per-page emission.
    `ole_helpers.py`) which returns
    `(version, sections, magnets, forms, contents, styles, frames,
    section_prop)`.
-2. **If `base_section.forms` is non-empty** (4.ttl: CTitle hangs three
+2. **If `base_section.forms` is non-empty** (captions_test.ttl: CTitle hangs three
    CBForms directly off `base_forms`), use those refs in declared
    order.
 3. **Else DFS through `base_section.sections`** (msn_today, showcase).
@@ -462,7 +462,7 @@ to the same decimal-looking digit and are parsed identically. Helper:
 | `page_bg` / `page_pixel_w` / `page_pixel_h` / `scrollbar_flags` | CVForm Page properties block (`_parse_cvform_page`) |
 | `controls` | Site descriptors of the embedded CVForm (`_decode_controls`) |
 
-### 4.ttl page table
+### captions_test.ttl page table
 
 | Page | CBForm | scrollbar_flags |
 |---|---|---|

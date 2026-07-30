@@ -4,16 +4,14 @@ Short docstring-style reference: `docs/medview-service-contract.md`.
 
 ## Scope
 
-`MOSVIEW.EXE` is not parsing Blackbird `.ttl` files directly. Its title open
-path is:
+`MOSVIEW.EXE` consumes Microsoft Media View 1.4 titles through this path:
 
 1. `MOSVIEW.EXE`
 2. `MVCL14N.DLL`
 3. `MVTTL14C.DLL`
 
-The actionable target format for MOSVIEW is therefore the MediaView 1.4 title
-pipeline implemented by `MVTTL14C.DLL`, with Blackbird acting only as a
-possible logical source model for a later converter.
+The source files are compiled `.m14` HFS books. The server maps their system,
+font, topic, and baggage data to the `MVTTL14C.DLL` online protocol.
 
 ## Evidence Base
 
@@ -56,12 +54,15 @@ The notes below are grounded in the following code paths recovered with Ghidra:
 - `DSNED.NED`
   - `FUN_7f573273`: service-node registration via `InitializeEcig`
 
-Static corroboration from `BLACKB/AUTHOR.HLP` also matters here:
+The sample set at `/var/share/drop/MediaView Samples` adds format evidence:
 
-- `Blackbird includes utilities to convert HTML, BBML, and MediaView files to Blackbird Data Format files.`
+- `HANDBOOK.M14` is an uncompressed Multimedia Viewer HFS book.
+- `FRANCE.M14` is a compressed Multimedia Viewer HFS book.
+- Both files contain `|SYSTEM`, `|FONT`, and `|TOPIC`.
+- Both files contain native bitmap and hotspot baggage.
 
-That matches the code evidence: MediaView is an older, distinct source format,
-not a renamed Blackbird `.ttl`.
+Blackbird help says that Blackbird can import Media View files. This statement
+confirms that `.m14` and Blackbird `.ttl` are different formats.
 
 ## MOSVIEW Open Pipeline
 
@@ -1838,132 +1839,47 @@ and hotspot paths operate on those viewer records, not on the raw wire blob.
 Detailed first-authored text and section-0 notes now live in
 `docs/mosview-authored-text-and-font-re.md`.
 
-## Outer Source Container: What Is Known
+## M14 Source Container
 
-The client-side `.m14` question is now resolved negatively.
+An `.m14` file is a Multimedia Viewer HFS book with magic `3F 5F 03 00`.
+The HFS directory contains the source data for the online title.
 
-Code proves:
+- `|SYSTEM` supplies the title, copyright, contents address, build time, and
+  topic-count hint.
+- `|FONT` supplies face names and `0x2A`-byte Media View style descriptors.
+- `|TOPIC` supplies topic links, paragraph data, control streams, and text.
+- The remaining files supply bitmap, hotspot, group, and index baggage.
 
-- `.m14` is only a canonical suffix recognized by `TitleOpenEx`
-- `MVCL14N!hMVTitleOpenEx` passes the parser token `[%s]0` into
-  `MVTTL14C!TitleOpenEx`
-- `TitleOpenEx` never opens the caller's title file locally
-- the only local file I/O in `TitleOpenEx` is against the companion
-  `MVCache_*.tmp`
-- `HfOpenHfs` also does not open local title-side storage; it forwards its HFS
-  string to selector `0x1a` and waits for the `MEDVIEW` reply
+The two samples use the same control-byte grammar as the online HFC cache.
+Their home display records start with a style control and an embedded-object
+control. The object strings name `!homed.SHG` and `!homem.SHG`.
 
-So the shipped clients do not contain a local `.m14` parser in the path that
-stock MOSVIEW uses. The real title/container grammar, if one exists as an
-on-disk file format at all, lives behind the server-side `MEDVIEW` contract.
-What the client actually requires is smaller and already concrete:
+The server does not send the complete HFS archive as the selector-`0x01`
+dynamic body. `MVTTL14C!TitleOpenEx` expects the nine-section flat payload
+documented above. The server projects M14 data into that payload.
 
-- selector-`0x01` must return:
-  - parser subtype byte
-  - file-system / mode byte
-  - contents VA dword
-  - address-contents (`addrGetContents`) dword
-  - topic-count dword
-  - 8-byte cache validation tuple
-  - flat payload blob
-- optional later selectors / notifications must satisfy the async conversion,
-  HFC, and HFS paths
+The server sends each `|TOPIC` display record through selector `0x15`. It
+re-encodes the compiled paragraph header as the online TLV. It copies the
+native control stream and text bytes without a Blackbird translation.
 
-This fully recovers the client-visible contract. What remains outside these
-client binaries is the server-internal source/storage format that `MEDVIEW`
-uses to manufacture those reply fields.
+`HfOpenHfs` sends each baggage name to selector `0x1A`. RemoteFileService then
+returns the matching HFS internal file. The server removes the leading `!`
+from Media View object references for this lookup.
 
-## Converter Target
+## Required Server Projection
 
-The right converter target is not "Blackbird `.ttl` bytes". It is:
+The current projection supplies these fields:
 
-1. a MediaView 1.4 logical title
-2. lowered to the `MVTTL14C` payload grammar above
-3. plus whatever server-side source/container state is required to recreate:
-   - the cache validation header
-   - the file-system / mode byte
-   - the additional live metadata dwords
+- the `|FONT` face names and style descriptors for selector `0x6F`
+- one `0x98` outer-window record for selector `0x06`
+- `|SYSTEM` title and copyright text for selectors `0x01` and `0x02`
+- the directory deid for selector `0x6A`
+- the `|SYSTEM` contents address and topic count in the TitleOpen prefix
+- native `|TOPIC` display records as case-1 `0xBF` cache entries
+- non-system HFS files through RemoteFileService
 
-Minimum fields a converter must populate for MOSVIEW compatibility:
-
-- font-table blob for selector `0x6f`
-- file-system / mode metadata for selector `0x69`
-- selector `0x07` record table
-- selector `0x08` record table
-- selector `0x06` record table
-- user-visible text blobs for selectors `0x01`, `0x02`, and `0x6a`
-- string tables for selectors `0x13` and `0x04`
-
-## Blackbird To MediaView Lowering Notes
-
-The input should be the Blackbird logical title model, not the OLE container
-layout. A Blackbird `.ttl` is still useful as source material because the repo
-already decodes its logical objects.
-
-Concrete sample: `msn today.ttl`
-
-- title name: `MSN Today`
-- resource folder: `Resources`
-- default frame: `Default Window`
-- default style sheet: `Default Style Sheet`
-- top-level section object:
-  - properties name: `Section 1`
-  - linked form list: one `CBForm`
-  - linked content list: three top-level authored content/proxy refs
-  - no authored fixed-width pane table analogous to MediaView selectors
-    `0x07`, `0x08`, or `0x06`
-- proxy/source content visible in properties:
-  - `Homepage.bdf`
-  - `Calendar of Events_.bdf`
-  - `bitmap.bmp`
-- AUTHOR.HLP / BBDESIGN.HLP model:
-  - project → title → section / page → window / controls → story / media assets
-  - so `CSection.contents` is only one authored layer, not the whole display tree
-
-What the recovered client behavior now pins down:
-
-- Blackbird title / section / resource names:
-  - candidate sources for selectors `0x01`, `0x02`, `0x04`, `0x13`, and `0x6a`
-- selector `0x06`:
-  - container scaffold only
-  - drives the outer `MosViewContainer`, the thin top child band, and the
-    scrolling host strip
-- selector `0x07`:
-  - separate child-pane table
-  - each record creates one extra `MosChildView`
-  - carries per-window metadata only on the recovered stock path
-- Blackbird style-sheet and frame choices:
-  - candidate source for the font blob that becomes selector `0x6f`
-
-Practical lowering sketch:
-
-- Blackbird section structure, not OLE container geometry, should drive the
-  lowering input model
-- the authored `CSection.contents` list is real authored data, but those
-  entries are not themselves MediaView pane records
-- the authored `CSection.forms` list is separate from `contents`, so treating
-  the sample's three content proxies as a serialized child-pane table is not
-  supported by the TTL object model
-- the fixed-width MediaView tables `0x07`, `0x08`, and `0x06` should therefore
-  be treated as lowering products synthesized from authored page/window/control
-  structure, not from proxy count alone
-- current live subset uses supported top-level proxy order only for
-  topic/address/context mapping and string-table population; it emits one
-  code-proven `0x06` scaffold and empty `0x07` / `0x08`
-- the exact historical rule used by MSN's original lowering path is still open;
-  authored child-pane and popup sources remain RE work
-
-Blackbird concepts with no direct MediaView equivalent:
-
-- OLE storages and numbered ref streams
-- swizzled Blackbird object handles
-- `CProxyTable` and Blackbird-specific object-store indirection
-- distinct `TextTree` / `TextRuns` / `WaveletImage` object taxonomy
-- arbitrary Blackbird property bags such as origin paths and MSN site metadata
-
-These will require lossy lowering or outright omission. The good news is that
-MOSVIEW's steady-state open path only consumes the selector set listed above, so
-Blackbird-only metadata outside that set is a plausible omission candidate.
+The sample M14 files contain no `0x2B` child-pane or `0x1F` popup projection
+data. The current fixture therefore leaves selectors `0x07` and `0x08` empty.
 
 ## Verification Status
 
@@ -1976,17 +1892,15 @@ Completed in this pass:
 - parser implementation in `scripts/inspect_mediaview_cache.py`
 - stock-client negative-evidence pass for the remaining apparent selector
   collisions in `MOSVIEW.EXE`
+- validation against `HANDBOOK.M14` and `FRANCE.M14`
+- native `|SYSTEM`, `|FONT`, and `|TOPIC` extraction
+- online HFC and HFS fixture projection
 
 Still open:
 
-- acquire an authentic `.m14` or `MVCache_*.tmp`
-- compare the parser output against live MOSVIEW-visible strings and tables
 - assign semantics to the still-unknown bytes inside the `0x2b`, `0x1f`, and
-  `0x98` records when a real sample or non-stock consumer proves them
+  `0x98` records when another sample or non-stock consumer proves them
+- compare a complete server projection against an authentic `MVCache_*.tmp`
 
-At this point the remaining uncertainty is sample validation and a handful of
-unconsumed/non-stock semantic names, not missing stock-client wire selectors or
-missing request/reply classes.
-
-No authentic MediaView cache sample exists in this workspace today, so the
-layout claims above are code-proven but not yet sample-validated.
+The sample files validate the source container and topic grammar. No authentic
+Media View cache file exists in this workspace.

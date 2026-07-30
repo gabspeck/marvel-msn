@@ -13,14 +13,12 @@ state needed by selectors that don't have a static answer:
 Cache-miss group (`0x05`/`0x06`/`0x07`/`0x15`/`0x16`) emits a bare-ack
 synchronous reply followed by an async push frame on the matching
 notification iterator. Type-3 (va resolution) pushes resolve to zero
-(va=addr=0); selector 0x15 HfcNear pushes a case-3 BF chunk when the
-loaded TTL draws anything — that is what makes the engine fetch `bm0`,
-whose kind=8 WMF carries the whole page — else an empty case-1 BF
-chunk.
+(va=addr=0); selector 0x15 HfcNear wraps the loaded M14 topic's native
+Media View control stream in a case-1 BF cache record.
 
-OpenTitle resolves the title by deid: `{deid}.ttl` under
-`resources/titles/` wins when present; missing/malformed files fall
-through to the empty `TITLE_OPEN_BODY` / `BM0_BAGGAGE`.
+OpenTitle maps the title deid to a compiled M14 file under
+`resources/titles/`. Missing or malformed files fall through to the
+empty `TITLE_OPEN_BODY` / `BM0_BAGGAGE`.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ import pathlib
 
 from ...blackbird.wire import (
     build_case1_bf_chunk,
-    build_case3_bf_chunk,
+    build_case1_stream_bf_chunk,
     build_type0_status_record,
     build_type3_op4_frame,
 )
@@ -84,21 +82,20 @@ from ...mpc import (
 )
 from .._dispatch import log_unhandled_selector
 from . import replies
+from .m14_loader import LoadedM14, load_m14, lower_m14_to_payload
 from .payload import (
     BM0_BAGGAGE,
     TITLE_OPEN_BODY,
     TITLE_OPEN_METADATA,
     TitleOpenMetadata,
-    derive_title_open_metadata,
-)
-from .ttl_loader import (
-    LoadedTitle,
-    build_all_bm_baggage,
-    load_title,
-    lower_to_payload,
 )
 
 _TITLES_DIR = pathlib.Path(__file__).resolve().parents[4] / "resources" / "titles"
+_M14_FIXTURE_FILES = {
+    "4": "HANDBOOK.M14",
+    "1000": "HANDBOOK.M14",
+    "1001": "FRANCE.M14",
+}
 
 log = logging.getLogger(__name__)
 
@@ -425,43 +422,27 @@ def _push_type3_op4(selector: int):
     return build
 
 
-def _page_draws_anything(page) -> bool:
-    """True when a page contributes ink to its `bm<n>` metafile — the
-    same condition `build_bm_baggage` uses to emit a kind=8 WMF rather
-    than the blank kind=5 raster."""
-    if page.captions:
-        return True
-    return any(
-        getattr(ctrl, "element_tree", None) is not None
-        for ctrl in page.controls
-    )
-
-
 def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
     """0xBF chunk for 0x15 (HfcNear) cache fill.
 
-    Dispatch by loaded title content:
-
-      1. Title with anything to draw — captions, a resolved Story, or
-         both → case-3 (bitmap cell), so the engine loads `bm0`
-         baggage at the slot origin and `PlayMetaFile` lowers the
-         kind=8 WMF. That metafile carries the whole page: caption
-         TextOuts plus the Story's flowed paragraphs. The client has
-         no layout engine, so every position is baked there.
-
-      2. Otherwise → empty case-1 ("skip-row" / layout walker's
-         return-5 fast path). Used when no title is loaded. Without
-         it the engine paints the cached chunk into many rows to
-         fill the pane.
-
-    The styled case-1 text-row path (`build_styled_case1_chunk`) is
-    not used: its layout pass is RE'd but its paint pass is not, and a
-    title routed to it never fetches baggage at all — the client sits
-    at 0x15/0x16 and paints nothing.
+    M14 display records already contain the control stream understood by
+    Media View. Wrap the requested record without translating it into a
+    Blackbird bitmap. Unknown keys retain the empty case-1 cache-fill
+    response so HfcNear terminates without painting.
     """
-    title = handler.loaded_title
-    if title is not None and any(_page_draws_anything(p) for p in title.pages):
-        return build_case3_bf_chunk(title_slot, key)
+    title = handler.loaded_m14
+    if title is not None:
+        display = title.display_at(key)
+        if display is not None:
+            return build_case1_stream_bf_chunk(
+                display.control_stream,
+                display.text_data,
+                title_slot,
+                key,
+                tlv_fields=display.fields_dict(),
+                tab_stops=list(display.tab_stops),
+                non_scroll=display.non_scroll,
+            )
     return build_case1_bf_chunk(
         text="", title_byte=title_slot, key=key, initial_font_style=None,
     )
@@ -576,13 +557,11 @@ class MEDVIEWHandler:
         self.svc_name = svc_name
         self._subscriptions: dict[int, tuple[int, int]] = {}
         self._open_title_slots: set[int] = set()
-        # Per-baggage-name handle table. Engine probes `wsprintfA("|bm%d",
-        # idx)` per page; handler responds with a unique u8 handle per
-        # name and looks the name up on subsequent reads. bm0's handle
-        # is pinned to `_BAGGAGE_HANDLE_BM0` even pre-OPEN so HFS_READ
-        # tests / call sites that bypass OPEN still resolve.
+        # Per-baggage-name handle table. The handler returns one stable
+        # u8 handle per open HFS name. bm0 remains available before
+        # OpenTitle for the empty-title fallback.
         self._baggage_handles: dict[int, str] = {_BAGGAGE_HANDLE_BM0: "bm0"}
-        self.loaded_title: LoadedTitle | None = None
+        self.loaded_m14: LoadedM14 | None = None
         self.title_body: bytes = TITLE_OPEN_BODY
         self.baggage_map: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
         self.title_metadata: TitleOpenMetadata = TITLE_OPEN_METADATA
@@ -759,25 +738,29 @@ class MEDVIEWHandler:
         slot = TITLE_OPEN_METADATA.title_slot
         self._open_title_slots.add(slot)
 
-        # Resolve `{deid}.ttl` under `resources/titles/`. Missing or
-        # malformed files degrade to the empty MSN Today scaffold so the
-        # client never sees a missing-title crash.
-        title = load_title(_TITLES_DIR / f"{deid}.ttl") if deid else None
+        # Resolve the compiled Media View title. The HFS archive is the
+        # canonical fixture: TitleOpen metadata and topic-cache records
+        # come from it, and its internal files back RemoteFileService.
+        title_file = _M14_FIXTURE_FILES.get(deid, f"{deid}.m14")
+        title = load_m14(_TITLES_DIR / title_file) if deid else None
         if title is not None:
-            self.loaded_title = title
-            self.title_body = lower_to_payload(title)
-            self.baggage_map = build_all_bm_baggage(title)
-            first_page = title.pages[0]
-            self.title_metadata = derive_title_open_metadata(
-                page_count=len(title.pages),
-                page_pixel_w=first_page.page_pixel_w,
-                page_pixel_h=first_page.page_pixel_h,
-                title_name=title.title_name or title.caption,
+            cache0, cache1 = title.cache_tuple
+            self.loaded_m14 = title
+            self.title_body = lower_m14_to_payload(title, deid)
+            self.baggage_map = title.baggage_map()
+            self.title_metadata = TitleOpenMetadata(
+                title_slot=TITLE_OPEN_METADATA.title_slot,
+                file_system_mode=0x01,
+                contents_va=title.contents_va,
+                addr_base=title.contents_offset,
+                topic_count=title.topic_count,
+                cache_header0=cache0,
+                cache_header1=cache1,
             )
-            caption = title.caption or title.title_name
-            source = "ttl"
+            caption = title.title
+            source = "m14"
         else:
-            self.loaded_title = None
+            self.loaded_m14 = None
             self.title_body = TITLE_OPEN_BODY
             self.baggage_map = {"bm0": BM0_BAGGAGE}
             self.title_metadata = TITLE_OPEN_METADATA
@@ -786,10 +769,10 @@ class MEDVIEWHandler:
 
         log.info(
             "open_title req_id=%d slot=0x%02x token=%r deid=%r source=%s "
-            "caption=%r body_len=%d pages=%d topic_count=%d baggage=%s",
+            "caption=%r body_len=%d topics=%d topic_count=%d baggage=%s",
             request_id, slot, token, deid, source, caption,
             len(self.title_body),
-            len(title.pages) if title is not None else 0,
+            title.topic_count if title is not None else 0,
             self.title_metadata.topic_count,
             ",".join(f"{k}={len(v)}" for k, v in self.baggage_map.items()),
         )
@@ -805,7 +788,7 @@ class MEDVIEWHandler:
         if slot is not None:
             self._open_title_slots.discard(slot)
             if not self._open_title_slots:
-                self.loaded_title = None
+                self.loaded_m14 = None
                 self.title_body = TITLE_OPEN_BODY
                 self.baggage_map = {"bm0": BM0_BAGGAGE}
                 self.title_metadata = TITLE_OPEN_METADATA
@@ -824,7 +807,7 @@ class MEDVIEWHandler:
 
     def _handle_open_remote_hfs_file(self, request_id, payload) -> bytes:
         name = _extract_baggage_name(payload)
-        canonical = name.lstrip("|")                       # `wsprintfA("|bm%d", idx)` form
+        canonical = name.lstrip("|!").lower()
         size = replies.baggage_size(canonical, baggage_map=self.baggage_map)
         log.info(
             "open_remote_hfs_file req_id=%d name=%r canonical=%r accept=%r",

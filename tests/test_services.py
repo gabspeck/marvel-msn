@@ -1,6 +1,5 @@
 """Tests for LOGSRV and DIRSRV service payload builders."""
 
-import pathlib
 import struct
 import unittest
 from unittest.mock import patch
@@ -784,7 +783,7 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((1, 0x10B), "The Internet Center"),
                     ((1, 0x10C), "The MSN Member Lobby"),
                     ((1, 0x10D), "The Microsoft Network Beta"),
-                    ((1, 0x10E), "MEDVIEW tests"),
+                    ((1, 0x10E), "Media View samples"),
                 ],
             ),
             (
@@ -800,6 +799,14 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((1, 0x306), "MSN Beta News Flash - July 19"),
                     ((1, 0x307), "Member Guidelines"),
                     ((1, 0x308), "Member Agreement"),
+                ],
+            ),
+            (
+                f"1:{0x10E}",
+                struct.pack("<II", 1, 0x10E),
+                [
+                    ((0x1000, 0), "Employee Handbook Example"),
+                    ((0x1001, 0), "France Magazine"),
                 ],
             ),
         ]
@@ -1864,9 +1871,7 @@ class TestMEDVIEWHandshake(unittest.TestCase):
 class TestMEDVIEWTitleOpen(unittest.TestCase):
     # TitleOpen spec format is `:%d[%s]%d` (docs/MOSVIEW.md §5.3); on the
     # HRMOSExec(c=6) path MSN Today lands as `:2[4]0` — svcid=2, deid=4,
-    # serial=0. `_title_name_from_spec` extracts "4". The live handler now
-    # serves a synthetic title branch, but the old Blackbird-backed
-    # builder remains covered separately below.
+    # serial=0. The deid selects resources/titles/HANDBOOK.M14.
     _MSN_TODAY_REQ = (
         b"\x04\x87:2[4]0\x00"        # tag=0x04 var, len|0x80=0x87, 7-byte ASCIIZ
         b"\x03\x00\x00\x00\x00"      # cached checksum 1 = 0
@@ -1925,19 +1930,41 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         # Dynamic-complete
         self.assertEqual(reply[pos], TAG_DYNAMIC_COMPLETE_SIGNAL)
 
-    def test_title_open_loads_ttl_when_deid_has_fixture(self):
-        # `:2[4]0` deid resolves to resources/titles/4.ttl. CBFrame
-        # caption = "Captions Test".
+    def test_title_open_loads_m14_when_deid_has_fixture(self):
         handler, _reply = self._open_handler()
-        self.assertIsNotNone(handler.loaded_title)
-        self.assertEqual(handler.loaded_title.caption, "Captions Test")
+        self.assertIsNotNone(handler.loaded_m14)
+        self.assertEqual(handler.loaded_m14.title, "Employee Handbook Example")
+        self.assertEqual(handler.loaded_m14.home_display.topic_pos, 0xA7)
+        self.assertEqual(handler.title_metadata.contents_va, 0xA7)
+        self.assertEqual(handler.title_metadata.addr_base, 0)
+        self.assertEqual(handler.title_metadata.topic_count, 22)
 
-    def test_title_open_body_carries_ttl_caption(self):
+    def test_title_open_body_carries_m14_system_strings(self):
         handler, _reply = self._open_handler()
-        # sec01 + sec06 both carry the CBFrame caption ASCIIZ in the
-        # TTL-lowered title body. The body spans multiple wire chunks
-        # (>1 KB), so check the in-memory body directly.
-        self.assertIn(b"Captions Test\x00", handler.title_body)
+        self.assertIn(b"Employee Handbook Example\x00", handler.title_body)
+        self.assertIn(
+            "© 1996 Centric Development, Inc.\x00".encode("cp1252"),
+            handler.title_body,
+        )
+
+    def test_sample_deids_select_the_two_compiled_m14_files(self):
+        for deid, archive_name, title_name in (
+            ("1000", "HANDBOOK.M14", "Employee Handbook Example"),
+            ("1001", "FRANCE.M14", "France"),
+        ):
+            token = f":2[{deid}]0".encode("ascii") + b"\x00"
+            request = (
+                b"\x04"
+                + bytes([0x80 | len(token)])
+                + token
+                + b"\x03\x00\x00\x00\x00"
+                + b"\x03\x00\x00\x00\x00"
+                + b"\x81\x81\x83\x83\x83\x83\x83"
+            )
+            handler, _reply = self._open_handler(request)
+            self.assertIsNotNone(handler.loaded_m14)
+            self.assertEqual(handler.loaded_m14.archive_name, archive_name)
+            self.assertEqual(handler.loaded_m14.title, title_name)
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
     def test_get_info_reply_size_zero(self):
@@ -2054,75 +2081,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         self.assertEqual(struct.unpack("<I", push[13:17])[0], key)
         self.assertEqual(push[1 + 0x2A], 0x01)
 
-    def test_va_resolve_pushes_case3_when_a_story_resolves(self):
-        # A page whose Story resolved to an element tree draws through
-        # `bm0`, exactly like a caption page: the 0x15 push must be
-        # case-3 so the engine fetches that baggage. A styled case-1
-        # chunk here would leave the client at 0x15/0x16 with nothing
-        # painted — it never asks for baggage on that path.
-        from server.services.medview.ccontent import (
-            TextTreeContent,
-            parse_element_tree,
-        )
-        from server.services.medview.ttl_loader import (
-            LoadedPage,
-            LoadedTitle,
-            StoryControl,
-        )
-
-        raw = (
-            bytes.fromhex("01") + bytes.fromhex("0700010100")
-            + bytes.fromhex("ffff030b") + b"Story title" + bytes.fromhex("0000")
-        )
-        story = StoryControl(
-            seq=0,
-            flags=0,
-            name="Story1R",
-            rect_himetric=(0, 0, 12700, 12700),
-            raw_block=b"",
-            content_proxy_ref=0x1400,
-            content=TextTreeContent(
-                text="Story title",
-                segments=((2, "Story title"),),
-                root=parse_element_tree(raw),
-            ),
-        )
-        page = LoadedPage(
-            name="page0",
-            section_name="TextTree Test",
-            cbform_table=0,
-            cbform_slot=0,
-            cvform_handle=None,
-            page_bg=0xFFFFFF,
-            page_pixel_w=640,
-            page_pixel_h=480,
-            scrollbar_flags=0,
-            controls=(story,),
-        )
-        title = LoadedTitle(
-            title_name="TextTree Test",
-            caption="TextTree Test",
-            window_rect=(0, 0, 640, 480),
-            font_table=(),
-            pages=(page,),
-        )
-        handler = MEDVIEWHandler(5, "MEDVIEW")
-        handler.loaded_title = title
-        self._subscribe(handler, 0, 3)
-        req = b"\x01\x01\x03" + struct.pack("<I", 0xDEADBEEF)
-        pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
-        )
-        push = parse_packet(pkts[1][:-1]).payload[8:]
-        self.assertEqual(push[0], 0x85)
-        self.assertEqual(push[1], 0xBF)
-        # Case-3 dispatch byte at name_buf[0x26].
-        self.assertEqual(push[1 + 0x2A], 0x03)
-
-    def test_va_resolve_pushes_case3_when_ttl_captions_present(self):
-        # OpenTitle with `:2[4]0` loads 4.ttl (a TTL with 1 caption) →
-        # 0x15 push uses case-3 (bitmap cell). bm0 baggage carries the
-        # caption TextOut.
+    def test_va_resolve_pushes_native_m14_control_stream(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         open_req = (
             b"\x04\x87:2[4]0\x00"
@@ -2131,8 +2090,9 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
         handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5)
+        self.assertIsNotNone(handler.loaded_m14)
         self._subscribe(handler, 0, 3)
-        key = 0xCAFE0001
+        key = handler.loaded_m14.home_display.topic_pos
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
@@ -2140,7 +2100,8 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[0], 0x85)
         self.assertEqual(push[1], 0xBF)
-        self.assertEqual(push[1 + 0x2A], 0x03)
+        self.assertEqual(push[1 + 0x2A], 0x01)
+        self.assertIn(b"MVIMG,MVIMAGE, !homed.SHG\x00", push)
 
     def test_fetch_adjacent_topic_pushes_type0_a5(self):
         from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
@@ -2711,58 +2672,63 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertTrue(all(len(pkt) <= 1024 for pkt in pkts))
 
 
-class TestMEDVIEWPerPageBaggageDispatch(unittest.TestCase):
-    """PR3 wires the handler so per-page baggage is keyed by name.
-    Tests load a multi-page TTL into the handler and check baggage
-    dispatch by `bm0` / `bm1` / `bm2` names."""
-
-    def test_captions_test_seeds_bm0_baggage(self):
-        import pathlib
-
-        from server.services.medview.handler import MEDVIEWHandler
-        from server.services.medview.ttl_loader import (
-            build_all_bm_baggage,
-            load_title,
-        )
-
+class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
+    @staticmethod
+    def _open_handler():
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        title = load_title(
-            pathlib.Path(__file__).resolve().parents[1]
-            / "tests" / "assets" / "captions_test.ttl"
+        open_req = (
+            b"\x04\x87:2[4]0\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x03\x00\x00\x00\x00"
+            b"\x81\x81\x83\x83\x83\x83\x83"
         )
-        self.assertIsNotNone(title)
-        handler.loaded_title = title
-        handler.baggage_map = build_all_bm_baggage(title)
-        # Single-page fixture → exactly one bm0 baggage entry.
-        self.assertEqual(sorted(handler.baggage_map.keys()), ["bm0"])
-
-    def test_open_remote_hfs_file_rejects_unknown_name(self):
-        import pathlib
-
-        from server.config import MEDVIEW_SELECTOR_HFS_OPEN
-        from server.services.medview.handler import MEDVIEWHandler
-        from server.services.medview.ttl_loader import (
-            build_all_bm_baggage,
-            load_title,
+        handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5,
         )
+        return handler
 
-        handler = MEDVIEWHandler(5, "MEDVIEW")
-        title = load_title(
-            pathlib.Path(__file__).resolve().parents[1]
-            / "tests" / "assets" / "captions_test.ttl"
+    def test_open_title_exposes_compiled_m14_baggage(self):
+        handler = self._open_handler()
+        self.assertIn("homed.shg", handler.baggage_map)
+        self.assertIn("handbook.m14", handler.baggage_map)
+        self.assertNotIn("bm0", handler.baggage_map)
+
+    def test_native_image_reference_opens_and_reads_hfs_baggage(self):
+        handler = self._open_handler()
+        name = b"!homed.SHG\x00"
+        open_req = (
+            b"\x01\x01\x04"
+            + bytes([0x80 | len(name)])
+            + name
+            + b"\x01\x02\x81\x83"
         )
-        handler.baggage_map = build_all_bm_baggage(title)
-
-        # OPEN "bm9\0" — captions_test is single-page, only bm0 exists.
-        open_bm9 = bytes.fromhex("01 01 04 84 62 6d 39 00 01 02 81 83")
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 21, open_bm9, 5, 5,
+            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 21, open_req, 5, 5,
         )
-        parsed = parse_packet(pkts[0][:-1])
-        reply = parsed.payload[8:]
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply[0], TAG_END_STATIC)
-        self.assertEqual(reply[1], 0x81)
-        self.assertEqual(reply[2], 0x00)                   # reject handle=0
+        handle = reply[2]
+        self.assertNotEqual(handle, 0)
+        self.assertEqual(
+            struct.unpack_from("<I", reply, 4)[0],
+            len(handler.baggage_map["homed.shg"]),
+        )
+
+        read_req = (
+            b"\x01"
+            + bytes([handle])
+            + b"\x03\x20\x00\x00\x00"
+            + b"\x03\x00\x00\x00\x00"
+            + b"\x81\x85"
+        )
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_HFS_READ, 22, read_req, 5, 5,
+        )
+        read_reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(
+            read_reply[4:36],
+            handler.baggage_map["homed.shg"][:32],
+        )
 
 
 if __name__ == "__main__":

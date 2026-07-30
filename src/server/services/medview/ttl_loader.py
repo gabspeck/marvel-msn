@@ -115,7 +115,8 @@ class CaptionControl(Control):
         +0x02 (2 B)  fAutoSize   (BOOL VARIANT_BOOL, default 0)
         +0x04 (2 B)  iAlignment  (short, default 0; 0=left 1=center 2=right)
         +0x06 (4 B)  fTransparent(LONG, default 1)
-    Pinned empirically: `4.ttl` pages 1/2 and `tests/assets/multi_page_title.ttl`
+    Pinned empirically: `captions_test.ttl` pages 1/2 and
+    `tests/assets/multi_page_title.ttl`
     (all default-valued single-Caption pages) share the exact
     same 10 bytes `00 00 00 00 00 00 01 00 00 00`, which decode to the
     MFC defaults (0, 0, 0, 1). The values BBDESIGN doesn't vary across
@@ -126,7 +127,7 @@ class CaptionControl(Control):
     `[u8 0][u32 COLORREF][u8 0]` at `font_off-5..font_off`) is the
     `back_color`. Default observed value `0xC8D0D8` = COLOR_3DFACE.
     Probe variants exhibit `0x0000FF` (red) and `0xFFF0FF` (ivory) for
-    Caption 2 / 3 of `4.ttl` page 0."""
+    Caption 2 / 3 of `captions_test.ttl` page 0."""
     text: str
     font_name: str
     size_pt: int                             # font_size_cy_lo // 10000
@@ -436,7 +437,7 @@ _FORM_PREAMBLE_END = 0x28
 _BBCTL_SITE_MARKER_U32 = 0x00030073
 
 # CVForm preamble carries a class-CLSID table. Layout pinned across
-# 4.ttl / msn_today / showcase: 16-B CLSIDs at offset 0x9A (154), each
+# captions_test / msn_today / showcase: 16-B CLSIDs at offset 0x9A (154), each
 # stride 40 B. Each site descriptor's `flags & 0xFF` indexes into this
 # table to select the BBCTL control class.
 _CVFORM_CLASS_TABLE_OFF = 0x9A
@@ -482,7 +483,7 @@ def _parse_cvform_class_table(raw: bytes) -> tuple[bytes, ...]:
     40. Continue while the next slot bytes match a known BBCTL CLSID;
     stop on first non-match or buffer end. Returns the in-order list of
     class CLSIDs (one per distinct class referenced by sites in the
-    form). Tested against 4.ttl (1 CLSID per page), msn_today (2),
+    form). Tested against captions_test (1 CLSID per page), msn_today (2),
     showcase 7/0 (5), showcase 7/1 (1)."""
     out: list[bytes] = []
     pos = _CVFORM_CLASS_TABLE_OFF
@@ -499,8 +500,7 @@ def _parse_cvform_class_table(raw: bytes) -> tuple[bytes, ...]:
 # rect immediately after the name slot, then a 12-byte trailer carrying
 # a stock-font handle echo + flags-with-high-bit. Empirically pinned
 # against `tests/assets/captions_test.ttl` (24-Caption form, variable
-# slot sizes 8..32) and `resources/titles/4.ttl` (4-Caption page,
-# 8-byte slot). Compound-control sites (Story/Audio/...) carry x,y twips
+# slot sizes 8..32). Compound-control sites (Story/Audio/...) carry x,y twips
 # in the first 8 bytes after the slot — same total tail size on the
 # wire because the remaining bytes hold per-control inline data.
 _SITE_FIXED_TAIL = 28
@@ -1076,7 +1076,7 @@ class _CBFormRef:
     """One CBForm located inside the section tree, plus the CSection
     that owns it (for content-proxy lookups). `owning_section_path` is
     `(table, slot)` for the CSection (or `None` when the form is hung
-    directly off CTitle.base_forms, as in 4.ttl)."""
+    directly off CTitle.base_forms, as in captions_test.ttl)."""
     table: int
     slot: int
     owning_section_path: tuple[int, int] | None
@@ -1121,7 +1121,7 @@ def _enumerate_cbforms(
     back to the single-CBForm-slot-0 path)."""
     out: list[_CBFormRef] = []
 
-    # CTitle.base_forms (4.ttl single-section variant).
+    # CTitle.base_forms (captions_test.ttl single-section variant).
     for table, slot in _refs_to_paths(base_section.forms):
         out.append(_CBFormRef(table=table, slot=slot, owning_section_path=None))
 
@@ -1499,7 +1499,7 @@ def load_title(path: pathlib.Path) -> LoadedTitle | None:
         if not cbform_refs:
             # Fall back to slot-0 CBForm (titles that don't list any
             # form anywhere in the section tree — defensive only;
-            # 4.ttl / msn_today / showcase all populate the tree).
+            # captions_test / msn_today / showcase all populate the tree).
             cbform_table = class_to_table["CBForm"]
             cbform_refs = [_CBFormRef(
                 table=cbform_table, slot=0, owning_section_path=None,
@@ -1600,7 +1600,7 @@ def _build_section0(title: LoadedTitle) -> bytes:
         # text_color carries `cap.color_rgb` (legacy field reads the
         # COLORREF at `font_off - 9`, which is 0 for default captions
         # and the explicit color for authored ones — e.g. Caption 2
-        # in `4.ttl` page 0 reads as red). back_color carries the
+        # in `captions_test.ttl` page 0 reads as red). back_color carries the
         # full COLORREF at `font_off - 5` (BackColor stock prop).
         descriptor[0x06] = cap.color_rgb & 0xFF
         descriptor[0x07] = (cap.color_rgb >> 8) & 0xFF

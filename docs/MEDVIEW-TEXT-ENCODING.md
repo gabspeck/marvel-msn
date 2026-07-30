@@ -676,17 +676,14 @@ Implementer's checklist. Each encoder must satisfy:
 | `tests/assets/all_controls.ttl`                     | BBCTL site coverage (captions / shortcuts / outlines / audio / buttons) |
 | `tests/assets/captions_test.ttl`                    | BBDESIGN caption-only title (case-3 + kind=8 WMF baggage)            |
 | `tests/assets/multi_page_title.ttl`                 | Multi-page lower (per-page bm baggage map)                           |
+| `resources/titles/HANDBOOK.M14`                    | Uncompressed native `|TOPIC` control stream and HFS baggage          |
+| `resources/titles/FRANCE.M14`                      | Compressed native `|TOPIC` control stream and HFS baggage            |
 | `binaries/MVPUBKIT/{MMAG,MVAPIREF,MVAUTHOR}.MVB`    | Multimedia Viewer 2.0 archive enumeration (NOT TextTree)             |
 
-Note on MVPUBKIT: the `.MVB` archives use Microsoft Multimedia
-Viewer 2.0's archive format (magic `3F5F0300`, B+ tree directory).
-Their `|TOPIC` streams carry MV's own RTF-token-stream encoding, NOT
-Blackbird TextTree CContent. The plan's original W7 premise (carve
-TextTree from MVPUBKIT) was incorrect — TextTree is exclusively a
-Blackbird-side container. The MVB parser at
-`scripts/inspect_mvb_archive.py` exists for enumerating the archive
-internals; deeper |TOPIC RTF-token decode is a separate workstream
-(out of scope here).
+The `.MVB` and `.M14` archives use Multimedia Viewer HFS. Their
+`|TOPIC` files contain native Media View controls, not Blackbird
+TextTree CContent. The M14 fixture loader sends those native control
+streams through the online case-1 cache grammar.
 
 ## 12. Open Questions
 
@@ -709,7 +706,5 @@ the static-RE-of-MSN-binaries scope:
 
 Out-of-scope items (intrinsically external):
 
-- MV 2.0 `|TOPIC` RTF-token decode for MVPUBKIT's
-  MMAG/MVAPIREF/MVAUTHOR archives. Distinct format from Blackbird
-  TextTree; not needed for MSN MOSVIEW since MSN titles are
-  always Blackbird-authored.
+- Complete MV 2.0 `|TOPIC` decode for MVPUBKIT's
+  MMAG/MVAPIREF/MVAUTHOR archives.

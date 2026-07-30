@@ -8,6 +8,7 @@ from .ccontent import (
     is_texttree,
 )
 from .handler import MEDVIEWHandler
+from .m14_loader import LoadedM14, load_m14, lower_m14_to_payload
 from .ttl_loader import (
     AudioControl,
     CaptionButtonControl,
@@ -32,6 +33,7 @@ __all__ = [
     "Control",
     "FaceEntry",
     "LoadedPage",
+    "LoadedM14",
     "LoadedTitle",
     "MEDVIEWHandler",
     "OutlineControl",
@@ -47,5 +49,7 @@ __all__ = [
     "decode_texttree",
     "is_texttree",
     "load_title",
+    "load_m14",
+    "lower_m14_to_payload",
     "lower_to_payload",
 ]

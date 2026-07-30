@@ -151,11 +151,11 @@ anonymous fields aren't editable from this dialog.
 | `this+0x0C` | u8 | embedded_vform_present (0/1) | — |
 | `this+0x14` | swizzle | embedded_vform handle | — |
 | `this+0x20` | swizzle | frame handle (CBFrame ref) | **Window:** dropdown |
-| `this+0x2C` | u32 | u32_0 | open; `0` in both 4.ttl and showcase. |
-| `this+0x30` | u32 | **background_color** | **Background color:** picker. COLORREF (RGB(R,G,B) = bytes [low,mid,high]). showcase TTL pinned `0x0000FFFF` (yellow) when picker explicitly set. 4.ttl: `0x009098A8` (RGB 168,152,144 — light tan; BBDESIGN's small swatch displayed as approximately the system color). |
-| `this+0x34` | u32 | **mouse_pointer** | **Mouse Pointer:** dropdown (Win32 cursor ID). 4.ttl: `0x00007F00` = `IDC_ARROW`; showcase: `0x00007F01` = `IDC_IBEAM`. |
-| `this+0x38` | u32 | **scrollbar_flags** | **Vertical scroll bar** = bit 1, **Horizontal scroll bar** = bit 0 (showcase TTL: `2` = V only, matches rendered window). 4.ttl: `3` = both. |
-| `this+0x3C..0x43` | 8 bytes | dpi_scaled_geometry (open; rescaled by current DPI / stored DPI ratio at runtime) | (open — 4.ttl: low dword `0`, high dword `0x1E0`/480) |
+| `this+0x2C` | u32 | u32_0 | open; `0` in both captions_test.ttl and showcase. |
+| `this+0x30` | u32 | **background_color** | **Background color:** picker. COLORREF (RGB(R,G,B) = bytes [low,mid,high]). showcase TTL pinned `0x0000FFFF` (yellow) when picker explicitly set. captions_test.ttl: `0x009098A8` (RGB 168,152,144 — light tan; BBDESIGN's small swatch displayed as approximately the system color). |
+| `this+0x34` | u32 | **mouse_pointer** | **Mouse Pointer:** dropdown (Win32 cursor ID). captions_test.ttl: `0x00007F00` = `IDC_ARROW`; showcase: `0x00007F01` = `IDC_IBEAM`. |
+| `this+0x38` | u32 | **scrollbar_flags** | **Vertical scroll bar** = bit 1, **Horizontal scroll bar** = bit 0 (showcase TTL: `2` = V only, matches rendered window). captions_test.ttl: `3` = both. |
+| `this+0x3C..0x43` | 8 bytes | dpi_scaled_geometry (open; rescaled by current DPI / stored DPI ratio at runtime) | (open — captions_test.ttl: low dword `0`, high dword `0x1E0`/480) |
 | `this+0x44` | u8 | u8_0 | (open) |
 | `this+0x48` | u32 | dpi_x (LOGPIXELSX at authoring time) | implicit |
 | `this+0x4C` | u32 | dpi_y (LOGPIXELSY at authoring time) | implicit |
@@ -179,20 +179,20 @@ Source: parsed `CBFrame` (the title's default frame, resolved from `CTitle.resou
 
 | sec06 wire field | source (authored) | reason |
 | --- | --- | --- |
-| `caption` (+0x15) | `CBFrame.caption` (this+0x08, `GetCaption`) | direct match. 4.ttl ships "MSN Today" |
+| `caption` (+0x15) | `CBFrame.caption` (this+0x08, `GetCaption`) | direct match. captions_test.ttl supplies the sample caption |
 | `flags` (+0x48) | `0x08` (constant) | outer rect is absolute pixels, top-band mode bit clear (rect is `-1`) |
-| `outer_rect` (+0x49..+0x58) | `(CBFrame.rect_left, rect_top, rect_right, rect_bottom)` | direct match. 4.ttl: (0, 0, 640, 480) |
-| `outer_color` (+0x5B) | `CBForm.background_color` (or `-1` if `0`) | Same authored color as the children. 4.ttl: `0x009098A8`; showcase: `0x0000FFFF`. |
+| `outer_rect` (+0x49..+0x58) | `(CBFrame.rect_left, rect_top, rect_right, rect_bottom)` | direct match. captions_test.ttl: (0, 0, 640, 480) |
+| `outer_color` (+0x5B) | `CBForm.background_color` (or `-1` if `0`) | Same authored color as the children. captions_test.ttl: `0x009098A8`; showcase: `0x0000FFFF`. |
 | `non_scroll_back_color` (+0x78) | `CBForm.background_color` (or `-1` if `0`) | BBDESIGN Page dialog has a single "Background color" picker — applied uniformly across MOSVIEW's three pane COLORREF slots. |
 | `scroll_back_color` (+0x7C) | `CBForm.background_color` (or `-1` if `0`) | same |
 | `top_band` rect (+0x80..+0x8F) | `(-1, -1, -1, -1)` (sentinels) | use full client area until an authored top-band source is RE'd |
 
 Open follow-ups (not yet mapped):
-- `CBFrame.prop_u32_b` (this+0x24): default 0; both 4.ttl and showcase ship zero. May correspond to "Window style:" enum dropdown — needs a probe.
+- `CBFrame.prop_u32_b` (this+0x24): default 0; both captions_test.ttl and showcase ship zero. May correspond to "Window style:" enum dropdown — needs a probe.
 - `CBFrame.prop_flag_a/b/c`: small flags. The Window dialog's six checkboxes ("Title bar", "Menu bar", "Always on top", "Modal window", "Minimize button", "Control box") may collapse into `window_style` bits or distribute across the three prop_flag_* slots — needs a probe with several toggled.
 - `CBForm.u32_0`, `CBForm.u64_0`, `CBForm.u8_0`: still anonymous after the showcase probe (all unchanged from default).
 - Sec06 top-band rect (`+0x80..+0x8F`): no obvious authored source; the BBDESIGN Page dialog has no top-band concept exposed.
-- Sec07 (child panes) / Sec08 (popups): empty in 4.ttl. The showcase TTL has multiple sections / forms — may surface authored sec07 records when actually opened by MOSVIEW.
+- Sec07 (child panes) / Sec08 (popups): empty in captions_test.ttl. The showcase TTL has multiple sections / forms.
 
 ## How `View+0x20` (= sec06+0x5B) is consumed
 
@@ -209,7 +209,7 @@ When sec06+0x5B equals `-1`, `MosView_BuildContainerHierarchy` skips the View+0x
 Server emits **one sec06 record per `LoadedPage`** concatenated into
 section 3. The per-record fields are sourced from the page (geometry /
 background / scrollbar flag), while the caption / desktop window
-position stay title-level (CBFrame). 4.ttl now ships three sec06
+position stay title-level (CBFrame). captions_test.ttl has three sec06
 records (456 B in section 3 vs. the single 152 B from PR1).
 
 ### Scrollbar collapse rule

@@ -31,12 +31,12 @@ construction pattern. The 10 functions and their pinned CLSIDs:
 | `CInfomapCtrl` | `INFOMAP.InfomapCtrl.1` | `Register_CInfomapCtrl_INFOMAP_BBCTL_OUTLINE` @ `0x40008166` | `CLSID_CInfomapCtrl_INFOMAP_BBCTL_OUTLINE` @ `0x40022d58` | `{DED253E0-F4E2-11CD-AB6D-00AA003E4475}` |
 
 Site-name ↔ class mapping (verified empirically against
-`resources/titles/4.ttl` + `tests/assets/{story,controls}_test.ttl`):
+`tests/assets/captions_test.ttl` + `tests/assets/{story,controls}_test.ttl`):
 
 | CVForm site name | BBCTL class | Reason for mapping |
 |---|---|---|
 | `Story` (e.g. `Story1R`) | `CQtxtCtrl` (QTXT) | Verified — CLSID at preamble slot 0 in msn_today CVForm 6/0 |
-| `Caption` (e.g. `Caption1`) | `CLabelCtrl` (LABEL) | Verified — CLSID at preamble slot 0 in 4.ttl pages + slot 1 in showcase 7/0 |
+| `Caption` (e.g. `Caption1`) | `CLabelCtrl` (LABEL) | Verified — CLSID at preamble slot 0 in captions_test.ttl pages + slot 1 in showcase 7/0 |
 | `Audio` (e.g. `Audio1R`) | `CAudioCtrl` (AUDIO) | Verified — CLSID at preamble slot 2 in showcase 7/0 |
 | `CaptionButton` (e.g. `CaptionButton1R`) | `CLabelBtnCtrl` (LABELBTN) | Verified — CLSID at preamble slot 3 in showcase 7/0 |
 | `Outline` (e.g. `Outline1`) | `CInfomapCtrl` (INFOMAP) | Verified — CLSID at preamble slot 4 in showcase 7/0 |

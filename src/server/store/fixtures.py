@@ -173,24 +173,19 @@ CATEGORY_DEFS = (
     (0x10B, "The Internet Center", "Category"),
     (0x10C, "The MSN Member Lobby", "Folder"),
     (0x10D, "The Microsoft Network Beta", "Category"),
-    # Development-only category that exposes the BBDESIGN test fixtures
-    # checked into `tests/assets/` as MOSVIEW-launched leaves. The asset
-    # files are mirrored into `resources/titles/{deid}.ttl` so the
-    # MEDVIEW handler resolves them through the standard OpenTitle path.
-    (0x10E, "MEDVIEW tests", "Category"),
+    # Development-only category exposing compiled Media View titles.
+    # MEDVIEW maps each leaf deid to its compiled M14 sample.
+    (0x10E, "Media View samples", "Category"),
 )
 
 
-# Children of "MEDVIEW tests" — one MOSVIEW leaf per `.ttl` fixture. The
+# Children of "Media View samples" — one MOSVIEW leaf per `.m14` fixture. The
 # f0 value is the MOSVIEW deid (formatted `%X` by MOSVIEW's deid
-# normalization, see docs/MOSVIEW.md §3.3), so the on-disk filename is
-# `{f0:x}.ttl`. f8=0 keeps deid_hi clear so MCM picks the single-word
-# `%X` path instead of `%X%8X`.
-MEDVIEW_TEST_LEAF_DEFS = (
-    (0x1000, "Captions Test"),
-    (0x1001, "Story Title"),
-    (0x1002, "Multi-page Title"),
-    (0x1003, "All Controls"),
+# normalization, see docs/MOSVIEW.md §3.3). f8=0 keeps deid_hi clear so
+# MCM picks the single-word `%X` path instead of `%X%8X`.
+MEDVIEW_SAMPLE_LEAF_DEFS = (
+    (0x1000, "Employee Handbook Example", 472917),
+    (0x1001, "France Magazine", 972835),
 )
 
 
@@ -296,12 +291,12 @@ def _dirsrv_container(f0, f8, name, *, type_str="Directory", language=_LCID_EN_U
     )
 
 
-def _medview_test_leaf(f0, name):
-    """MOSVIEW leaf backed by a `.ttl` fixture under `resources/titles/`.
+def _medview_sample_leaf(f0, name, size_bytes):
+    """MOSVIEW leaf backed by an `.m14` fixture under `resources/titles/`.
 
     deid_hi=0 keeps MOSVIEW on the single-word `%X` deid normalization
     path, so f0=0x1000 → cmdline `-MOS:6:1000:0:w` → titleToken
-    `:2[1000]0` → server resolves `resources/titles/1000.ttl`.
+    `:2[1000]0` → server resolves `resources/titles/HANDBOOK.M14`.
     """
     key, mnid = _mnid_key(f0, 0)
     return DirectoryNode(
@@ -312,7 +307,7 @@ def _medview_test_leaf(f0, name):
         content=NodeContent(
             name=name,
             go_word="",
-            category="MEDVIEW tests",
+            category="Media View samples",
             type_str="MedView Title",
             price_dword=0,
             rating_dword=0,
@@ -327,12 +322,12 @@ def _medview_test_leaf(f0, name):
             owner="",
             created="",
             modified="",
-            size_bytes=0,
+            size_bytes=size_bytes,
         ),
     )
 
 
-_MEDVIEW_TESTS_KEY = f"1:{0x10E}"
+_MEDVIEW_SAMPLES_KEY = f"1:{0x10E}"
 
 
 # --- BBS service sample board (docs/bbs-service-contract.md) ---
@@ -775,7 +770,10 @@ DIRECTORY_NODES = [
         _dirsrv_container(1, f8, name, type_str="Diretorio", language=_LCID_PT_BR)
         for f8, name in A_AND_E_BR_CHILD_DEFS
     ],
-    *[_medview_test_leaf(f0, name) for f0, name in MEDVIEW_TEST_LEAF_DEFS],
+    *[
+        _medview_sample_leaf(f0, name, size_bytes)
+        for f0, name, size_bytes in MEDVIEW_SAMPLE_LEAF_DEFS
+    ],
     *BBS_NODES,
 ]
 
@@ -816,7 +814,9 @@ DIRECTORY_CHILDREN = {
     _MEMBER_ASSISTANCE_BR_KEY: [f"1:{f8}" for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS],
     _ARTS_AND_ENTERTAINMENT_KEY: [f"1:{f8}" for f8, _ in A_AND_E_CHILD_DEFS],
     _ARTES_E_ENTRETENIMENTO_KEY: [f"1:{f8}" for f8, _ in A_AND_E_BR_CHILD_DEFS],
-    _MEDVIEW_TESTS_KEY: [f"{f0}:0" for f0, _ in MEDVIEW_TEST_LEAF_DEFS],
+    _MEDVIEW_SAMPLES_KEY: [
+        f"{f0}:0" for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS
+    ],
     # BBS board "Climbing BBS" listed under "Sports, Health and Fitness"
     # (c=2 = APP_BBS_SERVICE, b bit 0x04 = delegate). Opening it hands the
     # folder to bbsnav, which enumerates the thread list over svc "BBS".
@@ -847,7 +847,7 @@ DIRECTORY_CHILDREN = {
     # Every remaining category/A&E/MA leaf is terminal — explicit empty list
     # keeps the fallback sentinel out of their listviews. 0x100 (Arts and
     # Entertainment), 0x10A (Sports, Health and Fitness → Climbing BBS) and
-    # 0x10E (MEDVIEW tests) are skipped because they have their own subtrees
+    # 0x10E (Media View samples) are skipped because they have their own subtrees
     # wired above.
     **{
         f"1:{f8}": []
@@ -863,7 +863,10 @@ DIRECTORY_CHILDREN = {
     },
     **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS},
     **{f"1:{f8}": [] for f8, _ in A_AND_E_BR_CHILD_DEFS},
-    **{f"{f0}:0": [] for f0, _ in MEDVIEW_TEST_LEAF_DEFS},
+    **{
+        f"{f0}:0": []
+        for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS
+    },
 }
 
 

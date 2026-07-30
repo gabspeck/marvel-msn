@@ -717,8 +717,8 @@ def _stamp_no_nsr(chunk: bytearray, name_size: int) -> None:
     makes `MOSVIEW!NavigateMosViewPane @ 0x7f3c3670` call
     `ShowWindow(NSR_HWND, SW_HIDE)`.
 
-    Blackbird-authored titles never carry an NSR region, so every wire
-    chunk stamps this unconditionally.
+    The synthetic builders do not have a native topic header, so they
+    stamp the no-NSR sentinel.
     """
     nsr_off = 4 + name_size + 0x14
     chunk[nsr_off:nsr_off + 4] = b"\xFF\xFF\xFF\xFF"
@@ -1423,6 +1423,68 @@ def build_case1_bf_chunk(
 
     _stamp_chain_terminators(chunk)
     _stamp_no_nsr(chunk, name_size)
+    return bytes(chunk)
+
+
+def build_case1_stream_bf_chunk(
+    control_stream: bytes,
+    text_data: bytes,
+    title_byte: int,
+    key: int,
+    *,
+    tlv_fields: dict[int, int] | None = None,
+    tab_stops: list[tuple[int, int]] | None = None,
+    non_scroll: int = -1,
+) -> bytes:
+    """Wrap one native Media View display record in a type-0 0xBF chunk.
+
+    Compiled Media View titles already store the bytecode consumed by
+    `MVDispatchControlRun`: LinkData1 ends with the control stream and
+    LinkData2 carries its NUL-separated text strings. Only the paragraph
+    header differs from the online cache representation, so callers pass
+    its decoded fields for re-encoding as the wire TLV.
+    """
+    if not control_stream or control_stream[-1] != 0xFF:
+        raise ValueError("Media View control stream must end with 0xFF")
+    if not text_data:
+        text_data = b"\x00"
+
+    tlv = encode_text_item_tlv(tlv_fields, tab_stops=tab_stops)
+    preamble_length_value = len(tlv) + len(control_stream)
+    preamble = encode_case1_preamble(
+        length_value=preamble_length_value,
+        type_tag=0x01,
+    )
+
+    required_name_size = (
+        0x26 + len(preamble) + len(tlv) + len(control_stream) + len(text_data)
+    )
+    name_size = max(0x40, (required_name_size + 3) & ~3)
+    if name_size > 0xFFFF:
+        raise ValueError(
+            f"Media View display record exceeds 0xFFFF-byte name buffer: {name_size}"
+        )
+
+    chunk = bytearray(4 + name_size + 60)
+    chunk[0] = 0xBF
+    chunk[1] = title_byte & 0xFF
+    chunk[2:4] = struct.pack("<H", name_size)
+    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
+
+    case_offset = 4 + 0x26
+    chunk[case_offset:case_offset + len(preamble)] = preamble
+    tlv_offset = case_offset + len(preamble)
+    chunk[tlv_offset:tlv_offset + len(tlv)] = tlv
+    control_offset = tlv_offset + len(tlv)
+    chunk[control_offset:control_offset + len(control_stream)] = control_stream
+    text_offset = control_offset + len(control_stream)
+    chunk[text_offset:text_offset + len(text_data)] = text_data
+
+    _stamp_chain_terminators(chunk)
+    nsr_offset = 4 + name_size + 0x14
+    chunk[nsr_offset:nsr_offset + 4] = struct.pack(
+        "<I", non_scroll & 0xFFFFFFFF,
+    )
     return bytes(chunk)
 
 

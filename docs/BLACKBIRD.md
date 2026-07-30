@@ -1,8 +1,9 @@
 # Microsoft Blackbird — Authoring Tool
 
-Documents the Blackbird 11.0.06.0206 authoring suite shipped alongside MSN 1.0 and 2.0. Blackbird is the Microsoft-internal content-authoring tool used to create and publish MSN titles (the MOSVIEW content MSN Today opens). All addresses are image-base-relative in the newly-created `Blackbird.gpr` project at repo root.
+Documents the Blackbird 11.0.06.0206 authoring suite shipped alongside MSN 1.0 and 2.0. Blackbird creates BDF and `.TTL` content. The current evidence does not make it the source format for MOSVIEW titles. All addresses are image-base-relative in `Blackbird.gpr` at the repository root.
 
-The authoring-side OLE2 container is the familiar `.TTL` compound file. One reference sample ships in `resources/titles/4.ttl`.
+The Blackbird authoring-side container is an OLE2 `.TTL` file. Test samples
+remain under `tests/assets/` for Blackbird format research.
 
 ---
 
@@ -47,47 +48,21 @@ the sampled `.ttl` exposes directly:
 Practical consequence: top-level `CSection.contents` entries are authored
 membership / content references, not a serialized MediaView pane table.
 
-### 2.2 Conceptual map: Blackbird title → `.m14`
+### 2.2 Relationship to Media View
 
-```
-Blackbird authored title
-  ├─ CTitle.name
-  │    └─ .m14 sec01 title string
-  │       .m14 sec04 string table entry
-  │
-  ├─ CSection.name / CBForm / CBFrame / CStyleSheet / CResourceFolder names
-  │    └─ .m14 sec04 string table entries
-  │
-  ├─ top-level CSection.contents
-  │    └─ topic/address lowering only
-  │       topic_number = entry_index + 1
-  │       address      = 0x1000 + entry_index * 0x100
-  │       context_hash = CRC32(lower(proxy_name))
-  │
-  ├─ CProxyTable -> TextRuns / TextTree / WaveletImage
-  │    └─ per-topic content source
-  │       text topics -> case-1 0xBF text payloads
-  │       image topics -> topic slot only today
-  │
-  └─ page / window / control layer
-       (likely CBForm + CVForm + related authored objects)
-       └─ historical source for .m14 sec06 / sec07 / sec08
-          current live subset:
-            sec06 = one scaffold record
-            sec07 = empty
-            sec08 = empty
-```
+Microsoft Media View `.m14` files are compiled Multimedia Viewer HFS books.
+They contain `|SYSTEM`, `|FONT`, `|TOPIC`, and native baggage files.
 
-| Blackbird part | `.m14` part | Status |
-|---|---|---|
-| `CTitle.name` | `sec01` | direct |
-| `CTitle.name` + authored object names | `sec04` | direct in current subset |
-| top-level `CSection.contents` order | topics / `topic_count` / `va_get_contents` / `addr_get_contents` | direct synthetic lowering |
-| `CProxyTable` + `TextRuns` | case-1 text payloads | direct in current subset |
-| `CProxyTable` + `WaveletImage` | topic slot only | partial |
-| `CStyleSheet` | `sec00` font table | conceptual source; live server currently emits a minimal real section-0 recipe |
-| authored page/window/control structure | `sec06` / `sec07` / `sec08` | unresolved authored source; live server emits only the code-proven fallback scaffold |
-| runtime title-open spec | `sec6a` | wire/runtime field, not an authored title field |
+Blackbird `.TTL` files are OLE2 object stores. They contain Blackbird classes,
+property tables, proxy tables, and CContent objects.
+
+Blackbird help states that its converters can import Media View files into
+Blackbird Data Format. This path does not prove that MSN converted Blackbird
+titles back into M14. The Media View samples disprove the previous fixture
+model, which synthesized M14 wire data from Blackbird tiles.
+
+The live MEDVIEW fixtures now use compiled M14 files. Blackbird parsers remain
+useful only for Blackbird format research and their focused unit tests.
 
 Key registry roots consulted by BBDESIGN during release:
 
@@ -120,11 +95,13 @@ Persistence goes through **COSCL** rather than direct ole32 calls:
 - References between objects are carried as `CDPORef` monikers in a `CDPORefMgr` iterator. External references are preserved without copying their bytes via `CObjectStore::AddFiatMoniker(dst, 2, typename, guid, flags=0x80000, kind=1, ...)`.
 - Title-wide metadata lives in a separate property table accessed via `CObjectStore::AccessTitlePropertiesTable` and manipulated with `CPropertyTable::SetAt / Lookup / RemoveKey / Commit`.
 
-`resources/titles/4.ttl` (8704 B) is a Local-target snapshot of this compound-file layout: a stripped-down CTitle graph written by the same `extract_object` path the MSN publisher uses.
+`tests/assets/captions_test.ttl` is a Local-target snapshot of this
+compound-file layout. The same `extract_object` path wrote its CTitle graph.
 
 ### 3.1 Compound file layout
 
-The root and per-storage streams produced by `extract_object` (as observed on `resources/titles/4.ttl`, confirmed against the COSCL import surface):
+The root and per-storage streams produced by `extract_object` appear in
+`tests/assets/captions_test.ttl`:
 
 | Path | Size | Purpose |
 |---|---:|---|
@@ -132,22 +109,22 @@ The root and per-storage streams produced by `extract_object` (as observed on `r
 | `\x03ref_1` … `\x03ref_N` | 81-89 B | `CDPORef*` / `CDPORefHc`/`CDPORefHC` records. Cross-object monikers with GUID + FILETIME. One entry per serialized object. |
 | `<id>/0/\x03object` | var | Opaque class instance bytes (see §3.1.3). |
 | `<id>/0/\x03properties` | var | Single-property `CPropertyTable` — every named class carries `name=<ASCIIZ>`. |
-| `<id>/0/\x03handles` | 12 B | `[u32 count][GUID-handle][GUID-handle]…` of references this storage emits. Absent on leaf classes (e.g., CBFrame, CStyleSheet, CVForm on `4.ttl`). |
+| `<id>/0/\x03handles` | 12 B | `[u32 count][GUID-handle][GUID-handle]…` of references this storage emits. Absent on leaf classes in `captions_test.ttl`. |
 
 The storage id in `type_names_map` matches the decimal storage directory name — `<id>/0/…` reaches the instance.
 
 #### 3.1.1 `\x03type_names_map`
 
 ```
-u32 count                     // number of entries (6 on 4.ttl)
-u16 opaque                    // mirrors `count` on 4.ttl; semantics not pinned
+u32 count                     // number of entries (6 in captions_test.ttl)
+u16 opaque                    // mirrors `count`; semantics not pinned
 for `count` entries:
   u8  name_len
   char name[name_len]         // ASCII class name, no NUL
   u32 storage_id              // matches the `<id>/0/...` substorage
 ```
 
-4.ttl's table (in file order):
+`captions_test.ttl` table, in file order:
 
 | name | storage_id |
 |---|---:|
@@ -160,7 +137,8 @@ for `count` entries:
 
 #### 3.1.2 `\x03properties` (per-storage)
 
-COSCL's `CPropertyTable` persisted form. Every named class on 4.ttl carries a single `name` string; the format supports more but only string (type 0x08) has been observed:
+COSCL uses this persisted `CPropertyTable` form. Each named class in
+`captions_test.ttl` carries one `name` string:
 
 ```
 u32 prop_count
@@ -173,20 +151,17 @@ for `prop_count` entries:
   char value[value_len]
 ```
 
-The CTitle `name` (`"MSN Today"` on 4.ttl) is the authored display name the MSN Today viewer surfaces as the window caption; see `docs/MEDVIEW.md` §4.4 for how the server relays it in the 9-section MedView body.
+The CTitle `name` is the Blackbird-authored display name.
 
 #### 3.1.3 `\x03object` (per-storage)
 
-The opaque instance stream produced by `extract_object`. On 4.ttl:
+The opaque instance stream produced by `extract_object`. In the sample:
 
 - Most small classes (CTitle 38 B, CResourceFolder 25 B, CBFrame 45 B, CBForm 45 B) store serialized C++ members directly; `CStyleSheet` is larger (880 B) but follows the same `Serialize` pattern.
-- CVForm (816 B on 4.ttl) carries a 9-byte header (`01 [u32 uncompressed_size] [u32 compressed_size]`) followed by a compressed body. The algorithm is some MS-stock legacy variant (not zlib / deflate / gzip); decompression requires RE of `COSCL.DLL!extract_object` and the matching decoder.
+- CVForm carries a 9-byte header (`01 [u32 uncompressed_size] [u32 compressed_size]`) followed by a compressed body.
 
-The 9-section MedView body the viewer consumes (`docs/MEDVIEW.md` §4.4) does
-NOT need these bytes for the caption — only `CTitle.name` from §3.1.2 drives
-that — but recovering the authored page/window/control inputs behind the fixed
-record sections still requires decoding this layer and the surrounding lowering
-logic.
+This stream belongs to the Blackbird format. The live MEDVIEW fixtures do not
+read it.
 
 ---
 
@@ -227,7 +202,9 @@ It:
 
 ### 4.2 Local branch (`param_2 == 1`)
 
-`CReleaseWizard_DoPublish` assembles a `.TTL` path from `CReleaseData.localName` (relative paths resolve against the treeedcl.dll directory) plus the `.ttl` extension, then calls the file-writer (`FUN_0043ef8a`) to drop the compound file to disk. This is the path that produced `resources/titles/4.ttl`.
+`CReleaseWizard_DoPublish` assembles a `.TTL` path from
+`CReleaseData.localName`. Relative paths resolve against the treeedcl.dll
+directory. It then calls `FUN_0043ef8a` to write the compound file.
 
 ### 4.3 MSN branch (`param_2 == 0`)
 
@@ -297,7 +274,7 @@ All four values are written to the `CReleaseData`-local `CPropertyTable` during 
 
 ---
 
-## 7. Authored fixture inventory — `resources/titles/4.ttl` (MSN Today)
+## 7. Authored fixture inventory — `tests/assets/captions_test.ttl`
 
 Decoded by `server.blackbird.ttl_inspect.inspect_blackbird_title`:
 
@@ -319,16 +296,8 @@ Decoded by `server.blackbird.ttl_inspect.inspect_blackbird_title`:
 | 8/7 | `CContent` | 122 B | Raw `ver=0x02` body, "SThis is an exa..." — additional text fragment. |
 | 9/1 | `CSection` | 50 B | "Section 1" container with one `CBForm` ref and three top-level authored content refs. This is section membership data, not a MEDVIEW child-pane table. |
 
-The `CVForm` (6/0) is decisive — it carries an entire Word 95 binary
-document with the rendered page. Combined with the help-file hierarchy
-(pages/windows/controls separate from stories/media), the sample points
-to `CVForm` plus proxy/content indirection as the authored display layer
-the original 1996 MedView *server* lowered into wire-ready chunks
-(9-section title body + 0xBF cache pushes + baggage payloads) before
-shipping to the MOSVIEW client.
-
-The conversion logic, however, is fully recoverable from the
-binaries we DO have:
+The `CVForm` at `6/0` carries a Word 95 binary document. It is part of the
+Blackbird display layer.
 
 - **`extract_object` @ COSCL.DLL `0x40216AB4`** writes the
   PUBLISH.DLL output blob: `[u32 kind][u32 status_flags]
@@ -342,41 +311,10 @@ binaries we DO have:
   this+8/+2c/+50/+74/+bc/+98 (six member lists), then
   `CSectionProp::Serialize` on this+0xe0. CTitle, CBFrame, CBForm,
   CContent, CElementData, CStyleSheet, CResourceFolder, CProxyTable,
-  CVForm all follow the same pattern at corresponding offsets in
-  VIEWDLL.
-- **MEDVIEW wire format** (the destination) is documented in
-  `docs/MEDVIEW.md` and continuously refined by RE of MVCL14N and
-  MOSVIEW.
+  CVForm all follow the same pattern at corresponding offsets in VIEWDLL.
 
-So the path from `.ttl` → on-screen pixels is:
-
-```
-.ttl (compound file)
-  → server reads each \x03object stream
-  → server applies each class's Serialize-deserialize logic to
-    recover the authored title subtree (CTitle → top-level CSection;
-    section → CBForm + top-level proxy/content refs; resource folder
-    → default frame/style sheet)
-  → server lowers authored page/window/control structure plus
-    story/media refs into the MEDVIEW wire chunks the engine expects
-    (TitleOpen body sections, 0xBF cache pushes, baggage HFS
-    responses)
-  → MOSVIEW + MVCL14N consume the wire chunks and BitBlt the
-    result
-```
-
-The first two arrows are bounded RE work — every byte is in
-VIEWDLL's Serialize methods. The third arrow is what we've been
-incrementally building in `src/server/services/medview.py`. The
-remaining gap is the authored page/window/control lowering layer, not a
-mysterious unknown converter.
-
-The smaller proof-of-concept path skips the .ttl entirely:
-hand-build a CSection cache push with a non-empty trailer carrying
-one text child (tag 0x8A) pointing at a synthetic va that resolves
-to a buffer of glyph data. This validates the
-case-3 → trailer → CElementData chain documented in
-`docs/MEDVIEW.md §7.2` without needing the full deserializer.
+No current evidence connects this object graph to the MEDVIEW title service.
+The compiled M14 samples provide that service's source data directly.
 
 `ttl_inspect` now recovers the property bags needed by the supported
 subset (`name` / `type` / `origin` / `size` on the proxy/content side).
@@ -386,7 +324,7 @@ Broader class-specific property coverage remains open.
 
 ## 8. VIEWDLL Serialize methods — on-disk schemas
 
-Each authored class in `4.ttl` ships through `extract_object` driven by
+Each authored class in `captions_test.ttl` ships through `extract_object` driven by
 its `Serialize(CArchive&)` virtual. RE'd from VIEWDLL.DLL @ `0x40700000`
 (read-mode dispatch under `param_1[0x14]&1 != 0` branch; write-mode
 under `==0`). The `CArchive` write cursor is `param_1+0x24`, buffer end
@@ -410,7 +348,7 @@ deserialised in same order; `if (bVar3 < 3) Ordinal_781(this+4)` reads
 an additional pre-v3 field. CSectionProp::Serialize is invoked with the
 version byte as third arg.
 
-The 50-byte `9/1` body in `4.ttl` is exactly this serialised form with
+The 50-byte `9/1` body in `captions_test.ttl` is this serialized form with
 one `CBForm` ref, three top-level authored content refs, otherwise empty
 section/style/frame lists, and a small `CSectionProp` tail. The live
 MEDVIEW path does not ship this blob verbatim; current RE treats it as
@@ -453,31 +391,20 @@ else (write mode):
         commit_stream()
 ```
 
-CContent is **opaque IStream chunks** — there is no class-version prefix
-or header. The body bytes are whatever the source stream provides
-(text, structured records, BM-prefixed bitmap, MSZIP-compressed page
-content, etc.). This matches `project_medview_ccontent_not_via_bf.md`:
-CContent ships through baggage selectors `0x1A`/`0x1B`/`0x1C` verbatim,
-NOT through type-0 BF cache pushes.
+CContent is an opaque IStream. It has no class-version prefix or header.
+The body bytes come from the source stream.
 
 ### 8.4 Other classes (CTitle, CBFrame, CBForm, CVForm, CStyleSheet,
 CResourceFolder, CProxyTable)
 
 Same pattern as CSection: write a version byte (0x00..0x09 depending on
 class), then `this+offset → ChildClass::Serialize` calls in fixed order,
-optionally followed by inline fields. The `4.ttl` body bytes for each
+optionally followed by inline fields. The `captions_test.ttl` body bytes for each
 storage are byte-exact what `Serialize` emitted in write mode against
 the wizard-edited in-memory tree.
 
-For the MEDVIEW wire path we can't reuse most class bodies directly —
-the 1996 server consumed these via virtual `Serialize(read)` calls,
-walked the recovered C++ tree, combined page/window/control structure
-with story/media refs, and emitted MEDVIEW chunks. Today's shortcut is
-narrower: use `CContent` bytes for the supported case-1 text/image path,
-use `CTitle` / `CBForm` / `CBFrame` / `CStyleSheet` /
-`CResourceFolder` names for string-table lowering, derive synthetic
-topics from the supported top-level proxy/content entries, and emit only
-the code-proven `0x06` scaffold with empty `0x07` / `0x08`.
+The MEDVIEW fixture path does not use these class bodies. It reads compiled
+M14 files instead.
 
 ---
 
@@ -497,4 +424,4 @@ the code-proven `0x06` scaffold with empty `0x07` / `0x08`.
 - `docs/MEDVIEW.md` — the MedView service the MSN Today viewer reads from.
 
 [//]: # (Section 8 was renumbered; "Constraints and unknowns" is now §9.)
-- `resources/titles/4.ttl` — reference Local-target compound file (same `extract_object` output format the MSN branch ships, minus the MPC framing).
+- `tests/assets/captions_test.ttl` — reference Blackbird Local-target compound file.
