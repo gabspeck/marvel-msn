@@ -606,9 +606,31 @@ cache TLV offset `+0x12`. Both sample titles set it to `1`, selecting
 the client's 1440-unit twips scale. Omitting this value selects the
 144-unit scale and expands paragraph spacing and indents by 10.
 Prev/next cache tokens name neighboring display records in the topic;
-selector `0x16` returns those records. Topic endpoints use token `1`,
-an invalid TOPICPOS below every real record. A larger terminator would
-make `HfcNear` reuse the endpoint record for lower VAs.
+selector `0x16` returns those records. A topic edge names the token one
+below (or above) its own TOPICPOS. TOPICLINK records are at least 21
+bytes apart, so neither token collides with a real record.
+
+The edge token has to abut the record it terminates.
+`HfcNextPrevHfc @ 0x7E845ABB` probes it, receives the `0x3F3`
+end-of-content status, and caches it as a zero-length record under that
+key. `HfcNear`'s lookup — `HfcCache_FindEntryAndPromote @ 0x7E845EFA`
+called with a companion out-param — has no exact-match requirement: it
+falls back to the greatest cached key below the target whose successor
+key lies above it. A cached record therefore covers everything from its
+own key up to the next cached key. When that record is empty,
+`HfcCopyCacheRecordPayloadToGlobal @ 0x7E845CD4` returns NULL, and
+`HfcNear` returns NULL **without issuing selector `0x15`**;
+`fMVSetAddress` then fails with status `0x3ED` and
+`MOSVIEW!NavigateMosViewPane @ 0x7F3C3670` latches `pane+0x84 = 1`,
+whose final `ShowWindow(pane+0x44, …)` receives 0.
+
+A single sentinel below every TOPICPOS spans from itself up to the
+lowest record cached so far, so it swallows every lookup beneath that
+record. Confirmed under SoftICE 2026-07-30 on the France title: the
+terminator cached while a later topic was on screen claimed the range
+under it, and navigation to the title's lowest display (`va=0x49`, the
+"Fate of the Albigensians" popup topic) resolved its hash over selector
+`0x06` and then went silent, with no `0x15` and no popup window.
 
 RemoteFileService exposes each non-system HFS file by name. This path
 serves the bitmap and hotspot baggage referenced by the native M14
