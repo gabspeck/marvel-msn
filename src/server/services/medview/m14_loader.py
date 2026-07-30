@@ -162,21 +162,48 @@ class LoadedM14:
         return None
 
     def display_neighbors(self, topic_pos: int) -> tuple[int, int]:
+        """Prev/next cache tokens for one display record.
+
+        Interior records name their real siblings. Topic edges name a
+        token one below (or above) their own TOPICPOS. TOPICLINK records
+        are at least `_TOPIC_LINK_HEADER_SIZE` bytes apart, so neither
+        token can collide with a real record.
+
+        The edge token has to sit adjacent to the record it terminates.
+        `MVTTL14C!HfcNextPrevHfc @ 0x7e845abb` probes it over selector
+        0x16, gets the `0x3F3` end-of-content status, and caches it as a
+        zero-length record under that key. `HfcNear`'s lookup
+        (`HfcCache_FindEntryAndPromote @ 0x7e845efa` with a companion
+        out-param) falls back to the greatest cached key below its
+        target whose successor key is above it, so a cached record spans
+        from its own key up to the next cached key. An empty record
+        selected that way makes `HfcCopyCacheRecordPayloadToGlobal @
+        0x7e845cd4` return NULL, and `HfcNear` returns NULL *without*
+        issuing selector 0x15 — `fMVSetAddress` then fails with `0x3ED`
+        and `MOSVIEW!NavigateMosViewPane` hides the pane.
+
+        A single shared sentinel below every TOPICPOS therefore spans
+        from itself up to the lowest record cached so far and swallows
+        every lookup under it. That silently broke navigation to the
+        title's lowest topic (France popup `va=0x49`, confirmed under
+        SoftICE 2026-07-30): the terminator cached while a later topic
+        was on screen claimed the whole range beneath it.
+        """
         for topic in self.topics:
             for index, display in enumerate(topic.displays):
                 if display.topic_pos == topic_pos:
                     previous = (
                         topic.displays[index - 1].topic_pos
                         if index
-                        else 1
+                        else topic_pos - 1
                     )
                     following = (
                         topic.displays[index + 1].topic_pos
                         if index + 1 < len(topic.displays)
-                        else 1
+                        else topic_pos + 1
                     )
                     return previous, following
-        return 1, 1
+        return topic_pos - 1, topic_pos + 1
 
     def context_at(self, context_hash: int) -> tuple[int, int] | None:
         for candidate_hash, topic_pos, address in self.context_map:

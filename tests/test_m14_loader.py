@@ -203,6 +203,40 @@ class TestM14Loader(unittest.TestCase):
             0xFFFFFFFF,
         )
 
+    def test_edge_tokens_never_span_a_real_display(self):
+        """Topic-edge cache tokens must sit adjacent to their own record.
+
+        `HfcNear` treats a cached record as covering everything from its
+        own key up to the next cached key, so an end-of-content token
+        shared across topics claims the whole range beneath the lowest
+        record cached so far. That hid the France popup topic at
+        `va=0x49`, the title's lowest display.
+        """
+        title = load_m14(_FRANCE)
+        self.assertIsNotNone(title)
+        positions = sorted(
+            display.topic_pos
+            for topic in title.topics
+            for display in topic.displays
+        )
+        occupied = set(positions)
+        for topic_pos in positions:
+            previous, following = title.display_neighbors(topic_pos)
+            for token in (previous, following):
+                if token in occupied:
+                    continue
+                # A synthesised token spans only up to the next real
+                # record, so it must not sit below one it does not abut.
+                self.assertIn(
+                    token,
+                    (topic_pos - 1, topic_pos + 1),
+                    f"display 0x{topic_pos:x} names non-adjacent edge "
+                    f"token 0x{token:x}",
+                )
+        # The lowest display in the title is the popup target; its
+        # leading token must not reach down past it.
+        self.assertEqual(title.display_neighbors(positions[0])[0], positions[0] - 1)
+
     def test_cathar_display_chain_preserves_nsr_and_scroll_regions(self):
         title = load_m14(_FRANCE)
         self.assertIsNotNone(title)
@@ -211,9 +245,9 @@ class TestM14Loader(unittest.TestCase):
         self.assertIsNotNone(non_scroll)
         self.assertIsNotNone(scroll)
         self.assertEqual((non_scroll.non_scroll, non_scroll.scroll), (0x4696, 0x46D3))
-        self.assertEqual(title.display_neighbors(0x4696), (1, 0x46D3))
+        self.assertEqual(title.display_neighbors(0x4696), (0x4695, 0x46D3))
         self.assertEqual(title.display_neighbors(0x46D3), (0x4696, 0x4968))
-        self.assertEqual(title.display_neighbors(0x4A17), (0x4968, 1))
+        self.assertEqual(title.display_neighbors(0x4A17), (0x4968, 0x4A18))
         self.assertEqual(
             non_scroll.fields_dict(),
             {

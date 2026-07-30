@@ -2195,7 +2195,11 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         chunk = push[1:]
         name_size = struct.unpack_from("<H", chunk, 2)[0]
         self.assertEqual(chunk[0], 0xBF)
-        self.assertEqual(struct.unpack_from("<III", chunk, 8), (1, 0x4696, 0x46D3))
+        # 0x4696 opens its topic, so its leading token is the adjacent
+        # 0x4695 rather than a shared end-of-content sentinel.
+        self.assertEqual(
+            struct.unpack_from("<III", chunk, 8), (0x4695, 0x4696, 0x46D3),
+        )
         self.assertEqual(
             struct.unpack_from("<II", chunk, 4 + name_size + 0x14),
             (0x4696, 0x46D3),
