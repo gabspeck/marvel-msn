@@ -739,6 +739,72 @@ The fixture response is:
 An unanswered request blocks Explorer's UI thread immediately after the
 ticket exchange.
 
+#### 7.2.10 TREEEDCL SetProperties (class 0x04, selector 0x04)
+
+The write half of the node Properties sheet. Every editable control routes
+here: `CMosTreeNode::SetPropertyIfChanged` (vtable +0x130) compares the new
+value against the cache, and on a difference calls `CMosTreeEdit::SetProperty`
+@ MOSSHELL 0x7F403522, which reaches `CTreeEditClient::PrivateSetProperties`
+@ TREEEDCL 0x7F2C1CEE. One call per changed control, each carrying a
+single-property record.
+
+```
+ request: [0x04][len][ticket]            — the GetTicket blob, verbatim
+          [0x04][len=8][mnid]            — the node being edited
+          [0x04][len][property record]   — SVCPROP CompressPropClnt output
+          [0x83][0x83]                   — receive status + operation id
+ reply:   [0x83][u32 status=0]
+          [0x83][u32 operation_id=0]
+          [0x87]
+```
+
+Status `1` means "in progress": the client then calls `GetStatus`
+(selector 0x09) once a second until it reads anything else, so a completed
+operation must answer `0`. There is no variable field in the reply —
+AddNode's trailing `0x84` MNID has no counterpart here.
+
+Which channel a property takes is decided by `IMosTreeEdit::GetPropertyDispatch`
+(vtable +0x14). `CDirSrvTreeEdit::GetPropertyDispatch` @ DSNED 0x7F5712EA
+returns `1` for every name, so every DIRSRV property write goes to this
+selector — never to the DATAEDCL (bit 1) or delegate (bit 2) paths.
+
+**Name-tag swap.** `CMosTreeEdit::SetProperty` special-cases the name: it
+widens the ANSI edit-box text to UTF-16, rewrites the tag from `e` to `f` and
+the wire type to `0x0B`. Reads use `e`, writes use `f`.
+
+Tags and wire types written by each page:
+
+| Page (dialog) | Control | Tag | Type |
+|---|---|---|---|
+| General (0x65) | Name | `f` | 0x0B |
+| General | Go word | `k` | 0x0A |
+| General | Category | `ca` | 0x0A |
+| General | Description | `j` | 0x0A |
+| General | Rating combo | `o` | 0x03 |
+| General | Currency + Amount | `z` | 0x0D |
+| Context (0x67) | Language listbox | `q` | 0x10 |
+| Context | Topics | `r` | 0x0A |
+| Context | People | `s` | 0x0A |
+| Context | Place | `t` | 0x0A |
+| Context | Forum manager | `n` | 0x0A |
+| Context | Vendor name | `on` | 0x0A |
+| Context | Vendor ID | `y` | 0x11 |
+| Banner (DSNED 0x69) | banner shabby id | `mf` | 0x0F |
+| Banner | banner byte count | `p` | 0x03 |
+
+`z` packs both pricing fields into one DWORD — low byte = index into
+MOSSHELL's `g_rgISOCurrencyCodes` (0xFF = none), upper 24 bits = amount.
+The General page assembles it as `(currency & 0xFF) | (amount << 8)`.
+
+Go-word collisions have a dedicated status: returning `0x8B0B003C` for `k`
+makes the page show "Go word in use" (string 0xD4) and refocus the field
+instead of raising a generic MosError box.
+
+The Banner page reaches `mf` only after uploading the image through
+`CTreeEditClient::AddShabby` (**selector 0x07**), which returns the shabby id
+it then writes. Extension → format byte: `.emf`→1, `.mtf`→3, `.wmf`→4,
+`.bmp`→5 (DSNED 0x7F5717C8).
+
 ### 7.3 FTM
 
 Both selectors use the `FtmClientFileId` 60-byte CFI buffer via tag `0x04`:

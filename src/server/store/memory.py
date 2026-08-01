@@ -46,12 +46,14 @@ class InMemoryContentStore:
         return bool(ids)
 
     def add_node(self, node):
-        """Register a node that hangs off no parent.
+        """Register a node by mnid, replacing any node already under that key.
 
-        A BBS attachment is reachable only by its mnid — FUN_7F5FC919 builds
-        `(message id + k, board id)` from the message and asks for it directly.
-        It is not a child of the board, so listing it there would put a bogus
-        row in the reader.
+        Two callers. A BBS attachment is reachable only by its mnid —
+        FUN_7F5FC919 builds `(message id + k, board id)` from the message and
+        asks for it directly. It is not a child of the board, so listing it
+        there would put a bogus row in the reader. DIRSRV SetProperties reuses
+        the same replace-by-key step to commit an edited node, which leaves its
+        position in every parent's child list untouched.
         """
         self._nodes[node.node_id] = node
 

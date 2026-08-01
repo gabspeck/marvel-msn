@@ -50,6 +50,7 @@ from server.services.dirsrv import (
     build_get_properties_reply_payload,
     build_get_ticket_reply_payload,
     build_property_record,
+    build_set_properties_reply_payload,
 )
 from server.services.ftm import (
     FTM_BBS_SOURCE,
@@ -1167,6 +1168,180 @@ class TestDIRSRVAddNode(unittest.TestCase):
             )
 
         build_reply.assert_called_once_with(b"add-node")
+        parsed = parse_packet(packets[0][:-1])
+        self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
+
+
+class _SetPropertiesContentStore:
+    """Holds one real category node — the shape DSNED's Folder editor edits."""
+
+    NODE_ID = "1:256"  # "Arts and Entertainment", app_id 1 (tp "Category")
+
+    def __init__(self):
+        node = next(
+            node for node in default_seed().directory_nodes
+            if node.node_id == self.NODE_ID
+        )
+        self.nodes = {node.node_id: node}
+
+    def get_node(self, node_id):
+        return self.nodes.get(node_id)
+
+    def add_node(self, node):
+        self.nodes[node.node_id] = node
+
+
+class TestDIRSRVSetProperties(unittest.TestCase):
+    """Class 0x04 selector 0x04 — the Properties sheet's write path.
+
+    Each page applies one control per call, so these records carry the whole
+    page at once only to keep the tests short; the handler treats the record as
+    a set either way.
+    """
+
+    OK = b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87"
+
+    @staticmethod
+    def _tagged_var(value):
+        return b"\x04" + bytes([0x80 | len(value)]) + value
+
+    @staticmethod
+    def _ascii(text):
+        return b"\x01" + text.encode("ascii") + b"\x00"
+
+    @staticmethod
+    def _wide(text):
+        return b"\x00" + text.encode("utf-16-le") + b"\x00\x00"
+
+    def _request(self, properties, *, node_id=_SetPropertiesContentStore.NODE_ID):
+        field_0, field_8 = (int(part) for part in node_id.split(":"))
+        return (
+            self._tagged_var(b"\x02\x00")
+            + self._tagged_var(struct.pack("<II", field_0, field_8))
+            + self._tagged_var(build_property_record(properties))
+            + b"\x83\x83"
+        )
+
+    def test_general_page_fields_reach_the_node(self):
+        store = _SetPropertiesContentStore()
+        request = self._request(
+            [
+                (0x0B, "f", self._wide("Arts & Leisure")),
+                (0x0A, "k", self._ascii("artsgo")),
+                (0x0A, "j", self._ascii("Everything cultural.")),
+                (0x0A, "ca", self._ascii("Entertainment")),
+                (0x03, "o", struct.pack("<I", 2)),
+                # (amount 250) << 8 | currency index 3
+                (0x0D, "z", struct.pack("<I", (250 << 8) | 3)),
+            ]
+        )
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(reply, self.OK)
+        content = store.get_node(store.NODE_ID).content
+        self.assertEqual(content.name, "Arts & Leisure")
+        self.assertEqual(content.go_word, "artsgo")
+        self.assertEqual(content.description, "Everything cultural.")
+        self.assertEqual(content.category, "Entertainment")
+        self.assertEqual(content.rating_dword, 2)
+        self.assertEqual(content.price_dword, (250 << 8) | 3)
+
+    def test_context_page_fields_reach_the_node(self):
+        store = _SetPropertiesContentStore()
+        request = self._request(
+            [
+                (0x10, "q", struct.pack("<II", 1, 0x0416)),
+                (0x0A, "r", self._ascii("Books, Movies")),
+                (0x0A, "s", self._ascii("Critics")),
+                (0x0A, "t", self._ascii("Redmond, WA")),
+                (0x0A, "n", self._ascii("MSN Editorial")),
+                (0x0A, "on", self._ascii("Jane Doe")),
+                (0x11, "y", struct.pack("<I", 4242)),
+            ]
+        )
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(reply, self.OK)
+        content = store.get_node(store.NODE_ID).content
+        self.assertEqual(content.language, 0x0416)
+        self.assertEqual(content.topics, "Books, Movies")
+        self.assertEqual(content.people, "Critics")
+        self.assertEqual(content.place, "Redmond, WA")
+        self.assertEqual(content.forum_mgr, "MSN Editorial")
+        self.assertEqual(content.owner, "Jane Doe")
+        self.assertEqual(content.vendor_id, 4242)
+
+    def test_untouched_fields_survive_a_partial_write(self):
+        store = _SetPropertiesContentStore()
+        before = store.get_node(store.NODE_ID)
+
+        build_set_properties_reply_payload(
+            self._request([(0x0A, "k", self._ascii("artsgo"))]), store
+        )
+
+        after = store.get_node(store.NODE_ID)
+        self.assertEqual(after.content.name, before.content.name)
+        self.assertEqual(after.content.language, before.content.language)
+        self.assertEqual(after.app_id, before.app_id)
+        self.assertEqual(after.mnid_a, before.mnid_a)
+        self.assertEqual(after.is_container, before.is_container)
+
+    def test_unstored_tag_is_ignored_without_failing_the_record(self):
+        store = _SetPropertiesContentStore()
+        request = self._request(
+            [
+                (0x0F, "mf", struct.pack("<I", 0x0501)),
+                (0x0A, "ca", self._ascii("Entertainment")),
+            ]
+        )
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(reply, self.OK)
+        self.assertEqual(store.get_node(store.NODE_ID).content.category, "Entertainment")
+
+    def test_rejects_the_add_node_receive_shape(self):
+        store = _SetPropertiesContentStore()
+        before = store.get_node(store.NODE_ID)
+        request = (
+            self._tagged_var(b"\x02\x00")
+            + self._tagged_var(struct.pack("<II", 1, 256))
+            + self._tagged_var(build_property_record([]))
+            + b"\x83\x83\x84"
+        )
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
+        self.assertIs(store.get_node(store.NODE_ID), before)
+
+    def test_rejects_an_unknown_node(self):
+        store = _SetPropertiesContentStore()
+
+        reply = build_set_properties_reply_payload(
+            self._request([(0x0A, "k", self._ascii("nope"))], node_id="9:99"), store
+        )
+
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
+
+    def test_edit_class_selector_four_does_not_fall_through_to_get_shabby(self):
+        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
+        with patch(
+            "server.services.dirsrv.build_set_properties_reply_payload",
+            return_value=b"\x83\x00\x00\x00\x00",
+        ) as build_reply:
+            packets = handler.handle_request(
+                msg_class=0x04,
+                selector=0x04,
+                request_id=3,
+                payload=b"set-properties",
+                server_seq=0,
+                client_ack=0,
+            )
+
+        build_reply.assert_called_once_with(b"set-properties")
         parsed = parse_packet(packets[0][:-1])
         self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
 

@@ -2,6 +2,7 @@
 
 import logging
 import struct
+from dataclasses import replace
 
 from ..config import (
     DIRSRV_BROWSE_FLAGS_CONTAINER,
@@ -42,6 +43,7 @@ DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWor
 DIRSRV_SELECTOR_GET_SHABBY = 0x04
 TREEEDCL_CLASS_EDIT = 0x04
 TREEEDCL_SELECTOR_ADD_NODE = 0x02
+TREEEDCL_SELECTOR_SET_PROPERTIES = 0x04
 TREEEDCL_SELECTOR_GET_DATASETS = 0x0B
 TREEEDCL_SELECTOR_GET_TICKET = 0x0C
 
@@ -59,6 +61,11 @@ PROP_BROWSE_FLAGS = "b"
 PROP_APP_ID = "c"
 PROP_CATEGORY = "ca"
 PROP_NAME = "e"
+# The name travels under a different tag in each direction. Reads use `e`;
+# writes use `f`, because CMosTreeEdit::SetProperty @ MOSSHELL 0x7F403522
+# intercepts the name before marshalling — it widens the ANSI edit-box text to
+# UTF-16, swaps the tag to `f` and the wire type to 0x0B.
+PROP_NAME_EDIT = "f"
 PROP_UNKNOWN_G = "g"
 PROP_SECONDARY_ICON = "h"
 PROP_DELEGATE_FIELD10 = "i"
@@ -120,6 +127,8 @@ class DIRSRVHandler:
         """Handle a DIRSRV request — dispatch by selector."""
         if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_NODE:
             reply_payload = build_add_node_reply_payload(payload)
+        elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_SET_PROPERTIES:
+            reply_payload = build_set_properties_reply_payload(payload)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
             reply_payload = build_get_ticket_reply_payload()
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
@@ -751,7 +760,7 @@ def build_add_node_reply_payload(payload, content_store=None):
     language_values = _property_value(properties, PROP_LANGUAGE, [])
     language = language_values[0] if language_values else parent.content.language
     name = (
-        _property_text(properties, "f")
+        _property_text(properties, PROP_NAME_EDIT)
         or _property_text(properties, PROP_NAME)
         or "New Item"
     )
@@ -803,6 +812,123 @@ def _build_add_node_result(status, new_mnid):
         + bytes([TAG_END_STATIC])
         + build_tagged_reply_var(0x84, new_mnid)
     )
+
+
+# Properties-sheet write map: wire tag -> (NodeContent field, decoder).
+#
+# Every entry is a control the sheet actually writes back. The General page
+# (MOSSHELL dialog 0x65, apply handler @ 0x7F4010A3) writes k/z/f/j/ca/o; the
+# Context page (dialog 0x67, apply handler @ 0x7F4022AE) writes q/r/s/t/on/n/y.
+# The wire type each one carries is fixed by those two handlers — strings go out
+# as 0x0A except the name, which CMosTreeEdit::SetProperty rewrites to 0x0B.
+#
+# `_decode_property_record` has already turned each value into a Python int,
+# str or list, so the decoders here only reshape.
+_EDITABLE_PROPERTIES = {
+    PROP_NAME_EDIT: ("name", lambda v: v if isinstance(v, str) else ""),
+    PROP_GO_WORD: ("go_word", lambda v: v if isinstance(v, str) else ""),
+    PROP_DESCRIPTION: ("description", lambda v: v if isinstance(v, str) else ""),
+    PROP_CATEGORY: ("category", lambda v: v if isinstance(v, str) else ""),
+    PROP_TOPICS: ("topics", lambda v: v if isinstance(v, str) else ""),
+    PROP_PEOPLE: ("people", lambda v: v if isinstance(v, str) else ""),
+    PROP_PLACE: ("place", lambda v: v if isinstance(v, str) else ""),
+    PROP_FORUM_MANAGER: ("forum_mgr", lambda v: v if isinstance(v, str) else ""),
+    PROP_OWNER: ("owner", lambda v: v if isinstance(v, str) else ""),
+    PROP_RATING: ("rating_dword", lambda v: v if isinstance(v, int) else 0),
+    PROP_VENDOR_ID: ("vendor_id", lambda v: v if isinstance(v, int) else 0),
+    # `z` packs both pricing fields into one DWORD: the low byte is the index
+    # into MOSSHELL's g_rgISOCurrencyCodes table (0xFF = none) and the upper 24
+    # bits are the amount. The General page assembles it as
+    # `(currency & 0xFF) | (amount << 8)` before the SetProperty call, so the
+    # server only has to round-trip the word.
+    PROP_PRICE: ("price_dword", lambda v: v if isinstance(v, int) else 0),
+    PROP_MAYBE_SIZE_OR_LEGACY_TITLE: (
+        "size_bytes",
+        lambda v: v if isinstance(v, int) else 0,
+    ),
+    # `q` arrives as the type-0x10 counted DWORD array the Language listbox
+    # built from its selection. NodeContent holds a single LCID, so the first
+    # entry wins and an empty selection leaves the node locale-neutral.
+    PROP_LANGUAGE: ("language", lambda v: v[0] if isinstance(v, list) and v else 0),
+}
+
+
+def build_set_properties_reply_payload(payload, content_store=None):
+    """Apply a TREEEDCL SetProperties request to one existing node.
+
+    `CTreeEditClient::PrivateSetProperties` @ TREEEDCL 0x7F2C1CEE sends three
+    variable fields — the capability ticket, the 8-byte MNID, and a compressed
+    CServiceProperties record — and asks for two DWORDs back. Each Properties
+    page calls it once per changed control, so a record normally carries a
+    single property; the loop below accepts any number.
+
+    The reply is `status` + `operation id`, no variable field. The client polls
+    `GetStatus` (selector 0x09) once a second for as long as the status DWORD
+    reads 1, so a completed operation has to answer 0.
+    """
+    if content_store is None:
+        content_store = _default_store.content
+
+    send_params, recv_descriptors = parse_request_params(payload)
+    fields = [param.data for param in send_params if isinstance(param, VarParam)]
+    if len(fields) != 3 or recv_descriptors != [0x83, 0x83]:
+        log.warning(
+            "set_properties invalid request fields=%d recv=%s payload=%s",
+            len(fields),
+            [f"0x{tag:02x}" for tag in recv_descriptors],
+            payload.hex(),
+        )
+        return _build_set_properties_result(0x101)
+
+    ticket, mnid, property_record = fields
+    if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket) or len(mnid) != 8:
+        log.warning(
+            "set_properties invalid ticket_or_mnid ticket=%s mnid=%s",
+            ticket.hex(),
+            mnid.hex(),
+        )
+        return _build_set_properties_result(0x101)
+
+    field_0, field_8 = struct.unpack("<II", mnid)
+    node_id = f"{field_0}:{field_8}"
+    node = content_store.get_node(node_id)
+    if node is None or node.node_id != node_id:
+        log.warning("set_properties unknown node=%s", node_id)
+        return _build_set_properties_result(0x101)
+
+    try:
+        properties = _decode_property_record(property_record)
+    except ValueError as exc:
+        log.warning("set_properties invalid properties node=%s error=%s", node_id, exc)
+        return _build_set_properties_result(0x101)
+
+    changes = {}
+    ignored = []
+    for name, (_ptype, value) in properties.items():
+        mapping = _EDITABLE_PROPERTIES.get(name)
+        if mapping is None:
+            # `mf` lands here: the DSNED Banner page writes the shabby id it got
+            # back from AddNode's sibling selector 0x07, which this server does
+            # not store yet. Log it rather than fail the whole record — a
+            # rejected SetProperties makes the page refuse to close.
+            ignored.append(name)
+            continue
+        field, decode = mapping
+        changes[field] = decode(value)
+
+    if changes:
+        content_store.add_node(replace(node, content=replace(node.content, **changes)))
+    log.info(
+        "set_properties status=0 node=%s applied=%s ignored=%s",
+        node_id,
+        ",".join(f"{k}={v!r}" for k, v in changes.items()) or "-",
+        ",".join(ignored) or "-",
+    )
+    return _build_set_properties_result(0)
+
+
+def _build_set_properties_result(status):
+    return build_tagged_reply_dword(status) + build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
 
 
 def _decode_property_record(record):
