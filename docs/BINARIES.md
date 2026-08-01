@@ -615,7 +615,7 @@ The biggest `.NAV` — all forum/BBS rendering and posting UI. Exports full `CMo
 
 ### DSNED.NED — *Directory Services editor* (DLL, 36 KB)
 
-Edit-side companion to DSNAV for DIRSRV (paired with DSNAV at service-load time). Exposes `CDirSrvTreeEdit` and a minimum `GetPropertyDispatch` override.
+Edit-side companion to DSNAV for DIRSRV, reached through `CDsNavTreeNode::HrGetPMte` (vtable slot 72), which picks the editor class from the node's wire `c` property. Supplies eight `CDirSrvTreeEdit` subclasses — one per node type — and appends its own property page (Banner, Conversation, Media Viewer or Download and Run) to the MOSSHELL sheet.
 
 **Key exports**
 - `?FillSPForNewNode@CDirSrvTreeEdit@@` [8]
@@ -625,7 +625,7 @@ Edit-side companion to DSNAV for DIRSRV (paired with DSNAV at service-load time)
 - `GETPMTE` [12] — "Get ProMaster Tree Edit" (edit counterpart of GETPMTN).
 - Lifetime: `??0CDirSrvTreeEdit@@` ctors, `??1` dtor, `??_E` / `??_G` vector-delete/scalar-delete dtors.
 
-**Ghidra status**: Annotated (`project_dirsrv_dialog_props_investigation.md`).
+**Ghidra status**: Annotated — see `docs/DSNED.md` for the node-type table, the per-page control/tag map, the `HrSupportsPricing` pricing gate and the SASRV dependency behind the Security page.
 
 ---
 
