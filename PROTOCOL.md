@@ -884,7 +884,46 @@ See `docs/MEDVIEW.md` for full details including the title body layout
 (DIB section + fixed-size record arrays + string lists) and the MVP
 handler checklist.
 
-### 7.7 CONFLOC / CONFSRV
+### 7.7 SASRV (system administration)
+
+SACLIENT.DLL opens service `"SASRV"` version 4 (`0x7F3410F1`). The node
+Properties sheet is the only consumer reached so far: its Security page
+(MOSSHELL dialog 0x68) enumerates the master token list to fill the "Token
+name" combo, and its Context page opens the same pipe to validate a vendor id.
+
+Master-list enumeration. `FUN_7F3438E4` rejects any list kind outside 7..0x0B
+before it reaches the wire; `CreateSysAdminMasterTokenList` hard-codes kind
+**10**.
+
+| Sel | Method | Request | Reply |
+|-----|--------|---------|-------|
+| 0x02 | BeginEnum | `03 [kind] 03 [0] 01 [byte] 83 83` | `83 [status] 83 [handle] 87` |
+| 0x03 | EndEnum | `03 [handle] 83` | `83 [status] 87` |
+| 0x04 | ReadEnumResults | `03 [handle] 83 83` | `83 [count] 83 [status] 87` |
+| 0x05 | GetListPage | `03 [handle] 03 [index] 02 [0004] 83 85` | `83 [status] 87 86 [blob]` |
+
+Descriptor order matters on 0x02 and 0x04 — status comes first on BeginEnum
+and second on ReadEnumResults, following the order each function packs them.
+
+`0x05` must answer with `0x86` (dynamic-complete). `SaClient_GetListPage`
+@ 0x7F341480 waits with `Wait(INFINITE)`, so a `0x85` reply or no reply at all
+strands the shell's UI thread — the same hazard as GetShabby (§7.2.7).
+
+The `0x05` blob is one page of rows, `[u32 id][ASCIIZ name]` each, stride
+`4 + strlen + 1`. `SaMasterTokenList_GetItem` @ 0x7F343973 caches a page as
+`(index / 0x14) * 0x14 + n`, so a request for index *i* wants the 20 rows
+starting at `(i / 20) * 20`, and it truncates each name with
+`lstrcpynA(dst, src, 0x5C)`.
+
+A count of 0 is legal and useful: `FUN_7F4026D3` skips its item loop and the
+Security page renders with an empty combo instead of raising string 0xDB.
+
+**Open:** a second caller opens kind **4** with a trailing byte of 1, passing
+what look like token ids in the second DWORD (`03 04000000 03 03000000 01 01`).
+It sits outside the 7..0x0B master-list range, so it is a different entry
+point — most likely `CreateSysAdminToken`'s own fetch. Unserved.
+
+### 7.8 CONFLOC / CONFSRV
 
 Static-only — not implemented on the server side. See Open Questions.
 
