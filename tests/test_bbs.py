@@ -33,7 +33,7 @@ from server.services.bbs import (
     parse_article_headers,
 )
 from server.services.dirsrv import DIRSRVHandler
-from server.store import app_store
+from server.store import app_store, reset_app_store
 from server.transport import parse_packet
 
 # Sample-board node ids, decimal wire form `field_8:field_c` = message id : board
@@ -794,23 +794,17 @@ class PostChannelTestCase(unittest.TestCase):
     """Base for the post tests — commits mutate the shared store, so undo them."""
 
     def setUp(self):
+        reset_app_store()
         self.handler = BBSHandler(5, "BBS")
-        store = app_store.content
-        self._board_children = list(store._children[_BOARD])
-        self._node_ids = set(store._nodes)
         # A commit writes the upload to disk; keep the test run out of the repo.
         self._captures = tempfile.TemporaryDirectory()
         self._capture_dir = bbs._CAPTURE_DIR
         bbs._CAPTURE_DIR = pathlib.Path(self._captures.name)
 
     def tearDown(self):
-        store = app_store.content
-        store._children[_BOARD] = self._board_children
-        for node_id in set(store._nodes) - self._node_ids:
-            del store._nodes[node_id]
-            store._children.pop(node_id, None)
         bbs._CAPTURE_DIR = self._capture_dir
         self._captures.cleanup()
+        reset_app_store()
 
     def start(self, head, *, parent=0x200, board=1, total=None, attachments=b"", attach_count=0):
         """Method-2 request, in the parameter order FUN_7F5FB7CA builds."""

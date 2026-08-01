@@ -1,4 +1,11 @@
-"""Default seed data for the in-memory app store."""
+"""Default seed data for the in-memory app store.
+
+Everything below is immutable declarative data. The store never holds these
+objects: `default_seed()` hands out a fresh copy of every container, so a
+runtime write reaches the store's own state and this module keeps describing
+the state the process starts from. Every record is a frozen dataclass, which is
+what makes copying the containers one level deep enough.
+"""
 
 from __future__ import annotations
 
@@ -7,9 +14,8 @@ import pathlib
 import struct
 from dataclasses import dataclass
 
-from ..mos_apps import APP_BBS_SERVICE, APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
+from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
 from .base import (
-    BbsFields,
     BillingProfile,
     DirectoryNode,
     MemberProfile,
@@ -19,6 +25,7 @@ from .base import (
     Subscription,
     TransactionRecord,
 )
+from .records import bbs_node, build_bbs_attachment_nodes, mnid_key
 
 _FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
 
@@ -87,19 +94,6 @@ def _container_content(name, type_str="Directory", language=_LCID_EN_US):
     )
 
 
-def _mnid_key(f0, f8):
-    """Wire-form node_id (decimal `f0:f8`) and the 8-byte `a` blob.
-
-    Server node_id keys are `"wire_dword_0:wire_dword_1"`, which on the
-    client side are `(field_8, field_c)` of the 24-byte `_MosNodeId`
-    (GetNthChild @ MOSSHELL 0x7f3fe131 stores `'a'[0]` into the child's
-    `field_8` slot and `'a'[1]` into `field_c`; `field_0` is inherited
-    from the parent). So if a fixture's wire key is `"X:Y"`, its `'a'`
-    payload must equal `(X, Y)`, which is what this helper packs.
-    """
-    return f"{f0}:{f8}", struct.pack("<II", f0, f8)
-
-
 # The two Worldwide hubs are NOT ordinary nodes — the client pins them to
 # GetSpecialMnid(0) and GetSpecialMnid(1) and supplies their display names
 # from its own resources.
@@ -122,17 +116,17 @@ def _mnid_key(f0, f8):
 # localized child (docs/MSN_CENTRAL_HOMEBASE_MENU_MAPPING.md):
 #   Categories        LJUMP 1:0:0:0 → GetLocalizedNode("0:0") → Categories (US)
 #   Member Assistance LJUMP 1:1:0:0 → GetLocalizedNode("1:0") → Member Assistance (US)
-_WORLDWIDE_CATEGORIES_KEY, _WORLDWIDE_CATEGORIES_MNID = _mnid_key(0, 0)
-_WORLDWIDE_MEMBER_ASSISTANCE_KEY, _WORLDWIDE_MEMBER_ASSISTANCE_MNID = _mnid_key(1, 0)
+_WORLDWIDE_CATEGORIES_KEY, _WORLDWIDE_CATEGORIES_MNID = mnid_key(0, 0)
+_WORLDWIDE_MEMBER_ASSISTANCE_KEY, _WORLDWIDE_MEMBER_ASSISTANCE_MNID = mnid_key(1, 0)
 # HOMEBASE MSN Today button — LJUMP 1:4:0:0. GetSpecialMnid(idx=4) gives
 # `(field_0=1, field_8=4, field_c=0)`, wire "4:0".
-_MSN_TODAY_KEY, _MSN_TODAY_SPECIAL_MNID = _mnid_key(4, 0)
+_MSN_TODAY_KEY, _MSN_TODAY_SPECIAL_MNID = mnid_key(4, 0)
 # Localized wrapper mnids. The wire key `"f8:f_c"` on the server maps to the
 # client's `(field_0=1 inherited, field_8, field_c)`.
-_CATEGORIES_US_KEY, _CATEGORIES_US_MNID = _mnid_key(1, 0x10)
-_MEMBER_ASSISTANCE_US_KEY, _MEMBER_ASSISTANCE_US_MNID = _mnid_key(1, 0x11)
-_CATEGORIES_BR_KEY, _CATEGORIES_BR_MNID = _mnid_key(1, 0x13)
-_MEMBER_ASSISTANCE_BR_KEY, _MEMBER_ASSISTANCE_BR_MNID = _mnid_key(1, 0x14)
+_CATEGORIES_US_KEY, _CATEGORIES_US_MNID = mnid_key(1, 0x10)
+_MEMBER_ASSISTANCE_US_KEY, _MEMBER_ASSISTANCE_US_MNID = mnid_key(1, 0x11)
+_CATEGORIES_BR_KEY, _CATEGORIES_BR_MNID = mnid_key(1, 0x13)
+_MEMBER_ASSISTANCE_BR_KEY, _MEMBER_ASSISTANCE_BR_MNID = mnid_key(1, 0x14)
 
 ROOT_CONTENT = _container_content("Root")
 
@@ -186,6 +180,7 @@ CATEGORY_DEFS = (
 MEDVIEW_SAMPLE_LEAF_DEFS = (
     (0x1000, "Employee Handbook Example", 472917),
     (0x1001, "France Magazine", 972835),
+    (0x1002, "MediaView Online Documentation", 3584999),
 )
 
 
@@ -281,7 +276,7 @@ A_AND_E_BR_CHILD_DEFS = (
 
 
 def _dirsrv_container(f0, f8, name, *, type_str="Directory", language=_LCID_EN_US):
-    key, mnid = _mnid_key(f0, f8)
+    key, mnid = mnid_key(f0, f8)
     return DirectoryNode(
         node_id=key,
         is_container=True,
@@ -298,7 +293,7 @@ def _medview_sample_leaf(f0, name, size_bytes):
     path, so f0=0x1000 → cmdline `-MOS:6:1000:0:w` → titleToken
     `:2[1000]0` → server resolves `resources/titles/HANDBOOK.M14`.
     """
-    key, mnid = _mnid_key(f0, 0)
+    key, mnid = mnid_key(f0, 0)
     return DirectoryNode(
         node_id=key,
         is_container=False,
@@ -367,215 +362,6 @@ _YOSEMITE_BODY = (
 )
 
 
-def _bbs_date_to_unix(s):
-    """Parse a fixture `%B %d, %Y %I:%M %p` timestamp into a Unix time_t.
-
-    The string is **local wall-clock time**, i.e. what the client should display,
-    matching reference/screenshots/bbs.png whose reader header reads "10:12 AM".
-
-    Converted with the **current** UTC offset, not the offset that was in force
-    on the fixture's date. Windows 95 has no historical timezone database — it
-    applies its single current rule to every timestamp — so a 1995 `_D` is
-    rendered by the client with today's offset. Python's `.timestamp()` would
-    instead honor the 1995 rule (e.g. Europe/Lisbon ran CEST +0200 until 1996),
-    which put the Date column an hour behind the `v`/`w` dialog strings that pass
-    through verbatim. Using the current offset makes the column, the dialog and
-    the reference agree.
-
-    Assumes the client's timezone matches this host's. Both live on the same
-    machine here; a real deployment would format dialog strings from the
-    member's profile timezone instead.
-
-    Empty input → 0, which build_bbs_props still emits as `_D` = 0 (never
-    omitted — an omitted tag truncates the record).
-    """
-    if not s:
-        return 0
-    naive = datetime.datetime.strptime(s, "%B %d, %Y %I:%M %p")
-    offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
-    return int((naive - offset).replace(tzinfo=datetime.UTC).timestamp())
-
-
-def _bbs_node(
-    f0,
-    f8,
-    name,
-    *,
-    is_container,
-    author="",
-    date="",
-    parent_subid=0,
-    topic="",
-    has_children=False,
-    body="",
-    body_format=BbsFields.body_format,
-    delegate=False,
-    body_raw=None,
-    size_bytes=None,
-    attachment_count=0,
-    attachment_data=b"",
-):
-    """A BBS tree node (board / conversation / reply).
-
-    `is_container` means **board or folder**, not "has replies" — it drives `b`
-    bit 0x01 (CLEAR = container, SET = message), which is bbsnav's conversation
-    test. Every message takes is_container=False, whether or not anything
-    replies to it; a reply is expressed by `parent_subid` (`_P`), not by tree
-    position.
-
-    `has_children` drives `_F` bit 0x1000, the child-count gate read by
-    CBbsNavTreeNode_OkToGetChildren (0x7F5F1427). Only the board sets it —
-    messages have no tree children, so leaving it False stops the reader
-    asking for children that do not exist. The rest of `_F` is fixed: every
-    node here is a native MSN bulletin board carrying rich text, which is what
-    unlocks the Compose window's formatting and attachment commands. See
-    `server.services.bbs._folder_flags`.
-
-    Rides DirectoryNode with app_id=APP_BBS_SERVICE and language=0; the
-    BBS-specific tags (`_a/_D/_P/_t/_F`) live in the attached BbsFields, read by
-    build_bbs_props and ignored by DIRSRV serialisation. `p` (Size) is the body
-    byte count. `name` is the Subject (wire `e`).
-
-    `body` is always plain text. `body_format` names the X-MOS-Format the
-    reader is told to stream it as, per message — "RTF" (the default) wraps it
-    in an RTF document so the body draws in a proportional font, "TEXT" sends
-    it verbatim and lands in the RichEdit's default Courier New.
-
-    Set `delegate` on the board — the node DIRSRV lists inside a category. It
-    emits `b` bit 0x04 + `c`/`l`/`i`, so MOSSHELL `HrSetupDelegate` builds the
-    inner mnid `{field_0=2, field_8/field_c=mnid_a, field_10=0}` and hands the
-    folder to bbsnav, which then reads this same node over svc "BBS". Nodes
-    below the board inherit field_0=2 and need no delegate tags.
-    """
-    key, mnid = _mnid_key(f0, f8)
-    return DirectoryNode(
-        node_id=key,
-        is_container=is_container,
-        app_id=APP_BBS_SERVICE,
-        mnid_a=mnid,
-        delegate=delegate,
-        content=NodeContent(
-            name=name,
-            go_word="",
-            category="",
-            type_str="",
-            price_dword=0,
-            rating_dword=0,
-            description="",
-            language=0,
-            topics="",
-            people="",
-            place="",
-            u_value="",
-            forum_mgr="",
-            vendor_id=0,
-            owner=author,
-            # The Properties dialog fetches the shared MOS tree tags one at a
-            # time (`q,g` then `v,g` …), and build_bbs_props hands those to
-            # DIRSRV's serialiser. Mirror the post date into `created`/`modified`
-            # so the dialog shows the real timestamp instead of blanks; the
-            # listview Date column still comes from `_D`.
-            created=date,
-            modified=date,
-            # A posted message carries its own plain-text length in X-MOS-Size;
-            # `body` is empty there because the upload is already encoded.
-            size_bytes=len(body) if size_bytes is None else size_bytes,
-            bbs=BbsFields(
-                author=author,
-                date_unix=_bbs_date_to_unix(date),
-                parent_subid=parent_subid,
-                topic=topic,
-                has_children=has_children,
-                body=body,
-                body_format=body_format,
-                body_raw=body_raw,
-                attachment_count=attachment_count,
-                attachment_data=attachment_data,
-            ),
-        ),
-    )
-
-
-# Author stamped on a message that arrives over the BBS post channel. A real
-# service takes it from the authenticated session; nothing here tracks a
-# signed-in member, and the uploaded article carries no author header — the
-# Compose window writes X-MOS-To, Subject, References and the X-MOS-* control
-# set (BBSNAV FUN_7F5FBD4E @ 0x7F5FBD4E), never a From. Naming an existing
-# MEMBER_PROFILES entry keeps the Properties sheet working on a new post.
-BBS_POST_AUTHOR = "Chris Hahn"
-
-# Wall-clock format `_bbs_date_to_unix` parses, and the one the Properties
-# dialog shows verbatim through `created`/`modified`.
-BBS_POST_DATE_FORMAT = "%B %d, %Y %I:%M %p"
-
-
-def build_bbs_post(
-    msg_id,
-    board_id,
-    *,
-    subject,
-    parent_subid,
-    body_raw,
-    body_format,
-    size_bytes,
-    attachment_count=0,
-    attachment_data=b"",
-):
-    """A BBS message node built from an article the Compose window just posted.
-
-    `body_raw` is the uploaded body verbatim — the client encodes it before it
-    reaches the wire, so it goes back out untouched under the same
-    `body_format`. Dated now, because the article the client sends carries no
-    Date header.
-    """
-    return _bbs_node(
-        msg_id,
-        board_id,
-        subject,
-        is_container=False,
-        author=BBS_POST_AUTHOR,
-        date=datetime.datetime.now().strftime(BBS_POST_DATE_FORMAT),
-        parent_subid=parent_subid,
-        body_raw=body_raw,
-        body_format=body_format,
-        size_bytes=size_bytes,
-        attachment_count=attachment_count,
-        attachment_data=attachment_data,
-    )
-
-
-# Name each attachment node carries as its Subject (`e`). The reader never
-# shows it — the file name it draws under the icon comes out of the MOSAF
-# object's own CONTENTS record inside the body — so it only has to be something
-# legible in a log or the Properties dialog.
-BBS_ATTACHMENT_NAME = "Attachment %d"
-
-
-def build_bbs_attachment_nodes(message):
-    """The tree nodes behind one message's attachments.
-
-    BBSNAV `FUN_7F5FC919` @ 0x7F5FC919 walks the MOSAF objects it found in the
-    body and addresses the k-th one as `(message id + k, board id)`, then reads
-    `z` and `_r` off it through `CTreeNavClient::GetProperties`. Each of those
-    mnids has to resolve, so a message with N attachments brings N nodes with
-    it. They hang off no parent: the board lists messages, not files.
-    """
-    msg_id, _sep, board_id = message.node_id.partition(":")
-    bbs = message.content.bbs
-    return [
-        _bbs_node(
-            int(msg_id) + k,
-            int(board_id),
-            BBS_ATTACHMENT_NAME % k,
-            is_container=False,
-            author=bbs.author,
-            date=message.content.created,
-            parent_subid=int(msg_id),
-        )
-        for k in range(1, bbs.attachment_count + 1)
-    ]
-
-
 # "Sports, Health and Fitness" (CATEGORY_DEFS f8 0x10A) hosts the board.
 _SPORTS_HEALTH_FITNESS_KEY = f"1:{0x10A}"
 
@@ -586,13 +372,13 @@ _SPORTS_HEALTH_FITNESS_KEY = f"1:{0x10A}"
 # `CBbsNavTreeNode_GetParent` (0x7F5F12CE) zeroes field_8 to reach the board, and
 # `CBbsNavTreeNode_GetThreadParent` (0x7F5F1C3E) swaps `_P` into field_8 to reach
 # the parent post — which also makes field_8 == 0 mean "no thread parent",
-# correct for a board. `_mnid_key(f0, f8)` puts its first argument in the
+# correct for a board. `mnid_key(f0, f8)` puts its first argument in the
 # client's field_8 and its second in field_c, so the message id comes first here.
 # Getting this backwards makes GetParent return the message itself and the reader
 # fails with "Cannot open message" before any wire traffic.
 _BBS_BOARD_ID = 0x1
 
-_CLIMBING_BBS = _bbs_node(
+_CLIMBING_BBS = bbs_node(
     0,
     _BBS_BOARD_ID,
     "Climbing BBS",
@@ -604,7 +390,7 @@ _CLIMBING_BBS = _bbs_node(
 # reference/screenshots/bbs.png (list pane + reader header "Date: 10:12 AM
 # Tuesday, May 16, 1995"). The other two timestamps are NOT in the screenshot —
 # they are invented, ordered so the reply follows its parent.
-_BBS_YOSEMITE = _bbs_node(
+_BBS_YOSEMITE = bbs_node(
     0x100,
     _BBS_BOARD_ID,
     "Yosemite",
@@ -613,7 +399,7 @@ _BBS_YOSEMITE = _bbs_node(
     date="May 16, 1995 10:12 AM",
     body=_YOSEMITE_BODY,
 )
-_BBS_BRITISH_CLIMBERS = _bbs_node(
+_BBS_BRITISH_CLIMBERS = bbs_node(
     0x101,
     _BBS_BOARD_ID,
     "British Climbers",
@@ -621,7 +407,7 @@ _BBS_BRITISH_CLIMBERS = _bbs_node(
     author="KEITH SUTTON",
     date="May 15, 1995 8:22 AM",
 )
-_BBS_RE_YOSEMITE = _bbs_node(
+_BBS_RE_YOSEMITE = bbs_node(
     0x200,
     _BBS_BOARD_ID,
     "RE: Yosemite",
@@ -650,7 +436,7 @@ _BBS_RE_YOSEMITE = _bbs_node(
 # object's persisted storage, and nothing here builds a docfile.
 _BBS_ATTACHMENT_DIR = pathlib.Path(__file__).resolve().parents[3] / "resources" / "bbs"
 
-_BBS_ATTACHMENT = _bbs_node(
+_BBS_ATTACHMENT = bbs_node(
     0x201,
     _BBS_BOARD_ID,
     "Attachment test",
@@ -1098,14 +884,21 @@ class DefaultSeed:
 
 
 def default_seed():
+    """A fresh seed: every container above is copied, never handed out.
+
+    The store mutates what it is given — a post appends to a board's child list
+    — so sharing these containers would let one runtime write edit the seed and
+    survive a re-seed. The records inside are frozen dataclasses holding only
+    immutable fields, so the copy stops at the containers.
+    """
     return DefaultSeed(
-        directory_nodes=DIRECTORY_NODES,
-        directory_children=DIRECTORY_CHILDREN,
+        directory_nodes=list(DIRECTORY_NODES),
+        directory_children={key: list(ids) for key, ids in DIRECTORY_CHILDREN.items()},
         directory_fallback=DIRECTORY_FALLBACK_NODE,
         billing_profile=BILLING_PROFILE,
         statement_summary=STATEMENT_SUMMARY,
-        statement_transactions=STATEMENT_TRANSACTIONS,
-        subscriptions=SUBSCRIPTIONS,
-        plans=PLANS,
-        member_profiles=MEMBER_PROFILES,
+        statement_transactions=[list(period) for period in STATEMENT_TRANSACTIONS],
+        subscriptions=list(SUBSCRIPTIONS),
+        plans=list(PLANS),
+        member_profiles=list(MEMBER_PROFILES),
     )

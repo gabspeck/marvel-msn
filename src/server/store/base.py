@@ -187,6 +187,7 @@ class Plan:
 
 
 class ContentStore(Protocol):
+    def load(self, nodes: list, children: dict, fallback: DirectoryNode) -> None: ...
     def get_node(self, node_id: str) -> DirectoryNode | None: ...
     def get_children(self, node_id: str) -> list: ...
     def has_children(self, node_id: str) -> bool: ...
@@ -196,14 +197,23 @@ class ContentStore(Protocol):
 
 
 class AccountStore(Protocol):
+    def load(self, billing_profile: BillingProfile) -> None: ...
     def get_billing_profile(self) -> BillingProfile: ...
 
 
 class MemberStore(Protocol):
+    def load(self, profiles: list) -> None: ...
     def get_member(self, member_id: str) -> MemberProfile: ...
 
 
 class StatementStore(Protocol):
+    def load(
+        self,
+        summary: StatementSummary,
+        transactions: list,
+        subscriptions: list,
+        plans: list,
+    ) -> None: ...
     def get_summary(self) -> StatementSummary: ...
     def get_transactions(self, period_index: int) -> list: ...
     def period_count(self) -> int: ...
@@ -217,3 +227,23 @@ class AppStore:
     account: AccountStore
     statement: StatementStore
     member: MemberStore
+
+    def reset(self, seed) -> None:
+        """Re-seed every store in place, dropping all runtime changes.
+
+        In place, not rebuilt: each service binds `app_store` at import time, so
+        swapping in a new AppStore would leave them reading the old state.
+        """
+        self.content.load(
+            seed.directory_nodes,
+            seed.directory_children,
+            seed.directory_fallback,
+        )
+        self.account.load(seed.billing_profile)
+        self.statement.load(
+            seed.statement_summary,
+            seed.statement_transactions,
+            seed.subscriptions,
+            seed.plans,
+        )
+        self.member.load(seed.member_profiles)

@@ -40,8 +40,8 @@ from ..mpc import (
     parse_request_params,
 )
 from ..store import app_store as _default_store
-from ..store import build_bbs_attachment_nodes, build_bbs_post
 from ..store.base import BbsFields
+from ..store.records import build_bbs_attachment_nodes, build_bbs_post
 from . import dirsrv
 from ._dispatch import log_unhandled_selector
 

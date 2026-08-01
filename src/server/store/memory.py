@@ -1,4 +1,9 @@
-"""In-memory implementations of the store protocols, seeded from fixtures."""
+"""In-memory implementations of the store protocols, seeded from fixtures.
+
+These objects own every byte of server state that a request can change. The
+state is volatile — it lives for the process and nothing writes it to disk —
+and `load` is how it is (re)seeded, in place, from a `DefaultSeed`.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,9 @@ from .base import AppStore, MemberProfile
 
 class InMemoryContentStore:
     def __init__(self, nodes, children, fallback):
+        self.load(nodes, children, fallback)
+
+    def load(self, nodes, children, fallback):
         self._nodes = {n.node_id: n for n in nodes}
         self._children = children
         self._fallback = fallback
@@ -80,6 +88,9 @@ class InMemoryContentStore:
 
 class InMemoryAccountStore:
     def __init__(self, billing_profile):
+        self.load(billing_profile)
+
+    def load(self, billing_profile):
         self._profile = billing_profile
 
     def get_billing_profile(self):
@@ -88,6 +99,9 @@ class InMemoryAccountStore:
 
 class InMemoryMemberStore:
     def __init__(self, profiles):
+        self.load(profiles)
+
+    def load(self, profiles):
         self._profiles = {p.member_id.casefold(): p for p in profiles}
 
     def get_member(self, member_id):
@@ -104,6 +118,9 @@ class InMemoryMemberStore:
 
 class InMemoryStatementStore:
     def __init__(self, summary, transactions, subscriptions, plans):
+        self.load(summary, transactions, subscriptions, plans)
+
+    def load(self, summary, transactions, subscriptions, plans):
         self._summary = summary
         self._transactions = transactions
         self._subscriptions = subscriptions
