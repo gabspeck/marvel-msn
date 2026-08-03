@@ -796,6 +796,15 @@ Tags and wire types written by each page:
 MOSSHELL's `g_rgISOCurrencyCodes` (0xFF = none), upper 24 bits = amount.
 The General page assembles it as `(currency & 0xFF) | (amount << 8)`.
 
+**An empty control overrides the type in that table with `0x00`.**
+`CMosTreeEdit::SetProperty` @ 0x7F403522 forces the type byte to 0 and the
+value pointer to NULL whenever the value length is 0, so an edit box the user
+left blank or cleared arrives as `[0x00]["k"\0]` with no value bytes. SVCPROP's
+`DecodePropertyValue` @ 0x7F64143A agrees — its `default:` arm sizes every
+unlisted type at 0 and consumes nothing. Treat type `0x00` as "clear this
+property"; rejecting it fails the whole record and the sheet raises "This task
+cannot be completed at this time" instead of closing.
+
 Go-word collisions have a dedicated status: returning `0x8B0B003C` for `k`
 makes the page show "Go word in use" (string 0xD4) and refocus the field
 instead of raising a generic MosError box.

@@ -1541,6 +1541,22 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         self.assertEqual(after.mnid_a, before.mnid_a)
         self.assertEqual(after.is_container, before.is_container)
 
+    def test_cleared_control_arrives_as_type_zero_with_no_value(self):
+        """An empty edit box writes type 0x00 and zero value bytes.
+
+        `CMosTreeEdit::SetProperty` @ MOSSHELL 0x7F403522 forces the type byte
+        to 0 when the control's text length is 0, and SVCPROP's own decoder
+        consumes nothing for it. Clicking OK on the General page with an empty
+        Go word must clear the field, not fail the record.
+        """
+        store = _SetPropertiesContentStore()
+        request = self._request([(0x00, "k", b"")])
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(reply, self.OK)
+        self.assertEqual(store.get_node(store.NODE_ID).content.go_word, "")
+
     def test_unstored_tag_is_ignored_without_failing_the_record(self):
         store = _SetPropertiesContentStore()
         request = self._request(

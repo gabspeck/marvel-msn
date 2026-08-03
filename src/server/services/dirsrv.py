@@ -1064,7 +1064,15 @@ def _decode_property_record(record):
         elif property_type in (0x0A, 0x0B):
             value, pos = _decode_property_string(record, pos, total_size, name)
         else:
-            raise ValueError(f"property {name!r} has unknown type 0x{property_type:02x}")
+            # Zero-length value. `CMosTreeEdit::SetProperty` @ MOSSHELL
+            # 0x7F403522 forces the type byte to 0 and the value pointer to
+            # NULL whenever the control's text is empty, so clearing the Go
+            # word edit box arrives as type 0x00 with no value bytes.
+            # SVCPROP's own DecodePropertyValue @ 0x7F64143A treats every type
+            # outside its table the same way — `default: size = 0`, nothing
+            # consumed — so any other unmapped type follows the client here
+            # rather than failing the whole record.
+            value = None
         properties[name] = (property_type, value)
 
     if pos != total_size:
