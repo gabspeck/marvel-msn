@@ -44,6 +44,7 @@ from server.services.dirsrv import (
     SUPPORTED_BROWSE_LCIDS,
     DIRSRVHandler,
     build_add_node_reply_payload,
+    build_delete_node_reply_payload,
     build_dirsrv_service_map_payload,
     build_enum_shn_reply_payload,
     build_get_children_reply_payload,
@@ -1636,6 +1637,95 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         build_reply.assert_called_once_with(b"set-properties")
         parsed = parse_packet(packets[0][:-1])
         self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
+
+
+class _DeleteNodeContentStore:
+    """The sample BBS board plus the messages listed under it."""
+
+    BOARD_ID = "0:1"
+
+    def __init__(self):
+        seed = default_seed()
+        self.children = {self.BOARD_ID: list(seed.directory_children[self.BOARD_ID])}
+        wanted = {self.BOARD_ID, *self.children[self.BOARD_ID]}
+        self.nodes = {n.node_id: n for n in seed.directory_nodes if n.node_id in wanted}
+
+    def get_node(self, node_id):
+        return self.nodes.get(node_id)
+
+    def remove_node(self, node_id):
+        if node_id not in self.nodes:
+            return False
+        del self.nodes[node_id]
+        for ids in self.children.values():
+            ids[:] = [i for i in ids if i != node_id]
+        return True
+
+
+class TestDIRSRVDeleteNode(unittest.TestCase):
+    """Class 0x04 selector 0x03 — the shell's Delete verb.
+
+    `CTreeEditClient::PrivateDeleteNode` @ TREEEDCL 0x7F2C1BE3 sends the ticket
+    and the 8-byte MNID and asks for two DWORDs back.
+    """
+
+    @staticmethod
+    def _tagged_var(value):
+        return b"\x04" + bytes([0x80 | len(value)]) + value
+
+    def _request(self, node_id):
+        msg_id, _sep, board_id = node_id.partition(":")
+        return (
+            self._tagged_var(b"\x02\x00")
+            + self._tagged_var(struct.pack("<II", int(msg_id), int(board_id)))
+            + b"\x83\x83"
+        )
+
+    def test_removes_the_node_and_reports_a_completed_operation(self):
+        store = _DeleteNodeContentStore()
+        doomed = store.children[store.BOARD_ID][0]
+
+        reply = build_delete_node_reply_payload(self._request(doomed), store)
+
+        self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
+        self.assertNotIn(doomed, store.nodes)
+        self.assertNotIn(doomed, store.children[store.BOARD_ID])
+
+    def test_unknown_node_fails_without_touching_the_board(self):
+        store = _DeleteNodeContentStore()
+        before = list(store.children[store.BOARD_ID])
+
+        reply = build_delete_node_reply_payload(self._request("9000:1"), store)
+
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
+        self.assertEqual(store.children[store.BOARD_ID], before)
+
+    def test_rejects_the_add_node_receive_shape(self):
+        # AddNode asks for a variable field back as well. Answering a request
+        # shaped for three receives would leave the client short a field.
+        store = _DeleteNodeContentStore()
+        doomed = store.children[store.BOARD_ID][0]
+        request = self._request(doomed)[:-2] + b"\x83\x83\x84"
+
+        reply = build_delete_node_reply_payload(request, store)
+
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
+        self.assertIn(doomed, store.nodes)
+
+    def test_rejects_a_ticket_that_does_not_carry_its_own_length(self):
+        store = _DeleteNodeContentStore()
+        doomed = store.children[store.BOARD_ID][0]
+        msg_id, _sep, board_id = doomed.partition(":")
+        request = (
+            self._tagged_var(b"\x09\x00")
+            + self._tagged_var(struct.pack("<II", int(msg_id), int(board_id)))
+            + b"\x83\x83"
+        )
+
+        reply = build_delete_node_reply_payload(request, store)
+
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
+        self.assertIn(doomed, store.nodes)
 
 
 class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):

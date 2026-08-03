@@ -51,6 +51,13 @@ from ._dispatch import log_unhandled_selector
 # the message-content channel the reader negotiates when a message is opened
 # (BBSNAV FUN_7F5FCD1A). Dispatching on `selector` alone misroutes class-0x0B
 # method 0 into GetProperties, which answers it with a meaningless record.
+#
+# Class 0x04 is the TREEEDCL write channel. BBSNAV binds a `CTreeEditClient` to
+# the same "BBS" service (channel `g_BbsEcig`, docs/BBSNAV.md §9) and the shell's
+# Delete verb drives it: `CMosTreeNode::Delete` @ MOSSHELL 0x7F3FFFA4 puts up the
+# confirmation, takes the edit object (which fetches a ticket on selector 12),
+# then calls `CTreeEditClient::DeleteNode` (selector 3). Its builders live in
+# `dirsrv` — the tree edit client is generic, so the shapes are shared.
 BBS_CLASS_TREE = 0x03
 BBS_CLASS_MESSAGE = 0x0B
 
@@ -220,10 +227,11 @@ class BBSHandler:
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch a BBS request by (interface class, method selector).
 
-        Two classes are served: the tree class (0x03) methods 0/2/3/4, and the
+        Three classes are served: the tree class (0x03) methods 0/2/3/4, the
         message-content class (0x0B) methods 0 (article fetch) and 2/3/4/7 (post
-        upload). Everything else — GetParents (1), the unimplemented
-        enum/resolve slots — is logged unhandled and left unanswered.
+        upload), and the TREEEDCL edit class (0x04) methods 3 and 12 (Delete).
+        Everything else — GetParents (1), the unimplemented enum/resolve slots —
+        is logged unhandled and left unanswered.
 
         Class 0xE6/0xE7 are not calls. They carry the body of a field the head
         was too small to hold, and they expect no reply.
@@ -231,6 +239,16 @@ class BBSHandler:
         if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
             self._take_continuation(msg_class, selector, payload)
             return None
+        if msg_class == dirsrv.TREEEDCL_CLASS_EDIT:
+            if selector == dirsrv.TREEEDCL_SELECTOR_GET_TICKET:
+                reply_payload = dirsrv.build_get_ticket_reply_payload()
+            elif selector == dirsrv.TREEEDCL_SELECTOR_DELETE_NODE:
+                reply_payload = dirsrv.build_delete_node_reply_payload(payload)
+            else:
+                log_unhandled_selector(log, msg_class, selector, request_id, payload)
+                return None
+            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
+            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
         if msg_class == BBS_CLASS_MESSAGE:
             if selector == BBS_SELECTOR_GET_ARTICLE:
                 reply_payload = build_bbs_article_reply_payload(payload)

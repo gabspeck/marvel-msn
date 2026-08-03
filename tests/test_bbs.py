@@ -343,6 +343,18 @@ class TestBBSGetChildren(unittest.TestCase):
             ],
         )
 
+    def test_change_stamp_moves_when_a_message_is_deleted(self):
+        # The stamp the client caches on the fill, and the one it reads back
+        # after a delete, must differ or the row survives the refresh.
+        self.addCleanup(reset_app_store)
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e\x00g", flags=1)
+        before = _walk_records(build_bbs_get_children_reply_payload(request))[0]["g"]
+
+        app_store.content.remove_node(_YOSEMITE)
+
+        after = _walk_records(build_bbs_get_children_reply_payload(request))[0]["g"]
+        self.assertNotEqual(after, before)
+
     def test_every_message_carries_an_author_and_a_date(self):
         # A real post always has both. A missing `_D` used to be skipped
         # entirely, which truncated the record; a missing date now still ships
@@ -786,6 +798,87 @@ class TestBBSArticle(unittest.TestCase):
         self.assertIn(b"X-MOS-Format: RTF\n", head)
         self.assertTrue(body.startswith(b"{\\rtf1"))
         self.assertTrue(body.endswith(b"}"))
+
+
+class TestBBSEditChannel(unittest.TestCase):
+    """Class 0x04 — the TREEEDCL write channel BBSNAV binds to `g_BbsEcig`.
+
+    Delete is the only verb wired: `CMosTreeNode::Delete` @ MOSSHELL 0x7F3FFFA4
+    fetches a ticket (selector 12) and then calls DeleteNode (selector 3).
+    """
+
+    def setUp(self):
+        reset_app_store()
+
+    def tearDown(self):
+        reset_app_store()
+
+    @staticmethod
+    def _reply_payload(packets):
+        return parse_packet(packets[0][:-1]).payload[8:]
+
+    def _request(self, node_id):
+        msg_id, _sep, board_id = node_id.partition(":")
+        mnid = struct.pack("<II", int(msg_id), int(board_id))
+        return (
+            b"\x04\x82\x02\x00"
+            + b"\x04" + bytes([0x80 | len(mnid)]) + mnid
+            + b"\x83\x83"
+        )
+
+    def test_get_ticket_is_answered_on_the_bbs_pipe(self):
+        handler = BBSHandler(1, "BBS")
+        packets = handler.handle_request(
+            msg_class=0x04,
+            selector=0x0C,
+            request_id=0,
+            payload=b"\x83\x85",
+            server_seq=0,
+            client_ack=0,
+        )
+
+        self.assertEqual(
+            self._reply_payload(packets), dirsrv.build_get_ticket_reply_payload()
+        )
+
+    def test_delete_node_drops_the_message_from_the_board(self):
+        handler = BBSHandler(1, "BBS")
+        before = [n.node_id for n in app_store.content.get_children(_BOARD)]
+        self.assertIn(_RE_YOSEMITE, before)
+
+        packets = handler.handle_request(
+            msg_class=0x04,
+            selector=0x03,
+            request_id=1,
+            payload=self._request(_RE_YOSEMITE),
+            server_seq=0,
+            client_ack=0,
+        )
+
+        # status 0 + operation id 0, no variable field — the client polls
+        # GetStatus while the status DWORD reads 1.
+        self.assertEqual(
+            self._reply_payload(packets), b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87"
+        )
+        self.assertNotIn(
+            _RE_YOSEMITE,
+            [n.node_id for n in app_store.content.get_children(_BOARD)],
+        )
+
+    def test_unmapped_edit_selector_stays_unanswered(self):
+        # Lock/Unlock/LinkNode and the rest of the edit table are not served.
+        handler = BBSHandler(1, "BBS")
+        with self.assertLogs("server.services.bbs", level="WARNING") as cap:
+            result = handler.handle_request(
+                msg_class=0x04,
+                selector=0x05,
+                request_id=0,
+                payload=b"",
+                server_seq=0,
+                client_ack=0,
+            )
+        self.assertIsNone(result)
+        self.assertTrue(any("unhandled" in m for m in cap.output))
 
 
 class PostChannelTestCase(unittest.TestCase):

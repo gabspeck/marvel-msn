@@ -58,6 +58,73 @@ class TestSeedIsolation(unittest.TestCase):
         self.assertIsNot(first.statement_transactions[0], second.statement_transactions[0])
 
 
+class TestRemoveNode(unittest.TestCase):
+    """TREEEDCL DeleteNode drops the node, its subtree and every reference."""
+
+    def setUp(self):
+        reset_app_store()
+
+    def tearDown(self):
+        reset_app_store()
+
+    def test_removes_the_node_from_its_parent_listing(self):
+        board = app_store.content
+        doomed = board.get_children(_BOARD)[0].node_id
+
+        self.assertTrue(board.remove_node(doomed))
+
+        self.assertNotIn(doomed, [node.node_id for node in board.get_children(_BOARD)])
+        self.assertEqual(
+            board.get_node(doomed).node_id,
+            default_seed().directory_fallback.node_id,
+        )
+
+    def test_removing_a_board_takes_its_messages(self):
+        content = app_store.content
+        messages = [node.node_id for node in content.get_children(_BOARD)]
+        self.assertTrue(messages)
+
+        self.assertTrue(content.remove_node(_BOARD))
+
+        fallback = default_seed().directory_fallback.node_id
+        for message in messages:
+            self.assertEqual(content.get_node(message).node_id, fallback)
+
+    def test_unknown_node_reports_no_removal(self):
+        self.assertFalse(app_store.content.remove_node(_NEW_MESSAGE))
+
+    def test_the_parent_change_stamp_advances(self):
+        # `g` is the only signal QueryOutOfDate acts on — without a bump the
+        # deleted row survives every refresh.
+        content = app_store.content
+        before = content.get_node(_BOARD).generation
+
+        content.remove_node(content.get_children(_BOARD)[0].node_id)
+
+        self.assertEqual(content.get_node(_BOARD).generation, before + 1)
+
+    def test_an_unrelated_parent_keeps_its_change_stamp(self):
+        content = app_store.content
+        board = content.get_node(_BOARD)
+        doomed = content.get_children(_BOARD)[0].node_id
+        other = next(
+            node_id
+            for node_id in default_seed().directory_children
+            if node_id != _BOARD and content.get_node(node_id).node_id == node_id
+        )
+        before = content.get_node(other).generation
+
+        content.remove_node(doomed)
+
+        self.assertEqual(content.get_node(other).generation, before)
+        self.assertEqual(content.get_node(_BOARD).generation, board.generation + 1)
+
+    def test_leaves_the_seed_untouched(self):
+        before = len(default_seed().directory_children[_BOARD])
+        app_store.content.remove_node(app_store.content.get_children(_BOARD)[0].node_id)
+        self.assertEqual(len(default_seed().directory_children[_BOARD]), before)
+
+
 class TestReset(unittest.TestCase):
     def setUp(self):
         reset_app_store()

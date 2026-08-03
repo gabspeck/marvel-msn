@@ -58,6 +58,7 @@ ENUM_SHN_KEY_ICONS = 0x00
 GET_CHILDREN_FLAG_WITH_SELF = 1
 TREEEDCL_CLASS_EDIT = 0x04
 TREEEDCL_SELECTOR_ADD_NODE = 0x02
+TREEEDCL_SELECTOR_DELETE_NODE = 0x03
 TREEEDCL_SELECTOR_SET_PROPERTIES = 0x04
 TREEEDCL_SELECTOR_GET_DATASETS = 0x0B
 TREEEDCL_SELECTOR_GET_TICKET = 0x0C
@@ -969,7 +970,7 @@ def build_set_properties_reply_payload(payload, content_store=None):
             [f"0x{tag:02x}" for tag in recv_descriptors],
             payload.hex(),
         )
-        return _build_set_properties_result(0x101)
+        return _build_edit_result(0x101)
 
     ticket, mnid, property_record = fields
     if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket) or len(mnid) != 8:
@@ -978,20 +979,20 @@ def build_set_properties_reply_payload(payload, content_store=None):
             ticket.hex(),
             mnid.hex(),
         )
-        return _build_set_properties_result(0x101)
+        return _build_edit_result(0x101)
 
     field_0, field_8 = struct.unpack("<II", mnid)
     node_id = f"{field_0}:{field_8}"
     node = content_store.get_node(node_id)
     if node is None or node.node_id != node_id:
         log.warning("set_properties unknown node=%s", node_id)
-        return _build_set_properties_result(0x101)
+        return _build_edit_result(0x101)
 
     try:
         properties = _decode_property_record(property_record)
     except ValueError as exc:
         log.warning("set_properties invalid properties node=%s error=%s", node_id, exc)
-        return _build_set_properties_result(0x101)
+        return _build_edit_result(0x101)
 
     changes = {}
     ignored = []
@@ -1015,10 +1016,64 @@ def build_set_properties_reply_payload(payload, content_store=None):
         ",".join(f"{k}={v!r}" for k, v in changes.items()) or "-",
         ",".join(ignored) or "-",
     )
-    return _build_set_properties_result(0)
+    return _build_edit_result(0)
 
 
-def _build_set_properties_result(status):
+def build_delete_node_reply_payload(payload, content_store=None):
+    """Remove one node for a TREEEDCL DeleteNode request.
+
+    `CTreeEditClient::PrivateDeleteNode` @ TREEEDCL 0x7F2C1BE3 sends two
+    variable fields — the capability ticket and the 8-byte MNID — and asks for
+    two DWORDs back, so the reply is `status` + `operation id` with no variable
+    field. It polls `GetStatus` once a second for as long as the status DWORD
+    reads 1; a finished delete answers 0.
+
+    `CMosTreeNode::Delete` @ MOSSHELL 0x7F3FFFA4 runs `EnumMosWindows(RefreshEmw)`
+    the moment the call returns success, which re-lists the parent over the read
+    channel. The row only disappears if the node is out of the store by then.
+
+    A status this server cannot satisfy has to be an error, not 0: the public
+    `CTreeEditClient::DeleteNode` @ 0x7F2C160D retries the whole call after a
+    fresh `GetTicket` on 0x116/0x117 only, and treats every other non-zero value
+    as final.
+    """
+    if content_store is None:
+        content_store = _default_store.content
+
+    send_params, recv_descriptors = parse_request_params(payload)
+    fields = [param.data for param in send_params if isinstance(param, VarParam)]
+    if len(fields) != 2 or recv_descriptors != [0x83, 0x83]:
+        log.warning(
+            "delete_node invalid request fields=%d recv=%s payload=%s",
+            len(fields),
+            [f"0x{tag:02x}" for tag in recv_descriptors],
+            payload.hex(),
+        )
+        return _build_edit_result(0x101)
+
+    ticket, mnid = fields
+    if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket) or len(mnid) != 8:
+        log.warning(
+            "delete_node invalid ticket_or_mnid ticket=%s mnid=%s",
+            ticket.hex(),
+            mnid.hex(),
+        )
+        return _build_edit_result(0x101)
+
+    field_0, field_8 = struct.unpack("<II", mnid)
+    node_id = f"{field_0}:{field_8}"
+    node = content_store.get_node(node_id)
+    name = node.content.name if node is not None and node.node_id == node_id else ""
+    if not content_store.remove_node(node_id):
+        log.warning("delete_node unknown node=%s", node_id)
+        return _build_edit_result(0x101)
+
+    log.info("delete_node status=0 node=%s name=%r", node_id, name)
+    return _build_edit_result(0)
+
+
+def _build_edit_result(status):
+    """Build the `status` + `operation id` pair every completed edit op returns."""
     return build_tagged_reply_dword(status) + build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
 
 

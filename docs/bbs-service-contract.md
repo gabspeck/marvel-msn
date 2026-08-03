@@ -609,6 +609,60 @@ and cached at node+0xBC by `CBbsNavTreeNode_HrGetPMte` (slot 72, `0x7F5F1593`).
 ticket before any mutate succeeds; it is replayed on every edit op and validated
 server-side (cf. `SECURCL` `TICKET` decode used by TREEEDCL/DATAEDCL).
 
+### Delete flow (sel 3)
+
+Observed live: the shell's Delete verb on a board or message opens the edit
+channel on the **BBS** pipe with `class=0x04 selector=0x0c`, i.e. `GetTicket`.
+
+`CMosTreeNode::Delete` (slot 80, MOSSHELL `0x7F3FFFA4`):
+
+1. `LoadStringA(0x8D)` + `wsprintfA` with the node's name → confirmation body,
+   `MosError` dialog (`local_20 = 2` = Yes/No, icon `0x7F03`). Anything but
+   `IDYES` (6) returns 0 and sends nothing.
+2. `HrGetPMte` (slot 73) → the cached `CBbsTreeEdit`; this is what fires
+   `GetTicket` when no ticket is held.
+3. `CMosTreeEdit::Delete` (MOSSHELL `0x7F403C1E`) → `GetTec` (edit vtbl+0xC) →
+   `CTreeEditClient::DeleteNode` with the node's mnid (`node+0x28` / `node+0x2c`).
+4. `EnumMosWindows(RefreshEmw)` — every shell view re-lists its folder over the
+   read channel as soon as the call returns success.
+
+`CTreeEditClient::PrivateDeleteNode` (`0x7F2C1BE3`) marshals **two** variable
+fields — the ticket (`this+0x54`, u16 self-length) then the 8-byte mnid — and
+registers **two** receive DWORDs (`status`, `operation id`). No variable field
+comes back. It then polls `GetStatus` on `Sleep(1000)` for as long as the status
+DWORD reads 1.
+
+The public wrapper `CTreeEditClient::DeleteNode` (`0x7F2C160D`) re-runs the whole
+call after a fresh `GetTicket` when the status is `0x116` or `0x117`, up to three
+times. Every other non-zero status is final and surfaces through
+`ReportMosXErr`.
+
+A status-0 reply alone does not clear the row. `RefreshEmw` reaches
+`CMosViewWnd::Refresh` (`0x7F3F818B`), which restarts the filler thread only
+when `CMosTreeNode::QueryOutOfDate` (`0x7F3FDB3F`) reports the node stale, and
+that test never diffs the child list — it compares wire property `g`
+(`docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md` §"`g`"). The board must therefore
+report a **changed `g`** after a message is deleted.
+
+Observed live, deleting one message from the sample board:
+
+```
+BBS   class=0x04 sel=0x03  delete_node node=256:1
+DIRSRV sel=0x02  node=0:1 props=g,a flags=1  → [self g=1][3 survivors g=0]
+DIRSRV sel=0x00  node=0:1 (full prop list)   → board re-read, g=1 cached
+BBS    sel=0x00  node=0:1 (full prop list)
+BBS    sel=0x02  node=0:1 props=g,a flags=0  → 3 children
+```
+
+The outer DIRSRV node runs the flag-1 form and compares the self record's `g`
+against the `0` it had cached. With a constant `g` the pair matched, the check
+returned "current", and the row survived F5 — while the delete itself had
+committed, which is why the reader opened the deleted message with an empty
+body.
+
+The BBS-side pass arrives with **flags=0**, not 1. It is served children only.
+See the open question in `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md` §"Arg 3".
+
 ---
 
 ## Message reader & body

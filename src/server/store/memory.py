@@ -86,6 +86,38 @@ class InMemoryContentStore:
         if node is not None:
             self._nodes[node_id] = replace(node, generation=node.generation + 1)
 
+    def remove_node(self, node_id):
+        """Drop a node, its descendants, and every parent's reference to it.
+
+        Backs TREEEDCL DeleteNode. The subtree goes with the node: a surviving
+        child keeps its own mnid, so GetProperties would still answer for a
+        message under a deleted board.
+
+        Every parent that listed the node advances its `g`, which is what makes
+        the row disappear: the client's refresh never diffs the child list, it
+        only re-lists a folder whose stamp moved.
+
+        Returns True when the node was registered, False when it was not.
+        """
+        if node_id not in self._nodes:
+            return False
+        doomed = set()
+        pending = [node_id]
+        while pending:
+            current = pending.pop()
+            if current in doomed:
+                continue
+            doomed.add(current)
+            pending.extend(self._children.get(current, ()))
+        for gone in doomed:
+            self._nodes.pop(gone, None)
+            self._children.pop(gone, None)
+        for parent_id, ids in self._children.items():
+            if any(i in doomed for i in ids):
+                ids[:] = [i for i in ids if i not in doomed]
+                self._bump(parent_id)
+        return True
+
     def get_children(self, node_id, locale_raw=None):
         # Permissive fallback: any node without an explicit child list resolves
         # to [fallback]. CMosTreeNode::Exec caches 'z'/'c' from the GetChildren
