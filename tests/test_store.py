@@ -34,6 +34,17 @@ class TestSeedIsolation(unittest.TestCase):
         app_store.content.add_child(_BOARD, _message(_NEW_MESSAGE))
         self.assertEqual(len(default_seed().directory_children[_BOARD]), before)
 
+    def test_add_child_advances_the_parent_change_stamp(self):
+        before = app_store.content.get_node(_BOARD).generation
+        app_store.content.add_child(_BOARD, _message(_NEW_MESSAGE))
+        self.assertEqual(app_store.content.get_node(_BOARD).generation, before + 1)
+
+    def test_replacing_a_node_advances_its_own_change_stamp(self):
+        content = app_store.content
+        node = content.get_children(_BOARD)[0]
+        content.add_node(node)
+        self.assertEqual(content.get_node(node.node_id).generation, node.generation + 1)
+
     def test_add_node_leaves_the_seed_untouched(self):
         before = len(default_seed().directory_nodes)
         app_store.content.add_node(_message(_NEW_MESSAGE))

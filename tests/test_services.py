@@ -82,7 +82,7 @@ from server.services.sasrv import (
     SASRVHandler,
     build_sasrv_service_map_payload,
 )
-from server.store import default_seed
+from server.store import app_store, default_seed
 from server.transport import parse_packet
 from server.wire import decode_header_byte
 
@@ -528,6 +528,29 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = build_get_children_reply_payload(request)
         self.assertIn(b"Categories (US)", payload)
         self.assertIn(b"Categorias (BR)", payload)
+
+    def test_with_self_flag_leads_the_reply_with_the_requested_node(self):
+        # `CMosTreeNode::QueryOutOfDate` @ 0x7F3FDB3F asks for {g, a} with
+        # flags=1 and reads the reply as [self][children…]. The lazy loader
+        # `OkToGetChildren` sends flags=0 and must keep getting children alone.
+        prop_group = "g\x00a"
+        plain = _walk_get_children_records(
+            build_get_children_reply_payload(
+                DirsrvRequest(node_id="1:16", prop_group=prop_group)
+            )
+        )
+        with_self = _walk_get_children_records(
+            build_get_children_reply_payload(
+                DirsrvRequest(node_id="1:16", prop_group=prop_group, flags=1)
+            )
+        )
+
+        self.assertEqual(len(with_self), len(plain) + 1)
+        self.assertEqual(
+            with_self[0]["a"],
+            app_store.content.get_node("1:16").mnid_a,
+        )
+        self.assertEqual(with_self[1:], plain)
 
     def test_all_children_grant_authoring_rights(self):
         request = DirsrvRequest(

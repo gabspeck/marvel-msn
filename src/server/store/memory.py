@@ -8,6 +8,7 @@ and `load` is how it is (re)seeded, in place, from a `DefaultSeed`.
 from __future__ import annotations
 
 import struct
+from dataclasses import replace
 
 from .base import AppStore, MemberProfile
 
@@ -54,7 +55,13 @@ class InMemoryContentStore:
         there would put a bogus row in the reader. DIRSRV SetProperties reuses
         the same replace-by-key step to commit an edited node, which leaves its
         position in every parent's child list untouched.
+
+        Replacing an entry advances its `g`, so the client drops what it cached
+        for the node and reads the new values.
         """
+        previous = self._nodes.get(node.node_id)
+        if previous is not None:
+            node = replace(node, generation=previous.generation + 1)
         self._nodes[node.node_id] = node
 
     def add_child(self, parent_id, node):
@@ -64,10 +71,20 @@ class InMemoryContentStore:
         visible to the next GetChildren on the board. The child list is created
         empty for the node itself — get_children answers an unlisted node with
         the fallback sentinel, which would put a bogus row under the message.
+
+        The parent's `g` advances: its child list is what changed, and that is
+        the only signal the client has to re-list the folder.
         """
         self._nodes[node.node_id] = node
         self._children.setdefault(node.node_id, [])
         self._children.setdefault(parent_id, []).append(node.node_id)
+        self._bump(parent_id)
+
+    def _bump(self, node_id):
+        """Advance one node's change stamp, if the node is registered."""
+        node = self._nodes.get(node_id)
+        if node is not None:
+            self._nodes[node_id] = replace(node, generation=node.generation + 1)
 
     def get_children(self, node_id, locale_raw=None):
         # Permissive fallback: any node without an explicit child list resolves

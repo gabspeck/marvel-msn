@@ -26,7 +26,7 @@ From `CMosTreeNode::OkToGetChildren`:
 |-----|--------|---------|
 | 1 | `local_9` (stack CTreeNavClient) | client state |
 | 2 | `*(LARGE_INTEGER*)(this+0x18)` | node id (8 bytes) |
-| 3 | `0` | reserved / flags |
+| 3 | `0` | **with-self flag** — see below |
 | 4 | `this->field_2D` (+0xB4 dword) | handle / token |
 | 5 | `ppuVar5` | **requested property tag list** |
 | 6 | `&DAT_7F40B038` | locale_raw: `[u32 filter_on][u32 lcid?]` — 4 bytes if `filter_on=0`, 8 bytes if `filter_on=1` (see below) |
@@ -36,6 +36,57 @@ From `CMosTreeNode::OkToGetChildren`:
 On success, child count and the dynamic handle land in the node struct. On zero
 children the `no-more-children` flag (`flags_3B |= 4`) gets set, suppressing
 future calls. On wire error the dynamic handle is cleared to 0.
+
+### Arg 3 — the with-self flag
+
+`GetRelatives` sends arg 3 through the request object's `+0x30` slot (the
+one-byte parameter, wire tag `0x01`), right after the mnid.
+
+`OkToGetChildren` passes **0** and reads the reply as the children alone.
+`CMosTreeNode::QueryOutOfDate` (`0x7F3FDB3F`) passes **1** and reads it as
+`[self][child…]`:
+
+- it consumes one record before its loop and compares that record's `g` against
+  the node's own cached `g`;
+- it bounds the loop at `count - 1`;
+- it short-circuits on `count == 1`, i.e. a node with a self record and no
+  children.
+
+Answering a flag-1 request with children only lines the node up against its
+first child and hides the last child from the per-child pass.
+
+**Open**: on a delegate the inner node's pass was observed arriving with
+**flags=0** (BBS board `0:1`, 2026-08-03 — the outer DIRSRV pass on the same
+node sent 1 in the same second). `QueryOutOfDate` passes the constant 1 and
+BBSNAV does not override slot 40, so either the inner pass is a different caller
+that reuses the `{g, a}` list, or the flag is rewritten somewhere on the
+delegate hand-off. Untraced. It matters because a children-only reply makes the
+inner node compare its first child's `g` against the board's `g`; once the board
+advances, that pair never matches again and the inner node reports stale on
+every later probe. Harmless today — the probes are event-driven, so no refresh
+loop was observed — but it is not the real contract.
+
+### `g` — the change stamp
+
+`QueryOutOfDate` is the only reader of wire property `g`, and it is the whole
+refresh gate. `CMosViewWnd::Refresh` (`0x7F3F818B`) calls it and restarts the
+filler thread **only** when it reports out-of-date, so F5 is gated on it too.
+
+Two comparisons mark a node stale:
+
+1. the self record's `g` differs from the node's cached `g` → invalidate the
+   node itself (slot 39 `Invalidate`, `0x7F3FDABF`);
+2. a child record's `g` differs from that child's cached `g` → invalidate the
+   child (via `HrGetPMtn` on the record's `a`).
+
+Nothing compares the child *set*. A child that vanished from the reply is not
+noticed, so a deletion only reaches the screen when the **parent's** `g` moves.
+A node whose `g` never changes can never be re-listed.
+
+Delegates hand the check to the inner node: `QueryOutOfDate` calls slot 6
+(`HrSetupDelegate`) first and, when it succeeds, runs the inner node's
+`QueryOutOfDate` instead of its own per-child pass. That is why a BBS board
+produces one enumeration on the DIRSRV pipe and a second on the BBS pipe.
 
 ### `locale_raw` shape
 

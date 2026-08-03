@@ -541,17 +541,26 @@ def build_bbs_get_children_reply_payload(request):
     tree position. `locale_raw` is forwarded so a filter_on=1 request still
     resolves; BBS nodes are language=0 (locale-neutral) and survive every
     locale filter.
+
+    The board itself leads the reply when the request carries the with-self
+    flag. The BBS board is a delegate, so `CMosTreeNode::QueryOutOfDate` hands
+    the staleness check to the inner bbsnav node, which runs the same MOSSHELL
+    code over this pipe and reads the first record as the node's own.
     """
     requested = _requested_props(request.prop_group)
-    children = _default_store.content.get_children(request.node_id, request.locale_raw)
+    store = _default_store.content
+    children = store.get_children(request.node_id, request.locale_raw)
+    with_self = request.flags == dirsrv.GET_CHILDREN_FLAG_WITH_SELF
     log.info(
-        "bbs_get_children node=%s props=%s child_count=%d",
+        "bbs_get_children node=%s props=%s flags=%d child_count=%d",
         request.node_id,
         ",".join(requested) or "-",
+        request.flags,
         len(children),
     )
+    nodes = [store.get_node(request.node_id), *children] if with_self else children
     records = [
-        (child.node_id, build_bbs_props(requested, child, is_children=True)) for child in children
+        (node.node_id, build_bbs_props(requested, node, is_children=True)) for node in nodes
     ]
     return dirsrv.build_tree_reply_wire(records)
 

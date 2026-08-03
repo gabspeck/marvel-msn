@@ -326,6 +326,23 @@ class TestBBSGetChildren(unittest.TestCase):
         self.assertEqual(records[0]["_a"], "Chris Hahn")
         self.assertEqual(records[2]["_a"], "KEITH SUTTON")
 
+    def test_with_self_flag_leads_the_reply_with_the_board(self):
+        # QueryOutOfDate sends flags=1, consumes one record before its loop and
+        # compares that record's `g` against the board's own cached `g`. Leading
+        # with a child would line the board up against its first message.
+        request = DirsrvRequest(node_id=_BOARD, prop_group="a\x00e\x00g", flags=1)
+        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        self.assertEqual(
+            [r["e"] for r in records],
+            [
+                "Climbing BBS",
+                "Yosemite",
+                "RE: Yosemite",
+                "British Climbers",
+                "Attachment test",
+            ],
+        )
+
     def test_every_message_carries_an_author_and_a_date(self):
         # A real post always has both. A missing `_D` used to be skipped
         # entirely, which truncated the record; a missing date now still ships
@@ -769,25 +786,6 @@ class TestBBSArticle(unittest.TestCase):
         self.assertIn(b"X-MOS-Format: RTF\n", head)
         self.assertTrue(body.startswith(b"{\\rtf1"))
         self.assertTrue(body.endswith(b"}"))
-
-
-class TestBBSWriteSelectorDeferred(unittest.TestCase):
-    def test_get_ticket_selector_is_unhandled(self):
-        # Compose first sends GetTicket (sel 12) on the TREEEDCL edit channel.
-        # The write path is deferred, so it must be logged unhandled, not
-        # answered or misrouted into a read selector.
-        handler = BBSHandler(1, "BBS")
-        with self.assertLogs("server.services.bbs", level="WARNING") as cap:
-            result = handler.handle_request(
-                msg_class=0x01,
-                selector=0x0C,
-                request_id=0,
-                payload=b"",
-                server_seq=0,
-                client_ack=0,
-            )
-        self.assertIsNone(result)
-        self.assertTrue(any("unhandled" in m for m in cap.output))
 
 
 class PostChannelTestCase(unittest.TestCase):

@@ -603,7 +603,7 @@ Both tab requests use `dword_0=1` (GetChildren-shape) against the leaf.
 | `c`  | 0x03 | nav + click | Exec dispatch | Registered MOS app_id (HKLM\SOFTWARE\Microsoft\MOS\Applications\App #<c>). 1 = Directory_Service, 6 = Media_Viewer, 7 = Down_Load_And_Run (browser URL) |
 | `ca` | 0x0B | dlg-general | Category | — |
 | `e`  | **0x0A** | nav + dlg-general + titlebar | Name (icon label + explorer titlebar + General Name) | ASCII-cache string. Both icon label and `IShellFolder::GetDisplayNameOf` (STRRET ANSI) read 'e'; 0x0B truncates titlebar to "M" |
-| `g`  | 0x03 | nav + dlg-general + dlg-context | — | Purpose unresolved. Ruled out as the icon slot (sentinel sweeps 2026-04-16 showed `mf`/`wv`, not `g`, drive GetShabby). Emit DWORD 0 until a consumer trace pins it down |
+| `g`  | 0x03 | nav + dlg-general + dlg-context | — | Change stamp. `CMosTreeNode::QueryOutOfDate` @ MOSSHELL `0x7F3FDB3F` compares the value the server sends now against the one it cached; equal = the node is current and no refresh runs. Must advance whenever the node's properties or child list change |
 | `h`  | 0x03 | nav | **Secondary icon (GetShabby ICO/EXE/DLL path)** | Shabby ID DWORD of a custom icon-bearing file (.ICO/.EXE/.DLL). `MOSSHELL FUN_7F404786` reads "h" as 4-byte DWORD and, on success, calls `FUN_7F4047C2` → `FUN_7F4049F9` (GetTempFileNameA + vtable[0x74] GetShabbyToFile + ExtractIconExA). On GetProperty failure the whole ICO path is skipped. **Omit entirely** for nodes without a custom icon — emitting `h=0` triggers `GetShabby(shabby_id=0)` → zero-blob reply → NULL HICON → forbidden glyph. Prior container-flag interpretation was wrong (container-ness is carried in `b` bit 0) |
 | `i`  | 0x03 | nav | — | Unknown; send 0 |
 | `j`  | 0x0B | dlg-general | Description / Go word | — |
@@ -1036,7 +1036,6 @@ Other keys:
 |------|----------|
 | LOGSRV 0x0E | Real phone-book update contract. Current stub replies dword=0 → client ticks "done" without a real FTM fetch. Need: meaning of send dword=8, whether non-zero reply triggers a fetch, versioning scheme. Tracked in `TODO.md`; Ghidra: `SIGNUP.EXE!FUN_004043C1`. |
 | LOGSRV 0x02 / 0x07 / 0x0D | COM-proxy unmarshaller layer not RE'd. Empty `0x84` reply is the minimum that works — specific semantics unknown. |
-| DIRSRV `g` | Present in nav + both dialog tabs; purpose unresolved. Ruled out as the icon slot. |
 | DIRSRV `u` | Requested on dlg-context but no visible field — possibly currency/unit tied to price. |
 | DIRSRV `l` / `i` | Present in nav request group; shapes/meanings unknown. Catch-all defaults. |
 | DIRSRV `wv` vs `mf` split | Two GetShabby calls fire per node (`req_id=1` driven by `wv`, `req_id=9` driven by `mf` via `FUN_7F405018`). Presumably two icon sizes / display modes, but the exact consumer on the `wv` side isn't traced yet. |

@@ -45,6 +45,17 @@ DIRSRV_SELECTOR_GET_SHABBY = 0x04
 DIRSRV_SELECTOR_ENUM_SHN = 0x05  # CTreeNavClient::EnumShn
 # The only EnumShn key with an observed caller: MOSSHELL's Change Icon list.
 ENUM_SHN_KEY_ICONS = 0x00
+
+# GetChildren's third argument (`CTreeNavClient::GetRelatives` @ TREENVCL
+# 0x7F63190E, the byte sent through the request object's +0x30 slot).
+#
+# `CMosTreeNode::OkToGetChildren` — the lazy child loader that fills a view —
+# passes 0 and wants the children alone. `CMosTreeNode::QueryOutOfDate` @
+# 0x7F3FDB3F passes 1 and reads the reply as `[self][children…]`: it consumes
+# one record before its loop, compares that record's `g` against the node's own
+# cached `g`, and bounds the loop at `count - 1`. Sending only the children
+# under this flag lines the node up against its first child instead.
+GET_CHILDREN_FLAG_WITH_SELF = 1
 TREEEDCL_CLASS_EDIT = 0x04
 TREEEDCL_SELECTOR_ADD_NODE = 0x02
 TREEEDCL_SELECTOR_SET_PROPERTIES = 0x04
@@ -70,7 +81,7 @@ PROP_NAME = "e"
 # intercepts the name before marshalling — it widens the ANSI edit-box text to
 # UTF-16, swaps the tag to `f` and the wire type to 0x0B.
 PROP_NAME_EDIT = "f"
-PROP_UNKNOWN_G = "g"
+PROP_GENERATION = "g"
 PROP_SECONDARY_ICON = "h"
 PROP_DELEGATE_FIELD10 = "i"
 PROP_DESCRIPTION = "j"
@@ -347,10 +358,14 @@ def build_props(requested_props, node, *, is_children):
                     struct.pack("<I", content.size_bytes & 0xFFFFFFFF),
                 )
             )
-        elif name == PROP_UNKNOWN_G:
-            # Purpose unresolved — sentinel sweeps ruled out `g` as the icon
-            # slot. Emit DWORD 0 as a harmless default.
-            out.append((0x03, PROP_UNKNOWN_G, struct.pack("<I", 0)))
+        elif name == PROP_GENERATION:
+            # The node's change stamp. `CMosTreeNode::QueryOutOfDate` @ MOSSHELL
+            # 0x7F3FDB3F asks for {g, a} on every refresh and compares the value
+            # it gets against the one it cached: equal = nothing changed, and it
+            # returns before `CMosViewWnd::Refresh` restarts the filler thread.
+            # A constant `g` therefore freezes the view — a deleted row stays on
+            # screen even under F5, because the client never diffs child lists.
+            out.append((0x03, PROP_GENERATION, struct.pack("<I", node.generation)))
         elif name == PROP_SECONDARY_ICON_ALT:
             # 'wv' = GetShabby slot A. Must be inline DWORD — as a 0x0E blob
             # the cache holds a heap pointer whose low 4 bytes become the
@@ -533,10 +548,13 @@ def _collect_children_records(request, requested_props):
     if node.node_id == "4:0":
         return [(node.node_id, build_props(requested_props, node, is_children=True))]
 
-    return [
+    records = [
         (child.node_id, build_props(requested_props, child, is_children=True))
         for child in content_store.get_children(request.node_id, request.locale_raw)
     ]
+    if request.flags == GET_CHILDREN_FLAG_WITH_SELF:
+        records.insert(0, (node.node_id, build_props(requested_props, node, is_children=True)))
+    return records
 
 
 def _parse_prop_group(prop_group):
@@ -545,11 +563,14 @@ def _parse_prop_group(prop_group):
 
 def _log_request(kind, request, requested_props):
     log.info(
-        "%s node=%s raw=%s props=%s locale_lcid=%s locale_raw=%s",
+        "%s node=%s raw=%s props=%s flags=%d dwords=%d,%d locale_lcid=%s locale_raw=%s",
         kind,
         request.node_id,
         request.node_id_raw.hex(),
         ",".join(requested_props) or "-",
+        request.flags,
+        request.dword_0,
+        request.dword_1,
         f"0x{request.locale_lcid:04x}" if request.locale_lcid is not None else "-",
         request.locale_raw.hex() or "-",
     )

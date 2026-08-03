@@ -98,6 +98,12 @@ class DirectoryNode:
     # MOSSHELL HrSetupDelegate turns into the inner mnid
     # {field_0=app_id, field_8/field_c=mnid_a, field_10=0}.
     delegate: bool = False
+    # Wire property `g` — the node's change stamp. `CMosTreeNode::QueryOutOfDate`
+    # @ MOSSHELL 0x7F3FDB3F is the only reader: it compares the value the server
+    # sends now against the one it cached, and marks the node out of date when
+    # they differ. Every refresh — the idle poll and F5 alike — is gated on it,
+    # so a node whose `g` never moves can never be re-listed.
+    generation: int = 0
 
 
 @dataclass(frozen=True)
