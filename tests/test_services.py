@@ -1189,9 +1189,39 @@ class TestDIRSRVEnumShn(unittest.TestCase):
             b"\x83\x00\x00\x00\x00"
             + b"\x82"
             + struct.pack("<H", len(ids))
-            + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
             + b"".join(struct.pack("<I", i) for i in ids),
         )
+
+    def test_dynamic_tag_is_complete_signal_not_stream_end(self):
+        """0x86, not 0x88 — the opposite of GetChildren.
+
+        Only 0x86 runs MPCCL SignalRequestCompletion, which sets request
+        +0x18 and stops WaitForMessage from calling ResetEvent.
+        ShnIterator_GetAtIndex waits before reading its buffer, so under
+        0x88 the wait CTreeNavClient::EnumShn already performed leaves
+        nothing to wake it and the Change Icon click hangs.
+        """
+        # 0x83 + dword, then 0x82 + word = 8 bytes of static section.
+        payload = build_enum_shn_reply_payload(self.REQUEST)
+        self.assertEqual(payload[8], TAG_END_STATIC)
+        self.assertEqual(payload[9], TAG_DYNAMIC_COMPLETE_SIGNAL)
+        self.assertNotIn(TAG_DYNAMIC_STREAM_END, payload[8:10])
+
+    def test_whole_stream_ships_in_one_block(self):
+        """Every index must satisfy `index*4 <= size` on the first pass.
+
+        A short buffer drops ShnIterator_GetAtIndex into
+        `while (iVar1 != 0xB0B000B)` comparing the data-iface return, not
+        the wait's — an infinite spin.
+        """
+        from server.services import shabby as shabby_mod
+
+        ids = shabby_mod.enum_pickable_shabby_ids()
+        body = build_enum_shn_reply_payload(self.REQUEST)[10:]
+        self.assertEqual(len(body), 4 * len(ids))
+        for index in range(len(ids)):
+            self.assertLessEqual(index * 4, len(body))
 
     def test_stream_is_ascending_and_inside_the_picker_window(self):
         from server.services import shabby as shabby_mod
@@ -1227,7 +1257,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         self.assertEqual(
             payload,
             b"\x83\x00\x00\x00\x00\x82\x00\x00"
-            + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]),
+            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]),
         )
 
     def test_selector_dispatches_to_a_reply_packet(self):

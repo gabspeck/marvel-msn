@@ -688,14 +688,32 @@ def build_enum_shn_reply_payload(payload):
       - `0x82`  PackReceiveWord desc — element count
       - `0x85`  PackReceive desc for the dynamic dword stream
 
-    Reply: `0x83 [status] 0x82 [count] 0x87 0x88 [count * u32 LE]`.
+    Reply: `0x83 [status] 0x82 [count] 0x87 0x86 [count * u32 LE]`.
 
-    0x88 (stream-end), not 0x86: EnumShn hands the pending request to
-    ShnIterator_Construct (0x7F6326EB), and ShnIterator_GetAtIndex
-    (0x7F632757) drains it through the same `+0x14` Wait / `+0x1c`
-    data-iface pair as the GetChildren property walker, terminating on the
-    0xB0B000B sentinel. 0x86 would signal single-shot completion and never
-    feed the iterator.
+    0x86 (complete-signal), NOT 0x88 (stream-end) — the opposite of
+    GetChildren, because `ShnIterator` waits differently from
+    `NodeIterator`:
+
+    - MPCCL `ProcessTaggedServiceReply` @ 0x04604F26 runs
+      `SignalRequestCompletion` (0x04604DDC) only for 0x86. That sets
+      request `+0x18 = 1` and signals all three events. 0x88 instead calls
+      0x04604E25 / 0x04604E52, which signal `+0x28` / `+0x2c` but leave
+      `+0x18` at 0.
+    - `WaitForMessage` @ 0x04604BA4 calls `ResetEvent` on the `+0x2c`
+      event whenever `+0x18 == 0`.
+    - `CTreeNavClient::EnumShn` waits once before constructing the
+      iterator, so under 0x88 that first wait consumes and resets the
+      event. `ShnIterator_GetAtIndex` @ 0x7F632757 then waits *before*
+      looking at the buffer, and nothing is left to wake it — the Change
+      Icon click hangs with no further wire traffic.
+    - `NodeIterator_GetAtIndex` @ 0x7F63238A reads the buffer first and
+      only waits when it is short, which is why GetChildren tolerates 0x88.
+
+    Delivering every dword in this one block also keeps
+    `ShnIterator_GetAtIndex`'s `index*4 <= size` test true on the first
+    pass for every index. A short buffer would fall through to
+    `while (iVar1 != 0xB0B000B)`, where `iVar1` holds the data-iface
+    return rather than the wait's, and spin forever.
 
     Key 0 is the Change Icon picker — MOSSHELL's ChangeIconDlgProc
     (0x7F401886) builds its owner-draw list from this stream on
@@ -718,7 +736,7 @@ def build_enum_shn_reply_payload(payload):
     return (
         build_tagged_reply_dword(0)
         + build_tagged_reply_word(len(ids))
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + b"".join(struct.pack("<I", i) for i in ids)
     )
 

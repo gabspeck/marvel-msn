@@ -485,17 +485,49 @@ same `0xB0B000B` block-boundary protocol.
 
 Request bytes for the Change Icon picker are therefore `01 00 83 82 85`.
 
-The reply's dynamic section rides the **iterator** path, not the
-single-shot one: `EnumShn` hands the pending request straight to
-`ShnIterator_Construct` @ `0x7F6326EB`, and `ShnIterator_GetAtIndex` @
-`0x7F632757` drains it through the same `+0x14` Wait / `+0x1C` data-iface
-pair `NodeIterator_GetAtIndex` uses, terminating on `0xB0B000B`. A
-single-shot completion tag would satisfy the initial Wait and then starve
-the iterator.
-
 `*out_id` is only written when `status == 0` **and** the `ShnIterator`
 allocation succeeds; on any other path the caller's count stays whatever
 it was, and `*out_iter` is NULLed.
+
+### 11.2 `ShnIterator` needs the request marked complete
+
+`EnumShn` waits once on the pending request (`+0x14`) before handing it to
+`ShnIterator_Construct` @ `0x7F6326EB`. `ShnIterator_GetAtIndex` @
+`0x7F632757` then waits **again, unconditionally, before touching the
+buffer**:
+
+```
+Wait(pending, timeout, 0)          <- vtbl +0x14
+GetDataIface(pending, &data)       <- vtbl +0x1C
+if (index*4 <= data->GetSize()) { read; return 0; }
+```
+
+`NodeIterator_GetAtIndex` @ `0x7F63238A` is the other way round — it reads
+the data-iface first and only waits when the buffer is short. That
+difference decides which dynamic tag the reply must carry:
+
+| Tag | MPCCL `ProcessTaggedServiceReply` @ `0x04604F26` | request `+0x18` |
+|-----|--------------------------------------------------|-----------------|
+| `0x86` | `SignalRequestCompletion` @ `0x04604DDC` — signals `+0x24`, `+0x28`, `+0x2C` | set to 1 |
+| `0x88` | `0x04604E25` (signals `+0x28`) then `0x04604E52` (signals `+0x2C`) | stays 0 |
+
+`WaitForMessage` @ `0x04604BA4` calls `ResetEvent` on the `+0x2C` event
+whenever `+0x18 == 0`. So under `0x88` the wait inside `EnumShn` consumes
+*and clears* the event, and the first `ShnIterator_GetAtIndex` blocks with
+nothing left to wake it — the caller hangs and emits no further wire
+traffic, not even the usual iterator cancel. Under `0x86` the flag
+suppresses the reset, every later wait returns `0xB0B000B` at once, and
+the walk reads straight out of the buffer.
+
+So **`EnumShn` replies end `0x87 0x86`, while `GetRelatives` ends
+`0x87 0x88`**, even though both bind their dynamic field through the same
+marshal slot `+0x40` and both arrive as tag `0x85` in the request.
+
+One further constraint: ship the whole `ulong[]` in that single block.
+`ShnIterator_GetAtIndex`'s retry loop ends on
+`while (iVar1 != 0xB0B000B)`, where `iVar1` holds the **data-iface**
+return, not the wait's — so it is never `0xB0B000B`, and any index whose
+`index*4` exceeds the delivered size spins forever.
 
 ## 12. Error taxonomy
 
