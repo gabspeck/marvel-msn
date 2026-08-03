@@ -40,10 +40,12 @@ from server.mpc import (
 )
 from server.services.dirsrv import (
     DS_E_NOT_FOUND,
+    ENUM_SHN_KEY_ICONS,
     SUPPORTED_BROWSE_LCIDS,
     DIRSRVHandler,
     build_add_node_reply_payload,
     build_dirsrv_service_map_payload,
+    build_enum_shn_reply_payload,
     build_get_children_reply_payload,
     build_get_datasets_reply_payload,
     build_get_deid_from_go_word_reply_payload,
@@ -949,6 +951,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 [
                     ((0x1000, 0), "Employee Handbook Example"),
                     ((0x1001, 0), "France Magazine"),
+                    ((0x1002, 0), "MediaView Online Documentation"),
                 ],
             ),
         ]
@@ -1166,6 +1169,87 @@ class TestDIRSRVUnhandledSelector(unittest.TestCase):
             )
         self.assertIsNone(result)
         self.assertTrue(any("unhandled" in m for m in cap.output))
+
+
+class TestDIRSRVEnumShn(unittest.TestCase):
+    """Selector 0x05 — the Change Icon picker's list source.
+
+    Wire request captured from MOSSHELL's ChangeIconDlgProc WM_INITDIALOG:
+    `01 00 83 82 85`.
+    """
+
+    REQUEST = b"\x01\x00\x83\x82\x85"
+
+    def test_reply_carries_status_count_and_dword_stream(self):
+        from server.services import shabby as shabby_mod
+
+        ids = shabby_mod.enum_pickable_shabby_ids()
+        self.assertEqual(
+            build_enum_shn_reply_payload(self.REQUEST),
+            b"\x83\x00\x00\x00\x00"
+            + b"\x82"
+            + struct.pack("<H", len(ids))
+            + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+            + b"".join(struct.pack("<I", i) for i in ids),
+        )
+
+    def test_stream_is_ascending_and_inside_the_picker_window(self):
+        from server.services import shabby as shabby_mod
+
+        ids = shabby_mod.enum_pickable_shabby_ids()
+        # The client breaks on the first id above the window, so order matters.
+        self.assertEqual(ids, sorted(ids))
+        self.assertTrue(ids)
+        for shabby_id in ids:
+            self.assertGreater(shabby_id, 0x0598)
+            self.assertLessEqual(shabby_id, 0x0A48)
+
+    def test_every_enumerated_id_resolves_to_icon_bytes(self):
+        from server.services import shabby as shabby_mod
+
+        for shabby_id in shabby_mod.enum_pickable_shabby_ids():
+            blob = shabby_mod.load_shabby_bytes(shabby_id)
+            self.assertIsNotNone(blob, f"no blob for 0x{shabby_id:04x}")
+            # ExtractIconExA needs a real ICO/EXE/DLL — reserved word then
+            # RES_ICON in the ICONDIR header.
+            self.assertEqual(blob[:4], b"\x00\x00\x01\x00")
+
+    def test_default_h_value_is_in_the_enumerated_list(self):
+        from server.services import shabby as shabby_mod
+
+        self.assertIn(
+            shabby_mod.DEFAULT_NODE_ICON_ID,
+            shabby_mod.enum_pickable_shabby_ids(),
+        )
+
+    def test_unknown_key_enumerates_empty_without_hanging(self):
+        payload = build_enum_shn_reply_payload(b"\x01\x07\x83\x82\x85")
+        self.assertEqual(
+            payload,
+            b"\x83\x00\x00\x00\x00\x82\x00\x00"
+            + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]),
+        )
+
+    def test_selector_dispatches_to_a_reply_packet(self):
+        handler = DIRSRVHandler(pipe_idx=4, svc_name="DIRSRV")
+        packets = handler.handle_request(
+            msg_class=0x03,
+            selector=0x05,
+            request_id=12,
+            payload=self.REQUEST,
+            server_seq=0,
+            client_ack=0,
+        )
+
+        self.assertIsNotNone(packets)
+        parsed = parse_packet(packets[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        self.assertEqual(
+            parsed.payload[8:], build_enum_shn_reply_payload(self.REQUEST)
+        )
+
+    def test_key_constant_matches_the_observed_request(self):
+        self.assertEqual(self.REQUEST[1], ENUM_SHN_KEY_ICONS)
 
 
 class TestDIRSRVGetTicket(unittest.TestCase):
@@ -2267,6 +2351,7 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         for deid, archive_name, title_name in (
             ("1000", "HANDBOOK.M14", "Employee Handbook Example"),
             ("1001", "FRANCE.M14", "France"),
+            ("1002", "MVDOC.M14", "MediaView Online Documentation"),
         ):
             token = f":2[{deid}]0".encode("ascii") + b"\x00"
             request = (
@@ -2567,17 +2652,31 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         )
 
     @staticmethod
+    def _subscriber_state_request(notification_type, enabled):
+        state_payload = bytes([notification_type]) + struct.pack(
+            "<I", int(enabled),
+        )
+        return (
+            b"\x01\x00"
+            b"\x02\x07\x00"
+            b"\x04"
+            + bytes([0x80 | len(state_payload)])
+            + state_payload
+        )
+
+    @staticmethod
     def _picture_start_request(
         *,
         transfer_id,
         name="albi.bmp",
         current_size=0,
         mode=0,
+        state_flags=0,
     ):
         start_payload = (
             bytes([1, mode])
             + struct.pack("<II", current_size, transfer_id)
-            + b"\x00"
+            + bytes([state_flags])
             + name.encode("ascii")
             + b"\x00"
         )
@@ -2702,6 +2801,115 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
             (3, 12 + len(picture) - 2, 7, 2),
         )
         self.assertEqual(chunk_push[13:], picture[2:])
+
+    def test_reset_mode_start_on_valid_object_sends_status_only(self):
+        # The client's transfer-teardown pass: mode 1 (subscriber reset) with
+        # stateFlags bit 0 (object already valid). It reports currentSize 0 but
+        # already holds the finished bytes, so re-pushing them writes a second
+        # copy into a buffer it has finished with. Status record only.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        picture = b"BMalready-delivered"
+        handler.baggage_map = {"albi.bmp": picture}
+        self._subscribe(handler, 3, 3)
+        self._subscribe(handler, 4, 4)
+
+        pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            5,
+            self._picture_start_request(
+                transfer_id=7,
+                mode=1,
+                state_flags=0x01,
+            ),
+            10,
+            5,
+        )
+        # Reply + one type-3 status push, and no type-4 chunk push.
+        self.assertEqual(len(pkts), 2)
+        status_push = parse_packet(pkts[1][:-1]).payload[8:]
+        self.assertEqual(
+            struct.unpack("<HHIHIIIII", status_push[1:31]),
+            (1, 30, len(picture), 0, 0, 0, 0, 0, 7),
+        )
+        self.assertEqual(handler._pending_picture_transfers, {})
+
+    def test_reset_mode_holds_chunks_until_subscriber_reenabled(self):
+        # mode 1 on a not-yet-valid object still needs the bytes, but the
+        # type-4 subscriber is going down. Hold them until opcode 0x07 reports
+        # the stream enabled again.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        picture = b"BMheld-until-enabled"
+        handler.baggage_map = {"albi.bmp": picture}
+        self._subscribe(handler, 3, 3)
+        self._subscribe(handler, 4, 4)
+
+        start_pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            5,
+            self._picture_start_request(transfer_id=7, mode=1),
+            10,
+            5,
+        )
+        self.assertEqual(len(start_pkts), 2)
+        self.assertIn(7, handler._pending_picture_transfers)
+
+        # The client's own disable report must not release them either.
+        disable_pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            6,
+            self._subscriber_state_request(4, False),
+            20,
+            5,
+        )
+        self.assertEqual(len(disable_pkts), 1)
+
+        enable_pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            7,
+            self._subscriber_state_request(4, True),
+            30,
+            5,
+        )
+        self.assertEqual(len(enable_pkts), 2)
+        chunk_push = parse_packet(enable_pkts[1][:-1]).payload[8:]
+        self.assertEqual(
+            struct.unpack("<HHII", chunk_push[1:13]),
+            (3, 12 + len(picture), 7, 0),
+        )
+        self.assertEqual(chunk_push[13:], picture)
+        self.assertEqual(handler._pending_picture_transfers, {})
+
+    def test_online_start_after_disable_report_holds_chunks(self):
+        # Once the client reports type 4 disabled, an online-mode start must
+        # not push into the dead stream.
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        picture = b"BMno-live-stream"
+        handler.baggage_map = {"albi.bmp": picture}
+        self._subscribe(handler, 3, 3)
+        self._subscribe(handler, 4, 4)
+        handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            5,
+            self._subscriber_state_request(4, False),
+            10,
+            5,
+        )
+
+        pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            6,
+            self._picture_start_request(transfer_id=7, mode=0),
+            20,
+            5,
+        )
+        self.assertEqual(len(pkts), 2)
+        self.assertIn(7, handler._pending_picture_transfers)
 
 
 class TestMEDVIEWSubscribeNotification(unittest.TestCase):

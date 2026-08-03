@@ -579,6 +579,90 @@ paths (§6.2 and §6.3):
 
 See memory `project_mosshell_shabby_call_path` for deeper notes.
 
+### 6.5 Change Icon — `ChangeIconDlgProc` @ `0x7F401886`
+
+The dialog that rewrites `'h'`. Reached from the Properties **General**
+page (`GeneralPageDlgProc` @ `0x7F401ACE`) through
+`ShowChangeIconDialog` @ `0x7F401308`, which:
+
+1. Sets `IDC_WAIT`.
+2. Runs `PrefetchPickableIconsIntoCache` @ `0x7F404954` — see §6.5.2.
+   **A zero return stops here**, so the dialog never appears and the
+   button looks dead.
+3. Restores `IDC_ARROW` and runs `DialogBoxParamA(template 0x6B,
+   ChangeIconDlgProc, LPARAM = IMosTreeNode*)`.
+
+Listbox `0x65` is owner-draw and multi-column; each item carries a
+12-byte `g_mxa` allocation:
+
+| Offset | Field |
+|--------|-------|
+| `+0x0` | shabby id |
+| `+0x4` | cached `HICON` (filled lazily on first draw) |
+| `+0x8` | `IMosTreeNode*` |
+
+| Message | Handler |
+|---------|---------|
+| `WM_INITDIALOG` | `ChangeIconDlg_FillIconList` @ `0x7F40136C` |
+| `WM_MEASUREITEM` | cell = `SM_CXICON + 0xC` × `SM_CYICON + 4` |
+| `WM_DRAWITEM` | `GetCachedIconForShid` @ `0x7F40149E` → `DrawIcon` |
+| `WM_DELETEITEM` | `DestroyIcon` + `CMosXAllocator::Free` |
+| `WM_COMMAND` IDOK | `LB_GETCURSEL` → `LB_GETITEMDATA` → node `+0x130` `SetProperty("h", 0x0F, &shid, 4, 1)` |
+| `WM_COMMAND` `0x66` | `ChangeIconDlg_BrowseForIcon` @ `0x7F4017A2` |
+
+#### 6.5.1 List population and the pickable window
+
+`ChangeIconDlg_FillIconList`:
+
+1. `LB_SETCOLUMNWIDTH` = `SM_CXICON + 0xC`.
+2. `GetProperty("h", &current, 4, 0)` (`+0x40`) — the node's icon today.
+3. `EnumShn(0, &count, &iter)` (`+0x84`) — DIRSRV selector 5. `count` is
+   the u16 static field; `iter` is a TREENVCL `ShnIterator` over a packed
+   `ulong[]` (`docs/TREENVCL.md` §11).
+4. `GetNextShn` (`+0x88`) `count` times. Two guards per id:
+   - `id > 0xA48` — **break**, abandoning the rest of the stream.
+   - `id <= 0x598` — skip this id.
+
+   So the pickable window is `0x599 … 0xA48`, and because the guard is a
+   break rather than a continue, **the enumeration has to arrive
+   ascending** or it truncates at the first out-of-window value.
+5. Each surviving id becomes an `LB_ADDSTRING`. An id equal to the `'h'`
+   value read in step 2 also gets `LB_SETCURSEL`, which is the only way
+   the dialog opens on the node's current icon — so `'h'` has to live
+   inside the same window.
+6. `CTreeNavClient::CloseHDyn` releases the iterator.
+
+Every enumerated id is drawn through §6.2's cache, so each one must be
+fetchable by `GetShabby` as ExtractIconExA-parseable bytes (ICO/EXE/DLL).
+
+#### 6.5.2 The prefetch gate — `PrefetchPickableIconsIntoCache` @ `0x7F404954`
+
+Runs before the dialog is created and repeats the whole enumeration of
+§6.5.1 — **`EnumShn` therefore fires twice per Change Icon click**. For
+every in-window id it forces a cache fill
+(`CacheNodeIconsIntoImageLists` → `GetShabbyToFile` → `ExtractIconExA`),
+discarding both `HICON` outputs.
+
+It returns 0 — suppressing the dialog outright, with no error UI — when:
+
+- `EnumShn` itself fails,
+- `GetNextShn` returns negative, or
+- **any** in-window id fails to cache.
+
+An empty enumeration returns 1: the dialog opens with an empty list.
+
+The practical constraint is that a single id in the enumeration that
+`GetShabby` cannot serve, or that is not ExtractIconExA-parseable, kills
+the entire Change Icon button rather than dropping one row.
+
+#### 6.5.3 Browse for a local icon
+
+`ChangeIconDlg_BrowseForIcon` runs dialog `0x6C` ("Browse for icon",
+`Icon files (*.ico)`), then `CreateFileA` + `CreateFileMappingA` +
+`MapViewOfFile` and uploads the mapped bytes through node `+0x138`
+`AddShabby(0, base, size, &new_id, 1)`. The returned id is appended to the
+listbox and selected. Failures raise string `0xDA` ("Cannot add icon").
+
 ## 7. Click dispatch
 
 **Two separate dispatchers** — don't confuse them:
@@ -883,6 +967,12 @@ Renamed functions (plate comments on each):
 | `0x7F3FB27F` | `CMosEnumIDList_Next` | §5.3 |
 | `0x7F4047C2` | `CacheNodeIconsIntoImageLists` | §6.2 |
 | `0x7F4049F9` | `FetchShabbyIconToTempAndExtract` | §6.2 |
+| `0x7F40136C` | `ChangeIconDlg_FillIconList` | §6.5.1 |
+| `0x7F40149E` | `GetCachedIconForShid` | §6.5 |
+| `0x7F4017A2` | `ChangeIconDlg_BrowseForIcon` | §6.5.3 |
+| `0x7F401886` | `ChangeIconDlgProc` (created — no prior function) | §6.5 |
+| `0x7F401308` | `ShowChangeIconDialog` | §6.5 |
+| `0x7F404954` | `PrefetchPickableIconsIntoCache` | §6.5.2 |
 
 Already-annotated functions cross-referenced (not re-renamed):
 `HrGetPMtn`, `HrGetPMtnFromPIdl`, `HrBrowseObject`, `HrExecCommand`,

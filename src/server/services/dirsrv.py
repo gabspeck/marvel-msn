@@ -15,7 +15,7 @@ from ..config import (
     TAG_END_STATIC,
 )
 from ..log import TRACE
-from ..models import DirsrvRequest, DwordParam, VarParam
+from ..models import ByteParam, DirsrvRequest, DwordParam, VarParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -23,6 +23,7 @@ from ..mpc import (
     build_service_packet,
     build_tagged_reply_dword,
     build_tagged_reply_var,
+    build_tagged_reply_word,
     decode_dirsrv_request,
     parse_request_params,
 )
@@ -41,6 +42,9 @@ DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWor
 # Slot 4 (IID 00028B28) is GetShabby — CTreeNavClient::GetShabby
 # (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
 DIRSRV_SELECTOR_GET_SHABBY = 0x04
+DIRSRV_SELECTOR_ENUM_SHN = 0x05  # CTreeNavClient::EnumShn
+# The only EnumShn key with an observed caller: MOSSHELL's Change Icon list.
+ENUM_SHN_KEY_ICONS = 0x00
 TREEEDCL_CLASS_EDIT = 0x04
 TREEEDCL_SELECTOR_ADD_NODE = 0x02
 TREEEDCL_SELECTOR_SET_PROPERTIES = 0x04
@@ -143,6 +147,8 @@ class DIRSRVHandler:
             reply_payload = build_get_deid_from_go_word_reply_payload(payload)
         elif selector == DIRSRV_SELECTOR_GET_SHABBY:
             reply_payload = build_get_shabby_reply_payload(payload)
+        elif selector == DIRSRV_SELECTOR_ENUM_SHN:
+            reply_payload = build_enum_shn_reply_payload(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -319,11 +325,13 @@ def build_props(requested_props, node, *, is_children):
             # FUN_7f404786 reads it as DWORD → vtable[0x74] GetShabbyToFile →
             # ExtractIconExA (ICO/EXE/DLL bytes, not BMP). Omitting falls
             # back to LVN_GETDISPINFO iImage=0 = forbidden glyph.
+            # Held inside the Change Icon picker's window so the dialog
+            # opens with this icon selected.
             out.append(
                 (
                     0x03,
                     PROP_SECONDARY_ICON,
-                    struct.pack("<I", shabby.pack_shabby_id(shabby.FORMAT_ICO, 1)),
+                    struct.pack("<I", shabby.DEFAULT_NODE_ICON_ID),
                 )
             )
         elif name == PROP_RIGHTS:
@@ -668,6 +676,50 @@ def build_get_shabby_reply_payload(payload):
         build_tagged_reply_dword(0)
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + blob
+    )
+
+
+def build_enum_shn_reply_payload(payload):
+    """Build the reply for a DIRSRV EnumShn request.
+
+    Request payload (from `CTreeNavClient::EnumShn` @ TREENVCL 0x7F631D1F):
+      - `0x01 [key]`  PackSendByte — the enum key
+      - `0x83`  PackReceiveDword desc — status
+      - `0x82`  PackReceiveWord desc — element count
+      - `0x85`  PackReceive desc for the dynamic dword stream
+
+    Reply: `0x83 [status] 0x82 [count] 0x87 0x88 [count * u32 LE]`.
+
+    0x88 (stream-end), not 0x86: EnumShn hands the pending request to
+    ShnIterator_Construct (0x7F6326EB), and ShnIterator_GetAtIndex
+    (0x7F632757) drains it through the same `+0x14` Wait / `+0x1c`
+    data-iface pair as the GetChildren property walker, terminating on the
+    0xB0B000B sentinel. 0x86 would signal single-shot completion and never
+    feed the iterator.
+
+    Key 0 is the Change Icon picker — MOSSHELL's ChangeIconDlgProc
+    (0x7F401886) builds its owner-draw list from this stream on
+    WM_INITDIALOG, then writes the selected id back through
+    SetProperty("h", 0x0F, ...) on IDOK. No other key has an observed
+    caller, so anything else enumerates empty: count 0 skips the client's
+    walk loop entirely.
+    """
+    send_params, _ = parse_request_params(payload)
+    key = next((p.value for p in send_params if isinstance(p, ByteParam)), 0)
+
+    ids = shabby.enum_pickable_shabby_ids() if key == ENUM_SHN_KEY_ICONS else []
+    log.info("enum_shn key=%d", key)
+    log.info(
+        "enum_shn_reply status=0 count=%d ids=%s",
+        len(ids),
+        ",".join(f"0x{i:04x}" for i in ids) or "-",
+    )
+
+    return (
+        build_tagged_reply_dword(0)
+        + build_tagged_reply_word(len(ids))
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+        + b"".join(struct.pack("<I", i) for i in ids)
     )
 
 

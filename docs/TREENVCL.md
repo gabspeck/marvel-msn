@@ -472,6 +472,31 @@ is what `Reset` and `CloseHDyn` use to dispatch to the right backing
 type. Both kinds share the exact same `data_iface` vtable shape and the
 same `0xB0B000B` block-boundary protocol.
 
+### 11.1 EnumShn marshalling — selector 5
+
+`CTreeNavClient::EnumShn` @ `0x7F631D1F` packs, in order:
+
+| Marshal call | Tag | Binds |
+|--------------|-----|-------|
+| `+0x30` PackSendByte(key) | `0x01` | the enum key |
+| `+0x18` PackReceiveDword | `0x83` | status |
+| `+0x1C` PackReceiveWord | `0x82` | element count → `ShnIterator.capacity` |
+| `+0x40` PackReceive (dynamic) | `0x85` | the packed `ulong[]` |
+
+Request bytes for the Change Icon picker are therefore `01 00 83 82 85`.
+
+The reply's dynamic section rides the **iterator** path, not the
+single-shot one: `EnumShn` hands the pending request straight to
+`ShnIterator_Construct` @ `0x7F6326EB`, and `ShnIterator_GetAtIndex` @
+`0x7F632757` drains it through the same `+0x14` Wait / `+0x1C` data-iface
+pair `NodeIterator_GetAtIndex` uses, terminating on `0xB0B000B`. A
+single-shot completion tag would satisfy the initial Wait and then starve
+the iterator.
+
+`*out_id` is only written when `status == 0` **and** the `ShnIterator`
+allocation succeeds; on any other path the caller's count stays whatever
+it was, and `*out_iter` is NULLed.
+
 ## 12. Error taxonomy
 
 DS status codes (returned in `error_status` and from RPC exports) seen

@@ -14,6 +14,9 @@ pipe. Two consumers:
 
 Server replies with raw file bytes; no header synthesis beyond what the
 source file itself carries.
+
+The Change Icon picker (DIRSRV EnumShn, selector 0x05) draws from the
+pickable window below and writes the chosen id back into `h`.
 """
 
 from pathlib import Path
@@ -38,11 +41,41 @@ def unpack_shabby_id(shabby_id):
 
 _ICONS_DIR = Path(__file__).resolve().parent.parent / "data" / "icons"
 
+# Change Icon picker window. MOSSHELL's list builder (FUN_7f40136c @
+# 0x7F40136C, WM_INITDIALOG of ChangeIconDlgProc @ 0x7F401886) walks the
+# EnumShn stream and applies two guards per id: it skips anything <= 0x598
+# and *breaks* on the first id > 0xA48. Ids outside the window are therefore
+# invisible to the picker, and the enumeration has to be ascending or the
+# break truncates it early.
+#
+# Ids in this window are plain ordinals with no format byte: the picker draws
+# them through the same ExtractIconExA path as `h` (WM_DRAWITEM →
+# FUN_7f40149e → FUN_7f4049f9), which sniffs the file type itself.
+PICKABLE_ID_MIN = 0x0599
+PICKABLE_ID_MAX = 0x0A48
+
+PICKABLE_ICONS = {
+    0x0599: _ICONS_DIR / "folder.ico",
+    0x059A: _ICONS_DIR / "default.ico",
+}
+
+# What `h` carries by default. Sits inside the pickable window so the picker
+# opens with the node's current icon selected — ChangeIconDlgProc's builder
+# matches each enumerated id against GetProperty("h") and sends LB_SETCURSEL
+# on a hit.
+DEFAULT_NODE_ICON_ID = 0x0599
+
 ICON_REGISTRY = {
     pack_shabby_id(FORMAT_BMP, 1): _ICONS_DIR / "default_16.bmp",
     pack_shabby_id(FORMAT_ICO, 1): _ICONS_DIR / "folder.ico",
     pack_shabby_id(FORMAT_ICO, 2): _ICONS_DIR / "default.ico",
+    **PICKABLE_ICONS,
 }
+
+
+def enum_pickable_shabby_ids():
+    """Return the Change Icon picker's shabby ids, ascending."""
+    return sorted(PICKABLE_ICONS)
 
 
 def load_shabby_bytes(shabby_id):
