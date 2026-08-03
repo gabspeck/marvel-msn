@@ -58,8 +58,24 @@ The sample set at `/var/share/drop/MediaView Samples` adds format evidence:
 
 - `HANDBOOK.M14` is an uncompressed Multimedia Viewer HFS book.
 - `FRANCE.M14` is a compressed Multimedia Viewer HFS book.
-- Both files contain `|SYSTEM`, `|FONT`, and `|TOPIC`.
-- Both files contain native bitmap and hotspot baggage.
+- `MVDOC.M14` is a compressed book with a two-level HFS directory B-tree
+  and a `|Phrases` table. Its `|CONTEXT` records address table records
+  (type `0x23`) as well as display records (type `0x20`).
+- All three files contain `|SYSTEM`, `|FONT`, and `|TOPIC`.
+- All three files contain native bitmap and hotspot baggage.
+
+The `|Phrases` table replaces repeated strings in `LinkData2`:
+
+- `+0x02` u16 NumPhrases, `+0x06` u32 decompressed PhraseText size.
+- `+0x28` starts an offset table of NumPhrases+1 u16, each counted from
+  the table start, so `offsets[0]` equals `(NumPhrases + 1) * 2`.
+- The offset table is stored raw. Only the PhraseText it indexes is
+  LZ77-compressed.
+- In `LinkData2`, a byte in `0x01..0x0F` opens a two-byte reference.
+  The pair encodes `code = 256 * (first - 1) + second`. That selects
+  phrase `code >> 1` and appends a space when `code` is odd. Every other
+  byte is a literal.
+- Bytes `+0x0A..+0x27` are zero in `MVDOC.M14` and stay unidentified.
 
 Blackbird help says that Blackbird can import Media View files. This statement
 confirms that `.m14` and Blackbird `.ttl` are different formats.
@@ -1892,7 +1908,7 @@ Completed in this pass:
 - parser implementation in `scripts/inspect_mediaview_cache.py`
 - stock-client negative-evidence pass for the remaining apparent selector
   collisions in `MOSVIEW.EXE`
-- validation against `HANDBOOK.M14` and `FRANCE.M14`
+- validation against `HANDBOOK.M14`, `FRANCE.M14`, and `MVDOC.M14`
 - native `|SYSTEM`, `|FONT`, and `|TOPIC` extraction
 - online HFC and HFS fixture projection
 

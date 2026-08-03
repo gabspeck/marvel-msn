@@ -549,9 +549,9 @@ relying on allocator behaviour.
 
 ### 4.4.1 M14 projection
 
-The server reads `HANDBOOK.M14` and `FRANCE.M14` from `resources/titles/`.
-`|SYSTEM` supplies the title metadata and contents address. `|FONT`
-supplies face names and `0x2A`-byte style records.
+The server reads `HANDBOOK.M14`, `FRANCE.M14`, and `MVDOC.M14` from
+`resources/titles/`. `|SYSTEM` supplies the title metadata and contents
+address. `|FONT` supplies face names and `0x2A`-byte style records.
 
 The `|SYSTEM` DLLMAP records populate the info-kind `0x13` module
 table. `TitleLoadDLL @ 0x7E843785` matches the requested alias, skips
@@ -784,7 +784,17 @@ The server must then send, for each requested object:
    the type-3 target byte count.
 
 Initial/offline mode can replace the type-4 subscriber while the request
-is in flight. Queue the chunks until that subscription is active.
+is in flight. Queue the chunks until that subscription is active — the
+opcode-`0x07` enable report is the release signal, and it arrives for
+both directions.
+
+A completed picture draws one more start request: `modeByte = 1` with
+`stateFlags` bit 0 set and `currentSize` re-reported as `0`. That is the
+teardown pass, not a re-download. Publish the status record and no chunks:
+`NotificationType4_ApplyChunkedBuffer` accepts any `chunkOffset <= +0x38`
+without a completed-transfer check, so a second `chunkOffset=0` run walks
+back through the buffer the WLT decoder is reading and corrupts the heap.
+The fault then lands in KERNEL32's heap walker, well away from the copy.
 
 Additionally, `lMVTitleGetInfo` maps 5/6 in OpenMediaTitleSession to two
 more wire-path `info_kind`s — the **title name** is `info_kind=1`

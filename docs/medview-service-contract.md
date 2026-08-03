@@ -842,6 +842,28 @@ Returns:
   beginning at `currentSize`. If the type-4 subscription is being reset, the
   chunks wait until the replacement subscription is active.
 
+Two `modeByte == 1` shapes reach this opcode and they need different answers:
+
+- `stateFlags` bit 0 clear — a first transfer that coincides with the
+  subscriber reset. The bytes are still needed, so they wait for the
+  replacement stream.
+- `stateFlags` bit 0 set — the client's transfer-teardown pass, emitted once a
+  picture has completed. It re-reports `currentSize` as `0` even though the
+  object holds all `targetBytes`, and it disables the type-4 stream ~130 ms
+  later (opcode `0x07`, `enabled=0`). Answer with the status record only.
+  `NotificationType4_ApplyChunkedBuffer` has no completed-transfer guard: a
+  second `chunkOffset=0` run re-enters the buffer the WLT decoder is already
+  consuming, and the resulting heap damage surfaces later as a KERNEL32
+  page fault inside the heap walker rather than at the copy itself.
+
+Wire evidence for the teardown pass (`albi.bmp`, 12,100 B, `FRANCE.M14`):
+
+```
+op=4  mode=0 flags=0x00 current=0   → status + chunks, picture renders
+op=4  mode=1 flags=0x01 current=0   ← teardown pass, ~1.4 s later
+op=7  type=4 enabled=0              ← chunk stream down, ~130 ms later
+```
+
 ### Opcode `0x05` `ForceRefreshTransferNames`
 
 Purpose: force-refresh queued transfer names.
@@ -881,6 +903,12 @@ Returns:
 - `ack`. `TitlePreNotify @ 0x7E843941` deliberately **skips**
   `MVMarkPendingNotificationsBeforeRequest` for kind 7 (the only
   opcode treated specially in the dispatch tail).
+
+Both directions are reported, so this opcode is the authoritative gate on
+type-4 chunk delivery. The stock attach sequence enables type 4
+(`04 01 00 00 00`) right after the five `SubscribeNotifications` calls; a
+reset-mode `StartTransferBatch` takes it back down. Chunks pushed while the
+bit is clear land on a subscriber the client is tearing down.
 
 ### Opcode `0x08` `SendClientStatus`
 

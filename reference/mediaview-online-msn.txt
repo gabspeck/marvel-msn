@@ -1,0 +1,767 @@
+==============================================================================
+MediaView Online Documentation (MVDOC.M14) - MSN / online chapters
+==============================================================================
+
+Source archive : MVDOC.M14 (3,584,999 bytes)
+Book title     : MediaView Online Documentation
+Topics in book : 969
+
+Extracted from the compiled |TOPIC stream. Text only: pictures, hotspots, and
+styling are dropped. Topic numbers are indices into the book's topic list.
+
+
+==============================================================================
+TUTORIAL - GOING ONLINE WITH MSN
+==============================================================================
+
+
+[topic 902] Going Online with MSN
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Going Online with MSN
+---------------------
+
+Version 1.4 of MediaView offers an important new feature ... the ability to
+work online with the Microsoft Network (MSN).  There are a few changes that
+need to be made to both the title and the player to work online.  But almost
+everything you have already developed will work without modification.
+With an online MediaView title, the M14 file will reside on the Microsoft
+Network (the SERVER), and the player will reside on the user machine (the
+CLIENT).  When an online title is opened, a connection is automatically made
+to MSN.   For details on how to place the title on MSN, you will need to
+contact your MSN online representative.
+
+Lesson 28. Modifying the Title for Online Viewing
+Lesson 29.  Modifying the Player for Online Viewing
+
+
+
+[topic 903] Lesson 28. Modifying the Title for Online Viewing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Lesson 28.  Modifying the Title for Online Viewing
+--------------------------------------------------
+
+Titles created for MediaView work across the network with a few restrictions:
+
+  * MVIMG requires bitmaps to be encoded specially for the network.
+  * MVMCI cannot access media elements across the network.
+
+Both of these restrictions are because the bandwidth across a modem connection
+is limited.  Consider that a 640x480 8-bit color picture creates a file of
+about 320,000 bytes.  At 14.4 K baud (roughly, 14,000 bits per second), this
+file would take over 200 seconds (about 3 1/2 minutes) to download.
+This lesson is broken into the following steps:
+
+  * Preparing Pictures for Online Viewing
+  * Preparing Video and Audio for Local Access
+
+
+
+[topic 904] Lesson 28. Preparing Pictures for Online Viewing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Preparing Pictures for Online Access
+------------------------------------
+
+Compressing the graphics file cuts down on this download time.  Furthermore,
+the “wavelet compression” used by MSN allows a feature known as “progressive
+rendering”.  This feature allows the picture to be drawn even though only a
+portion of it has been down loaded.  It will appear fuzzy at first, but as
+more information is received, the picture gradually becomes clearer.  The user
+can usually recognize the picture early in the download -- and often doesn’t
+need to wait for the whole thing.
+
+The wavelet compression tools are available through MSN.
+Once compressed, the title needs to be modified to use the compressed form.
+To Add Support for Online Pictures
+
+  1. You will be working in the file "myths.rtf" and “myths.mvp”. You will
+     find a completed version of these file in the "changes" subdirectory
+     under lesson28.
+  2. In “myths.rtf”, change all “.BMP” to “.WLT”.  This Instructs the embedded
+     window DLL to use the wavelet decompression.
+  3. In “myths.mvp”, add the lines as shown.
+.  Comment out (or delete) the references to the “.BMP” files as shown.
+  4. Use the Wavelet compression tools to turn SWORD.BMP, BIGLION.BMP and
+     LION.BMP into SWORD.WLT, BIGLION.WLT, and LION.WLT respectively.
+
+In the next section you will prepare the Video and Audio elements to work
+locally.
+
+
+
+[topic 905] Lesson 28. Preparing Video and Audio for Online Access
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Preparing Video and Audio for Online Access
+-------------------------------------------
+
+Video and Audio played with MVMCI also require too much bandwidth to play
+across the MSN connection.  In the earlier examples the AVI and WAV elements
+were placed in BAGGAGE in the M14 file.  For titles used on MSN, the M14 file
+resides on the SERVER, but the audio and video files can be played from the
+CLIENT.
+To Add Support for Video and Audio
+
+  1. Continue working in the file "myths.rtf" and “myths.mvp”. You will find a
+     completed version of these file in the "changes" subdirectory under
+     lesson28.
+  2. In “myths.rtf”, change “!COYOTE.AVI” to “COYOTE.AVI”.  This will allow
+     the video to play from a local file rather than from baggage.
+  3. Similarly, change “!TADA.WAV” to “TADA.WAV”.
+  4. In “myths.mvp”, comment out (or delete) the references to “COYOTE.AVI”
+     and “TADA.WAV” as shown.
+
+  5. Build the MYTHS.M14 title using the MediaView compiler.
+  6. Move a copy of the COYOTE.AVI and TADA.WAV files from the MediaView
+     distribution disk (in the TUTORIAL\TITLESRC directory) to the same
+     directory as the newly built M14 file.
+
+Now your completed title needs to be installed on MSN.  For details on how to
+place the title on MSN, you will need to contact your MSN online
+representative.
+In the next lesson you will make some modifications to the player so that it
+will automatically connect to MSN when you open the title.
+
+
+
+[topic 906] Lesson 29. Modifying the Player for Online Viewing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Lesson 29.  Modifying the Player for Online Viewing
+---------------------------------------------------
+
+Making the PLAYER work with MSN is easy.  As long as the MediaView 1.4
+libraries are aware that you are opening a title on MSN, they will
+automatically connect to MSN, and route all MediaView API calls using a
+“remote procedure call”.  The player you build in this lesson will allow
+access to an online title.
+This lesson does not deal with the issue of distribution.  Although MSN has
+facilities for downloading a player executable, that is beyond the scope of
+this lesson.  It is assumed that the PLAYER you build will be placed on the
+client machine by other means.
+
+When the file opening code in PLAYER “recognizes” an online name it calls
+MVAddDriver, which alerts MediaView that the remote procedure calls are to be
+used.  Oline titles are all given a numerical designation (called a DEID) by
+MSN.  Consult your MSN representative to find out how these are assigned.
+A version of the sample title has been placed on MSN under the DEID “[2D23]0”.
+You will need to contact your MSN representative to be granted permission to
+access this title.
+Whenever an application is going to make a call that will use the connection
+to the network (for example, to do a search or to load a Word Wheel) the
+MVNotifyLayout calls are used to warn MediaView .  One of the features of MSN
+is that file and picture downloads are done asynchronously.  This means that
+when an application needs to use the connection, it might already be busy.
+The MVNotifyLayout call handles this contention for the connection.
+
+  1. Copy the files from the lesson29 subdirectory into your tutorial working
+     directory. Also copy the appropriate platform directory and its contents
+     under your working directory (i.e. “Win32” and “Win32\WinDebug”  if you
+     are developing on Windows NT or Windows95). If you are developing on NT
+     3.50 or older, be sure to add the NT350 predefined symbol to PLAYER.MAK.
+You will be working in the files "player.c" and “pane.c”. You will find a
+completed version of these files in the "changes" subdirectory under lesson29.
+
+  2. If the filename contains a left bracket ( “[“} ), it is recognized as an
+     online name.
+  3. The online file processing calls MVAddDriver .  The return value is a
+     network connection number that is prepended to the DEID.  Now the normal
+     call to hMVTitleOpenEx will use the network.  Note that the search
+     interrupt callback argument to hMVTitleOpenEx must be 0 when going
+     online.
+  4. Whenenver the address or layout of the topic changes, MVNotifyLayout
+     warns MediaView that the connection is needed by setting the usage
+     argument to TRUE.  At the end of the use, MediaVIew is notified again,
+     with the argument set to FALSE.
+
+Any MediaView calls that need to transfer data from the server should use
+MVNotifyLayout.  If they are missing, the program will still work, but will be
+very inefficient.  Some more examples (you do not need to copy any code here)
+of this occur in:
+
+  * Full Text Searching and
+  * Keyword Index Loading and
+  * Keyword Index Searching and
+
+Build the PLAYER.  Once you have established an account with permissions to
+access the MediaView test area, you can open the test title.  Please consult
+your MSN representative to get access to this area.
+Congratulations! You have completed the MediaView tutorial
+
+
+==============================================================================
+REFERENCE - ONLINE CONSIDERATIONS
+==============================================================================
+
+
+[topic 407] Programming for Online Applications
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Programming for Online Applications
+-----------------------------------
+
+In MediaView, 32-bit dynamically linked applications can use .M14 files which
+are not available locally. MediaView can access two separate title interfaces
+at once:
+
+The local interface (for accessing a CD or other local file
+An installable “online” interface
+
+The “title interface” is an interface between Mediaview and the .M14 file.
+This .M14 file may be on a local CD, on a network, or over a phone line.
+
+To specify the online interface, call the following function:
+
+BOOL FAR PASCAL EXPORT_API nMVTitleAddDriver ( “MVTTL14C.DLL” ) ;
+
+MVTTL14C.DLL is the filename of the MSN title interface DLL.
+
+Note:
+
+MediaView does not offer online support for static-linked or 16-bit
+applications, or for bitmaps displayed with the \{bm x ...
+\} command.
+
+The Title Interface
+
+The title interface functions as the “title driver.” It implements some of the
+core functions MediaView needs to access the .M14.
+
+
+
+[topic 408] Porting Applications for Online Use
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Porting Applications for MSN Use --
+Procedure
+---------
+
+For a given CD-ROM based MediaView application, perform the steps below to
+convert it for use in an MSN-based environment:
+
+Prerequisites
+
+Make sure you have converted all TITLE calls to use the “MV” versions that
+were implemented beginning with MV1.3.  For example, TitleOpen becomes
+MVTitleOpen; WordWheelLookup becomes nMVWordWheelLookup , etc.
+Make sure you have converted any remaining calls in MVFS (HfOpenHFS, etc.) to
+the baggage APIs in MediaView ( hMVBaggageOpen , etc.).  These should have
+been done for MV1.3 as well.
+
+Procedure
+
+  1. Set the online driver via nMVTitleAddDriver (LPCSTR lpszFilename ) :
+
+UINT nDriver = nMVTitleAddDriver ( “MVTTL14C.DLL” ) ;
+
+  2. Establish the connection via
+MVTitleConnection (UINT nDrvNum , BOOL fConnect , LPCSTR lpszService ) :
+
+MVTitleConnection ( nDriver , fConnect , lpszService );
+
+where:
+nDriver is the number returned by nMVTitleAddDriver (step 1) fConnect is TRUE
+to connect now; FALSE to not connect now.
+lpszService is the service to connect to.  Get this value from your MSN
+representitive.  Usually NULL.
+
+  3. Open the title with hMVTitleOpen :
+
+HTITLE htTitle = hMVTitleOpen (LPCSTR lpszFilename ) ;
+
+where lpszFilename is constructed as:
+
+:
+D [
+ID ]
+N
+
+where:
+D is the nDriver
+ID is the identification number obtained from your MSN representative
+N is the ID extension; obtain this from your MSN representative also.
+
+For example, if nDriver is 2 and the ID is 2D22, extension 0, lpszFilename
+would be constructed as:
+
+:2[2D22]0
+
+
+
+[topic 409] Optimizing Online Features
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Optimizing for MSN Applications
+-------------------------------
+
+Linking:
+
+MediaView MSN support is provided in the 32-bit DLL version only.  Link to
+ILIB\MVCL14N.LIB (the implib version) as the only MediaView library. You may
+also need to link to certain embedded window libraries, if you set special
+options. Do not link to MVTL14N.LIB, MVFS14N.LIB, MVBK14N.LIB or MVSR14N.LIB
+unless you are shipping the corresponding DLL’s and you are doing a CD/online
+hybrid product.
+
+Image :
+
+In general, all of your embedded images should use MVPR14N and use Wavelet
+compression. Wavelet compressed images always dither to the same palette when
+on a 256 color machine (the “Universal” palette).  Do not use the bml, bmc,
+bmr commands for bitmaps anywhere in your content, even for small bitmaps, as
+they are downloaded syncronously and slowly.
+
+Rethink your Caching :
+
+The MSN MediaView implementation caches a lot of things on its own, so doing
+your own cache is redundant. You may be preloading too many things, and
+slowing down the interface too much. Also, some of the things which it does
+not cache may now need to be cached. MSN MediaView will cache Word Wheel data,
+topic title strings, bitmaps and highlight information. Baggage files are not
+cached.
+
+Disable Background :
+
+Operations that call MediaView functions in idle loops or in response to
+timers will interfere with the background downloading of bitmaps, slowing down
+everything, so it should be avoided.
+
+Delay Word-wheeling:
+
+While CD-ROM access may be slow enough to call nMVWordWheelLookup for every
+keystroke, this method is too slow over the average modem. Use of a delay (set
+a flag and start a timer, then do the lookup in WM_TIMER) improves this. Be
+sure to process the data before processing the Enter key.
+
+Use nMVTitleAddDriver and
+MVTitleConnection :
+
+MVTitleConnection brings up the MSN connection dialog.  Call it before
+invoking your own splash screen. Use nMVTitleAddDriver to get the driver
+number for your online driver and construct the file name ( :
+D[ID]N , where
+D is the driver number, ID is the deid, and N is the deid extension).
+
+Call
+MVTerminate :
+
+You must call
+MVTerminate
+
+Use hMVBaggageGetFile :
+
+This function reads the entire baggage file in one call to the server, instead
+of making multiple calls, which can be particularly expensive if something
+else is using the modem.
+
+Use
+MVTitleNotifyLayout :
+
+Wrap calls to this function around groups of calls that will access the
+server. Most address conversions, layouts, searches, title and word wheel
+lookups will hit the server.
+
+
+==============================================================================
+PROJECT FILE / TITLE OPTION
+==============================================================================
+
+
+[topic 583] MediaViewOnlineTitle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MediaViewOnlineTitle
+--------------------
+
+Description
+
+Address for an MSN online MediaView .M14 title
+
+Type
+
+string
+
+Availability
+
+Design/runtime
+
+Acces
+
+Read/write
+
+Comments
+
+Comments for
+MediaViewTitle are applicable here.  Setting this property will cause an
+online title to be loaded.  The MediaViewTitle property will become a NULL
+string.
+
+
+
+[topic 588] MediaViewOnlineTitle
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Online
+------
+
+Description
+
+Tells whether application has gained online access or not.
+
+Type
+
+Boolean
+
+Availability
+
+Design/runtime
+
+Acces
+
+Read-only
+
+Comments
+
+If
+MediaViewOnlineTitle has been successfully set, this will return TRUE,
+otherwise it will return FALSE.
+
+
+==============================================================================
+ONLINE API FUNCTIONS
+==============================================================================
+
+
+[topic 536] MVTitleConnection;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MVTitleConnection
+-----------------
+
+#include <medv14.h>
+
+ERR FAR PASCAL MVTitleConnection(
+UINT nDrvNum ,
+BOOL fConnect ,
+LPCSTR lpszService );
+
+Connects to an online service by passing the integer returned by
+nMVTItleAddDriver to nDrvNum.
+
+Parameters
+
+nDrvNum
+
+The driver number, obtained from nMVTItleAddDriver (must be greater than 0).
+
+fConnect
+
+TRUE to connect;
+FALSE to disconnect from the online service.  If FALSE, pass NULL to LPCSTR.
+
+lpszService
+
+MS_HOME for Microsoft Consumer Division products; otherwise, the name of the
+service to connect to, or NULL to disconnect (and fConnect is FALSE).
+
+Comments
+
+A connection to a title service should be established before using it,
+although MediaView will call this function for you if you do not.
+
+
+
+[topic 537] MVTitleNotifyLayout;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MVTitleNotifyLayout
+-------------------
+
+#include <medv14.h>
+
+void FAR PASCAL MVTitleNotifyLayout(
+HANDLE hTitle ,
+HWIND hWnd ,
+BOOL fStart );
+
+For online use:  Notifies the driver that high priority activity will be
+taking place, such as FC downloads or word wheel opening. Lower priority
+downloads such as bitmaps should be paused.
+Enables/disables background downloads for title services that support it.
+
+Parameters
+
+hTitle
+
+The handle of the layout to be notified.
+
+hWnd
+
+Handle to the window that receives the download.
+
+fStart
+
+TRUE to pause;
+FALSE to resume.
+
+Comments
+
+MVTitleNotifyLayout has no effect in the standard operation of MediaView, but
+over MSN, bitmaps will be paused when
+MVTitleNotifyLayout (TRUE) has been called more times than
+MVTitleNotifyLayout (FALSE).
+
+
+
+[topic 538] MVTitlePreNotify;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MVTitlePreNotify
+----------------
+
+#include <medv14.h>
+
+DWORD FAR PASCAL MVTitlePreNotify (
+HANDLE hTitle ,
+WORD wType ,
+LPBYTE lpBuffer ,
+DWORD dwBufferLength );
+
+For online use:  No official generic use.  Used by specific online title
+services to perform specific tasks.
+
+Parameters
+
+hTitle
+
+The handle of the layout to be notified.
+
+wType
+
+Title service-specific parameter.
+
+lpBuffer
+
+Platform-specific parameter.
+
+dwBufferLength
+
+Size of the buffer in bytes.
+
+
+
+[topic 549] nMVTitleAddDriver;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+n
+MVTitleAddDriver
+----------------
+
+#include <medv14.h>
+
+UINT FAR PASCAL nMVTitleAddDriver (
+LPCSTR lpszFileName );
+
+Installs a new title service to use.
+
+Parameters
+
+lpszFileName
+
+The full filename for the driver.
+
+Return Value
+
+The driver number, or 0 on failure.
+
+Comments
+
+Use the textual representation of this number prepended with a colon (':') in
+the call to hMVTitleOpenEx to specify the use of this title service.
+
+
+
+[topic 500] MVBaggageAsyncClose;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MVBaggageAsyncClose
+-------------------
+
+#include <medv14.h>
+
+ERR FAR PASCAL MVBaggageAsyncClose (
+MVSTATUS lpErr );
+
+Terminates the background process and frees all memory.
+
+Parameters
+
+lpErr
+
+Error buffer.
+
+Return Value
+
+wERRS_NONE if successful; wERRS_BADPARAM if you passed NULL.
+
+
+
+[topic 501] MVBaggageAsyncGetFIle;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MVBaggageAsyncGetFile
+---------------------
+
+#include <medv14.h>
+
+MVSTATUS FAR PASCAL MVBaggageAsyncGetFile (
+HTITLE hTitle
+MVBGPROC
+MVCallBack
+DWORD dwUser
+DWORD dwStart
+DWORD dwBlock
+LPCSTR lpszFileName
+BOOL fBaggage
+DWORD dwBytes
+LPERR lpErr );
+
+Terminates the background process and frees all memory.
+
+Parameters
+
+hTitle
+
+Handle of the title that owns the background process.
+
+MVCallBack
+
+The user callback function.
+
+dwUser
+
+Value passed to the user callback function.
+
+dwStart
+
+Offset, starting at 0.
+
+dwBlock
+
+Block size to read.
+
+lpszFileName
+
+The full filename for the file to read.
+
+fBaggage
+
+Determines if file is in baggage or not:
+
+TRUE  = File is in baggage
+FALSE.= File is DOS file
+
+dwBytes
+
+The number of bytes to read.  To read the entire file, pass 0..
+
+lpErr
+
+Error buffer.  Must be non-NULL.
+
+Return Value
+
+The MVSTATUS object for calls to
+MVBaggageAsyncClose ,
+MVBaggageAsyncState , and
+MVBaggageAsyncStatus
+
+Comments
+
+The background process may not stop immediately. Therefore, the MVCallback may
+be called after
+MVBaggageAsyncClose is called. However, dwUser is guaranteed to be 0 if this
+is the case. Therefore, asyncronous baggage callbacks should check the dwUser
+parameter for 0.
+
+
+
+[topic 502] MVBaggageAsyncState;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MVBaggageAsyncState
+-------------------
+
+#include <medv14.h>
+
+ERR FAR PASCAL MVBaggageAsyncState (
+MVSTATUS lpID
+BOOL fResume );
+
+Pauses or resumes the baggage thread.
+
+Parameters
+
+lpID
+
+Identifier returned by
+MVBaggageAsyncGetFile
+
+fResume
+
+TRUE = Start or Resume the baggage thread
+FALSE. = Pause the baggage thread
+
+Return Value
+
+Error status
+
+Comments
+
+When the background process is paused, the file system may be locked, so do
+not attempt to call any MediaView functions. This function must be called at
+least once to start the thread.
+
+
+
+[topic 503] MVBaggageAsyncStatus;Online Functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+MVBaggageAsyncStatus
+--------------------
+
+#include <medv14.h>
+
+ERR FAR PASCAL MVBaggageAsyncStatus (
+MVSTATUS lpID long FAR* pRead long FAR* pTotal
+LPBYTE ppData
+
+Returns the status of a background baggage process.
+
+Parameters
+
+lpID
+
+Identifier returned by
+MVBaggageAsyncGetFile
+
+pRead
+
+Buffer to receive the number of bytes read.
+
+pTotal
+
+Buffer to receive the total number of bytes.
+
+ppData
+
+Buffer to receive the pointer to the data.
+
+Return Value
+
+Returns a pointer to the data that has been read, the number of bytes read,
+and the total number of bytes. If pRead
+--------------------------------------------------------------------------
+pTotal , the EOF has been reached.

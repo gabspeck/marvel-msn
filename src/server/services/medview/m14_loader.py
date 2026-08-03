@@ -51,6 +51,9 @@ _SEC06_OUTER_RECT_ABSOLUTE = 0x08
 # PopupPaneRecord: 31 bytes, name is an inline cstring[9] at +0x02.
 _SEC08_RECORD_SIZE = 0x1F
 _SEC08_NAME_SIZE = 9
+_PHRASE_COUNT_OFFSET = 2
+_PHRASE_TEXT_SIZE_OFFSET = 6
+_PHRASE_TABLE_OFFSET = 0x28
 _COLOR_INHERIT = 0xFFFFFFFF
 _CACHE_PROJECTION_VERSION = 2
 
@@ -276,6 +279,30 @@ def _read_internal_file(buf: bytes, offset: int) -> bytes:
     return bytes(buf[start:end])
 
 
+def _btree_first_leaf(
+    data: bytes,
+    pages_start: int,
+    page_size: int,
+    root_page: int,
+    level_count: int,
+    what: str,
+) -> int:
+    """Descend a Media View B-tree from its root page to the leftmost leaf.
+
+    An index page carries `Unused(2) NEntries(2) PreviousPage(2)` followed
+    by `key, child_page` pairs. `PreviousPage` is the leftmost child, so
+    taking it once per index level reaches the head of the leaf chain.
+    A one-level tree is already a leaf and descends zero times.
+    """
+    page = root_page
+    for _ in range(level_count - 1):
+        start = pages_start + page * page_size
+        if start + 6 > len(data):
+            raise ValueError(f"{what} index page {page} overruns file")
+        page = struct.unpack_from("<H", data, start + 4)[0]
+    return page
+
+
 def _read_directory(buf: bytes, directory_offset: int) -> dict[str, int]:
     directory = _read_internal_file(buf, directory_offset)
     if len(directory) < 38:
@@ -285,11 +312,16 @@ def _read_directory(buf: bytes, directory_offset: int) -> dict[str, int]:
         raise ValueError(f"HFS directory magic mismatch: 0x{magic:04x}")
     root_page = struct.unpack_from("<H", directory, 26)[0]
     level_count = struct.unpack_from("<H", directory, 32)[0]
-    if level_count != 1:
-        raise NotImplementedError(f"HFS directory with {level_count} B-tree levels is unsupported")
 
     pages_start = 38
-    page = root_page
+    page = _btree_first_leaf(
+        directory,
+        pages_start,
+        page_size,
+        root_page,
+        level_count,
+        "HFS directory",
+    )
     entries: dict[str, int] = {}
     visited: set[int] = set()
     while page != 0xFFFF:
@@ -438,13 +470,9 @@ def _parse_context(data: bytes) -> tuple[tuple[int, int], ...]:
         raise ValueError(f"|CONTEXT B-tree magic mismatch: 0x{magic:04x}")
     root_page = struct.unpack_from("<H", data, 26)[0]
     level_count = struct.unpack_from("<H", data, 32)[0]
-    if level_count != 1:
-        raise NotImplementedError(
-            f"|CONTEXT B-tree with {level_count} levels is unsupported",
-        )
 
     records: list[tuple[int, int]] = []
-    page = root_page
+    page = _btree_first_leaf(data, 38, page_size, root_page, level_count, "|CONTEXT")
     visited: set[int] = set()
     while page != 0xFFFF:
         if page in visited:
@@ -521,6 +549,66 @@ def _lz77_decompress(data: bytes, limit: int = 0x4000) -> bytes:
     return bytes(output)
 
 
+def _parse_phrases(data: bytes) -> tuple[bytes, ...]:
+    """Return the `|Phrases` table that expands compressed LinkData2 runs.
+
+    Layout confirmed against MVDOC.M14: NumPhrases sits at +2 and the
+    decompressed PhraseText size at +6, the offset table of NumPhrases+1
+    u16 starts at +0x28, and every offset counts from the table start.
+    The table itself is stored raw and only the text it indexes is
+    LZ77-compressed. Bytes +0x0A..+0x27 are zero in that sample and stay
+    unidentified.
+    """
+    if len(data) < _PHRASE_TABLE_OFFSET + 2:
+        raise ValueError("|Phrases is shorter than its header")
+    count = struct.unpack_from("<H", data, _PHRASE_COUNT_OFFSET)[0]
+    text_size = struct.unpack_from("<I", data, _PHRASE_TEXT_SIZE_OFFSET)[0]
+    if _PHRASE_TABLE_OFFSET + (count + 1) * 2 > len(data):
+        raise ValueError("|Phrases offset table overruns file")
+    offsets = struct.unpack_from(f"<{count + 1}H", data, _PHRASE_TABLE_OFFSET)
+    base = offsets[0]
+    if base != (count + 1) * 2:
+        raise ValueError("|Phrases offset table does not end where its text starts")
+    if offsets[-1] - base != text_size:
+        raise ValueError("|Phrases text size disagrees with its offset table")
+    text = _lz77_decompress(data[_PHRASE_TABLE_OFFSET + base :], text_size)
+    if len(text) != text_size:
+        raise ValueError("|Phrases text decompressed to the wrong size")
+    return tuple(
+        text[offsets[index] - base : offsets[index + 1] - base] for index in range(count)
+    )
+
+
+def _phrase_expand(data: bytes, phrases: tuple[bytes, ...]) -> bytes:
+    """Expand one phrase-compressed LinkData2 run.
+
+    A byte in 0x01..0x0F opens a two-byte reference encoding
+    `code = 256 * (first - 1) + second`. That selects phrase `code >> 1`
+    and appends a space when `code` is odd. Every other byte is a
+    literal. Verified against MVDOC.M14: each record expands to exactly
+    the size its TOPICLINK declares.
+    """
+    out = bytearray()
+    pos = 0
+    while pos < len(data):
+        first = data[pos]
+        pos += 1
+        if not 0 < first < 16:
+            out.append(first)
+            continue
+        if pos >= len(data):
+            raise ValueError("truncated LinkData2 phrase reference")
+        code = 256 * (first - 1) + data[pos]
+        pos += 1
+        index = code >> 1
+        if index >= len(phrases):
+            raise ValueError(f"LinkData2 phrase {index} is out of range")
+        out += phrases[index]
+        if code & 1:
+            out += b" "
+    return bytes(out)
+
+
 def _topic_block_size(system: _SystemInfo) -> int:
     if system.minor <= 16 or system.flags == 8:
         return 0x800
@@ -553,6 +641,7 @@ def _read_topic_link(
     blocks: list[bytes],
     topic_pos_stride: int,
     topic_pos: int,
+    phrases: tuple[bytes, ...],
 ) -> tuple[int, int, int, int, int, bytes, bytes]:
     relative = topic_pos - 12
     if relative < 0:
@@ -574,8 +663,15 @@ def _read_topic_link(
     data1 = bytes(record_data[_TOPIC_LINK_HEADER_SIZE:data1_size])
     stored_data2 = bytes(record_data[data1_size:size])
     if data2_size > len(stored_data2):
-        raise NotImplementedError("phrase-compressed M14 LinkData2 is unsupported")
-    data2 = stored_data2[:data2_size]
+        if not phrases:
+            raise NotImplementedError("phrase-compressed M14 LinkData2 without |Phrases")
+        data2 = _phrase_expand(stored_data2, phrases)
+        if len(data2) != data2_size:
+            raise ValueError(
+                f"TOPICLINK 0x{topic_pos:x} expanded to {len(data2)} of {data2_size} bytes",
+            )
+    else:
+        data2 = stored_data2[:data2_size]
     return (
         record_type,
         previous,
@@ -748,6 +844,7 @@ def _parse_display(
 def _parse_topics(
     data: bytes,
     system: _SystemInfo,
+    phrases: tuple[bytes, ...],
 ) -> tuple[tuple[M14Topic, ...], M14Topic]:
     headers, blocks, topic_pos_stride = _load_topic_blocks(data, system)
     builders: list[_TopicBuilder] = []
@@ -780,7 +877,7 @@ def _parse_topics(
             _data2_size,
             data1,
             data2,
-        ) = _read_topic_link(blocks, topic_pos_stride, current_pos)
+        ) = _read_topic_link(blocks, topic_pos_stride, current_pos, phrases)
 
         if record_type == _TOPIC_HEADER:
             current_topic = _parse_topic_header(data1, data2)
@@ -846,6 +943,7 @@ def _resolve_context_map(
         for display in topic.displays
     )
     resolved = []
+    unresolved = 0
     for context_hash, address in records:
         block = address >> 15
         character = address & 0x7FFF
@@ -861,10 +959,22 @@ def _resolve_context_map(
             None,
         )
         if target is None:
-            raise ValueError(
-                f"|CONTEXT hash 0x{context_hash:08x} points outside |TOPIC",
-            )
+            # The address lands in a record that carries no display, which
+            # in MVDOC.M14 is always a table (type 0x23). Tables consume
+            # character space but never become an M14DisplayRecord, so
+            # there is no TOPICPOS to hand back. Drop the entry: the miss
+            # then reaches `context_at` as `None`, the same answer an
+            # absent hash gets. Which TOPICPOS MOSVIEW expects for a
+            # table-hosted target is untested.
+            unresolved += 1
+            continue
         resolved.append((context_hash, target.topic_pos, address))
+    if unresolved:
+        log.info(
+            "m14 |CONTEXT: %d of %d records target a non-display record",
+            unresolved,
+            len(records),
+        )
     return tuple(resolved)
 
 
@@ -892,7 +1002,8 @@ def load_m14(path: pathlib.Path) -> LoadedM14 | None:
         by_name = {item.name: item.body for item in internal_files}
         system = _parse_system(by_name["|SYSTEM"])
         faces, descriptors = _parse_font(by_name["|FONT"])
-        topics, home_topic = _parse_topics(by_name["|TOPIC"], system)
+        phrases = _parse_phrases(by_name["|Phrases"]) if "|Phrases" in by_name else ()
+        topics, home_topic = _parse_topics(by_name["|TOPIC"], system, phrases)
         context_map = _resolve_context_map(
             _parse_context(by_name["|CONTEXT"]),
             topics,

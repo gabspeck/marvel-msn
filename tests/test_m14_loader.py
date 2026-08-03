@@ -16,6 +16,7 @@ from server.services.medview.m14_loader import load_m14, lower_m14_to_payload
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _HANDBOOK = _REPO_ROOT / "resources" / "titles" / "HANDBOOK.M14"
 _FRANCE = _REPO_ROOT / "resources" / "titles" / "FRANCE.M14"
+_MVDOC = _REPO_ROOT / "resources" / "titles" / "MVDOC.M14"
 
 
 def _read_blob(payload: bytes, offset: int) -> tuple[bytes, int]:
@@ -35,6 +36,35 @@ class TestM14Loader(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(_FRANCE.read_bytes()).hexdigest(),
             "f39c8fa37c881ade153f4af8e6c8d9c098c6309d378ed27e5331fd8a8fe98060",
+        )
+        self.assertEqual(len(_MVDOC.read_bytes()), 3_584_999)
+        self.assertEqual(
+            hashlib.sha256(_MVDOC.read_bytes()).hexdigest(),
+            "227144ca05fae687d1190dfd62010add711e953bf318aa69848af51423fd7123",
+        )
+
+    def test_mvdoc_needs_a_two_level_directory_and_the_phrase_table(self):
+        """MVDOC.M14 exercises two loader paths the other two fixtures skip.
+
+        Its HFS directory is a two-level B-tree, so the reader must descend
+        to the leftmost leaf before walking the leaf chain. Its LinkData2 is
+        phrase-compressed against `|Phrases`, so every record expands to the
+        size its TOPICLINK declares.
+        """
+        title = load_m14(_MVDOC)
+        self.assertIsNotNone(title)
+        self.assertEqual(title.title, "MediaView Online Documentation")
+        self.assertEqual(len(title.internal_files), 199)
+        self.assertEqual(title.topic_count, 968)
+        self.assertEqual(len(title.topics), 969)
+        self.assertEqual(
+            title.home_topic.title,
+            "MediaView Kit Documentation Contents",
+        )
+        # Phrase expansion feeds the text; a literal-only reader loses these.
+        self.assertIn(
+            "Author’s Reference:  MediaView Authoring Tools and Commands",
+            [topic.title for topic in title.topics],
         )
 
     def test_handbook_home_topic_contains_native_mediaview_image_command(self):

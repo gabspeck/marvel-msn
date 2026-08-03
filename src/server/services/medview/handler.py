@@ -100,6 +100,7 @@ _M14_FIXTURE_FILES = {
     "4": "HANDBOOK.M14",
     "1000": "HANDBOOK.M14",
     "1001": "FRANCE.M14",
+    "1002": "MVDOC.M14",
 }
 
 log = logging.getLogger(__name__)
@@ -113,6 +114,18 @@ _HFS_DYNAMIC_BLOCK_DATA_MAX = 0x4000
 # Keep each type-4 record within one MPCCL dynamic-buffer growth unit,
 # including its 12-byte frame header and the outer 0x85 stream tag.
 _PICTURE_CHUNK_DATA_MAX = 0x3F00
+# `PictureStartPayload.modeByte`. Value 1 is the client's initial/offline
+# mode: `PictureDownload_StartOrRefresh` emits it when its local transfer-mode
+# flag is clear, and the same condition makes the wrapper reset the type-4
+# subscriber (`MVAsyncSubscriberSetState(DAT_7E84E318, 0)`). The reset lands as
+# the opcode-0x07 disable report ~130 ms behind the start request, so the mode
+# byte is the only advance notice that the chunk stream is going down.
+_PICTURE_MODE_SUBSCRIBER_RESET = 1
+# `PictureStartPayload` entry `stateFlags` bit 0: the client's transfer object
+# is already validated (`this+0x48 != 0`) by an earlier type-3 status.
+_PICTURE_FLAG_OBJECT_VALID = 0x01
+# Notification type carrying transfer chunks (`TransferChunkStream`).
+_NOTIFICATION_TYPE_TRANSFER_CHUNK = 4
 _BAGGAGE_HANDLE_BM0 = 0x42
 # Per-page baggage handle base. Engine treats handles as opaque u8;
 # `0x42` is the bm0 sentinel kept for log continuity. Subsequent pages
@@ -664,6 +677,14 @@ def _parse_picture_start_payload(
     return mode_byte, entries
 
 
+def _parse_subscriber_state_payload(payload: bytes) -> tuple[int, bool] | None:
+    """Decode ``SetSubscriberEnabledState`` from PreNotifyTitle opcode 0x07."""
+    if len(payload) < 5:
+        return None
+    enabled = struct.unpack_from("<I", payload, 1)[0]
+    return payload[0], bool(enabled & 0x01)
+
+
 def _picture_status_metrics(data: bytes) -> tuple[int, int, int]:
     """Return the nonzero picture-info kind and natural BMP dimensions."""
     if len(data) < 26 or data[:2] != b"BM":
@@ -700,6 +721,11 @@ class MEDVIEWHandler:
         self._pending_picture_transfers: dict[
             int, tuple[str, int, bytes]
         ] = {}
+        # Client-reported subscriber enable bit, keyed by notification type
+        # (PreNotifyTitle opcode 0x07). Absent means the client has not
+        # reported a transition yet, which the engine treats as deliverable:
+        # the stock attach sequence enables type 4 right after subscribing.
+        self._subscriber_enabled: dict[int, bool] = {}
 
     # --- BootstrapDiscovery ----------------------------------------
 
@@ -901,6 +927,9 @@ class MEDVIEWHandler:
         )
         if notification_type is not None:
             self._subscriptions[notification_type] = (msg_class, request_id)
+            # A replacement subscription clears any hold left by a reset-mode
+            # start; the client reports the enable bit again on the new object.
+            self._subscriber_enabled.pop(notification_type, None)
         return replies.stream_end()
 
     def _handle_unsubscribe(self, request_id, payload) -> bytes:
@@ -1044,6 +1073,27 @@ class MEDVIEWHandler:
         packets = build_service_packet(
             self.pipe_idx, host_block, server_seq, client_ack,
         )
+        if notify_op == 8 and len(notify_payload) > 1:
+            # Opcode 0x08's long form is MOSVIEW's own failure report, not the
+            # 1-byte heartbeat: the "title ... caused an EXCEPTION" /
+            # "would not start" diagnostics it also shows in a dialog. The
+            # generic hex preview truncates it, so record the text in full.
+            log.info(
+                "client_status_report req_id=%d len=%d text=%r",
+                request_id,
+                len(notify_payload),
+                notify_payload.rstrip(b"\x00").decode("cp1252", "replace"),
+            )
+        if notify_op == 7:
+            packets.extend(
+                self._apply_subscriber_state(
+                    notify_payload,
+                    request_id,
+                    (server_seq + len(packets)) & 0x7F,
+                    client_ack,
+                )
+            )
+            return packets
         if notify_op != 4:
             return packets
 
@@ -1059,6 +1109,10 @@ class MEDVIEWHandler:
             "picture_transfer_start req_id=%d mode=%d entries=%d",
             request_id, mode_byte, len(entries),
         )
+        if mode_byte == _PICTURE_MODE_SUBSCRIBER_RESET:
+            # Advance notice that the type-4 subscriber is going down. Hold
+            # every chunk until the client reports the replacement stream.
+            self._subscriber_enabled[_NOTIFICATION_TYPE_TRANSFER_CHUNK] = False
         next_seq = (server_seq + len(packets)) & 0x7F
         for current_size, transfer_id, state_flags, name in entries:
             canonical = name.lstrip("|!").lower()
@@ -1078,21 +1132,42 @@ class MEDVIEWHandler:
                 )
                 current_size = 0
 
-            self._pending_picture_transfers[transfer_id] = (
-                canonical,
-                current_size,
-                data,
-            )
-            log.info(
-                "picture_transfer_queue req_id=%d transfer_id=0x%08x "
-                "name=%r current=%d target=%d flags=0x%02x",
-                request_id,
-                transfer_id,
-                canonical,
-                current_size,
-                len(data),
-                state_flags,
-            )
+            # A reset-mode start whose object is already valid is the client's
+            # transfer-teardown pass: it holds the finished bytes, it re-reports
+            # `currentSize` as 0, and it disables the chunk stream immediately
+            # after. Feeding the bytes again writes a second copy through
+            # `NotificationType4_ApplyChunkedBuffer` into a buffer the client
+            # has finished with, which corrupts the heap it decodes from.
+            # Status only, no chunks.
+            if (
+                mode_byte == _PICTURE_MODE_SUBSCRIBER_RESET
+                and state_flags & _PICTURE_FLAG_OBJECT_VALID
+            ):
+                log.info(
+                    "picture_transfer_ack_only req_id=%d transfer_id=0x%08x "
+                    "name=%r target=%d flags=0x%02x",
+                    request_id,
+                    transfer_id,
+                    canonical,
+                    len(data),
+                    state_flags,
+                )
+            else:
+                self._pending_picture_transfers[transfer_id] = (
+                    canonical,
+                    current_size,
+                    data,
+                )
+                log.info(
+                    "picture_transfer_queue req_id=%d transfer_id=0x%08x "
+                    "name=%r current=%d target=%d flags=0x%02x",
+                    request_id,
+                    transfer_id,
+                    canonical,
+                    current_size,
+                    len(data),
+                    state_flags,
+                )
             state_kind, metric0, metric1 = _picture_status_metrics(data)
             status_frame = build_type3_transfer_status_frame(
                 transfer_id,
@@ -1152,11 +1227,51 @@ class MEDVIEWHandler:
             client_ack,
         )
 
+    def _apply_subscriber_state(
+        self,
+        notify_payload,
+        request_id,
+        server_seq,
+        client_ack,
+    ):
+        """Track opcode 0x07 and release held chunks when type 4 comes back."""
+        parsed = _parse_subscriber_state_payload(notify_payload)
+        if parsed is None:
+            log.info(
+                "subscriber_state req_id=%d malformed payload_len=%d",
+                request_id, len(notify_payload),
+            )
+            return []
+        notification_type, enabled = parsed
+        self._subscriber_enabled[notification_type] = enabled
+        log.info(
+            "subscriber_state req_id=%d type=%d enabled=%d pending_transfers=%d",
+            request_id,
+            notification_type,
+            int(enabled),
+            len(self._pending_picture_transfers),
+        )
+        if (
+            notification_type != _NOTIFICATION_TYPE_TRANSFER_CHUNK
+            or not enabled
+        ):
+            return []
+        return self._flush_pending_picture_chunks(server_seq, client_ack)
+
     def _flush_pending_picture_chunks(self, server_seq, client_ack):
-        if 4 not in self._subscriptions:
+        if _NOTIFICATION_TYPE_TRANSFER_CHUNK not in self._subscriptions:
             if self._pending_picture_transfers:
                 log.info(
                     "picture_transfer_chunks_queued count=%d reason=no_type4_subscriber",
+                    len(self._pending_picture_transfers),
+                )
+            return []
+        if not self._subscriber_enabled.get(
+            _NOTIFICATION_TYPE_TRANSFER_CHUNK, True
+        ):
+            if self._pending_picture_transfers:
+                log.info(
+                    "picture_transfer_chunks_queued count=%d reason=type4_disabled",
                     len(self._pending_picture_transfers),
                 )
             return []

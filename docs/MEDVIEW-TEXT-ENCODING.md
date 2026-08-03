@@ -683,6 +683,7 @@ Implementer's checklist. Each encoder must satisfy:
 | `tests/assets/multi_page_title.ttl`                 | Multi-page lower (per-page bm baggage map)                           |
 | `resources/titles/HANDBOOK.M14`                    | Uncompressed native `|TOPIC` control stream and HFS baggage          |
 | `resources/titles/FRANCE.M14`                      | Compressed native `|TOPIC` control stream and HFS baggage            |
+| `resources/titles/MVDOC.M14`                       | Two-level HFS directory B-tree, `|Phrases`-compressed `LinkData2`    |
 | `binaries/MVPUBKIT/{MMAG,MVAPIREF,MVAUTHOR}.MVB`    | Multimedia Viewer 2.0 archive enumeration (NOT TextTree)             |
 
 The `.MVB` and `.M14` archives use Multimedia Viewer HFS. Their
