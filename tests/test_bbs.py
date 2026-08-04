@@ -295,6 +295,20 @@ class TestBBSAttachmentFixture(unittest.TestCase):
     def test_article_declares_one_attachment(self):
         self.assertIn(b"X-MOS-Attach: 1\n", build_bbs_article(self.node))
 
+    def test_tree_record_marks_the_message_for_attached_files_view(self):
+        request = DirsrvRequest(node_id=_BOARD, prop_group="e\x00_t")
+        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        counts = {record["e"]: record["_t"] for record in records}
+        self.assertEqual(
+            counts,
+            {
+                "Yosemite": 0,
+                "RE: Yosemite": 0,
+                "British Climbers": 0,
+                "Attachment test": 1,
+            },
+        )
+
     def test_the_object_mnid_resolves_on_the_tree(self):
         # FUN_7F5FC919 addresses the single MOSAF object as message id + 1 and
         # reads `z` and `_r` off it.

@@ -142,7 +142,7 @@ to materialize the parent message — the explicit RE: thread linkage.
 
 `CBbs_FillPropertiesDialogPage` (`0x7F5F385E`) populates the BBS folder/message
 property page: item 0x66 ← `e` (name), item 0x68 ← `MnidToSz(mnid)`, item 0x6A ←
-`_D` (date), item 0x70 ← `_t`. Reads `_I` (2-byte flags): bit `0x8000` →
+`_D` (date), item 0x70 ← `_t` (attachment count). Reads `_I` (2-byte flags): bit `0x8000` →
 checkbox 0x6E; bit `0x4000` → checkbox 0x72 + label string `0x190F`/`0x1910`.
 When pricing is supported it reads `z` (DWORD price) and `FFormatPrice`s it into
 a currency combo (items 0x73/0x75/0x77/0x79).
@@ -227,13 +227,12 @@ Gateway callee protocol deferred (out of binary set).
 
 See `docs/bbs-service-contract.md` §Property tags. Summary: per-node SVCPROP
 record with MOSSHELL base tags + 8 BBS extras `{_a,_D,_P,_f,_t,p,_F,_I}`;
-columns `e/_a/p/_D`; threading via tree + `_P`; flags `_F`/`_I`; price `z`; icon
-`h` synthesised client-side.
+columns `e/_a/p/_D`; threading via tree + `_P`; `_t` attachment count; flags
+`_F`/`_I`; price `z`; icon `h` synthesised client-side.
 
 ## 12. Known gaps / follow-ups
 
-- `_f` advertised but no read site found; `_t` is a short text field (topic), not
-  the body.
+- `_f` is advertised but no read site is known.
 - Attachments: the object side is traced (MOSAF.DLL, CLSID `{00028B50-…}`,
   mnid `message id + k`; see `docs/bbs-service-contract.md` §Attachments). The
   FTM download itself — `HrFtmDownloadWithUIFRI` / `HrQueueToFtm` — is not.

@@ -153,7 +153,7 @@ PROP_AUTHOR = "_a"
 PROP_SIZE = "p"
 PROP_DATE = "_D"
 PROP_PARENT_SUBID = "_P"
-PROP_TOPIC = "_t"
+PROP_ATTACHMENT_COUNT = "_t"
 PROP_HAS_CHILDREN = "_F"
 PROP_PRICE_INFO = "_I"
 PROP_UNKNOWN_F = "_f"
@@ -497,8 +497,11 @@ def build_bbs_props(requested_props, node, *, is_children):
             out.append((0x0A, name, dirsrv._sz(content.name)))
         elif name == PROP_AUTHOR:
             out.append((0x0A, name, dirsrv._sz(bbs.author)))
-        elif name == PROP_TOPIC:
-            out.append((0x0A, name, dirsrv._sz(bbs.topic)))
+        elif name == PROP_ATTACHMENT_COUNT:
+            # FUN_7F5F1CAD reads one byte from `_t`; a nonzero value marks the
+            # row for Attached Files view. The Properties page also formats
+            # this property as the attachment count.
+            out.append((0x01, name, struct.pack("<B", bbs.attachment_count)))
         elif name == PROP_SIZE:
             out.append((0x03, name, struct.pack("<I", content.size_bytes & 0xFFFFFFFF)))
         elif name == PROP_DATE:

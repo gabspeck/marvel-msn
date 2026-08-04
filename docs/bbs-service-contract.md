@@ -137,7 +137,7 @@ order): `_a, _D, _P, _f, _t, p, _F, _I`.
 | `p`  | `0x03` DWORD | **Size** (bytes). Column 2 (width 80). | RCDATA 6011 col2. |
 | `_D` | `0x03` DWORD time_t | **Date**. Column 3 (width 118); Properties dlg item 0x6A. | RCDATA 6011 col3. `_D` triggers MOSSHELL's DWORD-as-`time_t`→date fast path (`docs/DSNAV.md` §14.2; `MOSSHELL` `0x7F3FBC12` `"_D"` string). |
 | `_P` | `0x03` DWORD | **Parent / thread linkage**. Spliced into the node's own mnid → `HrGetPMtn` resolves the parent message (RE: threading / junction). | `CBbsNavTreeNode_GetThreadParent` `0x7F5F1C3E`. Also read in the write path `0x7F60162B`. |
-| `_t` | `0x0A` ASCIIZ | Short text field shown in the Properties dialog (item 0x70). Topic/sub-title; **not** the message body. | `CBbs_FillPropertiesDialogPage` `0x7F5F385E`. |
+| `_t` | `0x01` byte | **Attachment count.** A nonzero value puts the message in Attached Files view and is shown in the Properties dialog (item 0x70). | `FUN_7F5F1CAD` `0x7F5F1CAD`; `FUN_7F5F5DE4` `0x7F5F5DE4`; `CBbs_FillPropertiesDialogPage` `0x7F5F385E`. |
 | `_F` | 2-byte flags | Child-fetch gate, **inverted**: bit `0x1000` SET → child count forced to 0 (leaf message). CLEAR → the count is derived and the node expands. | `CBbsNavTreeNode_OkToGetChildren` `0x7F5F1427` reads `_F` (`&DAT_7F610234`) cap 2, then tests the HIGH byte against `0x10`. |
 | `_I` | 2-byte flags/attributes | Folder attributes. **bit `0x8000`** → checkbox 0x6E; **bit `0x4000`** → checkbox 0x72 + selects label string `0x190F`/`0x1910` + drives the pricing display. | `CBbs_FillPropertiesDialogPage` `0x7F5F385E`. |
 | `_f` | (unresolved) | Advertised but **no BBSNAV read site** found. Server-filled; safe value 0. | — |
@@ -159,6 +159,11 @@ Synthesised / non-extra tags BBS also touches:
   Author/Size/Date blank, and report "0 conversations" while still listing the
   rows. Confirmed live 2026-07-28 (`BPX 0x7F5F5DE4`, flag `0x01` on a node with
   mnid `field_8=0, field_c=0x100`), and fixed by sending the leaf bit.
+- **`_t`** controls Attached Files view. `FUN_7F5F1CAD` reads one byte and sets
+  bit 1 of the list-entry flags when it is nonzero. `FUN_7F5F5DE4` inserts a
+  non-container into view index 2 only when that bit is set. Sending `_t` as an
+  empty string therefore hides a message even when its article contains a
+  valid MOSAF object and `X-MOS-Attach` is nonzero.
 - **Shared MOS tree tags** (`j, k, ca, r, s, t, u, n, on, v, w, y, o, z`) are
   fetched from a BBS node too, one at a time as `{name, 'g'}` groups, when the
   Properties dialog opens — observed live as `q,g` then `v,g` on a message node.
@@ -194,8 +199,9 @@ Synthesised / non-extra tags BBS also touches:
   region) is set. Premium/paid BBS folders. Omit for free content.
 
 Required for a usable thread list: `e` (Subject), `_a` (Author). Recommended:
-`_D` (Date), `p` (Size), `_F`/`_I` (flags), `_P` (threading). The standard mnid
-tag (`a`), app_id (`c`) and browse-flag (`b`) base tags apply as in DIRSRV.
+`_D` (Date), `p` (Size), `_F`/`_I` (flags), `_P` (threading), `_t` (attachment
+count). The standard mnid tag (`a`), app_id (`c`) and browse-flag (`b`) base
+tags apply as in DIRSRV.
 
 ### Columns (RCDATA 6011)
 

@@ -27,7 +27,6 @@ class BbsFields:
     author: str = ""  # _a (ASCIIZ)
     date_unix: int = 0  # _D — time_t seconds (MOSSHELL DWORD-as-time_t path)
     parent_subid: int = 0  # _P — parent message's f8 (0 for a top-level node)
-    topic: str = ""  # _t (ASCIIZ, Properties-dialog sub-title)
     has_children: bool = False  # → _F bit 0x1000 CLEAR; set = leaf (no children)
     # Article body, always authored as plain text. `body_format` picks the
     # X-MOS-Format the reader is told to stream it as, and with it the encoder
@@ -43,7 +42,9 @@ class BbsFields:
     # untouched. When this is set it wins over `body`/BODY_ENCODERS, which
     # exist to turn fixture-authored plain text into wire bytes.
     body_raw: bytes | None = None
-    # Files attached to the message. An attachment never travels on the message
+    # Files attached to the message. The count is wire `_t` (one byte), which
+    # BBSNAV uses to populate Attached Files view and the Properties page. An
+    # attachment never travels on the message
     # channel: the article carries headers plus the body alone, and the file
     # reaches the reader as an OLE object embedded in that RTF body (CLSID
     # {00028B50-0000-0000-C000-000000000046}, MOSAF.DLL "Mos Attached File").
@@ -86,7 +87,7 @@ class NodeContent:
     # cached date → server skips emitting `w`, cell renders blank.
     modified_filetime: int = 0
     # Optional BBS-only sub-struct. None for DIRSRV/MEDVIEW nodes; set on BBS
-    # board/conversation/reply nodes so build_bbs_props can read _a/_D/_P/_t/_F.
+    # board/conversation/reply nodes so build_bbs_props can read BBS-only tags.
     bbs: BbsFields | None = None
 
 
