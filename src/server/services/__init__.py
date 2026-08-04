@@ -1,5 +1,6 @@
 from ._dispatch import log_unhandled_selector
 from .bbs import BBSHandler
+from .conference import CONFLOCHandler, CONFSRVHandler
 from .dirsrv import DIRSRVHandler
 from .ftm import FTMHandler
 from .logsrv import LOGSRVHandler
@@ -17,6 +18,8 @@ SERVICE_HANDLERS = {
     "onlstmt": OnlStmtHandler,
     "medview": MEDVIEWHandler,
     "bbs": BBSHandler,
+    "confloc": CONFLOCHandler,
+    "confsrv": CONFSRVHandler,
     "mosabp": MOSABPHandler,
     "sasrv": SASRVHandler,
 }

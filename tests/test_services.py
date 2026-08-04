@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from server.config import (
+    CONFLOC_INTERFACE_GUIDS,
+    CONFSRV_INTERFACE_GUIDS,
     DIRSRV_INTERFACE_GUIDS,
     LOGSRV_INTERFACE_GUIDS,
     MEDVIEW_DATA_EDIT_ADD,
@@ -40,6 +42,19 @@ from server.mpc import (
     build_tagged_reply_var,
     parse_host_block,
     parse_tagged_params,
+)
+from server.services.conference import (
+    CONFLOC_DATA_EDIT_ADD,
+    CONFLOC_DATA_EDIT_CLASS,
+    CONFLOC_DATA_EDIT_GET_PROPERTIES,
+    CONFLOC_DATA_EDIT_GET_TICKET,
+    CONFLOC_RESULT_FOUND,
+    CONFLOC_RESULT_NOT_FOUND,
+    CONFSRV_JOINED,
+    DEFAULT_MESSAGE_LENGTH,
+    DEFAULT_ROOM_CAPACITY,
+    CONFLOCHandler,
+    CONFSRVHandler,
 )
 from server.services.dirsrv import (
     DS_E_NOT_FOUND,
@@ -427,6 +442,190 @@ class TestDIRSRVServiceMap(unittest.TestCase):
             record = payload[i * 17 : (i + 1) * 17]
             self.assertEqual(record[:16], guid_bytes)
             self.assertEqual(record[16], selector)
+
+
+class TestConferenceStartup(unittest.TestCase):
+    def test_discovery_catalogs_match_confapi_tables(self):
+        self.assertEqual(
+            [guid[0] for guid, _selector in CONFLOC_INTERFACE_GUIDS],
+            [
+                0x52,
+                0x53,
+                0x54,
+                0x55,
+                0x56,
+                0x57,
+                0x58,
+                0x60,
+                0x61,
+                0x70,
+                0x71,
+                0x72,
+                0x73,
+                0x74,
+                0x78,
+                0x79,
+                0x81,
+            ],
+        )
+        self.assertEqual(
+            [guid[0] for guid, _selector in CONFSRV_INTERFACE_GUIDS],
+            [0xC8, 0xC9, 0xCA],
+        )
+        self.assertEqual(
+            [selector for _guid, selector in CONFLOC_INTERFACE_GUIDS],
+            list(range(1, 18)),
+        )
+
+    def test_locator_resolves_a_created_chat_node(self):
+        store = _AddNodeContentStore()
+        parent = store.get_node("1:16")
+        chat = parent.__class__(
+            node_id="1:275",
+            is_container=True,
+            app_id=4,
+            mnid_a=struct.pack("<II", 1, 275),
+            content=parent.content,
+        )
+        store.add_child("1:16", chat)
+        handler = CONFLOCHandler(10, "CONFLOC", content_store=store)
+
+        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 275) + b"\x82\x82")
+
+        self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 275)
+        self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_FOUND)
+        self.assertEqual(reply[6], TAG_END_STATIC)
+
+    def test_data_edit_get_ticket_returns_the_capability_blob(self):
+        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        packets = handler.handle_request(
+            CONFLOC_DATA_EDIT_CLASS,
+            CONFLOC_DATA_EDIT_GET_TICKET,
+            0,
+            b"\x83\x85",
+            0,
+            0,
+        )
+        parsed = parse_packet(packets[0][:-1])
+        self.assertEqual(parsed.payload[8:], build_get_ticket_reply_payload(handler.session))
+
+    def test_data_edit_add_completes_the_chat_record(self):
+        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        ticket = b"\x02\x00"
+        record_id = struct.pack("<II", 1, 275)
+        properties = struct.pack("<IH", 6, 0)
+        request = (
+            b"\x04\x82" + ticket
+            + b"\x03\x04\x00\x00\x00"
+            + b"\x04\x88" + record_id
+            + b"\x02\xff\xff"
+            + b"\x04\x86" + properties
+            + b"\x83\x83"
+        )
+
+        packets = handler.handle_request(
+            CONFLOC_DATA_EDIT_CLASS,
+            CONFLOC_DATA_EDIT_ADD,
+            1,
+            request,
+            0,
+            0,
+        )
+        parsed = parse_packet(packets[0][:-1])
+
+        self.assertEqual(
+            parsed.payload[8:],
+            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
+        )
+
+    def test_data_edit_get_properties_round_trips_the_authored_record(self):
+        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        ticket = b"\x02\x00"
+        record_id = struct.pack("<II", 1, 275)
+        properties = build_property_record(
+            [
+                (0x03, "ds", struct.pack("<I", 1)),
+                (0x03, "ml", struct.pack("<I", 1000)),
+                (0x03, "mm", struct.pack("<I", 100)),
+                (0x03, "unrequested", struct.pack("<I", 42)),
+            ]
+        )
+        add_request = (
+            b"\x04\x82" + ticket
+            + b"\x03\x04\x00\x00\x00"
+            + b"\x04\x88" + record_id
+            + b"\x02\xff\xff"
+            + b"\x04" + bytes([0x80 | len(properties)]) + properties
+            + b"\x83\x83"
+        )
+        handler.build_data_edit_add_reply_payload(1, add_request)
+        get_request = (
+            b"\x03\x01\x00\x00\x00"
+            + b"\x04\x88" + record_id
+            + b"\x02\x00\x00"
+            + b"\x03\x03\x00\x00\x00"
+            + b"\x04\x89ds\x00ml\x00mm\x00"
+            + b"\x83\x83\x85"
+        )
+
+        packets = handler.handle_request(
+            CONFLOC_DATA_EDIT_CLASS,
+            CONFLOC_DATA_EDIT_GET_PROPERTIES,
+            2,
+            get_request,
+            0,
+            0,
+        )
+        parsed = parse_packet(packets[0][:-1])
+        selected = build_property_record(
+            [
+                (0x03, "ds", struct.pack("<I", 1)),
+                (0x03, "ml", struct.pack("<I", 1000)),
+                (0x03, "mm", struct.pack("<I", 100)),
+            ]
+        )
+
+        self.assertEqual(
+            parsed.payload[8:],
+            b"\x83\x00\x00\x00\x00\x83\x01\x00\x00\x00\x87\x86" + selected,
+        )
+
+    def test_data_edit_add_rejects_anonymous_writes(self):
+        handler = CONFLOCHandler(10, "CONFLOC")
+        ticket = b"\x02\x00"
+        request = (
+            b"\x04\x82" + ticket
+            + b"\x03\x04\x00\x00\x00"
+            + b"\x04\x88" + struct.pack("<II", 1, 275)
+            + b"\x02\xff\xff"
+            + b"\x04\x86" + struct.pack("<IH", 6, 0)
+            + b"\x83\x83"
+        )
+        reply = handler.build_data_edit_add_reply_payload(1, request)
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
+
+    def test_locator_rejects_an_unknown_room(self):
+        handler = CONFLOCHandler(10, "CONFLOC", content_store=_AddNodeContentStore())
+        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 275) + b"\x82\x82")
+        self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 0)
+        self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_NOT_FOUND)
+
+    def test_join_pushes_the_record_confapi_consumes(self):
+        handler = CONFSRVHandler(11, "CONFSRV")
+        reply = handler.build_join_reply_payload(
+            b"\x03" + struct.pack("<I", 275) + b"\x04\x81\x00\x85"
+        )
+
+        self.assertEqual(reply[:2], bytes([TAG_END_STATIC, TAG_DYNAMIC_PARTIAL]))
+        status, padding, participant, capacity, message_limit, name_chars = struct.unpack(
+            "<HHIHII", reply[2:]
+        )
+        self.assertEqual(status, CONFSRV_JOINED)
+        self.assertEqual(padding, 0)
+        self.assertEqual(participant, 1)
+        self.assertEqual(capacity, DEFAULT_ROOM_CAPACITY)
+        self.assertEqual(message_limit, DEFAULT_MESSAGE_LENGTH)
+        self.assertEqual(name_chars, 0)
 
 
 class TestSASRVServiceMap(unittest.TestCase):

@@ -179,6 +179,43 @@ DIRSRV_INTERFACE_GUIDS = [
     (_guid_le("00028B2E-0000-0000-C000-000000000046"), 0x0A),
 ]
 
+# Conference locator. CONFAPI.DLL passes the 17-entry IID table at 0x7F5B5400
+# to OpenService("CONFLOC", ..., version=7). The client resolves methods on the
+# returned first interface, so selectors are assigned contiguously as for the
+# other client-side IID tables above.
+CONFLOC_INTERFACE_GUIDS = [
+    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
+    for sel, xx in enumerate(
+        (
+            0x52,
+            0x53,
+            0x54,
+            0x55,
+            0x56,
+            0x57,
+            0x58,
+            0x60,
+            0x61,
+            0x70,
+            0x71,
+            0x72,
+            0x73,
+            0x74,
+            0x78,
+            0x79,
+            0x81,
+        ),
+        start=0x01,
+    )
+]
+
+# Conference server. After CONFLOC resolves a room, CONFAPI.DLL opens CONFSRV
+# version 7 with the three-IID table at 0x7F5B5710.
+CONFSRV_INTERFACE_GUIDS = [
+    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
+    for sel, xx in enumerate((0xC8, 0xC9, 0xCA), start=0x01)
+]
+
 # BBS advertises the generic tree IIDs plus one more: opening a message runs
 # BBSNAV FUN_7F5FCD1A (0x7F5FCD1A), which does a second CreateTnc("BBS", 3) and
 # then asks the marshaller for IID 00028B2F with the parameter string
