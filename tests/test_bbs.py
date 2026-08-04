@@ -319,6 +319,21 @@ class TestBBSAttachmentFixture(unittest.TestCase):
         record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
         self.assertEqual((record["z"], record["_r"]), (0, 0))
 
+    def test_the_object_mnid_exposes_its_download_count(self):
+        self.addCleanup(reset_app_store)
+        attachment = app_store.content.get_node(_ATTACHMENT_FILE)
+        attachment_bbs = dataclasses.replace(attachment.content.bbs, download_count=7)
+        app_store.content.add_node(
+            dataclasses.replace(
+                attachment,
+                content=dataclasses.replace(attachment.content, bbs=attachment_bbs),
+            )
+        )
+
+        request = DirsrvRequest(node_id=_ATTACHMENT_FILE, prop_group="z\x00_r")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        self.assertEqual((record["z"], record["_r"]), (0, 7))
+
     def test_priced_attachment_has_a_nonzero_price(self):
         message = app_store.content.get_node(_PRICED_ATTACHMENT_POST)
         self.assertEqual(message.content.bbs.attachment_count, 1)

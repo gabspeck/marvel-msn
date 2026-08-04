@@ -228,16 +228,18 @@ Gateway callee protocol deferred (out of binary set).
 See `docs/bbs-service-contract.md` §Property tags. Summary: per-node SVCPROP
 record with MOSSHELL base tags + 8 BBS extras `{_a,_D,_P,_f,_t,p,_F,_I}`;
 columns `e/_a/p/_D`; threading via tree + `_P`; `_t` attachment count; flags
-`_F`/`_I`; price `z`; icon `h` synthesised client-side.
+`_F`/`_I`; price `z`; attachment download count `_r`; icon `h` synthesised
+client-side.
 
 ## 12. Known gaps / follow-ups
 
 - `_f` is advertised but no read site is known.
-- Attachments: the object side is traced (MOSAF.DLL, CLSID `{00028B50-…}`,
-  mnid `message id + k`; see `docs/bbs-service-contract.md` §Attachments). The
-  FTM download itself — `HrFtmDownloadWithUIFRI` / `HrQueueToFtm` — is not.
-  `X-MOS-Attach` (`0x68020002`) is parsed and enabled, but the count the
-  Properties page shows comes from the objects found in the body.
+- Attachments: the object and FTM paths are traced (MOSAF.DLL, CLSID
+  `{00028B50-…}`, mnid `message id + k`; see `docs/bbs-service-contract.md`
+  §Attachments). The attachment node's `_r` is the download count MOSAF shows
+  in Properties. `X-MOS-Attach` (`0x68020002`) is parsed and enabled, but the
+  attachment count the message Properties page shows comes from the objects
+  found in the body.
 - TREEEDCL selector 9 unused by the client.
 - Secondary `CBbsTreeEdit` interface vtables (after the first 29-slot table at
   `0x7F60E9E8`) are mostly local but not individually annotated (property

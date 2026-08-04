@@ -2147,6 +2147,10 @@ def _make_bbs_attachment_request(attachment_id=0x202, board_id=1):
 
 
 class TestFTMBbsAttachment(unittest.TestCase):
+    def setUp(self):
+        reset_app_store()
+        self.addCleanup(reset_app_store)
+
     def test_bbs_fri_resolves_the_fixture_upload(self):
         filename, content = _resolve_ftm_target(_make_bbs_attachment_request())
         self.assertEqual(filename, FTM_BBS_SOURCE)
@@ -2181,6 +2185,33 @@ class TestFTMBbsAttachment(unittest.TestCase):
             10,
         )
         self.assertIn(b"MOS2", b"".join(pkts))
+
+    def test_request_download_does_not_increment_the_download_count(self):
+        handler = FTMHandler(5, "FTM")
+        handler.handle_request(
+            0x01,
+            0x00,
+            1,
+            _make_bbs_attachment_request(),
+            10,
+            10,
+        )
+        attachment = app_store.content.get_node("514:1")
+        self.assertEqual(attachment.content.bbs.download_count, 0)
+
+    def test_bill_client_increments_the_download_count(self):
+        handler = FTMHandler(5, "FTM")
+        for expected in (1, 2):
+            handler.handle_request(
+                0x01,
+                0x03,
+                expected,
+                _make_bbs_attachment_request(),
+                10,
+                10,
+            )
+            attachment = app_store.content.get_node("514:1")
+            self.assertEqual(attachment.content.bbs.download_count, expected)
 
 
 class TestPropertyRecord(unittest.TestCase):

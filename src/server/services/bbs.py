@@ -4,7 +4,8 @@ The BBS read/navigation channel rides the same generic MOS tree infrastructure
 as DSNAV — a MOSSHELL `_NtniGroup` wrapping a TREENVCL `CTreeNavClient`, opened
 on the service named "BBS" (docs/bbs-service-contract.md §Framing). The wire
 request/reply shapes are therefore identical to DIRSRV; only the per-node
-property vocabulary differs (`e, _a, p, _D, _P, _t, _F, _I, _f` + base `a/c/b`).
+property vocabulary differs (`e, _a, p, _D, _P, _t, _r, _F, _I, _f` + base
+`a/c/b`).
 A board/conversation/reply is a `CMosTreeNode`, but the tree under a board is
 flat: every message is a direct child of the board and threading rides the `_P`
 property. The reader enumerates the board once and never asks a message for
@@ -154,6 +155,7 @@ PROP_SIZE = "p"
 PROP_DATE = "_D"
 PROP_PARENT_SUBID = "_P"
 PROP_ATTACHMENT_COUNT = "_t"
+PROP_DOWNLOAD_COUNT = "_r"
 PROP_HAS_CHILDREN = "_F"
 PROP_PRICE_INFO = "_I"
 PROP_UNKNOWN_F = "_f"
@@ -502,6 +504,11 @@ def build_bbs_props(requested_props, node, *, is_children):
             # row for Attached Files view. The Properties page also formats
             # this property as the attachment count.
             out.append((0x01, name, struct.pack("<B", bbs.attachment_count)))
+        elif name == PROP_DOWNLOAD_COUNT:
+            # On attachment nodes MOSAF renders `_r` as the number of times
+            # the file has been downloaded. Message nodes use the same tag for
+            # read state and retain the default zero until that path exists.
+            out.append((0x03, name, struct.pack("<I", bbs.download_count)))
         elif name == PROP_SIZE:
             out.append((0x03, name, struct.pack("<I", content.size_bytes & 0xFFFFFFFF)))
         elif name == PROP_DATE:

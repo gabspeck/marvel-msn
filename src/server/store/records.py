@@ -74,6 +74,7 @@ def bbs_node(
     size_bytes=None,
     attachment_count=0,
     attachment_data=b"",
+    download_count=0,
 ):
     """A BBS tree node (board / conversation / reply).
 
@@ -150,6 +151,7 @@ def bbs_node(
                 body_raw=body_raw,
                 attachment_count=attachment_count,
                 attachment_data=attachment_data,
+                download_count=download_count,
             ),
         ),
     )

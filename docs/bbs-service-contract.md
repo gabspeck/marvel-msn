@@ -164,6 +164,11 @@ Synthesised / non-extra tags BBS also touches:
   non-container into view index 2 only when that bit is set. Sending `_t` as an
   empty string therefore hides a message even when its article contains a
   valid MOSAF object and `X-MOS-Attach` is nonzero.
+- **`_r`** on an attachment node is the download count (`0x03` DWORD).
+  `FUN_7F5FC919` passes it to MOSAF's remote-file setter at vtable `+0x1C`;
+  MOSAF stores it at object offset `+0x114`, which its Properties page renders
+  under "Downloads:". The server increments it when FTM `HrBillClient`
+  transfers the attachment, not when `HrRequestDownload` advertises it.
 - **Shared MOS tree tags** (`j, k, ca, r, s, t, u, n, on, v, w, y, o, z`) are
   fetched from a BBS node too, one at a time as `{name, 'g'}` groups, when the
   Properties dialog opens — observed live as `q,g` then `v,g` on a message node.
@@ -401,8 +406,9 @@ than its own**, and the next message on the board has to start past them.
 
 `FUN_7F5FCEE5` is `CTreeNavClient::GetProperties` over service "BBS" for
 `z` and `_r`, both DWORD, both in one request — observed live 2026-07-28 as
-`props=z,_r` on the attachment mnid immediately after the article fetch. Its
-return value is discarded, so a failed resolve leaves the object holding zeros.
+`props=z,_r` on the attachment mnid immediately after the article fetch. `z`
+is the price and `_r` is the download count. Its return value is discarded, so
+a failed resolve leaves the object holding zeros.
 
 The object is MOSAF.DLL, "Mos Attached File InprocServer (c)1994 Microsoft
 Corp." — an in-proc server that aggregates the OLE default handler
@@ -442,9 +448,9 @@ Captured 2026-07-28 from the Compose window, one 175-byte BMP attached:
 
 The message Properties page (`FUN_7F604F96`, `WM_INITDIALOG`) prints the
 attachment count from reader `+0xC0` — the objects it found — not from
-`X-MOS-Attach`. The same page reads `_r` and `z` off the message node
-(`props=_r,g` then `z,g`), and the status bar's unread count drops when a
-message is opened, so `_r` is the read-state tag.
+`X-MOS-Attach`. On message nodes, the same `_r` tag is the read state: the page
+reads `_r` and `z` (`props=_r,g` then `z,g`), and the status bar's unread count
+drops when a message is opened.
 
 #### Methods 2/3/4/7 — post an article
 

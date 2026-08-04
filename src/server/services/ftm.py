@@ -21,6 +21,7 @@ Two call patterns are covered:
 
 import logging
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 from ..config import FTM_INTERFACE_GUIDS
@@ -125,7 +126,7 @@ class FTMHandler:
                 None if is_bbs_attachment else filename,
             )
         elif selector == FTM_SELECTOR_BILL_CLIENT:
-            _, content = _resolve_ftm_target(payload)
+            _, content = _resolve_ftm_target(payload, record_download=True)
             log.info("bill_client content_len=%d", len(content))
             reply_payload = _build_bill_client_reply(content)
             log.info("bill_client_reply status=0 payload_len=%d", len(content))
@@ -151,7 +152,7 @@ def _extract_client_file_id(payload):
     return None
 
 
-def _resolve_ftm_target(payload):
+def _resolve_ftm_target(payload, *, record_download=False):
     """Map an FTM request to (on-disk filename, file content).
 
     The client-given CFI name drives the lookup:
@@ -185,7 +186,7 @@ def _resolve_ftm_target(payload):
         return source, b""
 
     if source == FTM_BBS_SOURCE:
-        return source, _resolve_bbs_attachment(cfi)
+        return source, _resolve_bbs_attachment(cfi, record_download=record_download)
 
     content = _read_signup_file(source)
     if content is not None:
@@ -193,7 +194,7 @@ def _resolve_ftm_target(payload):
     return source, b""
 
 
-def _resolve_bbs_attachment(cfi):
+def _resolve_bbs_attachment(cfi, *, record_download=False):
     """Resolve MOSAF's BBS file resource identifier to its upload bytes.
 
     BBSNAV FUN_7F5FC919 gives MOSAF `(kind=2, board_id, message_id+k)`;
@@ -226,7 +227,23 @@ def _resolve_bbs_attachment(cfi):
     attachment_index = attachment_id - message_id
     if not 1 <= attachment_index <= message_bbs.attachment_count:
         return b""
-    return message_bbs.attachment_data
+    content = message_bbs.attachment_data
+    if record_download and content:
+        download_count = attachment_bbs.download_count + 1
+        attachment = replace(
+            attachment,
+            content=replace(
+                attachment.content,
+                bbs=replace(attachment_bbs, download_count=download_count),
+            ),
+        )
+        _default_store.content.add_node(attachment)
+        log.info(
+            "bbs_attachment_download attachment=%s count=%d",
+            attachment.node_id,
+            download_count,
+        )
+    return content
 
 
 def _encode_reply_filename(filename):

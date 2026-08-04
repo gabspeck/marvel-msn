@@ -56,6 +56,10 @@ class BbsFields:
     # per-file boundaries are not visible on the wire.
     attachment_count: int = 0
     attachment_data: bytes = b""
+    # Attachment-node wire `_r` (DWORD). MOSAF displays it as "Downloads:" in
+    # the remote file's Properties page. Message nodes use the same tag for
+    # read state; both start at zero.
+    download_count: int = 0
 
 
 @dataclass(frozen=True)
