@@ -2,6 +2,7 @@
 
 import struct
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from server.config import (
@@ -56,9 +57,10 @@ from server.services.conference import (
     CONFSRV_JOINED,
     CONFSRV_ROLE_HOST,
     CONFSRV_ROLE_PARTICIPANT,
+    CONFSRV_ROLE_SPECTATOR,
+    CONFSRV_ROOM_FULL,
     CONFSRV_SELECTOR_JOIN,
     CONFSRV_SELECTOR_SEND,
-    DEFAULT_MESSAGE_LENGTH,
     CONFLOCHandler,
     CONFSRVHandler,
 )
@@ -117,7 +119,13 @@ from server.services.sasrv import (
     build_sasrv_service_map_payload,
 )
 from server.session import Session
-from server.store import RIGHTS_AUTHORING, app_store, default_seed, reset_app_store
+from server.store import (
+    RIGHTS_AUTHORING,
+    ConferenceFields,
+    app_store,
+    default_seed,
+    reset_app_store,
+)
 from server.transport import parse_packet
 from server.wire import decode_header_byte
 
@@ -507,6 +515,10 @@ class TestConferenceStartup(unittest.TestCase):
         room = app_store.content.get_node("1:271")
         self.assertEqual(room.content.name, "MSN Chat")
         self.assertEqual(room.app_id, 4)
+        self.assertEqual(room.content.conference.room_capacity, 10)
+        self.assertEqual(room.content.conference.message_length, 1000)
+        self.assertTrue(room.content.conference.join_as_participants)
+        self.assertEqual(room.host_usernames, ("billg",))
         self.assertIn(
             room,
             app_store.content.get_children("1:16", struct.pack("<II", 1, 0x0409)),
@@ -614,6 +626,41 @@ class TestConferenceStartup(unittest.TestCase):
             b"\x83\x00\x00\x00\x00\x83\x01\x00\x00\x00\x87\x86" + selected,
         )
 
+    def test_seeded_chat_exposes_its_conference_settings(self):
+        reset_app_store()
+        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        record_id = struct.pack("<II", 1, 0x10F)
+        request = (
+            b"\x03\x01\x00\x00\x00"
+            + b"\x04\x88" + record_id
+            + b"\x02\x00\x00"
+            + b"\x03\x03\x00\x00\x00"
+            + b"\x04\x89mm\x00ml\x00ds\x00"
+            + b"\x83\x83\x85"
+        )
+
+        packets = handler.handle_request(
+            CONFLOC_DATA_EDIT_CLASS,
+            CONFLOC_DATA_EDIT_GET_PROPERTIES,
+            2,
+            request,
+            0,
+            0,
+        )
+        parsed = parse_packet(packets[0][:-1])
+        selected = build_property_record(
+            [
+                (0x03, "mm", struct.pack("<I", 10)),
+                (0x03, "ml", struct.pack("<I", 1000)),
+                (0x03, "ds", struct.pack("<I", 1)),
+            ]
+        )
+
+        self.assertEqual(
+            parsed.payload[8:],
+            b"\x83\x00\x00\x00\x00\x83\x01\x00\x00\x00\x87\x86" + selected,
+        )
+
     def test_data_edit_set_properties_applies_the_conversation_values(self):
         store = _AddNodeContentStore()
         parent = store.get_node("1:16")
@@ -630,9 +677,9 @@ class TestConferenceStartup(unittest.TestCase):
         record_id = struct.pack("<II", 1, 275)
         properties = build_property_record(
             [
-                (0x03, "ml", struct.pack("<I", 2000)),
+                (0x03, "ml", struct.pack("<I", 500)),
                 (0x03, "mm", struct.pack("<I", 200)),
-                (0x03, "ds", struct.pack("<I", 1)),
+                (0x03, "ds", struct.pack("<I", 0)),
             ]
         )
         request = (
@@ -658,7 +705,48 @@ class TestConferenceStartup(unittest.TestCase):
             parsed.payload[8:],
             b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
         )
-        self.assertEqual(handler._records[record_id], properties)
+        self.assertNotIn(record_id, handler._records)
+        conference = store.get_node("1:275").content.conference
+        self.assertEqual(conference.room_capacity, 200)
+        self.assertEqual(conference.message_length, 500)
+        self.assertFalse(conference.join_as_participants)
+
+        join_reply = CONFSRVHandler(
+            11,
+            "CONFSRV",
+            signed_in(SUBSCRIBER),
+            content_store=store,
+        ).build_join_reply_payload(
+            b"\x03" + struct.pack("<I", 1) + b"\x04\x81\x00\x85"
+        )
+        self.assertEqual(struct.unpack_from("<H", join_reply, 10)[0], CONFSRV_ROLE_SPECTATOR)
+        self.assertEqual(struct.unpack_from("<I", join_reply, 12)[0], 500)
+
+        fresh_handler = CONFLOCHandler(
+            10, "CONFLOC", signed_in(), content_store=store,
+        )
+        get_request = (
+            b"\x03\x01\x00\x00\x00"
+            + b"\x04\x88" + record_id
+            + b"\x02\x00\x00"
+            + b"\x03\x03\x00\x00\x00"
+            + b"\x04\x89mm\x00ml\x00ds\x00"
+            + b"\x83\x83\x85"
+        )
+        fresh_reply = fresh_handler.build_data_edit_get_properties_reply_payload(
+            4, get_request,
+        )
+        selected = build_property_record(
+            [
+                (0x03, "mm", struct.pack("<I", 200)),
+                (0x03, "ml", struct.pack("<I", 500)),
+                (0x03, "ds", struct.pack("<I", 0)),
+            ]
+        )
+        self.assertEqual(
+            fresh_reply,
+            b"\x83\x00\x00\x00\x00\x83\x01\x00\x00\x00\x87\x86" + selected,
+        )
 
     def test_data_edit_add_rejects_anonymous_writes(self):
         handler = CONFLOCHandler(10, "CONFLOC")
@@ -698,7 +786,7 @@ class TestConferenceStartup(unittest.TestCase):
         self.assertEqual(padding, 0)
         self.assertEqual(participant, 1)
         self.assertEqual(role, CONFSRV_ROLE_HOST)
-        self.assertEqual(message_limit, DEFAULT_MESSAGE_LENGTH)
+        self.assertEqual(message_limit, 1000)
         self.assertEqual(name_chars, len("MSN Chat") + 1)
         self.assertEqual(
             reply[20 : 20 + name_chars * 2].decode("utf-16le").rstrip("\x00"),
@@ -756,7 +844,7 @@ class TestConferenceStartup(unittest.TestCase):
         self.assertEqual(join_role, CONFSRV_ROLE_PARTICIPANT)
         self.assertEqual(participant_role, CONFSRV_ROLE_PARTICIPANT)
 
-    def test_created_chat_designates_its_creator_as_host(self):
+    def test_join_uses_the_room_host_list(self):
         store = _AddNodeContentStore()
         parent = store.get_node("1:16")
         chat = parent.__class__(
@@ -764,33 +852,91 @@ class TestConferenceStartup(unittest.TestCase):
             is_container=False,
             app_id=4,
             mnid_a=struct.pack("<II", 275, 1),
-            content=parent.content,
-            creator_username=SUBSCRIBER,
+            content=replace(
+                parent.content,
+                conference=ConferenceFields(
+                    room_capacity=10,
+                    message_length=1000,
+                    join_as_participants=False,
+                ),
+            ),
+            host_usernames=(SUBSCRIBER.upper(), ADMIN),
         )
         store.add_child("1:16", chat)
         join_request = b"\x03" + struct.pack("<I", 275) + b"\x04\x81\x00\x85"
 
-        creator_reply = CONFSRVHandler(
+        first_host_reply = CONFSRVHandler(
             11,
             "CONFSRV",
             signed_in(SUBSCRIBER),
             content_store=store,
         ).build_join_reply_payload(join_request)
-        other_reply = CONFSRVHandler(
+        second_host_reply = CONFSRVHandler(
             11,
             "CONFSRV",
             signed_in(ADMIN),
             content_store=store,
         ).build_join_reply_payload(join_request)
+        nonhost_reply = CONFSRVHandler(
+            11,
+            "CONFSRV",
+            Session(),
+            content_store=store,
+        ).build_join_reply_payload(join_request)
 
         self.assertEqual(
-            struct.unpack_from("<H", creator_reply, 10)[0],
+            struct.unpack_from("<H", first_host_reply, 10)[0],
             CONFSRV_ROLE_HOST,
         )
         self.assertEqual(
-            struct.unpack_from("<H", other_reply, 10)[0],
-            CONFSRV_ROLE_PARTICIPANT,
+            struct.unpack_from("<H", second_host_reply, 10)[0],
+            CONFSRV_ROLE_HOST,
         )
+        self.assertEqual(
+            struct.unpack_from("<H", nonhost_reply, 10)[0],
+            CONFSRV_ROLE_SPECTATOR,
+        )
+
+    def test_join_refuses_members_past_the_room_capacity(self):
+        store = _AddNodeContentStore()
+        parent = store.get_node("1:16")
+        chat = parent.__class__(
+            node_id="275:1",
+            is_container=False,
+            app_id=4,
+            mnid_a=struct.pack("<II", 275, 1),
+            content=replace(
+                parent.content,
+                conference=ConferenceFields(
+                    room_capacity=2,
+                    message_length=1000,
+                    join_as_participants=True,
+                ),
+            ),
+        )
+        store.add_child("1:16", chat)
+        join_request = b"\x03" + struct.pack("<I", 275) + b"\x04\x81\x00\x85"
+        first = CONFSRVHandler(11, "CONFSRV", signed_in(ADMIN), content_store=store)
+        second = CONFSRVHandler(12, "CONFSRV", signed_in(SUBSCRIBER), content_store=store)
+        refused = CONFSRVHandler(13, "CONFSRV", signed_in(ADMIN), content_store=store)
+
+        first_reply = first.build_join_reply_payload(join_request)
+        second_reply = second.build_join_reply_payload(join_request)
+        refused_packets = refused.handle_request(
+            0x01, CONFSRV_SELECTOR_JOIN, 7, join_request, 0, 0,
+        )
+        refused_reply = parse_packet(refused_packets[0][:-1]).payload[8:]
+
+        self.assertEqual(struct.unpack_from("<H", first_reply, 2)[0], CONFSRV_JOINED)
+        self.assertEqual(struct.unpack_from("<H", second_reply, 2)[0], CONFSRV_JOINED)
+        self.assertEqual(len(refused_packets), 1)
+        self.assertEqual(struct.unpack_from("<H", refused_reply, 2)[0], CONFSRV_ROOM_FULL)
+
+        first.close()
+        retry_reply = refused.build_join_reply_payload(join_request)
+        self.assertEqual(struct.unpack_from("<H", retry_reply, 2)[0], CONFSRV_JOINED)
+        second.close()
+        refused.close()
 
     def test_send_acknowledges_and_echoes_text_on_the_join_iterator(self):
         handler = CONFSRVHandler(11, "CONFSRV", signed_in())
@@ -1944,6 +2090,9 @@ class _AddNodeContentStore:
         self.children.setdefault(node.node_id, [])
         self.children.setdefault(parent_id, []).append(node.node_id)
 
+    def add_node(self, node):
+        self.nodes[node.node_id] = node
+
 
 class TestDIRSRVAddNode(unittest.TestCase):
     @staticmethod
@@ -1987,8 +2136,9 @@ class TestDIRSRVAddNode(unittest.TestCase):
         self.assertEqual(node.content.type_str, "Folder")
         self.assertEqual(node.content.language, 0x0409)
         self.assertTrue(node.is_container)
+        self.assertEqual(node.host_usernames, ())
 
-    def test_created_chat_records_its_creator_and_gets_a_unique_instance(self):
+    def test_created_chat_adds_its_creator_to_the_host_list(self):
         properties = build_property_record(
             [
                 (0x03, "c", struct.pack("<I", 4)),
@@ -2015,7 +2165,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         instance_id, field_8 = struct.unpack("<II", new_mnid)
         node = store.get_node(f"{instance_id}:{field_8}")
         self.assertEqual(instance_id, 2)
-        self.assertEqual(node.creator_username, ADMIN)
+        self.assertEqual(node.host_usernames, (ADMIN,))
         self.assertIs(store.find_app_instance(4, instance_id), node)
 
     def test_rejects_the_read_side_receive_shape(self):

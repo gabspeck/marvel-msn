@@ -286,6 +286,10 @@ class ConnectionState:
             self.info("pipe_close pipe=%d", pipe_idx)
             self.pipes_closed.add(pipe_idx)
             self.pipe_buffers.pop(pipe_idx, None)
+            handler = self.services.get(pipe_idx)
+            close_hook = getattr(handler, "close", None)
+            if close_hook is not None:
+                close_hook()
             if self._all_service_pipes_closed():
                 self.info("all_pipes_closed action=disconnect")
                 self.conn.close()
@@ -387,11 +391,16 @@ def handle_connection(conn, addr):
     server_log.reset_context()
     server_log.set_connection(next(_conn_id_seq))
     log.info("connection_open addr=%s:%d", addr[0], addr[1])
+    state = ConnectionState(conn)
     try:
-        ConnectionState(conn).run()
+        state.run()
     except (ConnectionError, BrokenPipeError, OSError) as e:
         log.info("connection_closed addr=%s:%d reason=%s", addr[0], addr[1], type(e).__name__)
     finally:
+        for handler in state.services.values():
+            close_hook = getattr(handler, "close", None)
+            if close_hook is not None:
+                close_hook()
         with contextlib.suppress(OSError):
             conn.close()
         server_log.reset_context()

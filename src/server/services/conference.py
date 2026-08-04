@@ -2,6 +2,9 @@
 
 import logging
 import struct
+import threading
+import weakref
+from dataclasses import replace
 
 from ..config import (
     CONFLOC_INTERFACE_GUIDS,
@@ -22,6 +25,7 @@ from ..mpc import (
     parse_request_params,
 )
 from ..session import Session
+from ..store import ConferenceFields
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 from .dirsrv import (
@@ -48,12 +52,21 @@ CONFLOC_RESULT_NOT_FOUND = 2
 CONFSRV_JOINED = 3
 CONFSRV_EVENT_TEXT = 0
 CONFSRV_EVENT_PARTICIPANTS = 2
+# CONFAPI CceJoin maps wire status 8 to result 2; TEXTCHAT's join caller maps
+# result 2 to string 0x3C, "This chat is currently full."
+CONFSRV_ROOM_FULL = 8
+# TEXTCHAT HostControlsDialogProc maps its spectator radio to role 0 and its
+# participant radio to role 1. HandleParticipantListEvent treats role 2 as host.
+CONFSRV_ROLE_SPECTATOR = 0
 CONFSRV_ROLE_PARTICIPANT = 1
 CONFSRV_ROLE_HOST = 2
 
-# DSNED's Conversation page constrains `ml` to 50..1000. The current directory
-# model does not retain that unresolved tag.
+# Fallback for an incomplete authored room record. Seeded rooms carry their
+# CONFLOC settings in the content store.
 DEFAULT_MESSAGE_LENGTH = 1000
+
+_room_members = {}
+_room_members_lock = threading.Lock()
 
 
 class CONFLOCHandler:
@@ -147,16 +160,33 @@ class CONFLOCHandler:
             )
             return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
 
+        try:
+            decoded = _decode_property_record(properties)
+            stored = _apply_conference_properties(
+                self.content_store, record_id, decoded,
+            )
+        except ValueError as exc:
+            log.warning(
+                "data_edit_add invalid record req_id=%d record_id=%s error=%s",
+                request_id,
+                record_id.hex(),
+                exc,
+            )
+            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+
         log.info(
             "data_edit_add status=0 req_id=%d table=%d record_id=%s "
-            "dataset=0x%04x properties_len=%d",
+            "dataset=0x%04x props=%s",
             request_id,
             send_params[1].value,
             record_id.hex(),
             send_params[3].value,
-            len(properties),
+            ",".join(decoded),
         )
-        self._records[record_id] = properties
+        if stored:
+            self._records.pop(record_id, None)
+        else:
+            self._records[record_id] = properties
         return _build_data_edit_result(0)
 
     def build_data_edit_set_properties_reply_payload(self, request_id, payload):
@@ -224,7 +254,23 @@ class CONFLOCHandler:
             )
             return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
 
-        self._records[record_id] = properties
+        try:
+            stored = _apply_conference_properties(
+                self.content_store, record_id, decoded,
+            )
+        except ValueError as exc:
+            log.warning(
+                "data_edit_set_properties refused req_id=%d record_id=%s error=%s",
+                request_id,
+                record_id.hex(),
+                exc,
+            )
+            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+
+        if stored:
+            self._records.pop(record_id, None)
+        else:
+            self._records[record_id] = properties
         log.info(
             "data_edit_set_properties status=0 req_id=%d table=%d record_id=%s "
             "dataset=0x%04x props=%s",
@@ -265,6 +311,10 @@ class CONFLOCHandler:
 
         record_id = send_params[1].data
         properties = self._records.get(record_id)
+        if properties is None:
+            properties = _build_stored_conference_properties(
+                self.content_store, record_id,
+            )
         if properties is None:
             log.warning(
                 "data_edit_get_properties unknown record req_id=%d record_id=%s",
@@ -352,6 +402,7 @@ class CONFSRVHandler:
         self._join_subscription = None
         self._participant_id = None
         self._participant_role = None
+        self._joined_room_id = None
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(CONFSRV_INTERFACE_GUIDS)
@@ -368,7 +419,7 @@ class CONFSRVHandler:
                 self.pipe_idx, host_block, server_seq, client_ack,
             )
             display_name = self.session.user.display_name
-            if display_name:
+            if display_name and self._participant_role is not None:
                 packets.extend(
                     self._build_event_push_packets(
                         _build_participants_event(
@@ -404,13 +455,13 @@ class CONFSRVHandler:
         return None
 
     def build_join_reply_payload(self, payload):
-        """Push CONFAPI's initial status-3 record as one complete dynamic item.
+        """Push CONFAPI's initial join record as one complete dynamic item.
 
         CConversation::CceJoin reads this packed record as status WORD at +0,
         participant DWORD at +4, role WORD at +8, message limit DWORD at
         +10, and a counted UTF-16 conference name at +14/+18. The iterator is
-        retained for later chat messages. The complete marker terminates this
-        item and wakes the blocking iterator Next call.
+        retained for later chat messages. A full room returns status 8 alone;
+        the complete marker wakes the blocking iterator Next call in both cases.
         """
         send_params, recv_descriptors = parse_request_params(payload)
         room_id = next(
@@ -427,14 +478,43 @@ class CONFSRVHandler:
 
         room = self.content_store.find_app_instance(APP_TEXT_CONFERENCE, room_id)
         room_name = room.content.name if room is not None else ""
+        conference = room.content.conference if room is not None else None
+        room_capacity = conference.room_capacity if conference is not None else 0
+        message_length = (
+            conference.message_length
+            if conference is not None
+            else DEFAULT_MESSAGE_LENGTH
+        )
+        self._leave_room()
+        if room is not None and not _join_room(self, room_id, room_capacity):
+            self._participant_role = None
+            log.info(
+                "join room=%d name=%r capacity=%d status=%d",
+                room_id,
+                room_name,
+                room_capacity,
+                CONFSRV_ROOM_FULL,
+            )
+            return (
+                bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+                + struct.pack("<H", CONFSRV_ROOM_FULL)
+            )
+        if room is not None:
+            self._joined_room_id = room_id
+
         name = room_name.encode("utf-16le") + b"\x00\x00"
         participant_id = self._participant_id or 1
+        username = self.session.user.username.casefold()
         participant_role = (
             CONFSRV_ROLE_HOST
             if room is not None
-            and room.creator_username
-            and room.creator_username == self.session.user.username
-            else CONFSRV_ROLE_PARTICIPANT
+            and username
+            and any(host.casefold() == username for host in room.host_usernames)
+            else (
+                CONFSRV_ROLE_PARTICIPANT
+                if conference is None or conference.join_as_participants
+                else CONFSRV_ROLE_SPECTATOR
+            )
         )
         self._participant_role = participant_role
         record = struct.pack(
@@ -443,19 +523,41 @@ class CONFSRVHandler:
             0,
             participant_id,
             participant_role,
-            DEFAULT_MESSAGE_LENGTH,
+            message_length,
             len(name) // 2,
         ) + name
         log.info(
-            "join room=%d name=%r participant=%d role=%d message_limit=%d status=%d",
+            "join room=%d name=%r participant=%d role=%d capacity=%d "
+            "message_limit=%d status=%d",
             room_id,
             room_name,
             participant_id,
             participant_role,
-            DEFAULT_MESSAGE_LENGTH,
+            room_capacity,
+            message_length,
             CONFSRV_JOINED,
         )
         return bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]) + record
+
+    def handle_iterator_cancel(self, msg_class, selector, request_id):
+        if self._join_subscription == (msg_class, request_id):
+            self._join_subscription = None
+            self._leave_room()
+
+    def close(self):
+        self._leave_room()
+
+    def _leave_room(self):
+        room_id = self._joined_room_id
+        if room_id is None:
+            return
+        with _room_members_lock:
+            members = _room_members.get(room_id)
+            if members is not None:
+                members.discard(self)
+                if not members:
+                    _room_members.pop(room_id, None)
+        self._joined_room_id = None
 
     def _parse_text_event(self, request_id, payload):
         send_params, recv_descriptors = parse_request_params(payload)
@@ -517,6 +619,92 @@ def _build_participants_event(participant_id, role, display_name):
         0,
     ) + name
     return struct.pack("<HHI", CONFSRV_EVENT_PARTICIPANTS, 0, 0) + participant
+
+
+def _join_room(handler, room_id, capacity):
+    with _room_members_lock:
+        members = _room_members.setdefault(room_id, weakref.WeakSet())
+        if capacity > 0 and handler not in members and len(members) >= capacity:
+            return False
+        members.add(handler)
+        return True
+
+
+def _build_stored_conference_properties(content_store, record_id):
+    if len(record_id) != 8:
+        return None
+    field_0, field_8 = struct.unpack("<II", record_id)
+    node_id = f"{field_0}:{field_8}"
+    node = content_store.get_node(node_id)
+    if (
+        node is None
+        or node.node_id != node_id
+        or node.app_id != APP_TEXT_CONFERENCE
+        or node.content.conference is None
+    ):
+        return None
+    conference = node.content.conference
+    return build_property_record(
+        [
+            (0x03, "mm", struct.pack("<I", conference.room_capacity)),
+            (0x03, "ml", struct.pack("<I", conference.message_length)),
+            (0x03, "ds", struct.pack("<I", conference.join_as_participants)),
+        ]
+    )
+
+
+def _apply_conference_properties(content_store, record_id, properties):
+    """Commit CONFLOC's room settings to the shared directory node."""
+    if len(record_id) != 8:
+        return False
+    field_0, field_8 = struct.unpack("<II", record_id)
+    node_id = f"{field_0}:{field_8}"
+    node = content_store.get_node(node_id)
+    if (
+        node is None
+        or node.node_id != node_id
+        or node.app_id != APP_TEXT_CONFERENCE
+    ):
+        return False
+
+    values = {}
+    for property_name, field_name in (
+        ("mm", "room_capacity"),
+        ("ml", "message_length"),
+        ("ds", "join_as_participants"),
+    ):
+        item = properties.get(property_name)
+        if item is None:
+            continue
+        property_type, value = item
+        if property_type != 0x03 or not isinstance(value, int):
+            raise ValueError(f"property {property_name!r} is not a DWORD")
+        if property_name == "ds" and value not in (0, 1):
+            raise ValueError("property 'ds' is not a Boolean DWORD")
+        values[field_name] = bool(value) if property_name == "ds" else value
+
+    if not values:
+        return False
+
+    conference = node.content.conference
+    if conference is None:
+        missing = {
+            "room_capacity",
+            "message_length",
+            "join_as_participants",
+        } - values.keys()
+        if missing:
+            raise ValueError(
+                "new conference record is missing " + ", ".join(sorted(missing))
+            )
+        conference = ConferenceFields(**values)
+    else:
+        conference = replace(conference, **values)
+
+    content_store.add_node(
+        replace(node, content=replace(node.content, conference=conference))
+    )
+    return True
 
 
 def _build_data_edit_result(status):

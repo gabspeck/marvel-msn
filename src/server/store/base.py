@@ -63,6 +63,15 @@ class BbsFields:
 
 
 @dataclass(frozen=True)
+class ConferenceFields:
+    """Conference-only room settings authored through CONFLOC."""
+
+    room_capacity: int
+    message_length: int
+    join_as_participants: bool
+
+
+@dataclass(frozen=True)
 class NodeContent:
     name: str
     go_word: str
@@ -93,6 +102,8 @@ class NodeContent:
     # Optional BBS-only sub-struct. None for DIRSRV/MEDVIEW nodes; set on BBS
     # board/conversation/reply nodes so build_bbs_props can read BBS-only tags.
     bbs: BbsFields | None = None
+    # Optional CONFLOC settings. None for nodes that are not chat rooms.
+    conference: ConferenceFields | None = None
 
 
 @dataclass(frozen=True)
@@ -121,9 +132,9 @@ class DirectoryNode:
     # they differ. Every refresh — the idle poll and F5 alike — is gated on it,
     # so a node whose `g` never moves can never be re-listed.
     generation: int = 0
-    # Account username that created this node. Conference service uses it to
-    # assign the room's host role; it is server state, not a wire property.
-    creator_username: str = ""
+    # Account usernames that hold the conference host role. This is server
+    # state, not a wire property, and is empty for nodes that are not rooms.
+    host_usernames: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

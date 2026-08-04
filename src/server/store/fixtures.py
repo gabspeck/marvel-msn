@@ -19,6 +19,7 @@ from .base import (
     RIGHTS_AUTHORING,
     RIGHTS_NONE,
     BillingProfile,
+    ConferenceFields,
     DirectoryNode,
     MemberProfile,
     NodeContent,
@@ -333,8 +334,15 @@ _DEFAULT_CHAT_ROOM = DirectoryNode(
     is_container=False,
     app_id=APP_TEXT_CONFERENCE,
     mnid_a=_DEFAULT_CHAT_MNID,
-    content=_container_content("MSN Chat", type_str="Chat Room"),
-    creator_username="billg",
+    content=replace(
+        _container_content("MSN Chat", type_str="Chat Room"),
+        conference=ConferenceFields(
+            room_capacity=10,
+            message_length=1000,
+            join_as_participants=True,
+        ),
+    ),
+    host_usernames=("billg",),
 )
 
 

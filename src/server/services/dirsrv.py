@@ -901,21 +901,25 @@ def build_add_node_reply_payload(
         if node_factory is None:
             node_factory = _build_dirsrv_child_node
         node = node_factory(content_store, parent, properties)
-        if session is not None and session.is_authenticated:
-            node = replace(node, creator_username=session.user.username)
+        if (
+            session is not None
+            and session.is_authenticated
+            and node.app_id == APP_TEXT_CONFERENCE
+        ):
+            node = replace(node, host_usernames=(session.user.username,))
     except ValueError as exc:
         log.warning("add_node invalid properties parent=%s error=%s", parent_id, exc)
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     content_store.add_child(parent_id, node)
     log.info(
-        "add_node status=0 parent=%s node=%s name=%r type=%r app_id=%d creator=%s",
+        "add_node status=0 parent=%s node=%s name=%r type=%r app_id=%d hosts=%s",
         parent_id,
         node.node_id,
         node.content.name,
         node.content.type_str,
         node.app_id,
-        node.creator_username or "-",
+        ",".join(node.host_usernames) or "-",
     )
     return _build_add_node_result(0, node.mnid_a)
 
