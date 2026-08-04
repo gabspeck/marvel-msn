@@ -43,7 +43,7 @@ from ..mpc import (
 from ..session import Session
 from ..store import app_store as _default_store
 from ..store.base import BbsFields
-from ..store.records import build_bbs_attachment_nodes, build_bbs_post
+from ..store.records import bbs_node, build_bbs_attachment_nodes, build_bbs_post
 from . import dirsrv
 from ._dispatch import log_unhandled_selector
 
@@ -55,11 +55,10 @@ from ._dispatch import log_unhandled_selector
 # method 0 into GetProperties, which answers it with a meaningless record.
 #
 # Class 0x04 is the TREEEDCL write channel. BBSNAV binds a `CTreeEditClient` to
-# the same "BBS" service (channel `g_BbsEcig`, docs/BBSNAV.md §9) and the shell's
-# Delete verb drives it: `CMosTreeNode::Delete` @ MOSSHELL 0x7F3FFFA4 puts up the
-# confirmation, takes the edit object (which fetches a ticket on selector 12),
-# then calls `CTreeEditClient::DeleteNode` (selector 3). Its builders live in
-# `dirsrv` — the tree edit client is generic, so the shapes are shared.
+# the same "BBS" service (channel `g_BbsEcig`, docs/BBSNAV.md §9). New BBS
+# Folder calls AddNode (selector 2); the shell's Delete verb calls DeleteNode
+# (selector 3) after fetching a ticket on selector 12. Their wire builders live
+# in `dirsrv` because the tree edit client is generic.
 BBS_CLASS_TREE = 0x03
 BBS_CLASS_MESSAGE = 0x0B
 
@@ -183,6 +182,7 @@ BBS_F_FORMAT_PLAIN_TEXT = 0x0000
 BBS_F_FORMAT_RICH_TEXT = 0x0001
 BBS_F_MSN_BULLETIN_BOARD = 0x0800
 BBS_F_NO_CHILDREN = 0x1000
+_NEW_BBS_FOLDER_NAME = "New BBS Folder"
 
 # LCID the Properties dialog displays for a BBS post. Distinct from the node's
 # `language` field, which stays 0 so the node survives every locale filter in
@@ -234,7 +234,8 @@ class BBSHandler:
 
         Three classes are served: the tree class (0x03) methods 0/2/3/4, the
         message-content class (0x0B) methods 0 (article fetch) and 2/3/4/7 (post
-        upload), and the TREEEDCL edit class (0x04) methods 3 and 12 (Delete).
+        upload), and the TREEEDCL edit class (0x04) methods 2, 3, 4 and 12 (Add,
+        Delete, SetProperties and GetTicket).
         Everything else — GetParents (1), the unimplemented enum/resolve slots —
         is logged unhandled and left unanswered.
 
@@ -245,7 +246,17 @@ class BBSHandler:
             self._take_continuation(msg_class, selector, payload)
             return None
         if msg_class == dirsrv.TREEEDCL_CLASS_EDIT:
-            if selector == dirsrv.TREEEDCL_SELECTOR_GET_TICKET:
+            if selector == dirsrv.TREEEDCL_SELECTOR_ADD_NODE:
+                reply_payload = dirsrv.build_add_node_reply_payload(
+                    payload,
+                    session=self.session,
+                    node_factory=_build_bbs_folder_node,
+                )
+            elif selector == dirsrv.TREEEDCL_SELECTOR_SET_PROPERTIES:
+                reply_payload = dirsrv.build_set_properties_reply_payload(
+                    payload, session=self.session
+                )
+            elif selector == dirsrv.TREEEDCL_SELECTOR_GET_TICKET:
                 reply_payload = dirsrv.build_get_ticket_reply_payload(
                     self.session, require_admin=False
                 )
@@ -602,6 +613,42 @@ def build_bbs_get_children_reply_payload(request):
 
 def _requested_props(prop_group):
     return [p for p in prop_group.split("\x00") if p]
+
+
+def _build_bbs_folder_node(content_store, parent, properties):
+    """Build the node requested by BBSNAV's New BBS Folder command."""
+    new_mnid = _allocate_bbs_folder_mnid(content_store, parent.mnid_a)
+    message_id, board_id = struct.unpack("<II", new_mnid)
+    flags = dirsrv._property_int(
+        properties,
+        PROP_HAS_CHILDREN,
+        BBS_F_FORMAT_RICH_TEXT | BBS_F_MSN_BULLETIN_BOARD,
+    )
+    name = (
+        dirsrv._property_text(properties, PROP_NAME)
+        or dirsrv._property_text(properties, dirsrv.PROP_NAME_EDIT)
+        or _NEW_BBS_FOLDER_NAME
+    )
+    return bbs_node(
+        message_id,
+        board_id,
+        name,
+        is_container=True,
+        has_children=not bool(flags & BBS_F_NO_CHILDREN),
+    )
+
+
+def _allocate_bbs_folder_mnid(content_store, parent_mnid):
+    """Allocate `0:<board id>`, the MNID shape BBSNAV treats as a folder."""
+    _parent_message_id, parent_board_id = struct.unpack("<II", parent_mnid)
+    board_id = parent_board_id + 1
+    while board_id <= 0xFFFFFFFF:
+        node_id = f"0:{board_id}"
+        existing = content_store.get_node(node_id)
+        if existing is None or existing.node_id != node_id:
+            return struct.pack("<II", 0, board_id)
+        board_id += 1
+    raise ValueError("no free BBS board id remains")
 
 
 # --- Message-content channel (class 0x0B) ---
@@ -1105,7 +1152,7 @@ def _header_int(headers, name, default):
         return default
 
 
-def _next_message_id(board_key, board_id):
+def _next_message_id(board_key, board_id, content_store=None):
     """One past the last id any message on the board owns.
 
     Message ids are the `field_8` half of the mnid and must be unique per board
@@ -1114,8 +1161,10 @@ def _next_message_id(board_key, board_id):
     attachment as `message id + k`, so the next message starts past the last of
     them or the two collide on one mnid.
     """
+    if content_store is None:
+        content_store = _default_store.content
     highest = 0
-    for child in _default_store.content.get_children(board_key):
+    for child in content_store.get_children(board_key):
         msg_id, _sep, child_board = child.node_id.partition(":")
         if child_board == str(board_id) and msg_id.isdigit():
             bbs = child.content.bbs or _EMPTY_BBS

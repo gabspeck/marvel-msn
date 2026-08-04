@@ -852,8 +852,9 @@ class TestBBSArticle(unittest.TestCase):
 class TestBBSEditChannel(unittest.TestCase):
     """Class 0x04 — the TREEEDCL write channel BBSNAV binds to `g_BbsEcig`.
 
-    Delete is the only verb wired: `CMosTreeNode::Delete` @ MOSSHELL 0x7F3FFFA4
-    fetches a ticket (selector 12) and then calls DeleteNode (selector 3).
+    New BBS Folder calls AddNode (selector 2). `CMosTreeNode::Delete` @
+    MOSSHELL 0x7F3FFFA4 fetches a ticket (selector 12) and then calls DeleteNode
+    (selector 3).
     """
 
     def setUp(self):
@@ -875,6 +876,41 @@ class TestBBSEditChannel(unittest.TestCase):
             + b"\x83\x83"
         )
 
+    @staticmethod
+    def _add_folder_request():
+        properties = dirsrv.build_property_record(
+            [
+                (0x02, "_F", struct.pack("<H", 0x0801)),
+                (0x03, "m", struct.pack("<I", 0)),
+                (0x10, "q", struct.pack("<II", 1, 0x0409)),
+            ]
+        )
+        request = (
+            b"\x04\x82\x02\x00"
+            + b"\x04\x88"
+            + struct.pack("<II", 0, 1)
+            + b"\x04"
+            + bytes([0x80 | len(properties)])
+            + properties
+            + b"\x83\x83\x84"
+        )
+        # Match the bounded log's complete 32-byte prefix and payload length.
+        assert len(request) == 49
+        assert request.hex().startswith(
+            "0482020004880000000001000000049e1e0000000300025f46000108036d0000"
+        )
+        return request
+
+    @staticmethod
+    def _set_folder_name_request():
+        # Captured after clicking Apply in the new BBS folder's Properties
+        # dialog. The inner MNID is 0:2 and the single record is f="New BBS".
+        request = bytes.fromhex(
+            "048202000488000000000200000004921200000001000b6600014e657720424253008383"
+        )
+        assert len(request) == 36
+        return request
+
     def test_get_ticket_is_answered_on_the_bbs_pipe(self):
         handler = BBSHandler(1, "BBS", signed_in())
         packets = handler.handle_request(
@@ -889,6 +925,64 @@ class TestBBSEditChannel(unittest.TestCase):
         self.assertEqual(
             self._reply_payload(packets), dirsrv.build_get_ticket_reply_payload()
         )
+
+    def test_add_node_creates_a_bbs_folder_and_returns_its_mnid(self):
+        handler = BBSHandler(1, "BBS", signed_in())
+        before = {node.node_id for node in app_store.content.get_children(_BOARD)}
+
+        packets = handler.handle_request(
+            msg_class=0x04,
+            selector=0x02,
+            request_id=1,
+            payload=self._add_folder_request(),
+            server_seq=0,
+            client_ack=0,
+        )
+
+        after = {node.node_id for node in app_store.content.get_children(_BOARD)}
+        (new_id,) = after - before
+        node = app_store.content.get_node(new_id)
+        self.assertEqual(node.content.name, "New BBS Folder")
+        self.assertEqual(node.app_id, APP_BBS_SERVICE)
+        self.assertTrue(node.is_container)
+        self.assertIsNotNone(node.content.bbs)
+        self.assertTrue(node.content.bbs.has_children)
+        message_id, board_id = struct.unpack("<II", node.mnid_a)
+        # CBbsNavTreeNode_AddPropPages @ 0x7F5F17AE selects the BBS Folder
+        # and Expiration pages only when the inner MNID's message id is zero.
+        self.assertEqual(message_id, 0)
+        self.assertNotEqual(board_id, 1)
+        self.assertEqual(
+            self._reply_payload(packets),
+            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87\x84\x88" + node.mnid_a,
+        )
+
+    def test_apply_updates_the_bbs_folder_and_completes(self):
+        handler = BBSHandler(1, "BBS", signed_in())
+        handler.handle_request(
+            msg_class=0x04,
+            selector=0x02,
+            request_id=1,
+            payload=self._add_folder_request(),
+            server_seq=0,
+            client_ack=0,
+        )
+        self.assertEqual(app_store.content.get_node("0:2").content.name, "New BBS Folder")
+
+        packets = handler.handle_request(
+            msg_class=0x04,
+            selector=0x04,
+            request_id=2,
+            payload=self._set_folder_name_request(),
+            server_seq=0,
+            client_ack=0,
+        )
+
+        self.assertEqual(
+            self._reply_payload(packets),
+            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
+        )
+        self.assertEqual(app_store.content.get_node("0:2").content.name, "New BBS")
 
     def test_delete_node_drops_the_message_from_the_board(self):
         handler = BBSHandler(1, "BBS", signed_in())

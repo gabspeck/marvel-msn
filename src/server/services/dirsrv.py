@@ -398,7 +398,12 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # not 0x0E (a 0x0E element caches a heap pointer, same hazard as
             # 'wv'/'mf'). Non-delegate nodes emit DWORD 0.
             if node.delegate:
-                out.append((0x0C, PROP_DELEGATE_MNID, node.mnid_a))
+                inner_mnid = (
+                    node.delegate_mnid_a
+                    if node.delegate_mnid_a is not None
+                    else node.mnid_a
+                )
+                out.append((0x0C, PROP_DELEGATE_MNID, inner_mnid))
             else:
                 out.append((0x03, PROP_DELEGATE_MNID, struct.pack("<I", 0)))
         elif name == PROP_DELEGATE_FIELD10:
@@ -833,7 +838,9 @@ def build_get_datasets_reply_payload():
     )
 
 
-def build_add_node_reply_payload(payload, content_store=None, session=None):
+def build_add_node_reply_payload(
+    payload, content_store=None, session=None, node_factory=None
+):
     """Create one child for a TREEEDCL AddNode request.
 
     CTreeEditClient::PrivateAddNode sends three variable fields: the capability
@@ -841,6 +848,9 @@ def build_add_node_reply_payload(payload, content_store=None, session=None):
     Its receive descriptors are two DWORDs and one variable field. A completed
     operation therefore replies with status 0, operation id 0, and the new
     8-byte MNID.
+
+    `node_factory` lets another service using TREEEDCL build its own node model
+    while reusing this wire validation and reply shape.
 
     An account without authoring rights is refused before the store is touched.
     The ticket it would have to carry is refused too, so this is the second gate
@@ -885,12 +895,30 @@ def build_add_node_reply_payload(payload, content_store=None, session=None):
 
     try:
         properties = _decode_property_record(property_record)
-        new_mnid = _allocate_child_mnid(content_store, parent_id, parent_mnid)
+        if node_factory is None:
+            node_factory = _build_dirsrv_child_node
+        node = node_factory(content_store, parent, properties)
     except ValueError as exc:
         log.warning("add_node invalid properties parent=%s error=%s", parent_id, exc)
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
+    content_store.add_child(parent_id, node)
+    log.info(
+        "add_node status=0 parent=%s node=%s name=%r type=%r app_id=%d",
+        parent_id,
+        node.node_id,
+        node.content.name,
+        node.content.type_str,
+        node.app_id,
+    )
+    return _build_add_node_result(0, node.mnid_a)
+
+
+def _build_dirsrv_child_node(content_store, parent, properties):
+    """Build the directory-specific node behind TREEEDCL AddNode."""
+    new_mnid = _allocate_child_mnid(content_store, parent.node_id, parent.mnid_a)
     browse_flags = _property_int(properties, PROP_BROWSE_FLAGS, 0)
+    delegate = bool(browse_flags & DIRSRV_BROWSE_FLAGS_DELEGATE)
     language_values = _property_value(properties, PROP_LANGUAGE, [])
     language = language_values[0] if language_values else parent.content.language
     name = (
@@ -899,7 +927,7 @@ def build_add_node_reply_payload(payload, content_store=None, session=None):
         or "New Item"
     )
     new_field_0, new_field_8 = struct.unpack("<II", new_mnid)
-    node = DirectoryNode(
+    return DirectoryNode(
         node_id=f"{new_field_0}:{new_field_8}",
         is_container=not bool(browse_flags & DIRSRV_BROWSE_FLAGS_LEAF),
         app_id=_property_int(properties, PROP_APP_ID, parent.app_id),
@@ -925,18 +953,11 @@ def build_add_node_reply_payload(payload, content_store=None, session=None):
             size_bytes=_property_int(properties, PROP_MAYBE_SIZE_OR_LEGACY_TITLE, 0),
         ),
         browse_flags=browse_flags,
-        delegate=bool(browse_flags & DIRSRV_BROWSE_FLAGS_DELEGATE),
+        delegate=delegate,
+        delegate_mnid_a=(
+            _property_mnid(properties, PROP_DELEGATE_MNID) if delegate else None
+        ),
     )
-    content_store.add_child(parent_id, node)
-    log.info(
-        "add_node status=0 parent=%s node=%s name=%r type=%r app_id=%d",
-        parent_id,
-        node.node_id,
-        node.content.name,
-        node.content.type_str,
-        node.app_id,
-    )
-    return _build_add_node_result(0, new_mnid)
 
 
 def _build_add_node_result(status, new_mnid):
@@ -1283,6 +1304,16 @@ def _property_int(properties, name, default):
 def _property_text(properties, name):
     value = _property_value(properties, name, "")
     return value if isinstance(value, str) else ""
+
+
+def _property_mnid(properties, name):
+    """Decode an 8-byte inline MNID property into its wire byte form."""
+    value = _property_value(properties, name, None)
+    if isinstance(value, int):
+        return struct.pack("<Q", value)
+    if isinstance(value, bytes) and len(value) == 8:
+        return value
+    return None
 
 
 # --- Payload builders used by tests ---

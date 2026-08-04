@@ -612,6 +612,17 @@ follows is the node-creation path, recovered statically.
 3. `CTreeEditClient::AddNode` (sel 2): `[ticket][parent mnid][compressed SP]` →
    new mnid. `EnumMosWindows(RefreshEmw)` refreshes all shell views.
 
+Creating a directory-visible BBS folder uses two linked AddNode calls, observed
+live on 2026-08-04. BBS AddNode creates the inner board. DIRSRV AddNode then
+creates the outer delegate row and carries the returned inner MNID in property
+`l`; outer property `a` remains the directory row's own MNID.
+
+`CBbsNavTreeNode_AddPropPages` (`0x7F5F17AE`) selects pages from the inner
+MNID's `field_8` at node offset `+0x18`. `field_8 == 0` selects the folder page
+set, including dialog resources `0x7C` (BBS Folder) and `0x7D` (Expiration).
+A nonzero value selects the BBS Message page. An inner folder MNID therefore
+has the wire form `(message_id=0, board_id=<unique>)`.
+
 Subsequent user edits → `SetProperties` (sel 4); relinking a node → `LinkNode`
 (sel 5). Neither has been seen on the wire. The 72-byte edit object
 (`CBbsTreeEdit`, vtable `vtbl_CBbsTreeEdit` `0x7F60E9E8`) is bound to `g_BbsEcig`

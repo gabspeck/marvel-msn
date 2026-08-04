@@ -53,6 +53,7 @@ from server.services.dirsrv import (
     build_get_properties_reply_payload,
     build_get_ticket_reply_payload,
     build_property_record,
+    build_props,
     build_set_properties_reply_payload,
 )
 from server.services.ftm import (
@@ -1583,6 +1584,39 @@ class TestDIRSRVAddNode(unittest.TestCase):
         reply = build_add_node_reply_payload(b"\x83\x85", store)
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
         self.assertEqual(store.children["1:16"], [])
+
+    def test_preserves_the_inner_mnid_of_a_delegate(self):
+        inner_mnid = struct.pack("<II", 0, 2)
+        properties = build_property_record(
+            [
+                (0x03, "c", struct.pack("<I", 2)),
+                (0x01, "b", b"\x04"),
+                (0x0C, "l", inner_mnid),
+                (0x02, "i", b"\x00\x00"),
+                (0x0A, "tp", b"\x01Bulletin Board Folder\x00"),
+            ]
+        )
+        request = (
+            self._tagged_var(b"\x02\x00")
+            + self._tagged_var(struct.pack("<II", 1, 16))
+            + self._tagged_var(properties)
+            + b"\x83\x83\x84"
+        )
+        store = _AddNodeContentStore()
+
+        build_add_node_reply_payload(request, store)
+
+        node = store.get_node("1:17")
+        self.assertTrue(node.delegate)
+        self.assertEqual(node.delegate_mnid_a, inner_mnid)
+        properties = {
+            name: value
+            for _ptype, name, value in build_props(
+                ["a", "l"], node, is_children=False
+            )
+        }
+        self.assertEqual(properties["a"], struct.pack("<I", 8) + node.mnid_a)
+        self.assertEqual(properties["l"], inner_mnid)
 
     def test_edit_class_selector_two_does_not_fall_through_to_get_children(self):
         handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")

@@ -110,6 +110,11 @@ class DirectoryNode:
     # MOSSHELL HrSetupDelegate turns into the inner mnid
     # {field_0=app_id, field_8/field_c=mnid_a, field_10=0}.
     delegate: bool = False
+    # Optional inner `l` MNID when it differs from the outer directory `a`.
+    # Creating a BBS folder produces both: DIRSRV owns the outer category row,
+    # while BBS AddNode returns the inner board id that selects BBSNAV's folder
+    # property pages.
+    delegate_mnid_a: bytes | None = None
     # Wire property `g` — the node's change stamp. `CMosTreeNode::QueryOutOfDate`
     # @ MOSSHELL 0x7F3FDB3F is the only reader: it compares the value the server
     # sends now against the one it cached, and marks the node out of date when
