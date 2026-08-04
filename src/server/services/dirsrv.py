@@ -16,6 +16,7 @@ from ..config import (
 )
 from ..log import TRACE
 from ..models import ByteParam, DirsrvRequest, DwordParam, VarParam
+from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -900,18 +901,21 @@ def build_add_node_reply_payload(
         if node_factory is None:
             node_factory = _build_dirsrv_child_node
         node = node_factory(content_store, parent, properties)
+        if session is not None and session.is_authenticated:
+            node = replace(node, creator_username=session.user.username)
     except ValueError as exc:
         log.warning("add_node invalid properties parent=%s error=%s", parent_id, exc)
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     content_store.add_child(parent_id, node)
     log.info(
-        "add_node status=0 parent=%s node=%s name=%r type=%r app_id=%d",
+        "add_node status=0 parent=%s node=%s name=%r type=%r app_id=%d creator=%s",
         parent_id,
         node.node_id,
         node.content.name,
         node.content.type_str,
         node.app_id,
+        node.creator_username or "-",
     )
     return _build_add_node_result(0, node.mnid_a)
 
@@ -919,6 +923,10 @@ def build_add_node_reply_payload(
 def _build_dirsrv_child_node(content_store, parent, properties):
     """Build the directory-specific node behind TREEEDCL AddNode."""
     new_mnid = _allocate_child_mnid(content_store, parent.node_id, parent.mnid_a)
+    app_id = _property_int(properties, PROP_APP_ID, parent.app_id)
+    if app_id == APP_TEXT_CONFERENCE:
+        _field_0, field_8 = struct.unpack("<II", new_mnid)
+        new_mnid = _allocate_app_instance_mnid(content_store, app_id, field_8)
     browse_flags = _property_int(properties, PROP_BROWSE_FLAGS, 0)
     delegate = bool(browse_flags & DIRSRV_BROWSE_FLAGS_DELEGATE)
     language_values = _property_value(properties, PROP_LANGUAGE, [])
@@ -932,7 +940,7 @@ def _build_dirsrv_child_node(content_store, parent, properties):
     return DirectoryNode(
         node_id=f"{new_field_0}:{new_field_8}",
         is_container=not bool(browse_flags & DIRSRV_BROWSE_FLAGS_LEAF),
-        app_id=_property_int(properties, PROP_APP_ID, parent.app_id),
+        app_id=app_id,
         mnid_a=new_mnid,
         content=NodeContent(
             name=name,
@@ -1292,6 +1300,18 @@ def _allocate_child_mnid(content_store, parent_id, parent_mnid):
             return struct.pack("<II", field_0, field_8)
         field_8 += 1
     raise ValueError("no free child MNID remains")
+
+
+def _allocate_app_instance_mnid(content_store, app_id, field_8):
+    instance_id = 1
+    while instance_id <= 0xFFFFFFFF:
+        node_id = f"{instance_id}:{field_8}"
+        existing = content_store.get_node(node_id)
+        node_id_is_free = existing is None or existing.node_id != node_id
+        if node_id_is_free and content_store.find_app_instance(app_id, instance_id) is None:
+            return struct.pack("<II", instance_id, field_8)
+        instance_id += 1
+    raise ValueError("no free app instance remains")
 
 
 def _property_value(properties, name, default):

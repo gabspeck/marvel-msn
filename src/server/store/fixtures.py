@@ -334,6 +334,7 @@ _DEFAULT_CHAT_ROOM = DirectoryNode(
     app_id=APP_TEXT_CONFERENCE,
     mnid_a=_DEFAULT_CHAT_MNID,
     content=_container_content("MSN Chat", type_str="Chat Room"),
+    creator_username="billg",
 )
 
 

@@ -7,6 +7,7 @@ from ..config import (
     CONFLOC_INTERFACE_GUIDS,
     CONFSRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ..models import DwordParam, VarParam, WordParam
@@ -39,15 +40,19 @@ CONFLOC_DATA_EDIT_SET_PROPERTIES = 0x02
 CONFLOC_DATA_EDIT_GET_PROPERTIES = 0x03
 CONFLOC_DATA_EDIT_GET_TICKET = 0x05
 CONFSRV_SELECTOR_JOIN = 0x03
+CONFSRV_SELECTOR_SEND = 0x02
 
 # CONFAPI!CConversation::CceJoin @ 0x7F5B16FC branches on these WORD values.
 CONFLOC_RESULT_FOUND = 1
 CONFLOC_RESULT_NOT_FOUND = 2
 CONFSRV_JOINED = 3
+CONFSRV_EVENT_TEXT = 0
+CONFSRV_EVENT_PARTICIPANTS = 2
+CONFSRV_ROLE_PARTICIPANT = 1
+CONFSRV_ROLE_HOST = 2
 
-# DSNED's Conversation page constrains these fields to 2..10000 and 50..1000.
-# The current directory model does not retain its unresolved `mm`/`ml` tags.
-DEFAULT_ROOM_CAPACITY = 100
+# DSNED's Conversation page constrains `ml` to 50..1000. The current directory
+# model does not retain that unresolved tag.
 DEFAULT_MESSAGE_LENGTH = 1000
 
 
@@ -337,12 +342,16 @@ class CONFLOCHandler:
 
 
 class CONFSRVHandler:
-    """Accept the initial join that opens the text-chat window."""
+    """Join a text conference and service its retained event iterator."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
+    def __init__(self, pipe_idx, svc_name, session=None, content_store=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
         self.session = session or Session()
+        self.content_store = content_store or _default_store.content
+        self._join_subscription = None
+        self._participant_id = None
+        self._participant_role = None
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(CONFSRV_INTERFACE_GUIDS)
@@ -350,18 +359,55 @@ class CONFSRVHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        if selector != CONFSRV_SELECTOR_JOIN:
-            log_unhandled_selector(log, msg_class, selector, request_id, payload)
-            return None
-        reply_payload = self.build_join_reply_payload(payload)
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        if selector == CONFSRV_SELECTOR_JOIN:
+            self._join_subscription = (msg_class, request_id)
+            self._participant_id = 1
+            reply_payload = self.build_join_reply_payload(payload)
+            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
+            packets = build_service_packet(
+                self.pipe_idx, host_block, server_seq, client_ack,
+            )
+            display_name = self.session.user.display_name
+            if display_name:
+                packets.extend(
+                    self._build_event_push_packets(
+                        _build_participants_event(
+                            self._participant_id,
+                            self._participant_role,
+                            display_name,
+                        ),
+                        (server_seq + len(packets)) & 0x7F,
+                        client_ack,
+                    )
+                )
+            return packets
+
+        if selector == CONFSRV_SELECTOR_SEND:
+            ack_host = build_host_block(
+                msg_class, selector, request_id, bytes([TAG_END_STATIC]),
+            )
+            packets = build_service_packet(
+                self.pipe_idx, ack_host, server_seq, client_ack,
+            )
+            event = self._parse_text_event(request_id, payload)
+            if event is not None and self._join_subscription is not None:
+                packets.extend(
+                    self._build_event_push_packets(
+                        event,
+                        (server_seq + len(packets)) & 0x7F,
+                        client_ack,
+                    )
+                )
+            return packets
+
+        log_unhandled_selector(log, msg_class, selector, request_id, payload)
+        return None
 
     def build_join_reply_payload(self, payload):
         """Push CONFAPI's initial status-3 record as one complete dynamic item.
 
         CConversation::CceJoin reads this packed record as status WORD at +0,
-        participant DWORD at +4, capacity WORD at +8, message limit DWORD at
+        participant DWORD at +4, role WORD at +8, message limit DWORD at
         +10, and a counted UTF-16 conference name at +14/+18. The iterator is
         retained for later chat messages. The complete marker terminates this
         item and wakes the blocking iterator Next call.
@@ -379,25 +425,98 @@ class CONFSRVHandler:
                 payload.hex(),
             )
 
-        participant_id = 1
+        room = self.content_store.find_app_instance(APP_TEXT_CONFERENCE, room_id)
+        room_name = room.content.name if room is not None else ""
+        name = room_name.encode("utf-16le") + b"\x00\x00"
+        participant_id = self._participant_id or 1
+        participant_role = (
+            CONFSRV_ROLE_HOST
+            if room is not None
+            and room.creator_username
+            and room.creator_username == self.session.user.username
+            else CONFSRV_ROLE_PARTICIPANT
+        )
+        self._participant_role = participant_role
         record = struct.pack(
             "<HHIHII",
             CONFSRV_JOINED,
             0,
             participant_id,
-            DEFAULT_ROOM_CAPACITY,
+            participant_role,
             DEFAULT_MESSAGE_LENGTH,
-            0,
-        )
+            len(name) // 2,
+        ) + name
         log.info(
-            "join room=%d participant=%d capacity=%d message_limit=%d status=%d",
+            "join room=%d name=%r participant=%d role=%d message_limit=%d status=%d",
             room_id,
+            room_name,
             participant_id,
-            DEFAULT_ROOM_CAPACITY,
+            participant_role,
             DEFAULT_MESSAGE_LENGTH,
             CONFSRV_JOINED,
         )
-        return bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + record
+        return bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]) + record
+
+    def _parse_text_event(self, request_id, payload):
+        send_params, recv_descriptors = parse_request_params(payload)
+        valid_shape = (
+            len(send_params) == 1
+            and isinstance(send_params[0], VarParam)
+            and recv_descriptors == []
+        )
+        record = send_params[0].data if valid_shape else b""
+        valid_record = (
+            len(record) >= 10
+            and len(record) % 2 == 0
+            and struct.unpack_from("<H", record)[0] == CONFSRV_EVENT_TEXT
+            and record[-2:] == b"\x00\x00"
+        )
+        if not valid_record:
+            log.warning(
+                "send_text invalid request req_id=%d params=%d recv=%s record_len=%d",
+                request_id,
+                len(send_params),
+                [f"0x{tag:02x}" for tag in recv_descriptors],
+                len(record),
+            )
+            return None
+
+        event = bytearray(record)
+        struct.pack_into("<I", event, 4, self._participant_id or 0)
+        text = event[8:-2].decode("utf-16le", errors="replace")
+        log.info(
+            "send_text req_id=%d participant=%d chars=%d text=%r",
+            request_id,
+            self._participant_id or 0,
+            len(text),
+            text,
+        )
+        return bytes(event)
+
+    def _build_event_push_packets(self, event, server_seq, client_ack):
+        msg_class, request_id = self._join_subscription
+        host_block = build_host_block(
+            msg_class,
+            CONFSRV_SELECTOR_JOIN,
+            request_id,
+            bytes([TAG_DYNAMIC_STREAM_END]) + event,
+        )
+        return build_service_packet(
+            self.pipe_idx, host_block, server_seq, client_ack,
+        )
+
+
+def _build_participants_event(participant_id, role, display_name):
+    name = display_name.encode("cp1252", errors="replace")
+    participant = struct.pack(
+        "<IHIHH",
+        participant_id,
+        role,
+        len(name),
+        0,
+        0,
+    ) + name
+    return struct.pack("<HHI", CONFSRV_EVENT_PARTICIPANTS, 0, 0) + participant
 
 
 def _build_data_edit_result(status):

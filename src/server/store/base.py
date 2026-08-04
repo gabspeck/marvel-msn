@@ -121,6 +121,9 @@ class DirectoryNode:
     # they differ. Every refresh — the idle poll and F5 alike — is gated on it,
     # so a node whose `g` never moves can never be re-listed.
     generation: int = 0
+    # Account username that created this node. Conference service uses it to
+    # assign the room's host role; it is server state, not a wire property.
+    creator_username: str = ""
 
 
 @dataclass(frozen=True)
