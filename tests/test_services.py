@@ -48,6 +48,7 @@ from server.services.conference import (
     CONFLOC_DATA_EDIT_CLASS,
     CONFLOC_DATA_EDIT_GET_PROPERTIES,
     CONFLOC_DATA_EDIT_GET_TICKET,
+    CONFLOC_DATA_EDIT_SET_PROPERTIES,
     CONFLOC_RESULT_FOUND,
     CONFLOC_RESULT_NOT_FOUND,
     CONFSRV_JOINED,
@@ -589,6 +590,52 @@ class TestConferenceStartup(unittest.TestCase):
             parsed.payload[8:],
             b"\x83\x00\x00\x00\x00\x83\x01\x00\x00\x00\x87\x86" + selected,
         )
+
+    def test_data_edit_set_properties_applies_the_conversation_values(self):
+        store = _AddNodeContentStore()
+        parent = store.get_node("1:16")
+        chat = parent.__class__(
+            node_id="1:275",
+            is_container=True,
+            app_id=4,
+            mnid_a=struct.pack("<II", 1, 275),
+            content=parent.content,
+        )
+        store.add_child("1:16", chat)
+        handler = CONFLOCHandler(10, "CONFLOC", signed_in(), content_store=store)
+        ticket = b"\x02\x00"
+        record_id = struct.pack("<II", 1, 275)
+        properties = build_property_record(
+            [
+                (0x03, "ml", struct.pack("<I", 2000)),
+                (0x03, "mm", struct.pack("<I", 200)),
+                (0x03, "ds", struct.pack("<I", 1)),
+            ]
+        )
+        request = (
+            b"\x04\x82" + ticket
+            + b"\x03\x01\x00\x00\x00"
+            + b"\x04\x88" + record_id
+            + b"\x02\x00\x00"
+            + b"\x04" + bytes([0x80 | len(properties)]) + properties
+            + b"\x83\x83"
+        )
+
+        packets = handler.handle_request(
+            CONFLOC_DATA_EDIT_CLASS,
+            CONFLOC_DATA_EDIT_SET_PROPERTIES,
+            3,
+            request,
+            0,
+            0,
+        )
+        parsed = parse_packet(packets[0][:-1])
+
+        self.assertEqual(
+            parsed.payload[8:],
+            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
+        )
+        self.assertEqual(handler._records[record_id], properties)
 
     def test_data_edit_add_rejects_anonymous_writes(self):
         handler = CONFLOCHandler(10, "CONFLOC")
