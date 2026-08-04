@@ -48,6 +48,8 @@ _RE_YOSEMITE = "512:1"  # msg 0x200, _P = 0x100
 _SPORTS_CATEGORY = "1:266"  # DIRSRV "Sports, Health and Fitness" (f8 0x10A)
 _ATTACHMENT_POST = "513:1"  # msg 0x201, one MOSAF object in its body
 _ATTACHMENT_FILE = "514:1"  # that object's mnid — message id + 1
+_PRICED_ATTACHMENT_POST = "515:1"  # msg 0x203
+_PRICED_ATTACHMENT_FILE = "516:1"  # priced MOSAF object at message id + 1
 
 
 def _mapi_crc(data):
@@ -306,6 +308,7 @@ class TestBBSAttachmentFixture(unittest.TestCase):
                 "RE: Yosemite": 0,
                 "British Climbers": 0,
                 "Attachment test": 1,
+                "Priced attachment test": 1,
             },
         )
 
@@ -315,6 +318,14 @@ class TestBBSAttachmentFixture(unittest.TestCase):
         request = DirsrvRequest(node_id=_ATTACHMENT_FILE, prop_group="z\x00_r")
         record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
         self.assertEqual((record["z"], record["_r"]), (0, 0))
+
+    def test_priced_attachment_has_a_nonzero_price(self):
+        message = app_store.content.get_node(_PRICED_ATTACHMENT_POST)
+        self.assertEqual(message.content.bbs.attachment_count, 1)
+
+        request = DirsrvRequest(node_id=_PRICED_ATTACHMENT_FILE, prop_group="z\x00_r")
+        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        self.assertEqual((record["z"], record["_r"]), ((250 << 8) | 3, 0))
 
     def test_the_uploaded_file_is_kept_off_the_body(self):
         # The file rode its own upload segment as a MOS2 container (the client
@@ -336,7 +347,13 @@ class TestBBSGetChildren(unittest.TestCase):
         records = _walk_records(build_bbs_get_children_reply_payload(request))
         self.assertEqual(
             [r["e"] for r in records],
-            ["Yosemite", "RE: Yosemite", "British Climbers", "Attachment test"],
+            [
+                "Yosemite",
+                "RE: Yosemite",
+                "British Climbers",
+                "Attachment test",
+                "Priced attachment test",
+            ],
         )
         # Authors per reference/screenshots/bbs.png.
         self.assertEqual(records[0]["_a"], "Chris Hahn")
@@ -356,6 +373,7 @@ class TestBBSGetChildren(unittest.TestCase):
                 "RE: Yosemite",
                 "British Climbers",
                 "Attachment test",
+                "Priced attachment test",
             ],
         )
 

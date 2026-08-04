@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime
 import pathlib
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
 from .base import (
@@ -455,6 +455,29 @@ _BBS_ATTACHMENT = bbs_node(
     attachment_data=(_BBS_ATTACHMENT_DIR / "attachment-post.mos2").read_bytes(),
 )
 
+_BBS_PRICED_ATTACHMENT = bbs_node(
+    0x203,
+    _BBS_BOARD_ID,
+    "Priced attachment test",
+    is_container=False,
+    author="Chris Hahn",
+    date="May 18, 1995 9:04 AM",
+    body_raw=(_BBS_ATTACHMENT_DIR / "attachment-post.rtfcomp").read_bytes(),
+    body_format="RTFCOMP",
+    size_bytes=1286,
+    attachment_count=1,
+    attachment_data=(_BBS_ATTACHMENT_DIR / "attachment-post.mos2").read_bytes(),
+)
+(_BBS_PRICED_ATTACHMENT_FILE,) = build_bbs_attachment_nodes(_BBS_PRICED_ATTACHMENT)
+_BBS_PRICED_ATTACHMENT_FILE = replace(
+    _BBS_PRICED_ATTACHMENT_FILE,
+    content=replace(
+        _BBS_PRICED_ATTACHMENT_FILE.content,
+        # `z`: amount in the high 24 bits, currency-table index in the low byte.
+        price_dword=(250 << 8) | 3,
+    ),
+)
+
 BBS_NODES = [
     _CLIMBING_BBS,
     _BBS_YOSEMITE,
@@ -464,6 +487,8 @@ BBS_NODES = [
     # (0x202, board) — the mnid FUN_7F5FC919 builds for the one MOSAF object in
     # the body above. Off the board's child list: it is a file, not a message.
     *build_bbs_attachment_nodes(_BBS_ATTACHMENT),
+    _BBS_PRICED_ATTACHMENT,
+    _BBS_PRICED_ATTACHMENT_FILE,
 ]
 
 
@@ -621,6 +646,7 @@ DIRECTORY_CHILDREN = {
         _BBS_RE_YOSEMITE.node_id,
         _BBS_BRITISH_CLIMBERS.node_id,
         _BBS_ATTACHMENT.node_id,
+        _BBS_PRICED_ATTACHMENT.node_id,
     ],
     # Explicit and empty: ContentStore.get_children answers an unlisted node
     # with the fallback sentinel, which would inject a bogus row.
@@ -628,6 +654,7 @@ DIRECTORY_CHILDREN = {
     _BBS_RE_YOSEMITE.node_id: [],
     _BBS_BRITISH_CLIMBERS.node_id: [],
     _BBS_ATTACHMENT.node_id: [],
+    _BBS_PRICED_ATTACHMENT.node_id: [],
     # Explicit empty children for the `4:0` startup node — avoids the
     # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
     # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.
