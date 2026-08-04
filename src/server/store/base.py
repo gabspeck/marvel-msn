@@ -135,6 +135,9 @@ class DirectoryNode:
     # Account usernames that hold the conference host role. This is server
     # state, not a wire property, and is empty for nodes that are not rooms.
     host_usernames: tuple[str, ...] = ()
+    # Wire property `h` — the plain shabby ID selected in MOSSHELL's Change
+    # Icon dialog. None makes DIRSRV emit its standard folder icon.
+    secondary_icon_shabby_id: int | None = None
 
 
 @dataclass(frozen=True)

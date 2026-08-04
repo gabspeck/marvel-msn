@@ -2319,6 +2319,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         self.assertEqual(node.content.language, 0x0409)
         self.assertTrue(node.is_container)
         self.assertEqual(node.host_usernames, ())
+        self.assertEqual(node.secondary_icon_shabby_id, 0x059B)
 
     def test_created_chat_adds_its_creator_to_the_host_list(self):
         properties = build_property_record(
@@ -2506,6 +2507,23 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         self.assertEqual(content.forum_mgr, "MSN Editorial")
         self.assertEqual(content.owner, "Jane Doe")
         self.assertEqual(content.vendor_id, 4242)
+
+    def test_change_icon_shabby_id_survives_the_next_property_read(self):
+        store = _SetPropertiesContentStore()
+        selected_id = 0x059B
+        request = self._request(
+            [(0x0F, "h", struct.pack("<I", selected_id))]
+        )
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(reply, self.OK)
+        node = store.get_node(store.NODE_ID)
+        self.assertEqual(node.secondary_icon_shabby_id, selected_id)
+        self.assertEqual(
+            build_props(["h"], node, is_children=False),
+            [(0x03, "h", struct.pack("<I", selected_id))],
+        )
 
     def test_untouched_fields_survive_a_partial_write(self):
         store = _SetPropertiesContentStore()

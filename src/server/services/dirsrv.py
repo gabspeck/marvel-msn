@@ -456,7 +456,14 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
                 (
                     0x03,
                     PROP_SECONDARY_ICON,
-                    struct.pack("<I", shabby.DEFAULT_NODE_ICON_ID),
+                    struct.pack(
+                        "<I",
+                        (
+                            node.secondary_icon_shabby_id
+                            if node.secondary_icon_shabby_id is not None
+                            else shabby.DEFAULT_NODE_ICON_ID
+                        ),
+                    ),
                 )
             )
         elif name == PROP_RIGHTS:
@@ -1134,6 +1141,9 @@ def _build_dirsrv_child_node(content_store, parent, properties):
         delegate_mnid_a=(
             _property_mnid(properties, PROP_DELEGATE_MNID) if delegate else None
         ),
+        secondary_icon_shabby_id=_property_int(
+            properties, PROP_SECONDARY_ICON, shabby.DEFAULT_NODE_ICON_ID
+        ),
     )
 
 
@@ -1239,26 +1249,37 @@ def build_set_properties_reply_payload(payload, content_store=None, session=None
         log.warning("set_properties invalid properties node=%s error=%s", node_id, exc)
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
-    changes = {}
+    content_changes = {}
+    node_changes = {}
     ignored = []
     for name, (_ptype, value) in properties.items():
+        if name == PROP_SECONDARY_ICON and isinstance(value, int):
+            node_changes["secondary_icon_shabby_id"] = value
+            continue
         mapping = _EDITABLE_PROPERTIES.get(name)
         if mapping is None:
             # `mf` lands here: the DSNED Banner page writes the shabby id it got
-            # back from AddNode's sibling selector 0x07, which this server does
-            # not store yet. Log it rather than fail the whole record — a
-            # rejected SetProperties makes the page refuse to close.
+            # back from AddShabby selector 0x07, which this server does not
+            # store yet. Log it rather than fail the whole record — a rejected
+            # SetProperties makes the page refuse to close.
             ignored.append(name)
             continue
         field, decode = mapping
-        changes[field] = decode(value)
+        content_changes[field] = decode(value)
 
-    if changes:
-        content_store.add_node(replace(node, content=replace(node.content, **changes)))
+    if content_changes or node_changes:
+        content_store.add_node(
+            replace(
+                node,
+                content=replace(node.content, **content_changes),
+                **node_changes,
+            )
+        )
+    applied = {**content_changes, **node_changes}
     log.info(
         "set_properties status=0 node=%s applied=%s ignored=%s",
         node_id,
-        ",".join(f"{k}={v!r}" for k, v in changes.items()) or "-",
+        ",".join(f"{k}={v!r}" for k, v in applied.items()) or "-",
         ",".join(ignored) or "-",
     )
     return _build_edit_result(0)
