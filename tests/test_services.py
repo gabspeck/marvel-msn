@@ -491,11 +491,29 @@ class TestConferenceStartup(unittest.TestCase):
         store.add_child("1:16", chat)
         handler = CONFLOCHandler(10, "CONFLOC", content_store=store)
 
-        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 275) + b"\x82\x82")
+        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 1) + b"\x82\x82")
 
-        self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 275)
+        self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 1)
         self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_FOUND)
         self.assertEqual(reply[6], TAG_END_STATIC)
+
+    def test_locator_resolves_the_default_chat_room(self):
+        reset_app_store()
+        room = app_store.content.get_node("1:271")
+        self.assertEqual(room.content.name, "MSN Chat")
+        self.assertEqual(room.app_id, 4)
+        self.assertIn(
+            room,
+            app_store.content.get_children("1:16", struct.pack("<II", 1, 0x0409)),
+        )
+
+        handler = CONFLOCHandler(10, "CONFLOC")
+        reply = handler.build_locate_reply_payload(
+            b"\x03" + struct.pack("<I", 1) + b"\x82\x82"
+        )
+
+        self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 1)
+        self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_FOUND)
 
     def test_data_edit_get_ticket_returns_the_capability_blob(self):
         handler = CONFLOCHandler(10, "CONFLOC", signed_in())
@@ -663,7 +681,10 @@ class TestConferenceStartup(unittest.TestCase):
             b"\x03" + struct.pack("<I", 275) + b"\x04\x81\x00\x85"
         )
 
-        self.assertEqual(reply[:2], bytes([TAG_END_STATIC, TAG_DYNAMIC_PARTIAL]))
+        self.assertEqual(
+            reply[:2],
+            bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]),
+        )
         status, padding, participant, capacity, message_limit, name_chars = struct.unpack(
             "<HHIHII", reply[2:]
         )
@@ -1363,6 +1384,7 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((1, 0x10C), "The MSN Member Lobby"),
                     ((1, 0x10D), "The Microsoft Network Beta"),
                     ((1, 0x10E), "Media View samples"),
+                    ((1, 0x10F), "MSN Chat"),
                 ],
             ),
             (
@@ -1778,6 +1800,15 @@ class _AddNodeContentStore:
 
     def get_children(self, node_id):
         return [self.nodes[child_id] for child_id in self.children.get(node_id, [])]
+
+    def find_app_instance(self, app_id, instance_id):
+        for node in self.nodes.values():
+            if (
+                node.app_id == app_id
+                and struct.unpack_from("<I", node.mnid_a)[0] == instance_id
+            ):
+                return node
+        return None
 
     def add_child(self, parent_id, node):
         self.nodes[node.node_id] = node

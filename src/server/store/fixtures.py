@@ -14,7 +14,7 @@ import pathlib
 import struct
 from dataclasses import dataclass, replace
 
-from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
+from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER, APP_TEXT_CONFERENCE
 from .base import (
     RIGHTS_AUTHORING,
     RIGHTS_NONE,
@@ -327,6 +327,15 @@ def _medview_sample_leaf(f0, name, size_bytes):
 
 _MEDVIEW_SAMPLES_KEY = f"1:{0x10E}"
 
+_DEFAULT_CHAT_KEY, _DEFAULT_CHAT_MNID = mnid_key(1, 0x10F)
+_DEFAULT_CHAT_ROOM = DirectoryNode(
+    node_id=_DEFAULT_CHAT_KEY,
+    is_container=False,
+    app_id=APP_TEXT_CONFERENCE,
+    mnid_a=_DEFAULT_CHAT_MNID,
+    content=_container_content("MSN Chat", type_str="Chat Room"),
+)
+
 
 # --- BBS service sample board (docs/bbs-service-contract.md) ---
 #
@@ -588,6 +597,7 @@ DIRECTORY_NODES = [
         _medview_sample_leaf(f0, name, size_bytes)
         for f0, name, size_bytes in MEDVIEW_SAMPLE_LEAF_DEFS
     ],
+    _DEFAULT_CHAT_ROOM,
     *BBS_NODES,
 ]
 
@@ -612,7 +622,10 @@ DIRECTORY_CHILDREN = {
         _MEMBER_ASSISTANCE_US_KEY,
         _MEMBER_ASSISTANCE_BR_KEY,
     ],
-    _CATEGORIES_US_KEY: [f"1:{f8}" for f8, _, _ in CATEGORY_DEFS],
+    _CATEGORIES_US_KEY: [
+        *[f"1:{f8}" for f8, _, _ in CATEGORY_DEFS],
+        _DEFAULT_CHAT_ROOM.node_id,
+    ],
     _MEMBER_ASSISTANCE_US_KEY: [
         f"1:{0x300}",        # The MSN Member Lobby
         f"1:{0x301}",        # MSN Beta Center
@@ -660,6 +673,7 @@ DIRECTORY_CHILDREN = {
     # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.
     "4:0": [],
     "3:1": [],
+    _DEFAULT_CHAT_ROOM.node_id: [],
     # Every remaining category/A&E/MA leaf is terminal — explicit empty list
     # keeps the fallback sentinel out of their listviews. 0x100 (Arts and
     # Entertainment), 0x10A (Sports, Health and Fitness → Climbing BBS) and

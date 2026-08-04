@@ -35,6 +35,15 @@ class InMemoryContentStore:
                 return node
         return None
 
+    def find_app_instance(self, app_id, instance_id):
+        for node in self._nodes.values():
+            if (
+                node.app_id == app_id
+                and struct.unpack_from("<I", node.mnid_a)[0] == instance_id
+            ):
+                return node
+        return None
+
     def has_children(self, node_id):
         # Backs 'b' bit 0x02 (SFGAO_HASSUBFOLDER). Deliberately unfiltered by
         # locale: the attribute is asked per-pidl outside any browse request,

@@ -7,7 +7,6 @@ from ..config import (
     CONFLOC_INTERFACE_GUIDS,
     CONFSRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
-    TAG_DYNAMIC_PARTIAL,
     TAG_END_STATIC,
 )
 from ..models import DwordParam, VarParam, WordParam
@@ -302,21 +301,22 @@ class CONFLOCHandler:
     def build_locate_reply_payload(self, payload):
         """Return `[instance:WORD][result:WORD]` for locator method 1.
 
-        CONFAPI!FUN_7F5B14D3 sends the room's DWORD id and binds two WORD
-        outputs. CceJoin treats result 1 as resolved and 2 as not found, then
-        opens `CONFSRV` with the decimal instance in the pipe parameter.
+        CONFAPI!FUN_7F5B14D3 sends the first DWORD from the room's launch MNID
+        and binds two WORD outputs. CceJoin treats result 1 as resolved and 2
+        as not found, then opens `CONFSRV` with the decimal instance in the
+        pipe parameter.
         """
         send_params, recv_descriptors = parse_request_params(payload)
         room_id = next(
             (param.value for param in send_params if isinstance(param, DwordParam)),
             None,
         )
-        node = self.content_store.get_node(f"1:{room_id}") if room_id is not None else None
-        found = (
-            node is not None
-            and node.node_id == f"1:{room_id}"
-            and node.app_id == APP_TEXT_CONFERENCE
+        node = (
+            self.content_store.find_app_instance(APP_TEXT_CONFERENCE, room_id)
+            if room_id is not None
+            else None
         )
+        found = node is not None
         if recv_descriptors != [0x82, 0x82]:
             log.warning(
                 "locate invalid request room=%s recv=%s payload=%s",
@@ -358,12 +358,13 @@ class CONFSRVHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def build_join_reply_payload(self, payload):
-        """Push CONFAPI's initial status-3 record without ending the iterator.
+        """Push CONFAPI's initial status-3 record as one complete dynamic item.
 
         CConversation::CceJoin reads this packed record as status WORD at +0,
         participant DWORD at +4, capacity WORD at +8, message limit DWORD at
         +10, and a counted UTF-16 conference name at +14/+18. The iterator is
-        retained for later chat messages, so the record uses dynamic-partial.
+        retained for later chat messages. The complete marker terminates this
+        item and wakes the blocking iterator Next call.
         """
         send_params, recv_descriptors = parse_request_params(payload)
         room_id = next(
@@ -396,7 +397,7 @@ class CONFSRVHandler:
             DEFAULT_MESSAGE_LENGTH,
             CONFSRV_JOINED,
         )
-        return bytes([TAG_END_STATIC, TAG_DYNAMIC_PARTIAL]) + record
+        return bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + record
 
 
 def _build_data_edit_result(status):
