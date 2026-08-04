@@ -7,14 +7,14 @@ run:
 	uv run python -m server | tee /tmp/marvel-server.log
 
 test:
-	uv run python -m unittest discover -s tests -v
+	uv run python -m unittest discover -s tests -t . -v
 
 coverage:
-	uv run coverage run --source=src/server -m unittest discover -s tests
+	uv run coverage run --source=src/server -m unittest discover -s tests -t .
 	uv run coverage report -m
 
 coverage-html:
-	uv run coverage run --source=src/server -m unittest discover -s tests
+	uv run coverage run --source=src/server -m unittest discover -s tests -t .
 	uv run coverage html
 	@echo "Open htmlcov/index.html"
 
