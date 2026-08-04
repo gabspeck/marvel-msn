@@ -656,6 +656,8 @@ Both tab requests use `dword_0=1` (GetChildren-shape) against the leaf.
 | `l`  | 0x03 | nav | — | Unknown; send 0 |
 | `mf` | **0x03** | nav | **Primary node icon (GetShabby slot B, `req_id=9`)** | Shabby ID DWORD. `MOSSHELL FUN_7F405018` does `GetProperty("mf", &buf, 4)` → 4-byte DWORD → synthesizes filename via `%04X%08X` → if absent, calls `vtable+0x74` → `GetShabbyToFile` → `CTreeNavClient::GetShabby`. **Must not be 0x0E** — as a blob, SVCPROP stores the heap-alloc pointer in the cache and the low 4 bytes of that pointer become the shabby_id (the `0x00BE0400` garbage). Adjacent string `PlaySound` at `0x7F40EBD8` hints `mf` may double as a sound-cue key |
 | `n`  | 0x0B | dlg-context | Forum manager | — |
+| `nc` | 0x03 | authoring | Child count | DWORD read by `CMosTreeNode::GetCChildrenTotal`. Delete is enabled only when `nc == 0`. |
+| `np` | 0x03 | authoring | Parent count | DWORD read by `CMosTreeNode::GetCParentsTotal`. Delete requires `np == 1`; Unlink requires `np > 1`. |
 | `o`  | 0x03 | dlg-general | Rating | DWORD 0 → "Not rated" |
 | `on` | 0x0B | dlg-context | Owner | Two-letter prop name |
 | `p`  | **context-dependent** | nav / dlg-context | Size | nav: `0x0E` blob carrying legacy title. dlg-context: `0x03` DWORD byte count — `FUN_7F3FBA69`'s `"p"` branch reads `**(cache+4)` and calls FormatSizeString (vtable +0x140) |

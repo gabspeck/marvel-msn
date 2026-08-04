@@ -55,6 +55,14 @@ class InMemoryContentStore:
             return True
         return bool(ids)
 
+    def count_children(self, node_id):
+        """Return the number of real child links below `node_id`."""
+        return len(self._children.get(node_id, ()))
+
+    def count_parents(self, node_id):
+        """Return the number of parents that list `node_id` as a child."""
+        return sum(node_id in child_ids for child_ids in self._children.values())
+
     def add_node(self, node):
         """Register a node by mnid, replacing any node already under that key.
 

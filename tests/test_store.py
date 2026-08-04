@@ -58,6 +58,30 @@ class TestSeedIsolation(unittest.TestCase):
         self.assertIsNot(first.users, second.users)
 
 
+class TestRelationshipCounts(unittest.TestCase):
+    def setUp(self):
+        reset_app_store()
+
+    def tearDown(self):
+        reset_app_store()
+
+    def test_counts_real_children_without_the_fallback_sentinel(self):
+        content = app_store.content
+
+        self.assertEqual(content.count_children("1:256"), 13)
+        self.assertEqual(content.count_children("4:0"), 0)
+        self.assertEqual(content.count_children("9000:1"), 0)
+
+    def test_counts_each_parent_that_lists_the_node(self):
+        content = app_store.content
+        node = content.get_node("4:0")
+        self.assertEqual(content.count_parents(node.node_id), 1)
+
+        content.add_child("0:0", node)
+
+        self.assertEqual(content.count_parents(node.node_id), 2)
+
+
 class TestRemoveNode(unittest.TestCase):
     """TREEEDCL DeleteNode drops the node, its subtree and every reference."""
 

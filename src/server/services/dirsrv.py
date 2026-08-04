@@ -97,6 +97,8 @@ PROP_GO_WORD = "k"
 PROP_DELEGATE_MNID = "l"
 PROP_PRIMARY_ICON = "mf"
 PROP_FORUM_MANAGER = "n"
+PROP_CHILD_COUNT = "nc"
+PROP_PARENT_COUNT = "np"
 PROP_RATING = "o"
 PROP_OWNER = "on"
 PROP_MAYBE_SIZE_OR_LEGACY_TITLE = "p"
@@ -353,6 +355,26 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             )
         elif name == PROP_RIGHTS:
             out.append((0x03, PROP_RIGHTS, struct.pack("<I", rights)))
+        elif name == PROP_CHILD_COUNT:
+            # CMosTreeNode::HrCanDelete @ MOSSHELL 0x7F3FFF42 requires nc=0.
+            # Count the stored links, not get_children's fallback sentinel.
+            out.append(
+                (
+                    0x03,
+                    PROP_CHILD_COUNT,
+                    struct.pack("<I", _default_store.content.count_children(node.node_id)),
+                )
+            )
+        elif name == PROP_PARENT_COUNT:
+            # HrCanDelete requires np=1; CMosViewWnd::HrCanUnlink @ 0x7F3F8A9C
+            # requires np>1. A node listed under two parents therefore exposes 2.
+            out.append(
+                (
+                    0x03,
+                    PROP_PARENT_COUNT,
+                    struct.pack("<I", _default_store.content.count_parents(node.node_id)),
+                )
+            )
         elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
             # `p` = byte count, read inline as DWORD. Feeds MOSSHELL
             # FormatSizeString (listview Size column + Properties dialog Size

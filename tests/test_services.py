@@ -1276,6 +1276,35 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"\x03x\x00\x70\x00\x00\x00", payload)
         self.assertNotIn(b"\x0ex\x00", payload)
 
+    def test_parent_and_child_counts_follow_the_directory_graph(self):
+        request = DirsrvRequest(
+            node_id="1:256",
+            node_id_raw=struct.pack("<II", 1, 256),
+            prop_group="np\x00nc",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+
+        [record] = _walk_get_children_records(build_get_properties_reply_payload(request))
+
+        self.assertEqual(record["np"], struct.pack("<I", 1))
+        self.assertEqual(record["nc"], struct.pack("<I", 13))
+
+    def test_parent_count_increases_when_a_node_is_listed_twice(self):
+        self.addCleanup(reset_app_store)
+        node = app_store.content.get_node("4:0")
+        app_store.content.add_child("0:0", node)
+        request = DirsrvRequest(
+            node_id=node.node_id,
+            node_id_raw=node.mnid_a,
+            prop_group="np\x00nc",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+
+        [record] = _walk_get_children_records(build_get_properties_reply_payload(request))
+
+        self.assertEqual(record["np"], struct.pack("<I", 2))
+        self.assertEqual(record["nc"], struct.pack("<I", 0))
+
     def test_get_properties_returns_self_record_only(self):
         # GetProperties (selector 0x00) is always a single-record query for
         # the requested node's own props. SetPropertyGroupFromPsp on the

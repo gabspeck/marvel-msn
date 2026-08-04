@@ -266,7 +266,7 @@ From `docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md § Property tag request lists`:
 
 **Full server cross-check is in `docs/DSNAV.md` §12 and §14.2.** MOSSHELL
 itself is tag-agnostic for everything except `a`, `b`, `c`, `e`, `h`, `mf`,
-`x`, and `_F` — the rest flow through to plug-ins or column descriptors.
+`x`, `nc`, `np`, and `_F` — the rest flow through to plug-ins or column descriptors.
 
 `CMosViewWnd::AddMenus` @ `0x7F3F7903` calls the current node's
 `HasRights(0x70)`. On success it merges MENU 0x82 into File, adding the
@@ -274,6 +274,11 @@ New submenu plus Delete and Unlink. DSNAV then fills New from the registered
 `Node Editor App #` plug-ins. A missing `x`, a non-DWORD value, or a mask with
 none of bits `0x70` leaves the authoring commands absent. The fixture server
 emits `x = 0x70` for every node.
+
+Delete (`0x300B`) is enabled when the selected node reports `np == 1`,
+`nc == 0`, and passes `HasRights(0x40)`. Unlink (`0x200D`) additionally
+requires exactly one selected item; the current folder must pass
+`HasRights(0x60)`, and the selected node must report `np > 1`.
 
 ### 4.3 `p` rendering in the Properties dialog
 
