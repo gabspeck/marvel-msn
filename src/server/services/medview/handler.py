@@ -44,6 +44,9 @@ from ...config import (
     MEDVIEW_CONVERT_HASH_TO_VA,
     MEDVIEW_CONVERT_TOPIC_TO_VA,
     MEDVIEW_COUNT_KEY_MATCHES,
+    MEDVIEW_DATA_EDIT_ADD,
+    MEDVIEW_DATA_EDIT_CLASS,
+    MEDVIEW_DATA_EDIT_GET_TICKET,
     MEDVIEW_FETCH_ADJACENT_TOPIC,
     MEDVIEW_FETCH_NEARBY_TOPIC,
     MEDVIEW_FIND_HIGHLIGHT_ADDRESS,
@@ -87,6 +90,7 @@ from ...mpc import (
 )
 from ...session import Session
 from .._dispatch import log_unhandled_selector
+from ..dirsrv import TREEEDCL_STATUS_REFUSED, build_get_ticket_reply_payload
 from . import replies
 from .m14_loader import LoadedM14, load_m14, lower_m14_to_payload
 from .payload import (
@@ -755,6 +759,29 @@ class MEDVIEWHandler:
             )
             return None
 
+        if msg_class == MEDVIEW_DATA_EDIT_CLASS:
+            if selector == MEDVIEW_DATA_EDIT_ADD:
+                reply_payload = self._handle_data_edit_add(request_id, payload)
+            elif selector == MEDVIEW_DATA_EDIT_GET_TICKET:
+                reply_payload = build_get_ticket_reply_payload(self.session)
+            else:
+                log_unhandled_selector(
+                    log, msg_class, selector, request_id, payload,
+                )
+                return None
+            log.info(
+                "reply data_edit selector=0x%02x req_id=%d %s",
+                selector,
+                request_id,
+                _format_reply_payload(selector, reply_payload),
+            )
+            host_block = build_host_block(
+                msg_class, selector, request_id, reply_payload,
+            )
+            return build_service_packet(
+                self.pipe_idx, host_block, server_seq, client_ack,
+            )
+
         if selector in _PUSH_DISPATCH:
             return self._handle_cache_miss(
                 msg_class, selector, request_id, payload, server_seq, client_ack,
@@ -797,6 +824,60 @@ class MEDVIEWHandler:
             )
             return reply_packets + push_packets
         return reply_packets
+
+    def _handle_data_edit_add(self, request_id, payload) -> bytes:
+        send_params, recv_descriptors = parse_request_params(payload)
+        valid_shape = (
+            len(send_params) == 5
+            and isinstance(send_params[0], VarParam)
+            and isinstance(send_params[1], DwordParam)
+            and isinstance(send_params[2], VarParam)
+            and isinstance(send_params[3], WordParam)
+            and isinstance(send_params[4], VarParam)
+            and recv_descriptors == [0x83, 0x83]
+        )
+        if not valid_shape:
+            log.warning(
+                "data_edit_add invalid request req_id=%d params=%d recv=%s",
+                request_id,
+                len(send_params),
+                [f"0x{tag:02x}" for tag in recv_descriptors],
+            )
+            return replies.data_edit_result(TREEEDCL_STATUS_REFUSED)
+
+        ticket = send_params[0].data
+        record_id = send_params[2].data
+        properties = send_params[4].data
+        valid_payload = (
+            self.session.is_admin
+            and len(ticket) >= 2
+            and struct.unpack_from("<H", ticket)[0] == len(ticket)
+            and len(record_id) == 8
+            and len(properties) >= 4
+            and struct.unpack_from("<I", properties)[0] == len(properties)
+        )
+        if not valid_payload:
+            log.warning(
+                "data_edit_add refused req_id=%d user=%s ticket_len=%d "
+                "record_id_len=%d properties_len=%d",
+                request_id,
+                self.session.user.username or "-",
+                len(ticket),
+                len(record_id),
+                len(properties),
+            )
+            return replies.data_edit_result(TREEEDCL_STATUS_REFUSED)
+
+        log.info(
+            "data_edit_add status=0 req_id=%d table=%d record_id=%s "
+            "dataset=0x%04x properties_len=%d",
+            request_id,
+            send_params[1].value,
+            record_id.hex(),
+            send_params[3].value,
+            len(properties),
+        )
+        return replies.data_edit_result()
 
     def _build_hfs_read_reply_packets(
         self,

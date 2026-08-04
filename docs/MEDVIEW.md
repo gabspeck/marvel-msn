@@ -103,17 +103,18 @@ ordinal `10`) — it falls back to `"MEDVIEW"` when the caller passes NULL /
 empty. `MVCL14N!MVTitleConnection` (ordinal 36) calls it via
 `hrAttachToService`.
 
-### 1.1 Per-service wire class byte (wire byte 0)
+### 1.1 Title-viewer wire class byte (wire byte 0)
 
 Every host block MEDVIEW emits carries two routing bytes in front of
 the request-id VLI: a **class byte** (byte 0) and a **per-call
-selector** (byte 1). The class byte is the same for every MEDVIEW
-request; the per-call selector is what selects e.g. handshake vs.
-TitleOpen vs. ConvertHashToVa.
+selector** (byte 1). MOSVIEW's title-viewing calls share class `0x01`;
+the per-call selector chooses handshake, TitleOpen, ConvertHashToVa,
+and the other viewer operations.
 
-For MEDVIEW the class byte is **`0x01`** — the server-assigned selector
-for IID `00028B71` (TitleOpen), which is the first IID in the client's
-IID table (§2.1) and thus the IID the proxy wrapper is bound to. Under
+For MOSVIEW's title-viewer proxy the class byte is **`0x01`** — the
+server-assigned selector for IID `00028B71` (TitleOpen), which is the
+first IID in the client's IID table (§2.1) and thus the IID the proxy
+wrapper is bound to. Under
 the index+1 selector-assignment rule the client expects (§2.1), the
 first IID resolves to selector `0x01`, and that byte propagates as the
 class byte for every subsequent MEDVIEW request.
@@ -165,11 +166,22 @@ Discovery is the sole exception: its wire bytes are `class=0x00,
 selector=0x00, request_id=0` — sent before any wrapper exists, from
 inside `InitializeLoginServiceSession`'s pipe-open sequence.
 
-The IID table only ever produces ONE bound wrapper (for IID idx 0 =
-TitleOpen). The other 41 IIDs do not get their own wrappers; their
+MOSVIEW produces one bound wrapper for IID idx 0 = TitleOpen. The other
+41 IIDs do not get their own wrappers on the viewing path; their
 selectors are resolved to per-call bytes that the client hard-codes as
 immediates (`TitleOpenEx` passes `0x01`, `TitleClose` passes `0x02`,
-…). The class byte is fixed at attach time and never re-evaluated.
+…). That wrapper's class byte is fixed at attach time.
+
+DSNED has a separate authoring path. Its Media Viewer title editor binds
+DATAEDCL through the second advertised interface, so those requests use
+class `0x02`. `CDataEditClient::GetTicket` sends selector `0x05` with
+receive descriptors `83 85` and expects a status DWORD plus a completed
+dynamic capability ticket. This class-specific method is distinct from
+MOSVIEW's class-`0x01`, selector-`0x05` ConvertAddressToVa call.
+After TREEEDCL creates the directory node, `CDataEditClient::Add` sends
+class `0x02`, selector `0x00` with the ticket, table id `6`, the new
+eight-byte MNID, dataset id `0xffff`, and the MEDVIEW property record. It
+expects status and operation-id DWORDs.
 
 ---
 

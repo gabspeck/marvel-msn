@@ -44,6 +44,14 @@ def stream_end() -> bytes:
     return bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
 
 
+def data_edit_result(status: int = 0, operation_id: int = 0) -> bytes:
+    """DATAEDCL mutation result: status DWORD + operation-id DWORD."""
+    return build_static_reply(
+        build_tagged_reply_dword(status),
+        build_tagged_reply_dword(operation_id),
+    )
+
+
 def _dynamic_complete(static_fields: bytes, dyn: bytes = b"") -> bytes:
     """Static section + `0x87` end-static + `0x86` dynamic-complete + bytes."""
     return static_fields + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + dyn

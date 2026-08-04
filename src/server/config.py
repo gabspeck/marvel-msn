@@ -319,6 +319,13 @@ MEDVIEW_SERVICE_VERSION = 0x1400800A
 # Names mirror the spec's `Class.Method` form so call sites read like the
 # wire contract.
 
+# DSNED uses the second advertised MEDVIEW interface as a DATAEDCL authoring
+# channel.  Its method selector 5 is CDataEditClient::GetTicket, distinct from
+# the title-viewing proxy's selector 5 below.
+MEDVIEW_DATA_EDIT_CLASS = 0x02
+MEDVIEW_DATA_EDIT_ADD = 0x00
+MEDVIEW_DATA_EDIT_GET_TICKET = 0x05
+
 # --- BootstrapDiscovery (class 0x00) ---
 # Discovery selector 0x00 is bound to `class=0x00` and synthesised by
 # `build_discovery_packet` rather than dispatched through `handle_request`,

@@ -7,6 +7,9 @@ from unittest.mock import patch
 from server.config import (
     DIRSRV_INTERFACE_GUIDS,
     LOGSRV_INTERFACE_GUIDS,
+    MEDVIEW_DATA_EDIT_ADD,
+    MEDVIEW_DATA_EDIT_CLASS,
+    MEDVIEW_DATA_EDIT_GET_TICKET,
     MEDVIEW_INTERFACE_GUIDS,
     MEDVIEW_SELECTOR_HANDSHAKE,
     MEDVIEW_SELECTOR_HFS_OPEN,
@@ -1867,6 +1870,18 @@ class TestDIRSRVDeleteNode(unittest.TestCase):
             + b"\x83\x83"
         )
 
+    def test_edit_class_selector_three_dispatches_to_delete(self):
+        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+        request = self._request("1:271")
+        with patch(
+            "server.services.dirsrv.build_delete_node_reply_payload",
+            return_value=b"\x87",
+        ) as delete:
+            packets = handler.handle_request(0x04, 0x03, 3, request, 5, 5)
+
+        self.assertIsNotNone(packets)
+        delete.assert_called_once_with(request, session=handler.session)
+
     def test_removes_the_node_and_reports_a_completed_operation(self):
         store = _DeleteNodeContentStore()
         doomed = store.children[store.BOARD_ID][0]
@@ -2773,6 +2788,53 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
         self.assertEqual(reply[5], TAG_END_STATIC)
         # 0x86 dynamic-complete-signal
         self.assertEqual(reply[6], TAG_DYNAMIC_COMPLETE_SIGNAL)
+
+
+class TestMEDVIEWDataEdit(unittest.TestCase):
+    @staticmethod
+    def _add_request():
+        ticket = b"\x02\x00"
+        record_id = struct.pack("<II", 1, 271)
+        properties = struct.pack("<IH", 6, 0)
+        return (
+            b"\x04" + bytes([0x80 | len(ticket)]) + ticket
+            + b"\x03\x06\x00\x00\x00"
+            + b"\x04" + bytes([0x80 | len(record_id)]) + record_id
+            + b"\x02\xff\xff"
+            + b"\x04" + bytes([0x80 | len(properties)]) + properties
+            + b"\x83\x83"
+        )
+
+    def test_data_edit_get_ticket_does_not_dispatch_as_viewer_cache_miss(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW", signed_in(ADMIN))
+        pkts = handler.handle_request(
+            MEDVIEW_DATA_EDIT_CLASS,
+            MEDVIEW_DATA_EDIT_GET_TICKET,
+            0,
+            b"\x83\x85",
+            5,
+            5,
+        )
+
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, build_get_ticket_reply_payload(handler.session))
+        self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x87\x86\x02\x00")
+
+    def test_data_edit_add_does_not_dispatch_as_validate_title(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW", signed_in(ADMIN))
+        pkts = handler.handle_request(
+            MEDVIEW_DATA_EDIT_CLASS,
+            MEDVIEW_DATA_EDIT_ADD,
+            1,
+            self._add_request(),
+            5,
+            5,
+        )
+
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
 
 
 class TestMEDVIEWCacheMissRpcs(unittest.TestCase):

@@ -11,7 +11,7 @@ Docstring-style client-visible API reference recovered from stock
   `0` of every request. Two literal values are pinned:
   - `class=0x00`, `selector=0x00`, `requestId=0` — bootstrap discovery frame,
     sent before any service wrapper exists.
-  - `class=0x01` — every MEDVIEW-proxy request. Derived as the
+  - `class=0x01` — every MOSVIEW title-viewer request. Derived as the
     server-assigned selector for IID `00028B71` (TitleOpen — the first IID in
     the client's IID table; the client expects the server's index+1 rule to
     map idx 0 → `0x01`). Implementation walked in
@@ -19,9 +19,12 @@ Docstring-style client-visible API reference recovered from stock
     @ 0x0460320E` wrapper+0x10, copied into request builder+0x14 by
     `ConstructServiceRequestBuilder @ 0x046036C8`, emitted by
     `AppendRequestIdHeaderToWireBuilder @ 0x046064E4`.
-- All logical API classes below ride the shared MEDVIEW proxy class byte
+- All title-viewer API classes below ride the shared MEDVIEW proxy class byte
   `0x01`. Per-call selectors (`0x01`..`0x2A`, `0x1F`, `0x00`) sit at wire
   byte 1.
+- DSNED's DATAEDCL authoring channel binds the second advertised interface and
+  uses class `0x02`. Its selector `0x05` is `CDataEditClient::GetTicket`, not
+  the title-viewer's `ConvertAddressToVa`.
 - Scalar types are little-endian.
 - `cstring` means ANSI NUL-terminated string.
 - `dynbytes` means a variable-length dynamic reply blob.
@@ -42,6 +45,39 @@ Parameters:
 Returns:
 - `interfaceTable: bytes[17 * n]`. Repeated entries of
   `interfaceIid: bytes[16]`, `selectorByte: u8`.
+
+## Class `DataEditService`
+
+Wire class: `0x02` (DSNED authoring channel)
+
+### `0x00` `Add`
+
+Purpose: attach the MEDVIEW-specific property record to a directory node that
+DSNED has just created through TREEEDCL.
+
+Parameters:
+- `ticket: dynbytes`. Capability ticket returned by `GetTicket`.
+- `tableId: u32`. Observed value: `6` for Media Viewer.
+- `recordId: bytes[8]`. The new directory node's two-DWORD MNID.
+- `datasetId: u16`. Observed value: `0xffff`.
+- `properties: dynbytes`. Compressed `CServiceProperties` record.
+
+Returns:
+- `status: u32`. Zero means complete; one requests status polling.
+- `operationId: u32`. Zero for a synchronously completed add.
+
+### `0x05` `GetTicket`
+
+Purpose: obtain the capability ticket required by DATAEDCL before it edits a
+new Media Viewer title.
+
+Parameters:
+- none.
+
+Returns:
+- `status: u32`. Zero means success.
+- `ticket: dynbytes`. `SECURCL!HrDecodeTicket` requires the first `u16` to
+  equal the total ticket length; `02 00` is the minimal valid opaque ticket.
 
 ## Class `SessionService`
 

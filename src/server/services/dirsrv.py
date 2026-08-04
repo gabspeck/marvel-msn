@@ -145,6 +145,8 @@ class DIRSRVHandler:
         """Handle a DIRSRV request — dispatch by selector."""
         if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_NODE:
             reply_payload = build_add_node_reply_payload(payload, session=self.session)
+        elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_DELETE_NODE:
+            reply_payload = build_delete_node_reply_payload(payload, session=self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_SET_PROPERTIES:
             reply_payload = build_set_properties_reply_payload(payload, session=self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:

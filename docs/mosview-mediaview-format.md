@@ -52,7 +52,8 @@ The notes below are grounded in the following code paths recovered with Ghidra:
   - session `QueryInterface` at `0x04601d25`
   - service attach / pipe open path at `0x04601f75` and `0x0460263f`
 - `DSNED.NED`
-  - `FUN_7f573273`: service-node registration via `InitializeEcig`
+  - `InitializeDsnEditorServiceGroups` at `0x7F573273`: service-node
+    registration via `InitializeEcig`
 
 The sample set at `/var/share/drop/MediaView Samples` adds format evidence:
 
@@ -211,8 +212,9 @@ Code-proven path:
   `{00028B08-0000-0000-C000-000000000046}`
 - `MPCCL.DLL` implements that COM class/interface pair and opens a MOS pipe to
   the requested service name
-- `DSNED.NED!FUN_7f573273` registers `DIRSRV`, `CONFLOC`, `MEDVIEW`, and `BBS`
-  as service-node types with `InitializeEcig`
+- `DSNED.NED!InitializeDsnEditorServiceGroups` at `0x7F573273` registers
+  `DIRSRV`, `CONFLOC`, `MEDVIEW`, and `BBS` as service-node types with
+  `InitializeEcig`
 
 The result is a real service boundary, not a local helper callback. Static
 request IDs recovered from `MVTTL14C` include:
