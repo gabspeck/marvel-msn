@@ -861,6 +861,27 @@ The Banner page reaches `mf` only after uploading the image through
 it then writes. Extension → format byte: `.emf`→1, `.mtf`→3, `.wmf`→4,
 `.bmp`→5 (DSNED 0x7F5717C8).
 
+#### 7.2.11 DATAEDCL Delete (application class, selector 0x01)
+
+After TREEEDCL `DeleteNode` succeeds, MOSSHELL deletes the node's application
+record through `CDataEditClient::PrivateDelete` @ DATAEDCL 0x7F5A183F. The
+application-specific class is `0x02` for MEDVIEW and `0x0C` for CONFLOC.
+
+```
+ request: [0x04][len][ticket]
+          [0x03][u32 table_id]
+          [0x04][len=8][record_id]
+          [0x02][u16 dataset_id]
+          [0x83][0x83]
+ reply:   [0x83][u32 status=0]
+          [0x83][u32 operation_id=0]
+          [0x87]
+```
+
+The directory record is already absent when this request arrives. The
+application service must still complete the operation; leaving selector
+`0x01` unanswered blocks Explorer.
+
 ### 7.3 FTM
 
 Both selectors use the `FtmClientFileId` 60-byte CFI buffer via tag `0x04`:

@@ -361,6 +361,7 @@ MEDVIEW_SERVICE_VERSION = 0x1400800A
 # the title-viewing proxy's selector 5 below.
 MEDVIEW_DATA_EDIT_CLASS = 0x02
 MEDVIEW_DATA_EDIT_ADD = 0x00
+MEDVIEW_DATA_EDIT_DELETE = 0x01
 MEDVIEW_DATA_EDIT_GET_TICKET = 0x05
 
 # --- BootstrapDiscovery (class 0x00) ---

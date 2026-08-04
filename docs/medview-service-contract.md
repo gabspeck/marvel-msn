@@ -66,6 +66,21 @@ Returns:
 - `status: u32`. Zero means complete; one requests status polling.
 - `operationId: u32`. Zero for a synchronously completed add.
 
+### `0x01` `Delete`
+
+Purpose: remove the MEDVIEW-specific record after TREEEDCL removes its
+directory node.
+
+Parameters:
+- `ticket: dynbytes`. Capability ticket returned by `GetTicket`.
+- `tableId: u32`.
+- `recordId: bytes[8]`. The deleted directory node's two-DWORD MNID.
+- `datasetId: u16`.
+
+Returns:
+- `status: u32`. Zero means complete; one requests status polling.
+- `operationId: u32`. Zero for a synchronously completed delete.
+
 ### `0x05` `GetTicket`
 
 Purpose: obtain the capability ticket required by DATAEDCL before it edits a

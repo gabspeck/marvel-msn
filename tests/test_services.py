@@ -12,6 +12,7 @@ from server.config import (
     LOGSRV_INTERFACE_GUIDS,
     MEDVIEW_DATA_EDIT_ADD,
     MEDVIEW_DATA_EDIT_CLASS,
+    MEDVIEW_DATA_EDIT_DELETE,
     MEDVIEW_DATA_EDIT_GET_TICKET,
     MEDVIEW_INTERFACE_GUIDS,
     MEDVIEW_SELECTOR_HANDSHAKE,
@@ -47,6 +48,7 @@ from server.mpc import (
 from server.services.conference import (
     CONFLOC_DATA_EDIT_ADD,
     CONFLOC_DATA_EDIT_CLASS,
+    CONFLOC_DATA_EDIT_DELETE,
     CONFLOC_DATA_EDIT_GET_PROPERTIES,
     CONFLOC_DATA_EDIT_GET_TICKET,
     CONFLOC_DATA_EDIT_SET_PROPERTIES,
@@ -569,6 +571,39 @@ class TestConferenceStartup(unittest.TestCase):
         )
         parsed = parse_packet(packets[0][:-1])
 
+        self.assertEqual(
+            parsed.payload[8:],
+            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
+        )
+
+    def test_data_edit_delete_completes_after_tree_delete(self):
+        record_id = struct.pack("<II", 1, 271)
+        request = (
+            b"\x04\x82\x02\x00"
+            + b"\x03\x01\x00\x00\x00"
+            + b"\x04\x88"
+            + record_id
+            + b"\x02\xff\xff"
+            + b"\x83\x83"
+        )
+        # TREEEDCL removes the directory node before DATAEDCL reaches CONFLOC.
+        handler = CONFLOCHandler(
+            10,
+            "CONFLOC",
+            signed_in(),
+            content_store=_AddNodeContentStore(),
+        )
+
+        packets = handler.handle_request(
+            CONFLOC_DATA_EDIT_CLASS,
+            CONFLOC_DATA_EDIT_DELETE,
+            1,
+            request,
+            0,
+            0,
+        )
+
+        parsed = parse_packet(packets[0][:-1])
         self.assertEqual(
             parsed.payload[8:],
             b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
@@ -3420,6 +3455,17 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
             + b"\x83\x83"
         )
 
+    @staticmethod
+    def _delete_request():
+        return (
+            b"\x04\x82\x02\x00"
+            + b"\x03\x01\x00\x00\x00"
+            + b"\x04\x88"
+            + struct.pack("<II", 4098, 0)
+            + b"\x02\xff\xff"
+            + b"\x83\x83"
+        )
+
     def test_data_edit_get_ticket_does_not_dispatch_as_viewer_cache_miss(self):
         handler = MEDVIEWHandler(5, "MEDVIEW", signed_in(ADMIN))
         pkts = handler.handle_request(
@@ -3450,6 +3496,29 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
+
+    def test_data_edit_delete_does_not_dispatch_as_open_title(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW", signed_in(ADMIN))
+
+        pkts = handler.handle_request(
+            MEDVIEW_DATA_EDIT_CLASS,
+            MEDVIEW_DATA_EDIT_DELETE,
+            1,
+            self._delete_request(),
+            5,
+            5,
+        )
+
+        self.assertIsNotNone(pkts)
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
+        self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
+
+    def test_data_edit_delete_refuses_anonymous_writes(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+
+        reply = handler._handle_data_edit_delete(1, self._delete_request())
+
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
 
 
 class TestMEDVIEWCacheMissRpcs(unittest.TestCase):

@@ -40,6 +40,7 @@ log = logging.getLogger(__name__)
 CONFLOC_SELECTOR_LOCATE = 0x01
 CONFLOC_DATA_EDIT_CLASS = 0x0C
 CONFLOC_DATA_EDIT_ADD = 0x00
+CONFLOC_DATA_EDIT_DELETE = 0x01
 CONFLOC_DATA_EDIT_SET_PROPERTIES = 0x02
 CONFLOC_DATA_EDIT_GET_PROPERTIES = 0x03
 CONFLOC_DATA_EDIT_GET_TICKET = 0x05
@@ -89,6 +90,8 @@ class CONFLOCHandler:
             reply_payload = build_get_ticket_reply_payload(self.session)
         elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_ADD:
             reply_payload = self.build_data_edit_add_reply_payload(request_id, payload)
+        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_DELETE:
+            reply_payload = self.build_data_edit_delete_reply_payload(request_id, payload)
         elif (
             msg_class == CONFLOC_DATA_EDIT_CLASS
             and selector == CONFLOC_DATA_EDIT_SET_PROPERTIES
@@ -187,6 +190,61 @@ class CONFLOCHandler:
             self._records.pop(record_id, None)
         else:
             self._records[record_id] = properties
+        return _build_data_edit_result(0)
+
+    def build_data_edit_delete_reply_payload(self, request_id, payload):
+        """Complete the application-record half of a tree-node deletion.
+
+        Live DIRSRV deletion shows TREEEDCL removing the node first, followed
+        by CDataEditClient::PrivateDelete on the node's application service.
+        DATAEDCL 0x7F5A183F sends the ticket, table DWORD, 8-byte record id and
+        dataset WORD, then waits for status and operation-id DWORDs.
+        """
+        send_params, recv_descriptors = parse_request_params(payload)
+        valid_shape = (
+            len(send_params) == 4
+            and isinstance(send_params[0], VarParam)
+            and isinstance(send_params[1], DwordParam)
+            and isinstance(send_params[2], VarParam)
+            and isinstance(send_params[3], WordParam)
+            and recv_descriptors == [0x83, 0x83]
+        )
+        if not valid_shape:
+            log.warning(
+                "data_edit_delete invalid request req_id=%d params=%d recv=%s",
+                request_id,
+                len(send_params),
+                [f"0x{tag:02x}" for tag in recv_descriptors],
+            )
+            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+
+        ticket = send_params[0].data
+        record_id = send_params[2].data
+        if not (
+            self.session.is_admin
+            and len(ticket) >= 2
+            and struct.unpack_from("<H", ticket)[0] == len(ticket)
+            and len(record_id) == 8
+        ):
+            log.warning(
+                "data_edit_delete refused req_id=%d user=%s ticket_len=%d "
+                "record_id_len=%d",
+                request_id,
+                self.session.user.username or "-",
+                len(ticket),
+                len(record_id),
+            )
+            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+
+        self._records.pop(record_id, None)
+        log.info(
+            "data_edit_delete status=0 req_id=%d table=%d record_id=%s "
+            "dataset=0x%04x",
+            request_id,
+            send_params[1].value,
+            record_id.hex(),
+            send_params[3].value,
+        )
         return _build_data_edit_result(0)
 
     def build_data_edit_set_properties_reply_payload(self, request_id, payload):

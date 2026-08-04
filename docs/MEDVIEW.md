@@ -183,6 +183,12 @@ class `0x02`, selector `0x00` with the ticket, table id `6`, the new
 eight-byte MNID, dataset id `0xffff`, and the MEDVIEW property record. It
 expects status and operation-id DWORDs.
 
+Deleting a Media Viewer node first sends TREEEDCL `DeleteNode`, then
+`CDataEditClient::Delete` sends class `0x02`, selector `0x01` with the ticket,
+table id, deleted eight-byte MNID, and dataset id. It expects the same status
+and operation-id DWORD pair. An unanswered DATAEDCL request leaves Explorer
+waiting after the directory node has already been removed.
+
 ---
 
 ## 2. Discovery
