@@ -16,6 +16,8 @@ from dataclasses import dataclass
 
 from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER
 from .base import (
+    RIGHTS_AUTHORING,
+    RIGHTS_NONE,
     BillingProfile,
     DirectoryNode,
     MemberProfile,
@@ -24,6 +26,7 @@ from .base import (
     StatementSummary,
     Subscription,
     TransactionRecord,
+    User,
 )
 from .records import bbs_node, build_bbs_attachment_nodes, mnid_key
 
@@ -674,33 +677,18 @@ DIRECTORY_FALLBACK_NODE = DirectoryNode(
 )
 
 
-BILLING_PROFILE = BillingProfile(
-    first_name="Microsoft",
-    last_name="User",
-    country_id=1,  # US
-    address="1 Microsoft Way",
-    city="Redmond",
-    state="WA",
-    zip="98052",
-    phone="425-882-8080",
-    payment_type=1,  # CHARGE
-    card_number="411111******1111",
-)
+# The accounts that can sign in. `username`/`password` are what the Sign In
+# dialog collects; `display_name` is what the rest of MSN shows, and doubles as
+# the Member Properties key (see MEMBER_PROFILES below). Every per-member reply
+# — billing, statement, subscriptions, authoring rights, SASRV tokens — reads
+# off the record the login resolved.
+#
+# Passwords sit here in the clear. Nothing in this reconstruction protects an
+# account: the value only has to match what the client sends.
 
-
-STATEMENT_SUMMARY = StatementSummary(
-    balance_cents=1904,  # formatted as "$19.04"
-    currency_iso=840,  # USD
-    year=2026,
-    month=4,
-    day=1,
-    free_connect_minutes=90,  # rendered as "01:30"
-)
-
-
-STATEMENT_TRANSACTIONS = [
+_BILLG_TRANSACTIONS = (
     # Period 0 — April 2026 (current statement, $19.04 balance).
-    [
+    (
         TransactionRecord(datetime.datetime(2026, 4, 1, 9, 15), "Monthly subscription", 495, 495),
         TransactionRecord(
             datetime.datetime(2026, 4, 5, 19, 42), "Premium content access", 149, 644
@@ -717,17 +705,17 @@ STATEMENT_TRANSACTIONS = [
         TransactionRecord(
             datetime.datetime(2026, 4, 12, 22, 30), "Online statement fee", 515, 1904
         ),
-    ],
+    ),
     # Period 1 — March 2026.
-    [
+    (
         TransactionRecord(datetime.datetime(2026, 3, 1, 8, 30), "Monthly subscription", 495, 495),
         TransactionRecord(
             datetime.datetime(2026, 3, 14, 21, 5), "Premium content access", 149, 644
         ),
         TransactionRecord(datetime.datetime(2026, 3, 28, 23, 50), "Online statement fee", 250, 894),
-    ],
+    ),
     # Period 2 — February 2026.
-    [
+    (
         TransactionRecord(datetime.datetime(2026, 2, 1, 7, 45), "Monthly subscription", 495, 495),
         TransactionRecord(
             datetime.datetime(2026, 2, 7, 18, 22), "Game zone tournament entry", 200, 695
@@ -738,52 +726,154 @@ STATEMENT_TRANSACTIONS = [
         TransactionRecord(
             datetime.datetime(2026, 2, 27, 22, 30), "Online statement fee", 250, 1094
         ),
-    ],
+    ),
     # Period 3 — January 2026.
-    [
+    (
         TransactionRecord(datetime.datetime(2026, 1, 1, 10, 0), "Monthly subscription", 495, 495),
         TransactionRecord(
             datetime.datetime(2026, 1, 19, 19, 17), "Premium content access", 149, 644
         ),
         TransactionRecord(datetime.datetime(2026, 1, 31, 23, 59), "Online statement fee", 250, 894),
-    ],
-]
+    ),
+)
 
 
-SUBSCRIPTIONS = [
-    Subscription(
-        kind=0x01,
-        name="MSN Premium",
-        detail="Monthly subscription",
-        price_minor=495,
-        price_currency=840,
-        record_currency=840,
+_SJOBS_TRANSACTIONS = (
+    # Period 0 — April 2026 (current statement, $7.94 balance).
+    (
+        TransactionRecord(datetime.datetime(2026, 4, 1, 6, 5), "Monthly subscription", 495, 495),
+        TransactionRecord(datetime.datetime(2026, 4, 8, 20, 18), "Chat room usage", 50, 545),
+        TransactionRecord(datetime.datetime(2026, 4, 16, 21, 40), "Online statement fee", 249, 794),
     ),
-    Subscription(
-        kind=0x02,
-        name="MSN Plus Games",
-        detail="Gaming add-on pack",
-        price_minor=299,
-        price_currency=840,
-        record_currency=840,
+    # Period 1 — March 2026.
+    (
+        TransactionRecord(datetime.datetime(2026, 3, 1, 6, 12), "Monthly subscription", 495, 495),
+        TransactionRecord(datetime.datetime(2026, 3, 22, 19, 3), "Chat room usage", 25, 520),
     ),
-    Subscription(
-        kind=0x04,
-        name="Promotional credit",
-        detail="First-month welcome credit",
-        price_minor=199,
-        price_currency=840,
-        record_currency=840,
+)
+
+
+BILL_GATES = User(
+    username="billg",
+    password="msn@96",
+    display_name="Bill Gates",
+    # Full authoring: File > New/Delete/Unlink on every node, plus the TREEEDCL
+    # write channel and the Security page's whole token list.
+    rights=RIGHTS_AUTHORING,
+    sa_tokens=(1, 2, 3),
+    billing=BillingProfile(
+        first_name="Bill",
+        last_name="Gates",
+        country_id=1,  # US
+        address="1 Microsoft Way",
+        city="Redmond",
+        state="WA",
+        zip="98052",
+        phone="425-882-8080",
+        payment_type=1,  # CHARGE
+        card_number="411111******1111",
     ),
-    Subscription(
-        kind=0xFF,
-        name="MSN Bookshelf",
-        detail="Reference library access",
-        price_minor=99,
-        price_currency=840,
-        record_currency=840,
+    statement=StatementSummary(
+        balance_cents=1904,  # formatted as "$19.04"
+        currency_iso=840,  # USD
+        year=2026,
+        month=4,
+        day=1,
+        free_connect_minutes=90,  # rendered as "01:30"
+        expires_date=datetime.date(2026, 12, 31),
+        effective_date=datetime.date(2026, 5, 1),
     ),
-]
+    transactions=_BILLG_TRANSACTIONS,
+    subscriptions=(
+        Subscription(
+            kind=0x01,
+            name="MSN Premium",
+            detail="Monthly subscription",
+            price_minor=495,
+            price_currency=840,
+            record_currency=840,
+        ),
+        Subscription(
+            kind=0x02,
+            name="MSN Plus Games",
+            detail="Gaming add-on pack",
+            price_minor=299,
+            price_currency=840,
+            record_currency=840,
+        ),
+        Subscription(
+            kind=0x04,
+            name="Promotional credit",
+            detail="First-month welcome credit",
+            price_minor=199,
+            price_currency=840,
+            record_currency=840,
+        ),
+        Subscription(
+            kind=0xFF,
+            name="MSN Bookshelf",
+            detail="Reference library access",
+            price_minor=99,
+            price_currency=840,
+            record_currency=840,
+        ),
+    ),
+)
+
+
+STEVE_JOBS = User(
+    username="sjobs",
+    password="whatsnext",
+    display_name="Steve Jobs",
+    # A plain subscriber: browses and posts, authors nothing. No token grant, so
+    # the Security page has no list to show.
+    rights=RIGHTS_NONE,
+    sa_tokens=(),
+    billing=BillingProfile(
+        first_name="Steve",
+        last_name="Jobs",
+        country_id=1,  # US
+        address="1 Infinite Loop",
+        city="Cupertino",
+        state="CA",
+        zip="95014",
+        phone="408-996-1010",
+        payment_type=2,  # DEBIT
+        card_number="555555******4444",
+    ),
+    statement=StatementSummary(
+        balance_cents=794,  # formatted as "$7.94"
+        currency_iso=840,  # USD
+        year=2026,
+        month=4,
+        day=16,
+        free_connect_minutes=180,  # rendered as "03:00"
+        expires_date=datetime.date(2027, 3, 31),
+        effective_date=datetime.date(2026, 6, 1),
+    ),
+    transactions=_SJOBS_TRANSACTIONS,
+    subscriptions=(
+        Subscription(
+            kind=0x01,
+            name="MSN Premium",
+            detail="Monthly subscription",
+            price_minor=495,
+            price_currency=840,
+            record_currency=840,
+        ),
+        Subscription(
+            kind=0x02,
+            name="MSN Bookshelf",
+            detail="Reference library access",
+            price_minor=99,
+            price_currency=840,
+            record_currency=840,
+        ),
+    ),
+)
+
+
+USERS = [BILL_GATES, STEVE_JOBS]
 
 
 PLANS = [
@@ -808,9 +898,50 @@ PLANS = [
 # header this server writes carries `BbsFields.author` verbatim, so the lookup
 # key is the author string as authored — not a separate account name.
 #
+# The signed-in accounts appear here too, under their `display_name`, so a
+# member who opens Properties on their own post gets a filled sheet.
+#
 # Details are invented. reference/screenshots/bbs.png shows the three authors in
 # the list pane and nothing about them, and no MSN member directory survives.
 MEMBER_PROFILES = [
+    MemberProfile(
+        member_id=BILL_GATES.display_name,
+        display_name=BILL_GATES.display_name,
+        first_name="Bill",
+        last_name="Gates",
+        city="Redmond",
+        state="WA",
+        country_code=1,
+        birth_date="October 28, 1955",
+        sex="Male",
+        marital_status_code=2,
+        language_code=_LCID_EN_US,
+        interests="Bridge, reading, golf",
+        job_description="Chairman and CEO",
+        company_name="Microsoft Corporation",
+        work_city="Redmond",
+        work_state="WA",
+        work_country_code=1,
+    ),
+    MemberProfile(
+        member_id=STEVE_JOBS.display_name,
+        display_name=STEVE_JOBS.display_name,
+        first_name="Steve",
+        last_name="Jobs",
+        city="Palo Alto",
+        state="CA",
+        country_code=1,
+        birth_date="February 24, 1955",
+        sex="Male",
+        marital_status_code=2,
+        language_code=_LCID_EN_US,
+        interests="Calligraphy, industrial design, Bob Dylan",
+        job_description="Chairman and CEO",
+        company_name="NeXT Computer",
+        work_city="Redwood City",
+        work_state="CA",
+        work_country_code=1,
+    ),
     MemberProfile(
         member_id="Chris Hahn",
         display_name="Chris Hahn",
@@ -875,10 +1006,7 @@ class DefaultSeed:
     directory_nodes: list
     directory_children: dict
     directory_fallback: DirectoryNode
-    billing_profile: BillingProfile
-    statement_summary: StatementSummary
-    statement_transactions: list
-    subscriptions: list
+    users: list
     plans: list
     member_profiles: list
 
@@ -895,10 +1023,7 @@ def default_seed():
         directory_nodes=list(DIRECTORY_NODES),
         directory_children={key: list(ids) for key, ids in DIRECTORY_CHILDREN.items()},
         directory_fallback=DIRECTORY_FALLBACK_NODE,
-        billing_profile=BILLING_PROFILE,
-        statement_summary=STATEMENT_SUMMARY,
-        statement_transactions=[list(period) for period in STATEMENT_TRANSACTIONS],
-        subscriptions=list(SUBSCRIPTIONS),
+        users=list(USERS),
         plans=list(PLANS),
         member_profiles=list(MEMBER_PROFILES),
     )

@@ -137,15 +137,46 @@ class InMemoryContentStore:
         return nodes
 
 
-class InMemoryAccountStore:
-    def __init__(self, billing_profile):
-        self.load(billing_profile)
+class InMemoryUserStore:
+    def __init__(self, users):
+        self.load(users)
 
-    def load(self, billing_profile):
-        self._profile = billing_profile
+    def load(self, users):
+        self._users = {u.username.casefold(): u for u in users}
 
-    def get_billing_profile(self):
-        return self._profile
+    def get_user(self, username):
+        # Case-insensitive, because a member id is not case-sensitive on MSN and
+        # the Sign In dialog does not correct what was typed. Unlike
+        # InMemoryMemberStore.get_member, an unknown key answers None: a lenient
+        # lookup here would let anyone sign in.
+        return self._users.get(username.casefold())
+
+    def authenticate(self, username, password):
+        """Return the account when the password matches, None otherwise.
+
+        The password is compared as typed. Whatever transform the client applies
+        on the wire is undone in LOGSRV before the value reaches this call, so
+        the store holds and compares the plain password.
+        """
+        user = self.get_user(username)
+        if user is None or user.password != password:
+            return None
+        return user
+
+    def set_password(self, username, password):
+        return self._replace(username, password=password)
+
+    def set_billing(self, username, profile):
+        return self._replace(username, billing=profile)
+
+    def _replace(self, username, **changes):
+        """Commit one edit to an account. False when no such account exists."""
+        key = username.casefold()
+        user = self._users.get(key)
+        if user is None:
+            return False
+        self._users[key] = replace(user, **changes)
+        return True
 
 
 class InMemoryMemberStore:
@@ -167,29 +198,12 @@ class InMemoryMemberStore:
         return profile
 
 
-class InMemoryStatementStore:
-    def __init__(self, summary, transactions, subscriptions, plans):
-        self.load(summary, transactions, subscriptions, plans)
+class InMemoryCatalogStore:
+    def __init__(self, plans):
+        self.load(plans)
 
-    def load(self, summary, transactions, subscriptions, plans):
-        self._summary = summary
-        self._transactions = transactions
-        self._subscriptions = subscriptions
+    def load(self, plans):
         self._plans = plans
-
-    def get_summary(self):
-        return self._summary
-
-    def period_count(self):
-        return len(self._transactions)
-
-    def get_transactions(self, period_index):
-        if period_index < 0 or period_index >= len(self._transactions):
-            period_index = 0
-        return self._transactions[period_index]
-
-    def get_subscriptions(self):
-        return self._subscriptions
 
     def get_plans(self):
         return self._plans
@@ -202,12 +216,7 @@ def build_app_store(seed):
             children=seed.directory_children,
             fallback=seed.directory_fallback,
         ),
-        account=InMemoryAccountStore(billing_profile=seed.billing_profile),
-        statement=InMemoryStatementStore(
-            summary=seed.statement_summary,
-            transactions=seed.statement_transactions,
-            subscriptions=seed.subscriptions,
-            plans=seed.plans,
-        ),
+        users=InMemoryUserStore(users=seed.users),
+        catalog=InMemoryCatalogStore(plans=seed.plans),
         member=InMemoryMemberStore(profiles=seed.member_profiles),
     )

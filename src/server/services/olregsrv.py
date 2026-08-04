@@ -29,6 +29,7 @@ from ..mpc import (
     build_tagged_reply_dword,
     parse_request_params,
 )
+from ..session import Session
 from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
@@ -45,9 +46,11 @@ OLREGSRV_MSG_CLASS_CALL = 0x01
 
 
 class OLREGSRVHandler:
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(OLREGSRV_INTERFACE_GUIDS)

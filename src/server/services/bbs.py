@@ -39,6 +39,7 @@ from ..mpc import (
     decode_dirsrv_request,
     parse_request_params,
 )
+from ..session import Session
 from ..store import app_store as _default_store
 from ..store.base import BbsFields
 from ..store.records import build_bbs_attachment_nodes, build_bbs_post
@@ -197,9 +198,11 @@ log = logging.getLogger(__name__)
 class BBSHandler:
     """Handles BBS read-channel requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
         # In-flight post uploads, handle byte → PostUpload. A post runs
         # START → [APPEND …] → COMMIT on one pipe, and the handler lives as
         # long as that pipe (Connection._handle_pipe_open builds one per open),
@@ -241,9 +244,13 @@ class BBSHandler:
             return None
         if msg_class == dirsrv.TREEEDCL_CLASS_EDIT:
             if selector == dirsrv.TREEEDCL_SELECTOR_GET_TICKET:
-                reply_payload = dirsrv.build_get_ticket_reply_payload()
+                reply_payload = dirsrv.build_get_ticket_reply_payload(
+                    self.session, require_admin=False
+                )
             elif selector == dirsrv.TREEEDCL_SELECTOR_DELETE_NODE:
-                reply_payload = dirsrv.build_delete_node_reply_payload(payload)
+                reply_payload = dirsrv.build_delete_node_reply_payload(
+                    payload, session=self.session
+                )
             else:
                 log_unhandled_selector(log, msg_class, selector, request_id, payload)
                 return None
@@ -390,7 +397,7 @@ class BBSHandler:
             )
             return
         del self._uploads[handle]
-        node = commit_post(upload)
+        node = commit_post(upload, self.session.user.display_name)
         # Only now, with the article built, are the streams safe to drop.
         for stream_id in upload.stream_ids:
             self._streams.pop(stream_id, None)
@@ -1002,7 +1009,7 @@ def build_post_reply(value):
     return build_static_reply(build_tagged_reply_byte(value))
 
 
-def commit_post(upload):
+def commit_post(upload, author):
     """Turn a completed upload into a message node under its board.
 
     The uploaded article splits the same way the reader splits a downloaded one
@@ -1024,6 +1031,7 @@ def commit_post(upload):
         msg_id,
         upload.board_id,
         subject=headers.get(POST_HEADER_SUBJECT) or _POST_UNTITLED_SUBJECT,
+        author=author,
         parent_subid=_header_int(headers, POST_HEADER_PARENT, upload.parent_msg_id),
         body_raw=body,
         body_format=headers.get(POST_HEADER_FORMAT) or BBS_FORMAT_TEXT,

@@ -60,6 +60,7 @@ from ..mpc import (
     build_tagged_reply_var,
     build_tagged_reply_word,
 )
+from ..session import Session
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 
@@ -74,7 +75,7 @@ ONLSTMT_SELECTOR_CANCEL_SUBSCRIPTION = 0x04   # cancel-subscription ack
 ONLSTMT_SELECTOR_GET_DETAILS = 0x05           # per-period charge details
 
 
-def build_summary_payload():
+def build_summary_payload(user):
     """Build the statement-summary reply for selector=0x00.
 
     Request wire has exactly 7 recv tags (no 0x84), so the reply is 7
@@ -82,9 +83,8 @@ def build_summary_payload():
     has an extra 0x84 recv tag from m48 and therefore ends in
     0x87 + 0x84 var.
     """
-    statement = _default_store.statement
-    s = statement.get_summary()
-    period_count = statement.period_count()
+    s = user.statement
+    period_count = len(user.transactions)
     log.info(
         "statement_summary_reply balance_cents=%d currency=%d date=%04d-%02d-%02d"
         " free_minutes=%d period_count=%d",
@@ -179,7 +179,7 @@ def _encode_record(when, description, amount, total, extra=None, foreign=None):
 _DETAILS_HEADER = b"Exchange rate:\x00"
 
 
-def build_details_payload(period_index):
+def build_details_payload(period_index, user):
     """Build the Get-Details reply for selector=0x05.
 
     Request wire (after host block): `01 NN 82 82 85`
@@ -207,7 +207,8 @@ def build_details_payload(period_index):
     (prefix used by the flag-0x02 exchange-rate formatter), read
     once before the record loop at 0x7f352292.
     """
-    txns = _default_store.statement.get_transactions(period_index)
+    txns = _period_transactions(user, period_index)
+    currency = user.statement.currency_iso
     records = [
         _encode_record(
             t.when, t.description, t.amount_minor, t.total_minor, extra=t.extra, foreign=t.foreign
@@ -219,9 +220,10 @@ def build_details_payload(period_index):
         for t in txns[:3]
     )
     log.info(
-        "get_details_reply period=%d record_count=%d currency=840 txns=[%s%s]",
+        "get_details_reply period=%d record_count=%d currency=%d txns=[%s%s]",
         period_index,
         len(records),
+        currency,
         sample,
         "" if len(txns) <= 3 else f",...+{len(txns) - 3}",
     )
@@ -229,11 +231,20 @@ def build_details_payload(period_index):
     return b"".join(
         [
             build_tagged_reply_word(len(records)),
-            build_tagged_reply_word(840),  # slot-10 currency: USD
+            build_tagged_reply_word(currency),  # slot-10 currency
             bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]),
             blob,  # dynamic-complete: no length prefix
         ]
     )
+
+
+def _period_transactions(user, period_index):
+    """One statement period's transactions. Out-of-range asks get the current one."""
+    if not user.transactions:
+        return ()
+    if period_index < 0 or period_index >= len(user.transactions):
+        period_index = 0
+    return user.transactions[period_index]
 
 
 def _encode_subscription_record(sub):
@@ -300,7 +311,7 @@ def _encode_subscription_record(sub):
     )
 
 
-def build_subscriptions_payload():
+def build_subscriptions_payload(user):
     """Build the Subscriptions-tab reply for selector=0x02.
 
     Request wire (all recv, no send params):
@@ -332,16 +343,23 @@ def build_subscriptions_payload():
         9  byte  second_date_month     date appended to type_flag 0x02
         10 byte  second_date_day       rows; 0 suppresses
     """
-    subs = _default_store.statement.get_subscriptions()
+    subs = user.subscriptions
+    statement = user.statement
+    expires = statement.expires_date
+    effective = statement.effective_date
     records_blob = b"".join(_encode_subscription_record(s) for s in subs)
     sample = ",".join(
         f"kind=0x{s.kind:02x}|{s.name!r}|price={s.price_minor}|cur={s.price_currency}"
         for s in subs[:3]
     )
     log.info(
-        "subscriptions_reply count=%d balance_cents=495 currency=840"
-        " first_date=2026-12-31 second_date=2026-05-01 subs=[%s%s]",
+        "subscriptions_reply count=%d balance_cents=%d currency=%d"
+        " first_date=%s second_date=%s subs=[%s%s]",
         len(subs),
+        statement.balance_cents,
+        statement.currency_iso,
+        expires.isoformat(),
+        effective.isoformat(),
         sample,
         "" if len(subs) <= 3 else f",...+{len(subs) - 3}",
     )
@@ -349,15 +367,15 @@ def build_subscriptions_payload():
         [
             build_tagged_reply_byte(len(subs)),
             build_tagged_reply_var(0x84, records_blob),
-            build_tagged_reply_dword(495),
-            build_tagged_reply_word(840),  # balance currency: USD
+            build_tagged_reply_dword(statement.balance_cents),
+            build_tagged_reply_word(statement.currency_iso),
             build_tagged_reply_byte(1),
-            build_tagged_reply_word(2026),  # first-date year
-            build_tagged_reply_byte(12),  # first-date month
-            build_tagged_reply_byte(31),  # first-date day
-            build_tagged_reply_word(2026),  # second-date year
-            build_tagged_reply_byte(5),  # second-date month
-            build_tagged_reply_byte(1),  # second-date day
+            build_tagged_reply_word(expires.year),
+            build_tagged_reply_byte(expires.month),
+            build_tagged_reply_byte(expires.day),
+            build_tagged_reply_word(effective.year),
+            build_tagged_reply_byte(effective.month),
+            build_tagged_reply_byte(effective.day),
             bytes([TAG_END_STATIC]),
         ]
     )
@@ -408,7 +426,7 @@ def build_plans_payload():
     Our subscriptions reply leaves the per-row pad zeroed, so plan
     id 0 is the current one.
     """
-    plans = _default_store.statement.get_plans()
+    plans = _default_store.catalog.get_plans()
     blob = b"".join(_encode_plan_record(p) for p in plans)
     sample = ",".join(f"id={p.plan_id}|{p.name!r}" for p in plans[:3])
     log.info(
@@ -445,9 +463,11 @@ _CANCEL_ACK_PAYLOAD = b"".join(
 class OnlStmtHandler:
     """Handles OnlStmt service requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Build the IID->selector discovery block for OnlStmt."""
@@ -466,12 +486,13 @@ class OnlStmtHandler:
             )
             return None
 
+        user = self.session.user
         if selector == ONLSTMT_SELECTOR_SUMMARY:
-            log.info("statement_summary")
-            reply_payload = build_summary_payload()
+            log.info("statement_summary user=%s", user.username or "-")
+            reply_payload = build_summary_payload(user)
         elif selector == ONLSTMT_SELECTOR_SUBSCRIPTIONS:
-            log.info("subscriptions")
-            reply_payload = build_subscriptions_payload()
+            log.info("subscriptions user=%s", user.username or "-")
+            reply_payload = build_subscriptions_payload(user)
         elif selector == ONLSTMT_SELECTOR_MANAGE_SUBSCRIPTION:
             log.info("manage_subscription")
             reply_payload = build_plans_payload()
@@ -483,8 +504,8 @@ class OnlStmtHandler:
             # Request payload: `01 NN ...` — first send param is the
             # period index byte.  Fall back to 0 (current) if absent.
             period = payload[1] if len(payload) >= 2 and payload[0] == 0x01 else 0
-            log.info("get_details period=%d", period)
-            reply_payload = build_details_payload(period)
+            log.info("get_details period=%d user=%s", period, user.username or "-")
+            reply_payload = build_details_payload(period, user)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None

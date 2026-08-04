@@ -37,6 +37,7 @@ from ..mpc import (
     build_tagged_reply_dword,
     parse_request_params,
 )
+from ..session import Session
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 
@@ -133,9 +134,11 @@ MOSABP_ADDRTYPE = "MOS"
 class MOSABPHandler:
     """Handles MSN address-book requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Advertise IID 00028B22 — the only interface MOSABP32 resolves.

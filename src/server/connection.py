@@ -30,6 +30,7 @@ from .mpc import (
 )
 from .pipe import parse_pipe0_content, parse_pipe_frames
 from .services import SERVICE_HANDLERS
+from .session import Session
 from .transport import build_ack_packet, build_transport_params, parse_packet
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,9 @@ class ConnectionState:
         self.tx_pkt_no = 0
         self.server_seq = 1  # seq 0 used for transport params
         self.client_ack = 0
+        # Identity for this connection. Every service pipe the client opens
+        # shares it, and LOGSRV fills it in when the sign-in succeeds.
+        self.session = Session()
         self.services = {}
         self.pipe_buffers = defaultdict(bytearray)
         # Bytes still owed on a pipe frame whose content spans transport
@@ -258,7 +262,7 @@ class ConnectionState:
                 msg.version,
             )
         if handler_cls:
-            handler = handler_cls(msg.client_pipe_idx, msg.svc_name)
+            handler = handler_cls(msg.client_pipe_idx, msg.svc_name, self.session)
             self.services[msg.client_pipe_idx] = handler
 
             time.sleep(DELAY_BEFORE_REPLY)

@@ -85,6 +85,7 @@ from ...mpc import (
     build_service_packet,
     parse_request_params,
 )
+from ...session import Session
 from .._dispatch import log_unhandled_selector
 from . import replies
 from .m14_loader import LoadedM14, load_m14, lower_m14_to_payload
@@ -705,9 +706,11 @@ def _picture_status_metrics(data: bytes) -> tuple[int, int, int]:
 class MEDVIEWHandler:
     """Per-pipe MEDVIEW handler."""
 
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
         self._subscriptions: dict[int, tuple[int, int]] = {}
         self._open_title_slots: set[int] = set()
         # Per-baggage-name handle table. The handler returns one stable

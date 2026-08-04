@@ -27,7 +27,8 @@ from ..mpc import (
     decode_dirsrv_request,
     parse_request_params,
 )
-from ..store import DirectoryNode, NodeContent
+from ..session import Session
+from ..store import RIGHTS_NONE, DirectoryNode, NodeContent
 from ..store import app_store as _default_store
 from . import shabby
 from ._dispatch import log_unhandled_selector
@@ -62,6 +63,11 @@ TREEEDCL_SELECTOR_DELETE_NODE = 0x03
 TREEEDCL_SELECTOR_SET_PROPERTIES = 0x04
 TREEEDCL_SELECTOR_GET_DATASETS = 0x0B
 TREEEDCL_SELECTOR_GET_TICKET = 0x0C
+
+# The failure status every TREEEDCL write answers with, whether the request was
+# malformed or the account may not make it. `CTreeEditClient` retries only on
+# 0x116/0x117, so any other non-zero value ends the operation.
+TREEEDCL_STATUS_REFUSED = 0x101
 
 # Status returned in GetDeidFromGoWord's reply for an unrecognised go-word.
 # MCM!FGetGoWord (0x0410423f) compares the wire status DWORD against three
@@ -106,12 +112,6 @@ PROP_RIGHTS = "x"
 PROP_VENDOR_ID = "y"
 PROP_PRICE = "z"
 
-# CMosViewWnd::AddMenus asks CMosTreeNode::HasRights for mask 0x70 before
-# merging File > New/Delete/Unlink. HasRights reads wire property `x` as a
-# DWORD and succeeds when any requested bit is present. Fixtures grant the
-# complete authoring-menu mask.
-DIRSRV_RIGHTS_AUTHORING = 0x70
-
 # Browse-language LCIDs advertised in GetChildren replies with propList=["q"].
 # Each value becomes a row in the View > Options > General "Content view"
 # combobox after GetLocaleInfoA translates it to a display name. LCIDs missing
@@ -129,9 +129,11 @@ log = logging.getLogger(__name__)
 class DIRSRVHandler:
     """Handles DIRSRV service requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Build the IID->selector discovery block for DIRSRV."""
@@ -142,19 +144,19 @@ class DIRSRVHandler:
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Handle a DIRSRV request — dispatch by selector."""
         if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_NODE:
-            reply_payload = build_add_node_reply_payload(payload)
+            reply_payload = build_add_node_reply_payload(payload, session=self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_SET_PROPERTIES:
-            reply_payload = build_set_properties_reply_payload(payload)
+            reply_payload = build_set_properties_reply_payload(payload, session=self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
-            reply_payload = build_get_ticket_reply_payload()
+            reply_payload = build_get_ticket_reply_payload(self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
             reply_payload = build_get_datasets_reply_payload()
         elif selector == DIRSRV_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_get_properties_reply_payload(request)
+            reply_payload = build_get_properties_reply_payload(request, self.session.user.rights)
         elif selector == DIRSRV_SELECTOR_GET_CHILDREN:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_get_children_reply_payload(request)
+            reply_payload = build_get_children_reply_payload(request, self.session.user.rights)
         elif selector == DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD:
             reply_payload = build_get_deid_from_go_word_reply_payload(payload)
         elif selector == DIRSRV_SELECTOR_GET_SHABBY:
@@ -267,7 +269,7 @@ def _sz(s):
     return b"\x01" + data + b"\x00"
 
 
-def build_props(requested_props, node, *, is_children):
+def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
     """Serialize `node` into (type, name, value) property tuples.
 
     Most props have a single canonical wire type regardless of caller; only
@@ -347,7 +349,7 @@ def build_props(requested_props, node, *, is_children):
                 )
             )
         elif name == PROP_RIGHTS:
-            out.append((0x03, PROP_RIGHTS, struct.pack("<I", DIRSRV_RIGHTS_AUTHORING)))
+            out.append((0x03, PROP_RIGHTS, struct.pack("<I", rights)))
         elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
             # `p` = byte count, read inline as DWORD. Feeds MOSSHELL
             # FormatSizeString (listview Size column + Properties dialog Size
@@ -480,7 +482,7 @@ def build_props(requested_props, node, *, is_children):
     return out
 
 
-def build_get_properties_reply_payload(request=None):
+def build_get_properties_reply_payload(request=None, rights=RIGHTS_NONE):
     """Build a DIRSRV GetProperties (selector 0x00) reply: one self record.
 
     The client always wants exactly one record back — the requested node's own
@@ -497,13 +499,15 @@ def build_get_properties_reply_payload(request=None):
     _log_request("get_properties", request, requested_props)
 
     node = _default_store.content.get_node(request.node_id)
-    records_with_ids = [(node.node_id, build_props(requested_props, node, is_children=False))]
+    records_with_ids = [
+        (node.node_id, build_props(requested_props, node, is_children=False, rights=rights))
+    ]
 
     _log_reply("get_properties_reply", records_with_ids)
     return build_tree_reply_wire(records_with_ids)
 
 
-def build_get_children_reply_payload(request=None):
+def build_get_children_reply_payload(request=None, rights=RIGHTS_NONE):
     """Build a DIRSRV GetChildren (selector 0x02) reply: child records.
 
     Special cases (order matters):
@@ -527,13 +531,13 @@ def build_get_children_reply_payload(request=None):
     requested_props = _parse_prop_group(request.prop_group)
     _log_request("get_children", request, requested_props)
 
-    records_with_ids = _collect_children_records(request, requested_props)
+    records_with_ids = _collect_children_records(request, requested_props, rights)
 
     _log_reply("get_children_reply", records_with_ids)
     return build_tree_reply_wire(records_with_ids)
 
 
-def _collect_children_records(request, requested_props):
+def _collect_children_records(request, requested_props, rights):
     """Return [(src_node_id, prop_tuples)] for the GetChildren body."""
     if request.node_id == "0:0" and requested_props == [PROP_LANGUAGE]:
         return [
@@ -547,14 +551,19 @@ def _collect_children_records(request, requested_props):
     content_store = _default_store.content
     node = content_store.get_node(request.node_id)
     if node.node_id == "4:0":
-        return [(node.node_id, build_props(requested_props, node, is_children=True))]
+        return [
+            (node.node_id, build_props(requested_props, node, is_children=True, rights=rights))
+        ]
 
     records = [
-        (child.node_id, build_props(requested_props, child, is_children=True))
+        (child.node_id, build_props(requested_props, child, is_children=True, rights=rights))
         for child in content_store.get_children(request.node_id, request.locale_raw)
     ]
     if request.flags == GET_CHILDREN_FLAG_WITH_SELF:
-        records.insert(0, (node.node_id, build_props(requested_props, node, is_children=True)))
+        records.insert(
+            0,
+            (node.node_id, build_props(requested_props, node, is_children=True, rights=rights)),
+        )
     return records
 
 
@@ -763,8 +772,8 @@ def build_enum_shn_reply_payload(payload):
     )
 
 
-def build_get_ticket_reply_payload():
-    """Return a minimal TREEEDCL capability ticket for fixture authoring.
+def build_get_ticket_reply_payload(session=None, *, require_admin=True):
+    """Return a TREEEDCL capability ticket to an account allowed to write here.
 
     Enabling wire property `x` makes DSNAV initialize its node editors while
     building File > New. CTreeEditClient::GetTicket sends class 0x04,
@@ -773,7 +782,33 @@ def build_get_ticket_reply_payload():
     u16 as its total length, allocates that many bytes, and copies it without
     interpreting any other fields. A two-byte self-length is therefore the
     smallest valid opaque ticket.
+
+    The ticket is what every write on this class carries, so refusing it here is
+    the first gate. What it gates depends on the pipe it arrived on: authoring
+    the directory tree needs the rights mask, while the BBS reader asks for a
+    ticket to delete a message, which any signed-in member may do to their own —
+    hence `require_admin`. Ownership itself is settled at DeleteNode.
+
+    The public `CTreeEditClient::GetTicket` @ 0x7F2C160D retries only on
+    0x116/0x117 and treats any other non-zero status as final, so the refusal
+    has to answer something outside that pair — a server-side policy choice, not
+    a documented Marvel status code.
     """
+    if session is not None and not (
+        session.is_admin if require_admin else session.is_authenticated
+    ):
+        log.info(
+            "get_ticket refused user=%s require_admin=%s status=0x%x",
+            session.user.username or "-",
+            require_admin,
+            TREEEDCL_STATUS_REFUSED,
+        )
+        return (
+            build_tagged_reply_dword(TREEEDCL_STATUS_REFUSED)
+            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+            + b""
+        )
+
     ticket = struct.pack("<H", 2)
     return (
         build_tagged_reply_dword(0)
@@ -798,7 +833,7 @@ def build_get_datasets_reply_payload():
     )
 
 
-def build_add_node_reply_payload(payload, content_store=None):
+def build_add_node_reply_payload(payload, content_store=None, session=None):
     """Create one child for a TREEEDCL AddNode request.
 
     CTreeEditClient::PrivateAddNode sends three variable fields: the capability
@@ -806,9 +841,16 @@ def build_add_node_reply_payload(payload, content_store=None):
     Its receive descriptors are two DWORDs and one variable field. A completed
     operation therefore replies with status 0, operation id 0, and the new
     8-byte MNID.
+
+    An account without authoring rights is refused before the store is touched.
+    The ticket it would have to carry is refused too, so this is the second gate
+    rather than the only one.
     """
     if content_store is None:
         content_store = _default_store.content
+    if session is not None and not session.is_admin:
+        log.info("add_node refused user=%s", session.user.username or "-")
+        return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     send_params, recv_descriptors = parse_request_params(payload)
     fields = [param.data for param in send_params if isinstance(param, VarParam)]
@@ -819,7 +861,7 @@ def build_add_node_reply_payload(payload, content_store=None):
             [f"0x{tag:02x}" for tag in recv_descriptors],
             payload.hex(),
         )
-        return _build_add_node_result(0x101, b"\x00" * 8)
+        return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     ticket, parent_mnid, property_record = fields
     if (
@@ -832,21 +874,21 @@ def build_add_node_reply_payload(payload, content_store=None):
             ticket.hex(),
             parent_mnid.hex(),
         )
-        return _build_add_node_result(0x101, b"\x00" * 8)
+        return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     parent_f0, parent_f8 = struct.unpack("<II", parent_mnid)
     parent_id = f"{parent_f0}:{parent_f8}"
     parent = content_store.get_node(parent_id)
     if parent is None or parent.node_id != parent_id:
         log.warning("add_node unknown parent=%s", parent_id)
-        return _build_add_node_result(0x101, b"\x00" * 8)
+        return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     try:
         properties = _decode_property_record(property_record)
         new_mnid = _allocate_child_mnid(content_store, parent_id, parent_mnid)
     except ValueError as exc:
         log.warning("add_node invalid properties parent=%s error=%s", parent_id, exc)
-        return _build_add_node_result(0x101, b"\x00" * 8)
+        return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     browse_flags = _property_int(properties, PROP_BROWSE_FLAGS, 0)
     language_values = _property_value(properties, PROP_LANGUAGE, [])
@@ -945,7 +987,7 @@ _EDITABLE_PROPERTIES = {
 }
 
 
-def build_set_properties_reply_payload(payload, content_store=None):
+def build_set_properties_reply_payload(payload, content_store=None, session=None):
     """Apply a TREEEDCL SetProperties request to one existing node.
 
     `CTreeEditClient::PrivateSetProperties` @ TREEEDCL 0x7F2C1CEE sends three
@@ -957,9 +999,14 @@ def build_set_properties_reply_payload(payload, content_store=None):
     The reply is `status` + `operation id`, no variable field. The client polls
     `GetStatus` (selector 0x09) once a second for as long as the status DWORD
     reads 1, so a completed operation has to answer 0.
+
+    An account without authoring rights is refused before the store is touched.
     """
     if content_store is None:
         content_store = _default_store.content
+    if session is not None and not session.is_admin:
+        log.info("set_properties refused user=%s", session.user.username or "-")
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     send_params, recv_descriptors = parse_request_params(payload)
     fields = [param.data for param in send_params if isinstance(param, VarParam)]
@@ -970,7 +1017,7 @@ def build_set_properties_reply_payload(payload, content_store=None):
             [f"0x{tag:02x}" for tag in recv_descriptors],
             payload.hex(),
         )
-        return _build_edit_result(0x101)
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     ticket, mnid, property_record = fields
     if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket) or len(mnid) != 8:
@@ -979,20 +1026,20 @@ def build_set_properties_reply_payload(payload, content_store=None):
             ticket.hex(),
             mnid.hex(),
         )
-        return _build_edit_result(0x101)
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     field_0, field_8 = struct.unpack("<II", mnid)
     node_id = f"{field_0}:{field_8}"
     node = content_store.get_node(node_id)
     if node is None or node.node_id != node_id:
         log.warning("set_properties unknown node=%s", node_id)
-        return _build_edit_result(0x101)
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     try:
         properties = _decode_property_record(property_record)
     except ValueError as exc:
         log.warning("set_properties invalid properties node=%s error=%s", node_id, exc)
-        return _build_edit_result(0x101)
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     changes = {}
     ignored = []
@@ -1019,7 +1066,7 @@ def build_set_properties_reply_payload(payload, content_store=None):
     return _build_edit_result(0)
 
 
-def build_delete_node_reply_payload(payload, content_store=None):
+def build_delete_node_reply_payload(payload, content_store=None, session=None):
     """Remove one node for a TREEEDCL DeleteNode request.
 
     `CTreeEditClient::PrivateDeleteNode` @ TREEEDCL 0x7F2C1BE3 sends two
@@ -1036,6 +1083,9 @@ def build_delete_node_reply_payload(payload, content_store=None):
     `CTreeEditClient::DeleteNode` @ 0x7F2C160D retries the whole call after a
     fresh `GetTicket` on 0x116/0x117 only, and treats every other non-zero value
     as final.
+
+    Who may delete what is decided by `_may_delete`. The BBS reader reaches this
+    same builder over its own pipe, which is why the rule lives here.
     """
     if content_store is None:
         content_store = _default_store.content
@@ -1049,7 +1099,7 @@ def build_delete_node_reply_payload(payload, content_store=None):
             [f"0x{tag:02x}" for tag in recv_descriptors],
             payload.hex(),
         )
-        return _build_edit_result(0x101)
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     ticket, mnid = fields
     if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket) or len(mnid) != 8:
@@ -1058,18 +1108,44 @@ def build_delete_node_reply_payload(payload, content_store=None):
             ticket.hex(),
             mnid.hex(),
         )
-        return _build_edit_result(0x101)
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     field_0, field_8 = struct.unpack("<II", mnid)
     node_id = f"{field_0}:{field_8}"
     node = content_store.get_node(node_id)
-    name = node.content.name if node is not None and node.node_id == node_id else ""
+    known = node is not None and node.node_id == node_id
+    name = node.content.name if known else ""
+    if session is not None and known and not _may_delete(session, node):
+        log.info(
+            "delete_node refused user=%s node=%s name=%r",
+            session.user.username or "-",
+            node_id,
+            name,
+        )
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
     if not content_store.remove_node(node_id):
         log.warning("delete_node unknown node=%s", node_id)
-        return _build_edit_result(0x101)
+        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     log.info("delete_node status=0 node=%s name=%r", node_id, name)
     return _build_edit_result(0)
+
+
+def _may_delete(session, node):
+    """Whether the signed-in account may remove `node`.
+
+    An account with authoring rights may remove anything. Everyone else is
+    limited to a BBS message they wrote — the author string on the node is the
+    connection's own display name. A node with no BBS fields is not a message,
+    so nobody but an author-rights account can remove it.
+
+    Server-side policy, not a Marvel rule: no capture shows how the real service
+    decided this.
+    """
+    if session.is_admin:
+        return True
+    bbs = node.content.bbs
+    return bbs is not None and bbs.author == session.user.display_name
 
 
 def _build_edit_result(status):

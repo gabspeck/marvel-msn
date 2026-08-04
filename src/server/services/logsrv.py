@@ -8,6 +8,7 @@ from ..config import (
     MPC_CLASS_ONEWAY_MASK,
     TAG_END_STATIC,
 )
+from ..log import TRACE
 from ..models import DwordParam, VarParam
 from ..mpc import (
     build_discovery_host_block,
@@ -18,6 +19,7 @@ from ..mpc import (
     build_tagged_reply_var,
     parse_request_params,
 )
+from ..session import Session
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 
@@ -37,13 +39,62 @@ LOGSRV_SELECTOR_EXISTING_MEMBER_PHONEBOOK = 0x0E   # existing-member phonebook f
 # Current stub short-circuits after NEGOTIATE — see project_logsrv_osr2_ntlm.
 LOGSRV_SELECTOR_NTLM_LOGIN = 0x0F
 
+# The credential blob the client sends as the second send-param of selector
+# 0x00. `GUIDE.EXE!VerifyAccountViaLogSrv` @ 0x04304024 builds it out of three
+# adjacent stack locals and hands the lot to the marshaller as one 0x58-byte
+# field:
+#
+#     undefined1 blob      [4]    Stack[-0xc4]   never written before the send
+#     CHAR       memberId  [65]   Stack[-0xc0]   lstrcpyA(memberId, userId)
+#     CHAR       password  [19]   Stack[-0x7f]   lstrcpyA(password, password)
+#
+# 4 + 65 + 19 = 0x58, and the next local sits at Stack[-0x6c] = blob + 0x58, so
+# the three cover the field exactly. Both strings are ASCIIZ and neither is
+# transformed — the account is verified against the plain password.
+#
+# The same layout backs the cached-credentials record in the registry: when the
+# dialog passes an empty member id the function copies from `cachedRecord + 4`,
+# and clears the cached password at `cachedRecord + 0x45`.
+LOGIN_BLOB_LEN = 0x58
+LOGIN_BLOB_MEMBER_ID_OFFSET = 0x04
+LOGIN_BLOB_MEMBER_ID_LEN = 0x41
+LOGIN_BLOB_PASSWORD_OFFSET = 0x45
+LOGIN_BLOB_PASSWORD_LEN = 0x13
+
+# First reply dword. `VerifyAccountViaLogSrv` treats 0 and 0x0C as success and
+# maps every other value to the message its 0x2F0-titled box shows:
+#
+#   2, 0x0A  -> 0x2FC  "This member ID is not valid."
+#   1        -> 0x309  "The Microsoft Network accounts database is not available"
+#   0x0D     -> 0x31E  "This account has been locked."
+#   0x16     -> 0x31C  "You are already signed in ... another computer"
+#   0x22     -> 0x2C6  "Network busy."
+#   0x23     -> 0x2C7  "Software update required." (newer Windows)
+#   0x24     -> 0x2C8  "Software update required." (newer MSN)
+#   default  -> 0x2F5  "Password not valid. Please type it again."
+#
+# The catch-all is the password message, so the two credential failures the
+# client can name are the two this server reports: 2 for a member id that
+# resolves to no account, and an unmapped code for an account whose password
+# does not match. 3 is unmapped and sits in the same low band as the rest.
+LOGIN_RESULT_OK = 0
+LOGIN_RESULT_BAD_MEMBER_ID = 2
+LOGIN_RESULT_BAD_PASSWORD = 3
+
+# Selector 0x01 reply for a change the server will not make. Any non-zero value
+# raises the same "current password not valid" box, so one code covers a wrong
+# current password, a malformed request, and a connection that never signed in.
+PASSWORD_CHANGE_REFUSED = 1
+
 
 class LOGSRVHandler:
     """Handles LOGSRV service requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Build the IID->selector discovery block for LOGSRV."""
@@ -63,22 +114,21 @@ class LOGSRVHandler:
             return None
 
         if selector == LOGSRV_SELECTOR_LOGIN:
-            reply_payload = _BOOTSTRAP_PAYLOAD
-            log.info("login_bootstrap_reply status=0 dword_count=7 padding=16B")
+            reply_payload = _handle_login(payload, self.session)
         elif selector == LOGSRV_SELECTOR_NTLM_LOGIN:
             reply_payload = _handle_osr2_bootstrap(payload)
         elif selector == LOGSRV_SELECTOR_PASSWORD_CHANGE:
-            reply_payload = _handle_password_change(payload)
+            reply_payload = _handle_password_change(payload, self.session)
         elif selector == LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER:
             reply_payload = _handle_signup_post_transfer(payload)
         elif selector == LOGSRV_SELECTOR_SIGNUP_QUERY:
             reply_payload = _handle_signup_query(payload)
         elif selector == LOGSRV_SELECTOR_BILLING_QUERY:
-            reply_payload = _handle_billing_query()
+            reply_payload = _handle_billing_query(self.session)
         elif selector == LOGSRV_SELECTOR_PM_COMMIT:
-            reply_payload = _handle_pm_commit()
+            reply_payload = _handle_pm_commit(payload, self.session)
         elif selector == LOGSRV_SELECTOR_BILLING_COMMIT:
-            reply_payload = _handle_billing_commit()
+            reply_payload = _handle_billing_commit(payload, self.session)
         elif selector == LOGSRV_SELECTOR_POST_SIGNUP_QUERY:
             reply_payload = _handle_post_signup_query(payload)
         elif selector == LOGSRV_SELECTOR_EXISTING_MEMBER_PHONEBOOK:
@@ -91,20 +141,89 @@ class LOGSRVHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
 
-def _build_bootstrap_payload():
+def _build_bootstrap_payload(result):
     """Build the LOGSRV login reply: 7 dwords + end-static + 16-byte variable.
 
-    Field 0 = login result code (0 = success).
+    Field 0 is the login result the client branches on. The remaining six dwords
+    and the 16-byte variable are read into `PTR_DAT_0430a0a0` slots and the
+    account record at `DAT_04308a44 + 0x1de`; zero leaves them all unset.
     """
     payload = bytearray()
-    for _ in range(7):
+    payload.extend(build_tagged_reply_dword(result))
+    for _ in range(6):
         payload.extend(build_tagged_reply_dword(0))
     payload.append(TAG_END_STATIC)
     payload.extend(build_tagged_reply_var(0x84, b"\x00" * 16))
     return bytes(payload)
 
 
-_BOOTSTRAP_PAYLOAD = _build_bootstrap_payload()
+_BOOTSTRAP_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_OK)
+_BAD_MEMBER_ID_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_BAD_MEMBER_ID)
+_BAD_PASSWORD_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_BAD_PASSWORD)
+
+
+def _handle_login(request_payload, session):
+    """Handle LOGSRV selector 0x00 — the sign-in the client runs before anything else.
+
+    The request is a `0x03` dword (last-update version) plus the `0x04`
+    credential blob. A member id and password that match a seeded account sign
+    the connection in, and every per-member reply on it reads off that account
+    from here on.
+
+    A failure says which half was wrong, because the client has a message for
+    each: an unknown member id and a mismatched password raise different boxes.
+    """
+    send_params, _ = parse_request_params(request_payload)
+    blob = next(
+        (p.data for p in send_params if isinstance(p, VarParam) and len(p.data) == LOGIN_BLOB_LEN),
+        None,
+    )
+    if blob is None:
+        log.warning("login no 0x%02x-byte blob params=%d", LOGIN_BLOB_LEN, len(send_params))
+        # A request shaped like this holds no credential the parser recognises,
+        # but it may still hold one somewhere else — keep the bytes off INFO.
+        log.log(TRACE, "login_request payload=%s", request_payload.hex())
+        return _BAD_MEMBER_ID_PAYLOAD
+
+    member_id, password = _decode_login_blob(blob)
+    user = _default_store.users.get_user(member_id)
+    if user is None:
+        log.info(
+            "login_reply result=%d reason=unknown_member_id member_id=%r",
+            LOGIN_RESULT_BAD_MEMBER_ID,
+            member_id,
+        )
+        return _BAD_MEMBER_ID_PAYLOAD
+    if user.password != password:
+        log.info(
+            "login_reply result=%d reason=wrong_password member_id=%r",
+            LOGIN_RESULT_BAD_PASSWORD,
+            user.username,
+        )
+        return _BAD_PASSWORD_PAYLOAD
+
+    session.sign_in(user)
+    log.info(
+        "login_reply result=0 member_id=%r display_name=%r rights=0x%x",
+        user.username,
+        user.display_name,
+        user.rights,
+    )
+    return _BOOTSTRAP_PAYLOAD
+
+
+def _decode_login_blob(blob):
+    """Split the credential blob into (member id, password)."""
+    return (
+        _asciiz(blob, LOGIN_BLOB_MEMBER_ID_OFFSET, LOGIN_BLOB_MEMBER_ID_LEN),
+        _asciiz(blob, LOGIN_BLOB_PASSWORD_OFFSET, LOGIN_BLOB_PASSWORD_LEN),
+    )
+
+
+def _asciiz(buf, offset, length):
+    """Read a NUL-terminated ASCII field out of a fixed-width slot."""
+    return buf[offset : offset + length].split(b"\x00", 1)[0].decode("ascii", errors="replace")
+
 
 # Minimum success reply for LOGSRV commit selectors (0x0b PM, 0x0c OI).
 # Must be a 0x84 variable — a 0x83 dword unblocks WaitForResponse but
@@ -116,27 +235,47 @@ _BOOTSTRAP_PAYLOAD = _build_bootstrap_payload()
 _COMMIT_OK_REPLY = build_tagged_reply_var(0x84, b"\x00" * 4)
 
 
-def _handle_pm_commit():
+def _handle_pm_commit(request_payload, session):
     """LOGSRV selector 0x0b — Payment Options > Payment Method OK.
     BILLADD.DLL BillingDlg_CommitPM @ 0x00434b81 submits a 0x11c PM buffer.
+
+    The submitted buffer is traced rather than stored. Its length matches the
+    PM block of the 0x0a reply exactly, but nothing confirms the field offsets
+    run the same way in this direction, and writing the account from guessed
+    offsets would corrupt it silently. The buffer carries a card number, so the
+    bytes stay at TRACE.
     """
-    log.info("pm_commit status=0")
+    log.info(
+        "pm_commit user=%s payload_len=%d",
+        session.user.username or "-",
+        len(request_payload),
+    )
+    log.log(TRACE, "pm_commit payload=%s", request_payload.hex())
     log.info("pm_commit_reply status=0")
     return _COMMIT_OK_REPLY
 
 
-def _handle_billing_commit():
+def _handle_billing_commit(request_payload, session):
     """LOGSRV selector 0x0c — Payment Options > Name and Address OK.
     BILLADD.DLL BillingDlg_CommitOI @ 0x00434953 submits a 0x2fc OI
     buffer, fragmented on the wire as class=0xe6/0xe7 one-way
     continuations (filtered out by MPC_CLASS_ONEWAY_MASK).
+
+    Traced, not stored, for the same reason as the PM commit — and here the
+    lengths do not even agree: the 0x0a reply's OI block spans 0x008..0x300,
+    which is 0x2f8 bytes, four short of what the commit sends.
     """
-    log.info("billing_commit status=0")
+    log.info(
+        "billing_commit user=%s payload_len=%d",
+        session.user.username or "-",
+        len(request_payload),
+    )
+    log.log(TRACE, "billing_commit payload=%s", request_payload.hex())
     log.info("billing_commit_reply status=0")
     return _COMMIT_OK_REPLY
 
 
-def _handle_billing_query():
+def _handle_billing_query(session):
     """Handle a billing/account info query (selector 0x0A).
 
     The client opens this when the user clicks Tools > Billing > Payment Method.
@@ -156,8 +295,8 @@ def _handle_billing_query():
         +0x00  Type dword (1=CHARGE, 2=DEBIT, 3=DIRECTDEBIT)
         +0x19  Card number string
     """
-    log.info("billing_query")
-    profile = _default_store.account.get_billing_profile()
+    profile = session.user.billing
+    log.info("billing_query user=%s", session.user.username or "-")
     buf = bytearray(0x41C)  # 1052 bytes, zero-filled
 
     # Status = 0 (success)
@@ -283,20 +422,46 @@ def _handle_osr2_bootstrap(request_payload):
     return _BOOTSTRAP_PAYLOAD
 
 
-def _handle_password_change(request_payload):
-    """Handle a password change request.
+def _handle_password_change(request_payload, session):
+    """Handle a password change request (selector 0x01).
+
+    The two 17-byte buffers hold the current and the new password. The change
+    only commits when the current one matches the account the connection signed
+    in as.
 
     Reply: dword 0 = success, non-zero = "current password not valid"
     (client shows same message for any non-zero value).
     """
     send_params, _ = parse_request_params(request_payload)
-    old_pw = new_pw = "?"
+    old_pw = new_pw = None
     if len(send_params) > 0 and isinstance(send_params[0], VarParam):
         old_pw = send_params[0].data.split(b"\x00", 1)[0].decode("ascii", errors="replace")
     if len(send_params) > 1 and isinstance(send_params[1], VarParam):
         new_pw = send_params[1].data.split(b"\x00", 1)[0].decode("ascii", errors="replace")
-    log.info("password_change old=%s new=%s", old_pw, new_pw)
-    log.info("password_change_reply status=0")
+
+    user = session.user
+    if not session.is_authenticated:
+        log.warning("password_change_reply status=%d reason=not_signed_in", PASSWORD_CHANGE_REFUSED)
+        return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
+    if old_pw is None or new_pw is None:
+        log.warning(
+            "password_change_reply status=%d reason=malformed params=%d",
+            PASSWORD_CHANGE_REFUSED,
+            len(send_params),
+        )
+        return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
+    if old_pw != user.password:
+        log.info(
+            "password_change_reply status=%d user=%s reason=wrong_current",
+            PASSWORD_CHANGE_REFUSED,
+            user.username,
+        )
+        return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
+
+    _default_store.users.set_password(user.username, new_pw)
+    # The session holds a frozen copy, so re-read the account it now points at.
+    session.sign_in(_default_store.users.get_user(user.username))
+    log.info("password_change_reply status=0 user=%s", user.username)
     return build_tagged_reply_dword(0)
 
 

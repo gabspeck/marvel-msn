@@ -33,8 +33,9 @@ from server.services.onlstmt import (
     build_subscriptions_payload,
     build_summary_payload,
 )
-from server.store import default_seed
 from server.transport import parse_packet
+
+from .support import seed_user, signed_in
 
 
 def _extract_host_block(wire_packets):
@@ -53,7 +54,7 @@ class TestSummaryPayload(unittest.TestCase):
     """Static section: 7 tagged primitives in fixed order."""
 
     def setUp(self):
-        self.payload = build_summary_payload()
+        self.payload = build_summary_payload(seed_user())
 
     def test_parses_to_seven_primitives(self):
         params = parse_tagged_params(self.payload)
@@ -91,14 +92,14 @@ class TestSummaryPayload(unittest.TestCase):
 
 class TestDetailsPayloads(unittest.TestCase):
     def setUp(self):
-        self.seed = default_seed()
+        self.user = seed_user()
         self.payloads = [
-            build_details_payload(i) for i in range(len(self.seed.statement_transactions))
+            build_details_payload(i, self.user) for i in range(len(self.user.transactions))
         ]
 
     def test_one_payload_per_period(self):
         self.assertEqual(len(self.payloads), 4)
-        self.assertEqual(len(self.seed.statement_transactions), 4)
+        self.assertEqual(len(self.user.transactions), 4)
 
     def test_each_payload_has_dynamic_complete_tag(self):
         # Reply must end with a 0x86 dynamic-complete blob — the
@@ -117,7 +118,7 @@ class TestDetailsPayloads(unittest.TestCase):
             with self.subTest(period=period):
                 self.assertEqual(payload[0], 0x82)
                 count = struct.unpack("<H", payload[1:3])[0]
-                self.assertEqual(count, len(self.seed.statement_transactions[period]))
+                self.assertEqual(count, len(self.user.transactions[period]))
 
 
 class TestDetailsPeriodDispatch(unittest.TestCase):
@@ -130,7 +131,8 @@ class TestDetailsPeriodDispatch(unittest.TestCase):
         logging.disable(logging.NOTSET)
 
     def setUp(self):
-        self.handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt")
+        self.handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt", session=signed_in())
+        self.user = seed_user()
 
     def _dispatch(self, payload):
         wire = self.handler.handle_request(
@@ -147,25 +149,25 @@ class TestDetailsPeriodDispatch(unittest.TestCase):
 
     def test_period_zero_returned_for_period_byte_0(self):
         reply = self._dispatch(b"\x01\x00")
-        self.assertEqual(reply, build_details_payload(0))
+        self.assertEqual(reply, build_details_payload(0, self.user))
 
     def test_period_three_returned_for_period_byte_3(self):
         reply = self._dispatch(b"\x01\x03")
-        self.assertEqual(reply, build_details_payload(3))
+        self.assertEqual(reply, build_details_payload(3, self.user))
 
     def test_period_clamped_when_out_of_range(self):
         # Anything >= 4 falls back to current period.
         reply = self._dispatch(b"\x01\x09")
-        self.assertEqual(reply, build_details_payload(0))
+        self.assertEqual(reply, build_details_payload(0, self.user))
 
     def test_empty_payload_falls_back_to_period_zero(self):
         reply = self._dispatch(b"")
-        self.assertEqual(reply, build_details_payload(0))
+        self.assertEqual(reply, build_details_payload(0, self.user))
 
     def test_missing_send_byte_tag_falls_back_to_period_zero(self):
         # If the leading tag isn't 0x01 (send byte), treat as period 0.
         reply = self._dispatch(b"\x02\x03")
-        self.assertEqual(reply, build_details_payload(0))
+        self.assertEqual(reply, build_details_payload(0, self.user))
 
 
 class TestDetailsRecordEncoding(unittest.TestCase):
@@ -234,8 +236,7 @@ class TestDaysWireBias(unittest.TestCase):
 
     def test_records_in_real_payloads_above_safety_threshold(self):
         # Sanity: every record in our fixture data passes the gate.
-        seed = default_seed()
-        for period_records in seed.statement_transactions:
+        for period_records in seed_user().transactions:
             for txn in period_records:
                 days_wire, _ = _encode_timestamp(txn.when)
                 self.assertGreaterEqual(days_wire, 0x63E0)
@@ -249,7 +250,7 @@ class TestDaysWireBias(unittest.TestCase):
 
 class TestSubscriptionsPayload(unittest.TestCase):
     def setUp(self):
-        self.payload = build_subscriptions_payload()
+        self.payload = build_subscriptions_payload(seed_user())
 
     def test_ends_with_end_static(self):
         self.assertEqual(self.payload[-1], TAG_END_STATIC)

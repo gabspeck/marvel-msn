@@ -55,7 +55,7 @@ class TestSeedIsolation(unittest.TestCase):
         self.assertIsNot(first.directory_nodes, second.directory_nodes)
         self.assertIsNot(first.directory_children, second.directory_children)
         self.assertIsNot(first.directory_children[_BOARD], second.directory_children[_BOARD])
-        self.assertIsNot(first.statement_transactions[0], second.statement_transactions[0])
+        self.assertIsNot(first.users, second.users)
 
 
 class TestRemoveNode(unittest.TestCase):
@@ -156,16 +156,16 @@ class TestReset(unittest.TestCase):
         # survive a re-seed — only their contents may be replaced.
         stores = (
             app_store.content,
-            app_store.account,
-            app_store.statement,
+            app_store.users,
+            app_store.catalog,
             app_store.member,
         )
         reset_app_store()
         self.assertEqual(
             (
                 app_store.content,
-                app_store.account,
-                app_store.statement,
+                app_store.users,
+                app_store.catalog,
                 app_store.member,
             ),
             stores,
@@ -174,11 +174,8 @@ class TestReset(unittest.TestCase):
     def test_reset_reseeds_every_store(self):
         seed = default_seed()
         reset_app_store()
-        self.assertEqual(app_store.account.get_billing_profile(), seed.billing_profile)
-        self.assertEqual(app_store.statement.get_summary(), seed.statement_summary)
-        self.assertEqual(app_store.statement.get_plans(), seed.plans)
-        self.assertEqual(app_store.statement.get_subscriptions(), seed.subscriptions)
-        self.assertEqual(app_store.statement.period_count(), len(seed.statement_transactions))
+        self.assertEqual(app_store.users.get_user(seed.users[0].username), seed.users[0])
+        self.assertEqual(app_store.catalog.get_plans(), seed.plans)
         self.assertEqual(
             app_store.member.get_member(seed.member_profiles[0].member_id),
             seed.member_profiles[0],

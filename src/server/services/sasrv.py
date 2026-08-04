@@ -39,6 +39,7 @@ from ..mpc import (
     build_tagged_reply_dword,
     parse_request_params,
 )
+from ..session import Session
 from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
@@ -93,9 +94,11 @@ class SASRVHandler:
     and closes it with the property sheet.
     """
 
-    def __init__(self, pipe_idx, svc_name):
+    def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
+        # Anonymous when the pipe opens before the login lands.
+        self.session = session or Session()
         self._enums = {}
         self._next_handle = 1
 
@@ -136,6 +139,18 @@ class SASRVHandler:
         dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
         kind = dwords[0] if dwords else None
 
+        # An account holding no token grant has no master list to enumerate.
+        # SA_E_BAD_LIST_KIND is what the page turns into "Cannot display
+        # Security page", which is the outcome wanted for a plain subscriber.
+        # Server-side policy: no capture shows how Marvel gated this.
+        if not self.session.user.sa_tokens:
+            log.info(
+                "begin_enum refused user=%s kind=%s",
+                self.session.user.username or "-",
+                kind,
+            )
+            return _build_two_dword_reply(SA_E_BAD_LIST_KIND, 0)
+
         if kind not in _LIST_KINDS:
             log.warning(
                 "begin_enum unsupported list kind=%s range=%d..%d payload=%s",
@@ -169,9 +184,19 @@ class SASRVHandler:
             log.warning("read_enum_results unknown handle=%s payload=%s", handle, payload.hex())
             return _build_two_dword_reply(0, SA_E_BAD_LIST_KIND)
 
-        count = len(_LIST_KINDS[kind])
+        count = len(self._rows(kind))
         log.info("read_enum_results status=0 handle=%d kind=%d count=%d", handle, kind, count)
         return _build_two_dword_reply(count, 0)
+
+    def _rows(self, kind):
+        """The rows of `kind` this account may see, in list order.
+
+        A row is offered only when the account holds that token. The Security
+        page's Token name combo is a picker, so an account can only assign what
+        it has been granted.
+        """
+        granted = self.session.user.sa_tokens
+        return tuple(row for row in _LIST_KINDS.get(kind, ()) if row[0] in granted)
 
     def build_get_list_page_reply_payload(self, payload):
         """Return one page of list rows (selector 0x05).
@@ -209,7 +234,7 @@ class SASRVHandler:
         # and returns a failure the page handles, whereas no reply at all would
         # strand its Wait(INFINITE) on the shell's UI thread.
         kind = self._enums.get(handle)
-        rows = _LIST_KINDS.get(kind, ())
+        rows = self._rows(kind)
         if kind is None:
             log.warning("get_list_page unknown handle=%s payload=%s", handle, payload.hex())
 

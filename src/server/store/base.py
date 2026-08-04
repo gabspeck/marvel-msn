@@ -6,6 +6,13 @@ import datetime
 from dataclasses import dataclass
 from typing import Protocol
 
+# Wire DIRSRV property `x`. `CMosViewWnd::AddMenus` asks
+# `CMosTreeNode::HasRights` for mask 0x70 before merging File >
+# New/Delete/Unlink, and HasRights reads `x` as a DWORD and succeeds when any
+# requested bit is present. A member holding 0 therefore gets no authoring menu.
+RIGHTS_NONE = 0x00
+RIGHTS_AUTHORING = 0x70
+
 
 @dataclass(frozen=True)
 class BbsFields:
@@ -163,6 +170,11 @@ class StatementSummary:
     month: int
     day: int
     free_connect_minutes: int
+    # Dates the Subscriptions page appends to its rows: `expires` to the
+    # type-flag 0x01 rows, `effective` to the 0x02 ones. The summary page uses
+    # year/month/day above instead, which is a different date entirely.
+    expires_date: datetime.date = datetime.date(1970, 1, 1)
+    effective_date: datetime.date = datetime.date(1970, 1, 1)
 
 
 @dataclass(frozen=True)
@@ -192,6 +204,63 @@ class Plan:
     detail: str
 
 
+# Stand-ins so every User answers every field. A member who has published no
+# billing or statement data still gets a well-formed reply — blank boxes and a
+# zero balance — instead of forcing a None check into each handler.
+EMPTY_BILLING_PROFILE = BillingProfile(
+    first_name="",
+    last_name="",
+    country_id=0,
+    address="",
+    city="",
+    state="",
+    zip="",
+    phone="",
+    payment_type=1,
+    card_number="",
+)
+
+EMPTY_STATEMENT_SUMMARY = StatementSummary(
+    balance_cents=0,
+    currency_iso=840,
+    year=1970,
+    month=1,
+    day=1,
+    free_connect_minutes=0,
+)
+
+
+@dataclass(frozen=True)
+class User:
+    """One MSN account: what signs in, and everything the services say about it.
+
+    `username` and `password` are what the Sign In dialog collects and LOGSRV
+    checks. `display_name` is the public identity — it goes out as a BBS post's
+    `From:` header, and because MOSABP32 passes a From with no '@' through
+    whole, it is also the key that resolves the Member Properties sheet.
+
+    Billing and statement data hang off the account rather than living in
+    parallel stores keyed by name: one lookup answers every per-member reply.
+    """
+
+    username: str
+    password: str
+    display_name: str
+    rights: int = RIGHTS_NONE  # wire DIRSRV `x`
+    sa_tokens: tuple = ()  # SASRV token ids this account may enumerate
+    billing: BillingProfile = EMPTY_BILLING_PROFILE
+    statement: StatementSummary = EMPTY_STATEMENT_SUMMARY
+    transactions: tuple = ()  # one list per statement period, newest first
+    subscriptions: tuple = ()
+
+
+# The identity a connection carries before LOGSRV signs it in. A pipe can open
+# ahead of the login — the LOGSRV pipe itself does — so an unauthenticated
+# session is a real state, and giving it a User keeps `if user is None` out of
+# every handler.
+ANONYMOUS_USER = User(username="", password="", display_name="")
+
+
 class ContentStore(Protocol):
     def load(self, nodes: list, children: dict, fallback: DirectoryNode) -> None: ...
     def get_node(self, node_id: str) -> DirectoryNode | None: ...
@@ -203,9 +272,12 @@ class ContentStore(Protocol):
     def remove_node(self, node_id: str) -> bool: ...
 
 
-class AccountStore(Protocol):
-    def load(self, billing_profile: BillingProfile) -> None: ...
-    def get_billing_profile(self) -> BillingProfile: ...
+class UserStore(Protocol):
+    def load(self, users: list) -> None: ...
+    def authenticate(self, username: str, password: str) -> User | None: ...
+    def get_user(self, username: str) -> User | None: ...
+    def set_password(self, username: str, password: str) -> bool: ...
+    def set_billing(self, username: str, profile: BillingProfile) -> bool: ...
 
 
 class MemberStore(Protocol):
@@ -213,26 +285,18 @@ class MemberStore(Protocol):
     def get_member(self, member_id: str) -> MemberProfile: ...
 
 
-class StatementStore(Protocol):
-    def load(
-        self,
-        summary: StatementSummary,
-        transactions: list,
-        subscriptions: list,
-        plans: list,
-    ) -> None: ...
-    def get_summary(self) -> StatementSummary: ...
-    def get_transactions(self, period_index: int) -> list: ...
-    def period_count(self) -> int: ...
-    def get_subscriptions(self) -> list: ...
+class CatalogStore(Protocol):
+    """The subscription plans on offer — a catalogue, the same for every member."""
+
+    def load(self, plans: list) -> None: ...
     def get_plans(self) -> list: ...
 
 
 @dataclass
 class AppStore:
     content: ContentStore
-    account: AccountStore
-    statement: StatementStore
+    users: UserStore
+    catalog: CatalogStore
     member: MemberStore
 
     def reset(self, seed) -> None:
@@ -246,11 +310,6 @@ class AppStore:
             seed.directory_children,
             seed.directory_fallback,
         )
-        self.account.load(seed.billing_profile)
-        self.statement.load(
-            seed.statement_summary,
-            seed.statement_transactions,
-            seed.subscriptions,
-            seed.plans,
-        )
+        self.users.load(seed.users)
+        self.catalog.load(seed.plans)
         self.member.load(seed.member_profiles)

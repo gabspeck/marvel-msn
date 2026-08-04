@@ -157,14 +157,6 @@ def bbs_node(
     )
 
 
-# Author stamped on a message that arrives over the BBS post channel. A real
-# service takes it from the authenticated session; nothing here tracks a
-# signed-in member, and the uploaded article carries no author header — the
-# Compose window writes X-MOS-To, Subject, References and the X-MOS-* control
-# set (BBSNAV FUN_7F5FBD4E @ 0x7F5FBD4E), never a From. Naming an existing
-# MEMBER_PROFILES entry keeps the Properties sheet working on a new post.
-BBS_POST_AUTHOR = "Chris Hahn"
-
 # Wall-clock format `bbs_date_to_unix` parses, and the one the Properties
 # dialog shows verbatim through `created`/`modified`.
 BBS_POST_DATE_FORMAT = "%B %d, %Y %I:%M %p"
@@ -175,6 +167,7 @@ def build_bbs_post(
     board_id,
     *,
     subject,
+    author,
     parent_subid,
     body_raw,
     body_format,
@@ -183,6 +176,14 @@ def build_bbs_post(
     attachment_data=b"",
 ):
     """A BBS message node built from an article the Compose window just posted.
+
+    `author` comes from the connection's signed-in account. The uploaded article
+    carries no author header — the Compose window writes X-MOS-To, Subject,
+    References and the X-MOS-* control set (BBSNAV FUN_7F5FBD4E @ 0x7F5FBD4E),
+    never a From — so the identity has to come from the session. It goes back
+    out as the `From:` header and as the tree's `_a`, and because MOSABP32
+    passes a From with no '@' through whole, it is also the key the Member
+    Properties sheet resolves on.
 
     `body_raw` is the uploaded body verbatim — the client encodes it before it
     reaches the wire, so it goes back out untouched under the same
@@ -194,7 +195,7 @@ def build_bbs_post(
         board_id,
         subject,
         is_container=False,
-        author=BBS_POST_AUTHOR,
+        author=author,
         date=datetime.datetime.now().strftime(BBS_POST_DATE_FORMAT),
         parent_subid=parent_subid,
         body_raw=body_raw,

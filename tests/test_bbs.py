@@ -36,6 +36,8 @@ from server.services.dirsrv import DIRSRVHandler
 from server.store import app_store, reset_app_store
 from server.transport import parse_packet
 
+from .support import SUBSCRIBER, seed_user, signed_in
+
 # Sample-board node ids, decimal wire form `field_8:field_c` = message id : board
 # id. The board itself carries message id 0 — GetParent (0x7F5F12CE) reaches it by
 # zeroing field_8, and GetThreadParent (0x7F5F1C3E) reaches a parent post by
@@ -827,7 +829,7 @@ class TestBBSEditChannel(unittest.TestCase):
         )
 
     def test_get_ticket_is_answered_on_the_bbs_pipe(self):
-        handler = BBSHandler(1, "BBS")
+        handler = BBSHandler(1, "BBS", signed_in())
         packets = handler.handle_request(
             msg_class=0x04,
             selector=0x0C,
@@ -842,7 +844,7 @@ class TestBBSEditChannel(unittest.TestCase):
         )
 
     def test_delete_node_drops_the_message_from_the_board(self):
-        handler = BBSHandler(1, "BBS")
+        handler = BBSHandler(1, "BBS", signed_in())
         before = [n.node_id for n in app_store.content.get_children(_BOARD)]
         self.assertIn(_RE_YOSEMITE, before)
 
@@ -886,7 +888,9 @@ class PostChannelTestCase(unittest.TestCase):
 
     def setUp(self):
         reset_app_store()
-        self.handler = BBSHandler(5, "BBS")
+        # A post is stamped with the account the connection signed in as.
+        self.session = signed_in()
+        self.handler = BBSHandler(5, "BBS", self.session)
         # A commit writes the upload to disk; keep the test run out of the repo.
         self._captures = tempfile.TemporaryDirectory()
         self._capture_dir = bbs._CAPTURE_DIR
@@ -1200,6 +1204,24 @@ class TestBBSPostCommit(PostChannelTestCase):
         # back PT_ERROR, leaving it empty. An empty `e` gives a nameless row.
         head = _POST_HEAD.replace(b"Subject: RE: RE: Yosemite\n", b"Subject: \n")
         self.assertTrue(self.post(head, _POST_BODY).content.name)
+
+    def test_the_author_is_the_account_the_connection_signed_in_as(self):
+        # The uploaded article carries no From header, so the identity can only
+        # come from the session. It goes out as `_a` and as the article's From,
+        # which is also the key the Member Properties sheet resolves on.
+        node = self.post(_POST_HEAD, _POST_BODY)
+        display_name = seed_user().display_name
+
+        self.assertEqual(node.content.bbs.author, display_name)
+        self.assertIn(f"From: {display_name}\n".encode(), bbs.build_bbs_article(node))
+        self.assertEqual(
+            app_store.member.get_member(display_name).display_name, display_name
+        )
+
+    def test_a_different_account_signs_its_own_posts(self):
+        self.handler = BBSHandler(5, "BBS", signed_in(SUBSCRIBER))
+        node = self.post(_POST_HEAD, _POST_BODY)
+        self.assertEqual(node.content.bbs.author, seed_user(SUBSCRIBER).display_name)
 
 
 class TestBBSPostedAttachments(PostChannelTestCase):

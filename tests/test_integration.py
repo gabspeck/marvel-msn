@@ -30,7 +30,17 @@ from server.mpc import (
     parse_tagged_params,
 )
 from server.pipe import build_control_frame, build_pipe_frame
+from server.services.logsrv import (
+    LOGIN_BLOB_LEN,
+    LOGIN_BLOB_MEMBER_ID_OFFSET,
+    LOGIN_BLOB_PASSWORD_OFFSET,
+    LOGIN_RESULT_BAD_MEMBER_ID,
+    LOGIN_RESULT_BAD_PASSWORD,
+)
+from server.store import reset_app_store
 from server.transport import build_packet, parse_packet
+
+from .support import ADMIN, ADMIN_PASSWORD, SUBSCRIBER, SUBSCRIBER_PASSWORD
 
 # Route server logs to stdout when auditing DEBUG/TRACE output.
 if os.environ.get("MSN_LOG_LEVEL"):
@@ -155,7 +165,7 @@ class TestFullSession(unittest.TestCase):
 
         # Step 5: login request (class=0x06, selector=0x00, req_id=0)
         # Build as pipe-0 data routed to pipe 3
-        login_blob = bytes(0x58)  # 88 bytes of zeros (simplified login blob)
+        login_blob = _login_blob(ADMIN, ADMIN_PASSWORD)
         login_payload = (
             b"\x03"
             + struct.pack("<I", 0x001643)  # dword: version
@@ -174,8 +184,20 @@ class TestFullSession(unittest.TestCase):
         self.assertIsNotNone(login_reply)
         self.assertTrue(login_reply.crc_ok)
         self.assertEqual(login_reply.type, "DATA")
-        # Reply should contain LOGSRV bootstrap (7 success dwords)
-        self.assertIn(b"\x83\x00\x00\x00\x00", login_reply.payload)
+        # First reply dword is the login result: 0 accepted the credentials.
+        self.assertIn(b"\x83\x00\x00\x00\x00" * 7, login_reply.payload)
+
+
+def _login_blob(member_id, password):
+    """The 0x58-byte credential blob GUIDE.EXE builds for LOGSRV selector 0x00."""
+    blob = bytearray(LOGIN_BLOB_LEN)
+    blob[LOGIN_BLOB_MEMBER_ID_OFFSET : LOGIN_BLOB_MEMBER_ID_OFFSET + len(member_id)] = (
+        member_id.encode("ascii")
+    )
+    blob[LOGIN_BLOB_PASSWORD_OFFSET : LOGIN_BLOB_PASSWORD_OFFSET + len(password)] = (
+        password.encode("ascii")
+    )
+    return bytes(blob)
 
 
 def _send_param_var(data):
@@ -194,16 +216,11 @@ def _send_param_word(value):
     return bytes([0x02]) + struct.pack("<H", value & 0xFFFF)
 
 
-class TestFullFeatureSession(unittest.TestCase):
-    """End-to-end exercise of every implemented service handler.
+class _ConnectionHarness(unittest.TestCase):
+    """Socket plumbing for a live `handle_connection` run over a socketpair.
 
-    Drives the live `handle_connection` event loop over a socketpair
-    and walks through bootstrap → LOGSRV (login + password change +
-    signup queries + billing query/commits + post-signup) → DIRSRV
-    (self + children) → FTM (download + bill-client) → OLREGSRV
-    (commit head + one-way continuations) → OnlStmt (summary +
-    details for two periods + subscriptions + plans + cancel) →
-    pipe-close cascade.
+    Holds no tests of its own — the cases below inherit the handshake, pipe and
+    service-call helpers and supply their own scenario.
     """
 
     PIPE_LOGSRV = 3
@@ -218,6 +235,8 @@ class TestFullFeatureSession(unittest.TestCase):
         self.client_sock.settimeout(5)
         self.client_seq = 0
         self.client_ack = 0
+        # The walk changes a password, so put the store back for the next test.
+        self.addCleanup(reset_app_store)
         self.server_thread = threading.Thread(target=self._run_server, daemon=True)
         self.server_thread.start()
 
@@ -343,7 +362,16 @@ class TestFullFeatureSession(unittest.TestCase):
         self._send_pipe0(content)
         self._drain_packets(0, timeout=0.15)
 
-    # --- the test ---
+
+class TestFullFeatureSession(_ConnectionHarness):
+    """End-to-end exercise of every implemented service handler.
+
+    Walks bootstrap → LOGSRV (login + password change + signup queries +
+    billing query/commits + post-signup) → DIRSRV (self + children) → FTM
+    (download + bill-client) → OLREGSRV (commit head + one-way continuations) →
+    OnlStmt (summary + details for two periods + subscriptions + plans +
+    cancel) → pipe-close cascade.
+    """
 
     def test_full_feature_session(self):
         self._do_handshake()
@@ -371,7 +399,10 @@ class TestFullFeatureSession(unittest.TestCase):
         self._open_pipe(self.PIPE_LOGSRV, "LOGSRV", 6)
 
         login_payload = (
-            _send_param_dword(0x001643) + _send_param_var(b"\x00" * 0x58) + b"\x83" * 7 + b"\x84"
+            _send_param_dword(0x001643)
+            + _send_param_var(_login_blob(ADMIN, ADMIN_PASSWORD))
+            + b"\x83" * 7
+            + b"\x84"
         )
         pkts = self._call_selector(self.PIPE_LOGSRV, 0x06, 0x00, login_payload)
         params = parse_tagged_params(self._reply_payload(pkts))
@@ -380,8 +411,10 @@ class TestFullFeatureSession(unittest.TestCase):
         self.assertIsInstance(params[7], EndMarker)
         self.assertIsInstance(params[8], VarParam)
 
+        # The rest of the walk runs as the account the login just resolved, so
+        # the password change has to present that account's current password.
         pw_req = (
-            _send_param_var(b"oldpass\x00" + b"\x00" * 9)
+            _send_param_var(ADMIN_PASSWORD.encode() + b"\x00" * (17 - len(ADMIN_PASSWORD)))
             + _send_param_var(b"newpass\x00" + b"\x00" * 9)
             + b"\x83"
         )
@@ -568,6 +601,49 @@ class TestFullFeatureSession(unittest.TestCase):
         pkts = self._call_selector(reopened_pipe, 0x06, 0x07, b"\x85", req_id=0)
         self.assertEqual(self._reply_payload(pkts)[0], 0x84)
         self._close_pipe(reopened_pipe)
+
+
+class TestLoginIdentity(_ConnectionHarness):
+    """What the connection is signed in as decides what the services answer."""
+
+    def _login(self, member_id, password):
+        """Sign the connection in and return the reply's result dword."""
+        self._open_pipe(self.PIPE_LOGSRV, "LOGSRV", 6)
+        payload = (
+            _send_param_dword(0x001643)
+            + _send_param_var(_login_blob(member_id, password))
+            + b"\x83" * 7
+            + b"\x84"
+        )
+        pkts = self._call_selector(self.PIPE_LOGSRV, 0x06, 0x00, payload)
+        return parse_tagged_params(self._reply_payload(pkts))[0].value
+
+    def _billing_reply(self):
+        """The 0x41C account buffer for whoever the connection signed in as."""
+        pkts = self._call_selector(self.PIPE_LOGSRV, 0x06, 0x0A, b"\x84", req_id=1)
+        params = parse_tagged_params(self._reply_payload(pkts))
+        return params[0].data
+
+    def test_a_wrong_password_is_rejected(self):
+        # The client turns an unmapped result into "Password not valid."
+        self._do_handshake()
+        self._do_control()
+        self.assertEqual(self._login(ADMIN, "not-the-password"), LOGIN_RESULT_BAD_PASSWORD)
+
+    def test_an_unknown_member_id_is_rejected(self):
+        # ...and 2 into "This member ID is not valid."
+        self._do_handshake()
+        self._do_control()
+        self.assertEqual(self._login("nobody", ADMIN_PASSWORD), LOGIN_RESULT_BAD_MEMBER_ID)
+
+    def test_billing_follows_the_account_that_signed_in(self):
+        self._do_handshake()
+        self._do_control()
+        self.assertEqual(self._login(SUBSCRIBER, SUBSCRIBER_PASSWORD), 0)
+
+        buffer = self._billing_reply()
+        self.assertIn(b"Jobs\x00", buffer)
+        self.assertNotIn(b"Gates\x00", buffer)
 
 
 if __name__ == "__main__":

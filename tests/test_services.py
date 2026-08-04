@@ -67,7 +67,15 @@ from server.services.ftm import (
     _resolve_ftm_target,
 )
 from server.services.logsrv import (
+    LOGIN_BLOB_LEN,
+    LOGIN_BLOB_MEMBER_ID_OFFSET,
+    LOGIN_BLOB_PASSWORD_OFFSET,
+    LOGIN_RESULT_BAD_MEMBER_ID,
+    LOGIN_RESULT_BAD_PASSWORD,
     LOGSRVHandler,
+    _handle_billing_query,
+    _handle_login,
+    _handle_password_change,
     build_logsrv_bootstrap_payload,
     build_logsrv_service_map_payload,
 )
@@ -83,9 +91,18 @@ from server.services.sasrv import (
     SASRVHandler,
     build_sasrv_service_map_payload,
 )
-from server.store import app_store, default_seed
+from server.session import Session
+from server.store import RIGHTS_AUTHORING, app_store, default_seed, reset_app_store
 from server.transport import parse_packet
 from server.wire import decode_header_byte
+
+from .support import (
+    ADMIN,
+    ADMIN_PASSWORD,
+    SUBSCRIBER,
+    SUBSCRIBER_PASSWORD,
+    signed_in,
+)
 
 
 class TestLOGSRVBootstrap(unittest.TestCase):
@@ -157,10 +174,153 @@ class TestLOGSRVServiceMap(unittest.TestCase):
         self.assertEqual(pkts[0][:10], expected_start)
 
 
+def _login_blob(member_id, password):
+    """The credential blob GUIDE.EXE!VerifyAccountViaLogSrv @ 0x04304024 builds."""
+    blob = bytearray(LOGIN_BLOB_LEN)
+    blob[LOGIN_BLOB_MEMBER_ID_OFFSET : LOGIN_BLOB_MEMBER_ID_OFFSET + len(member_id)] = (
+        member_id.encode("ascii")
+    )
+    blob[LOGIN_BLOB_PASSWORD_OFFSET : LOGIN_BLOB_PASSWORD_OFFSET + len(password)] = password.encode(
+        "ascii"
+    )
+    return bytes(blob)
+
+
+def _login_request(member_id=ADMIN, password=ADMIN_PASSWORD):
+    """A whole selector 0x00 request: version dword, blob, recv descriptors."""
+    return (
+        b"\x03"
+        + struct.pack("<I", 0x001643)
+        + build_tagged_reply_var(0x04, _login_blob(member_id, password))
+        + b"\x83" * 7
+        + b"\x84"
+    )
+
+
+# Every result `VerifyAccountViaLogSrv` @ GUIDE.EXE 0x04304024 gives its own
+# dialog. Anything outside this set falls to the catch-all, string 0x2F5
+# "Password not valid.", which is why the bad-password reply must stay unmapped.
+_LOGIN_RESULTS_THE_CLIENT_MAPS = frozenset(
+    {0x00, 0x0C, 0x01, 0x02, 0x0A, 0x0D, 0x16, 0x22, 0x23, 0x24}
+)
+
+
+class TestLOGSRVLogin(unittest.TestCase):
+    """Selector 0x00 checks the blob against the store and signs the session in."""
+
+    def setUp(self):
+        reset_app_store()
+        self.addCleanup(reset_app_store)
+
+    def _login(self, session, member_id, password):
+        reply = _handle_login(_login_request(member_id, password), session)
+        return struct.unpack_from("<I", reply, 1)[0]
+
+    def test_matching_credentials_sign_the_connection_in(self):
+        session = Session()
+        self.assertEqual(self._login(session, ADMIN, ADMIN_PASSWORD), 0)
+        self.assertTrue(session.is_authenticated)
+        self.assertEqual(session.user.display_name, "Bill Gates")
+
+    def test_a_wrong_password_names_the_password(self):
+        # An unmapped result is the client's catch-all, which is string 0x2F5
+        # "Password not valid. Please type it again."
+        session = Session()
+        self.assertEqual(
+            self._login(session, ADMIN, SUBSCRIBER_PASSWORD), LOGIN_RESULT_BAD_PASSWORD
+        )
+        self.assertNotIn(LOGIN_RESULT_BAD_PASSWORD, _LOGIN_RESULTS_THE_CLIENT_MAPS)
+        self.assertFalse(session.is_authenticated)
+
+    def test_an_unknown_member_id_names_the_member_id(self):
+        # 2 is string 0x2FC "This member ID is not valid."
+        session = Session()
+        self.assertEqual(self._login(session, "nobody", ADMIN_PASSWORD), LOGIN_RESULT_BAD_MEMBER_ID)
+        self.assertFalse(session.is_authenticated)
+
+    def test_a_known_member_id_is_not_reported_as_unknown(self):
+        # The two failures are distinguishable, so a typo'd password must not
+        # tell the member their id is wrong.
+        session = Session()
+        self.assertNotEqual(
+            self._login(session, ADMIN, SUBSCRIBER_PASSWORD), LOGIN_RESULT_BAD_MEMBER_ID
+        )
+
+    def test_a_request_without_the_blob_is_rejected(self):
+        session = Session()
+        result = struct.unpack_from("<I", _handle_login(b"", session), 1)[0]
+        self.assertEqual(result, LOGIN_RESULT_BAD_MEMBER_ID)
+        self.assertFalse(session.is_authenticated)
+
+    def test_the_reply_shape_is_the_same_whether_accepted_or_rejected(self):
+        # The client unmarshals seven dwords and a 16-byte variable either way;
+        # only the first dword differs.
+        accepted = _handle_login(_login_request(), Session())
+        rejected = _handle_login(b"", Session())
+        self.assertEqual(len(accepted), len(rejected))
+        self.assertEqual(accepted[5:], rejected[5:])
+
+
+class TestLOGSRVPasswordChange(unittest.TestCase):
+    """Selector 0x01 commits only against the account that signed in."""
+
+    def setUp(self):
+        reset_app_store()
+        self.addCleanup(reset_app_store)
+
+    @staticmethod
+    def _request(old, new):
+        return (
+            build_tagged_reply_var(0x04, old.encode() + b"\x00" * (17 - len(old)))
+            + build_tagged_reply_var(0x04, new.encode() + b"\x00" * (17 - len(new)))
+            + b"\x83"
+        )
+
+    def test_the_right_current_password_commits_the_new_one(self):
+        session = signed_in()
+        reply = _handle_password_change(self._request(ADMIN_PASSWORD, "newpass"), session)
+        self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0)
+        self.assertIsNotNone(app_store.users.authenticate(ADMIN, "newpass"))
+        self.assertEqual(session.user.password, "newpass")
+
+    def test_a_wrong_current_password_changes_nothing(self):
+        reply = _handle_password_change(self._request("guess", "newpass"), signed_in())
+        self.assertNotEqual(struct.unpack_from("<I", reply, 1)[0], 0)
+        self.assertIsNotNone(app_store.users.authenticate(ADMIN, ADMIN_PASSWORD))
+
+    def test_an_anonymous_connection_cannot_change_a_password(self):
+        reply = _handle_password_change(self._request(ADMIN_PASSWORD, "newpass"), Session())
+        self.assertNotEqual(struct.unpack_from("<I", reply, 1)[0], 0)
+        self.assertIsNotNone(app_store.users.authenticate(ADMIN, ADMIN_PASSWORD))
+
+
+class TestLOGSRVBillingQuery(unittest.TestCase):
+    """Selector 0x0A describes the account the connection signed in as."""
+
+    def _buffer(self, session):
+        payload = _handle_billing_query(session)
+        return parse_tagged_params(payload)[0].data
+
+    def test_each_account_gets_its_own_address_and_card(self):
+        admin = self._buffer(signed_in(ADMIN))
+        subscriber = self._buffer(signed_in(SUBSCRIBER))
+
+        self.assertIn(b"Gates\x00", admin)
+        self.assertIn(b"Redmond\x00", admin)
+        self.assertNotIn(b"Gates\x00", subscriber)
+        self.assertIn(b"Jobs\x00", subscriber)
+        self.assertIn(b"Cupertino\x00", subscriber)
+
+    def test_the_buffer_is_always_the_full_0x41c_bytes(self):
+        for session in (signed_in(ADMIN), Session()):
+            with self.subTest(user=session.user.username or "anonymous"):
+                self.assertEqual(len(self._buffer(session)), 0x41C)
+
+
 class TestLOGSRVReply(unittest.TestCase):
     def test_login_reply_returns_packet(self):
-        handler = LOGSRVHandler(3, "LOGSRV")
-        pkts = handler.handle_request(0x06, 0x00, 0, b"", 4, 4)
+        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        pkts = handler.handle_request(0x06, 0x00, 0, _login_request(), 4, 4)
         self.assertIsNotNone(pkts)
         self.assertIsInstance(pkts, list)
         parsed = parse_packet(pkts[0][:-1])
@@ -240,8 +400,8 @@ class TestLOGSRVReply(unittest.TestCase):
         self.assertIsNone(pkt)
 
     def test_known_login_reply_wire_bytes(self):
-        handler = LOGSRVHandler(3, "LOGSRV")
-        pkts = handler.handle_request(0x06, 0x00, 0, b"", 4, 4)
+        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        pkts = handler.handle_request(0x06, 0x00, 0, _login_request(), 4, 4)
         expected = bytes.fromhex(
             "84 84 e3 3b 00 03 00 06 00 00 83 00 00 00 00 83"
             "00 00 00 00 83 00 00 00 00 83 00 00 00 00 83 00"
@@ -296,7 +456,7 @@ class TestSASRVMasterListEnum(unittest.TestCase):
     BEGIN_ENUM_TOKENS = bytes.fromhex("030a000000030000000001008383")
 
     def setUp(self):
-        self.handler = SASRVHandler(6, "SASRV")
+        self.handler = SASRVHandler(6, "SASRV", signed_in())
 
     @staticmethod
     def _list_page_request(handle, index):
@@ -313,7 +473,10 @@ class TestSASRVMasterListEnum(unittest.TestCase):
     def test_begin_enum_opens_a_handle_for_the_token_list(self):
         reply = self.handler.build_begin_enum_reply_payload(self.BEGIN_ENUM_TOKENS)
 
-        status, handle = struct.unpack_from("<I", reply, 1)[0], struct.unpack_from("<I", reply, 6)[0]
+        status, handle = (
+            struct.unpack_from("<I", reply, 1)[0],
+            struct.unpack_from("<I", reply, 6)[0],
+        )
         self.assertEqual(status, 0)
         self.assertNotEqual(handle, 0)
         self.assertEqual(reply[10], TAG_END_STATIC)
@@ -536,9 +699,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # `OkToGetChildren` sends flags=0 and must keep getting children alone.
         prop_group = "g\x00a"
         plain = _walk_get_children_records(
-            build_get_children_reply_payload(
-                DirsrvRequest(node_id="1:16", prop_group=prop_group)
-            )
+            build_get_children_reply_payload(DirsrvRequest(node_id="1:16", prop_group=prop_group))
         )
         with_self = _walk_get_children_records(
             build_get_children_reply_payload(
@@ -560,7 +721,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e\x00x",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = build_get_children_reply_payload(request, RIGHTS_AUTHORING)
         records = _walk_get_children_records(payload)
 
         self.assertGreater(len(records), 0)
@@ -688,7 +849,7 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Categorias (BR)", payload)
         self.assertNotIn(struct.pack("<II", 1, 0x11), payload)  # no MA (US)
         self.assertNotIn(struct.pack("<II", 1, 0x14), payload)  # no MA (BR)
-        self.assertNotIn(struct.pack("<II", 1, 0), payload)     # no WW MA hub
+        self.assertNotIn(struct.pack("<II", 1, 0), payload)  # no WW MA hub
         self.assertNotIn(b"Member Assistance", payload)
         self.assertNotIn(struct.pack("<II", 4, 0), payload)  # no MSN Today
         self.assertNotIn(struct.pack("<II", 3, 1), payload)  # no Favorite Places
@@ -763,8 +924,8 @@ class TestDIRSRVReply(unittest.TestCase):
         # MSN Today (4:0) and Favorite Places (3:1) are client-side HOMEBASE
         # aliases. Neither hub may enumerate them.
         for node_id, f8, localized in (
-            ("0:0", 0, 0x10),   # WW Categories → Categories (US)
-            ("1:0", 1, 0x11),   # WW Member Assistance → Member Assistance (US)
+            ("0:0", 0, 0x10),  # WW Categories → Categories (US)
+            ("1:0", 1, 0x11),  # WW Member Assistance → Member Assistance (US)
         ):
             request = DirsrvRequest(
                 node_id=node_id,
@@ -991,18 +1152,21 @@ class TestDIRSRVReply(unittest.TestCase):
             payload = build_get_children_reply_payload(request)
             records = _walk_get_children_records(payload)
             self.assertEqual(
-                len(records), len(expected),
+                len(records),
+                len(expected),
                 f"node={node_id} record count {len(records)} != expected {len(expected)}",
             )
             for idx, (props, (exp_a, exp_e)) in enumerate(zip(records, expected, strict=True)):
                 a_blob = props.get("a")
                 self.assertIsNotNone(a_blob, f"node={node_id} idx={idx} missing 'a'")
                 self.assertEqual(
-                    struct.unpack("<II", a_blob), exp_a,
+                    struct.unpack("<II", a_blob),
+                    exp_a,
                     f"node={node_id} idx={idx}: a={struct.unpack('<II', a_blob)} != {exp_a}",
                 )
                 self.assertEqual(
-                    props.get("e"), exp_e,
+                    props.get("e"),
+                    exp_e,
                     f"node={node_id} idx={idx}: e={props.get('e')!r} != {exp_e!r}",
                 )
 
@@ -1059,6 +1223,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # Fixture date "April 15, 2026" → FILETIME. Recompute here to stay in
         # sync with `_date_string_to_wire_filetime` in store/fixtures.py.
         from server.store.fixtures import _date_string_to_wire_filetime
+
         ft = _date_string_to_wire_filetime("April 15, 2026")
         self.assertGreater(ft, 0)
         self.assertIn(b"\x0cw\x00" + struct.pack("<Q", ft), payload)
@@ -1166,9 +1331,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # scoped to propList=["q"] only, so this reply carries nav data.
         self.assertIn(b"Categories (US)", addrbar_payload)
         for lcid in SUPPORTED_BROWSE_LCIDS:
-            self.assertNotIn(
-                b"\x04q\x00" + struct.pack("<II", 1, lcid), addrbar_payload
-            )
+            self.assertNotIn(b"\x04q\x00" + struct.pack("<II", 1, lcid), addrbar_payload)
 
 
 class TestDIRSRVUnhandledSelector(unittest.TestCase):
@@ -1298,9 +1461,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         self.assertIsNotNone(packets)
         parsed = parse_packet(packets[0][:-1])
         self.assertTrue(parsed.crc_ok)
-        self.assertEqual(
-            parsed.payload[8:], build_enum_shn_reply_payload(self.REQUEST)
-        )
+        self.assertEqual(parsed.payload[8:], build_enum_shn_reply_payload(self.REQUEST))
 
     def test_key_constant_matches_the_observed_request(self):
         self.assertEqual(self.REQUEST[1], ENUM_SHN_KEY_ICONS)
@@ -1328,7 +1489,7 @@ class TestDIRSRVGetTicket(unittest.TestCase):
         parsed = parse_packet(packets[0][:-1])
         self.assertTrue(parsed.crc_ok)
         # header + size prefix + routing + class + selector + one-byte VLI
-        self.assertEqual(parsed.payload[8:], build_get_ticket_reply_payload())
+        self.assertEqual(parsed.payload[8:], build_get_ticket_reply_payload(handler.session))
 
 
 class TestDIRSRVGetDataSets(unittest.TestCase):
@@ -1358,10 +1519,7 @@ class TestDIRSRVGetDataSets(unittest.TestCase):
 
 class _AddNodeContentStore:
     def __init__(self):
-        parent = next(
-            node for node in default_seed().directory_nodes
-            if node.node_id == "1:16"
-        )
+        parent = next(node for node in default_seed().directory_nodes if node.node_id == "1:16")
         self.nodes = {parent.node_id: parent}
         self.children = {parent.node_id: []}
 
@@ -1411,10 +1569,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         new_mnid = struct.pack("<II", 1, 17)
         self.assertEqual(
             reply,
-            b"\x83\x00\x00\x00\x00"
-            b"\x83\x00\x00\x00\x00"
-            b"\x87\x84\x88"
-            + new_mnid,
+            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87\x84\x88" + new_mnid,
         )
         node = store.get_node("1:17")
         self.assertEqual(store.children["1:16"], ["1:17"])
@@ -1444,7 +1599,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
                 client_ack=0,
             )
 
-        build_reply.assert_called_once_with(b"add-node")
+        build_reply.assert_called_once_with(b"add-node", session=handler.session)
         parsed = parse_packet(packets[0][:-1])
         self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
 
@@ -1455,10 +1610,7 @@ class _SetPropertiesContentStore:
     NODE_ID = "1:256"  # "Arts and Entertainment", app_id 1 (tp "Category")
 
     def __init__(self):
-        node = next(
-            node for node in default_seed().directory_nodes
-            if node.node_id == self.NODE_ID
-        )
+        node = next(node for node in default_seed().directory_nodes if node.node_id == self.NODE_ID)
         self.nodes = {node.node_id: node}
 
     def get_node(self, node_id):
@@ -1634,7 +1786,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
                 client_ack=0,
             )
 
-        build_reply.assert_called_once_with(b"set-properties")
+        build_reply.assert_called_once_with(b"set-properties", session=handler.session)
         parsed = parse_packet(packets[0][:-1])
         self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
 
@@ -1740,30 +1892,29 @@ class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
         # All fixtures keep go-words short enough for the inline form.
         assert len(wide) < 0x80
         return (
-            b"\x04" + bytes([0x80 | len(wide)]) + wide
+            b"\x04"
+            + bytes([0x80 | len(wide)])
+            + wide
             + b"\x04\x84\x00\x00\x00\x00"  # locale: count=0
-            + b"\x83\x84"                    # recv descriptors
+            + b"\x83\x84"  # recv descriptors
         )
 
     def test_known_go_word_returns_matching_deid(self):
         # MSN Today fixture: node_id "4:0", go_word "today" (case fold).
-        payload = build_get_deid_from_go_word_reply_payload(
-            self._build_request("Today")
-        )
+        payload = build_get_deid_from_go_word_reply_payload(self._build_request("Today"))
         expected = (
-            b"\x83\x00\x00\x00\x00"               # status=0
-            + bytes([TAG_END_STATIC])             # 0x87
-            + b"\x84\x88"                         # 0x84 var, len=8 inline
-            + struct.pack("<II", 4, 0)            # deid (4, 0)
+            b"\x83\x00\x00\x00\x00"  # status=0
+            + bytes([TAG_END_STATIC])  # 0x87
+            + b"\x84\x88"  # 0x84 var, len=8 inline
+            + struct.pack("<II", 4, 0)  # deid (4, 0)
         )
         self.assertEqual(payload, expected)
 
     def test_unknown_go_word_returns_zero_deid_with_error(self):
-        payload = build_get_deid_from_go_word_reply_payload(
-            self._build_request("nonexistent")
-        )
+        payload = build_get_deid_from_go_word_reply_payload(self._build_request("nonexistent"))
         expected = (
-            b"\x83" + struct.pack("<I", DS_E_NOT_FOUND)
+            b"\x83"
+            + struct.pack("<I", DS_E_NOT_FOUND)
             + bytes([TAG_END_STATIC])
             + b"\x84\x88"
             + b"\x00" * 8
@@ -2432,16 +2583,21 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
     # HRMOSExec(c=6) path MSN Today lands as `:2[4]0` — svcid=2, deid=4,
     # serial=0. The deid selects resources/titles/HANDBOOK.M14.
     _MSN_TODAY_REQ = (
-        b"\x04\x87:2[4]0\x00"        # tag=0x04 var, len|0x80=0x87, 7-byte ASCIIZ
-        b"\x03\x00\x00\x00\x00"      # cached checksum 1 = 0
-        b"\x03\x00\x00\x00\x00"      # cached checksum 2 = 0
+        b"\x04\x87:2[4]0\x00"  # tag=0x04 var, len|0x80=0x87, 7-byte ASCIIZ
+        b"\x03\x00\x00\x00\x00"  # cached checksum 1 = 0
+        b"\x03\x00\x00\x00\x00"  # cached checksum 2 = 0
         b"\x81\x81\x83\x83\x83\x83\x83"
     )
 
     def _decode_reply(self, req_payload):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, req_payload, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_OPEN,
+            1,
+            req_payload,
+            5,
+            5,
         )
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
@@ -2526,15 +2682,16 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
             self.assertEqual(handler.loaded_m14.archive_name, archive_name)
             self.assertEqual(handler.loaded_m14.title, title_name)
 
+
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
     def test_get_info_reply_size_zero(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Request: 0x01 <title_byte>, 3× 0x03 dword, 0x83 recv.
         req_payload = bytes.fromhex(
             "01 01"
-            "03 07 00 00 00"    # info_kind=7 (0x2B records)
-            "03 00 00 2b 00"    # bufsize=0x002b, index=0
-            "03 00 00 00 00"    # buffer_ptr=0
+            "03 07 00 00 00"  # info_kind=7 (0x2B records)
+            "03 00 00 2b 00"  # bufsize=0x002b, index=0
+            "03 00 00 00 00"  # buffer_ptr=0
             "83"
         )
         pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_GET_INFO, 2, req_payload, 5, 5)
@@ -2583,7 +2740,8 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             self.assertEqual(len(pkts), 1)
             reply = parse_packet(pkts[0][:-1]).payload[8:]
             self.assertEqual(
-                reply, bytes([TAG_END_STATIC]),
+                reply,
+                bytes([TAG_END_STATIC]),
                 f"selector 0x{selector:02x} ack mismatch",
             )
 
@@ -2593,7 +2751,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         key = 0xCAFEBABE
         hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_CONVERT_HASH, 9, hash_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+            9,
+            hash_req,
+            5,
+            5,
         )
         self.assertGreaterEqual(len(pkts), 2)
         push = parse_packet(pkts[1][:-1]).payload[8:]
@@ -2621,12 +2784,22 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
                 + b"\x81\x81\x83\x83\x83\x83\x83"
             )
             handler.handle_request(
-                0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5,
+                0x01,
+                MEDVIEW_SELECTOR_TITLE_OPEN,
+                1,
+                open_req,
+                5,
+                5,
             )
             self._subscribe(handler, 3, 2)
             hash_req = b"\x01\x01\x03\x01\x00\x00\x00"
             pkts = handler.handle_request(
-                0x01, MEDVIEW_SELECTOR_VA_CONVERT_HASH, 9, hash_req, 5, 5,
+                0x01,
+                MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+                9,
+                hash_req,
+                5,
+                5,
             )
             push = parse_packet(pkts[1][:-1]).payload[8:]
             self.assertEqual(
@@ -2646,13 +2819,23 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             + b"\x81\x81\x83\x83\x83\x83\x83"
         )
         handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_OPEN,
+            1,
+            open_req,
+            5,
+            5,
         )
         self._subscribe(handler, 3, 2)
         key = 0x6348
         hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_CONVERT_HASH, 9, hash_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+            9,
+            hash_req,
+            5,
+            5,
         )
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(
@@ -2666,7 +2849,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         key = 0x00000005
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_CONVERT_TOPIC, 10, req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
+            10,
+            req,
+            5,
+            5,
         )
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(
@@ -2684,7 +2872,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         key = 0x12345678
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_VA_RESOLVE,
+            11,
+            req,
+            5,
+            5,
         )
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[0], 0x85)
@@ -2707,7 +2900,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         key = handler.loaded_m14.home_display.topic_pos
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_VA_RESOLVE, 11, req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_VA_RESOLVE,
+            11,
+            req,
+            5,
+            5,
         )
         push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(push[0], 0x85)
@@ -2717,11 +2915,17 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
 
     def test_fetch_adjacent_topic_pushes_type0_a5(self):
         from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._subscribe(handler, 0, 1)
         req_payload = bytes.fromhex("01 01 03 00 00 00 00 01 00")
         pkts = handler.handle_request(
-            0x01, MEDVIEW_FETCH_ADJACENT_TOPIC, 11, req_payload, 5, 5,
+            0x01,
+            MEDVIEW_FETCH_ADJACENT_TOPIC,
+            11,
+            req_payload,
+            5,
+            5,
         )
         self.assertGreaterEqual(len(pkts), 2)
         sync = parse_packet(pkts[0][:-1]).payload[8:]
@@ -2732,13 +2936,11 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
 
     def test_m14_topic_chunks_carry_pane_bounds_and_adjacent_records(self):
         from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         token = b":2[1001]0\x00"
         open_req = (
-            b"\x04"
-            + bytes([0x80 | len(token)])
-            + token
-            + b"\x03\x00\x00\x00\x00"
+            b"\x04" + bytes([0x80 | len(token)]) + token + b"\x03\x00\x00\x00\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
@@ -2747,7 +2949,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
 
         req_payload = b"\x01\x01\x03" + struct.pack("<I", 0x4696) + b"\x01\x01"
         pkts = handler.handle_request(
-            0x01, MEDVIEW_FETCH_ADJACENT_TOPIC, 11, req_payload, 5, 5,
+            0x01,
+            MEDVIEW_FETCH_ADJACENT_TOPIC,
+            11,
+            req_payload,
+            5,
+            5,
         )
         push = parse_packet(pkts[1][:-1]).payload[8:]
         chunk = push[1:]
@@ -2756,7 +2963,8 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         # 0x4696 opens its topic, so its leading token is the adjacent
         # 0x4695 rather than a shared end-of-content sentinel.
         self.assertEqual(
-            struct.unpack_from("<III", chunk, 8), (0x4695, 0x4696, 0x46D3),
+            struct.unpack_from("<III", chunk, 8),
+            (0x4695, 0x4696, 0x46D3),
         )
         self.assertEqual(
             struct.unpack_from("<II", chunk, 4 + name_size + 0x14),
@@ -2765,7 +2973,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
 
         req_payload = b"\x01\x01\x03" + struct.pack("<I", 0x46D3) + b"\x01\x01"
         pkts = handler.handle_request(
-            0x01, MEDVIEW_FETCH_ADJACENT_TOPIC, 12, req_payload, 5, 5,
+            0x01,
+            MEDVIEW_FETCH_ADJACENT_TOPIC,
+            12,
+            req_payload,
+            5,
+            5,
         )
         push = parse_packet(pkts[1][:-1]).payload[8:]
         chunk = push[1:]
@@ -2786,7 +2999,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC, 9, req_payload, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
+            9,
+            req_payload,
+            5,
+            5,
         )
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
@@ -2813,15 +3031,10 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
     @staticmethod
     def _subscriber_state_request(notification_type, enabled):
         state_payload = bytes([notification_type]) + struct.pack(
-            "<I", int(enabled),
+            "<I",
+            int(enabled),
         )
-        return (
-            b"\x01\x00"
-            b"\x02\x07\x00"
-            b"\x04"
-            + bytes([0x80 | len(state_payload)])
-            + state_payload
-        )
+        return b"\x01\x00\x02\x07\x00\x04" + bytes([0x80 | len(state_payload)]) + state_payload
 
     @staticmethod
     def _picture_start_request(
@@ -2842,10 +3055,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         return (
             b"\x01\x01"
             b"\x02\x04\x00"
-            b"\x04"
-            + bytes([0x80 | len(start_payload)])
-            + start_payload
-            + b"\x83"
+            b"\x04" + bytes([0x80 | len(start_payload)]) + start_payload + b"\x83"
         )
 
     def test_pre_notify_reply_ships_status_dword(self):
@@ -2882,12 +3092,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
     def test_picture_start_pushes_status_then_file_bytes(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        picture = (
-            b"BM"
-            + b"\x00" * 12
-            + struct.pack("<Iii", 40, 113, 95)
-            + b"\x00" * 12
-        )
+        picture = b"BM" + b"\x00" * 12 + struct.pack("<Iii", 40, 113, 95) + b"\x00" * 12
         handler.baggage_map = {"albi.bmp": picture}
         self._subscribe(handler, 3, 3)
         self._subscribe(handler, 4, 4)
@@ -3118,16 +3323,15 @@ class TestMEDVIEWTitleService(unittest.TestCase):
         # ValidateTitle and CloseTitle assertions pass. Title token bytes
         # are ignored — the handler always ships the same hardcoded body.
         req = (
-            b"\x04\x84:2[]0\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x03\x00\x00\x00\x00"
-            b"\x81\x81\x83\x83\x83\x83\x83"
+            b"\x04\x84:2[]0\x00\x03\x00\x00\x00\x00\x03\x00\x00\x00\x00\x81\x81\x83\x83\x83\x83\x83"
         )
         from server.config import MEDVIEW_OPEN_TITLE
+
         handler.handle_request(0x01, MEDVIEW_OPEN_TITLE, 1, req, 5, 5)
 
     def test_validate_title_returns_zero_when_no_title_open(self):
         from server.config import MEDVIEW_VALIDATE_TITLE
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 81")
         pkts = handler.handle_request(0x01, MEDVIEW_VALIDATE_TITLE, 1, req_payload, 5, 5)
@@ -3138,6 +3342,7 @@ class TestMEDVIEWTitleService(unittest.TestCase):
 
     def test_validate_title_returns_nonzero_after_open(self):
         from server.config import MEDVIEW_VALIDATE_TITLE
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._open_title(handler)
         req_payload = bytes.fromhex("01 01 81")
@@ -3149,6 +3354,7 @@ class TestMEDVIEWTitleService(unittest.TestCase):
 
     def test_close_title_acks(self):
         from server.config import MEDVIEW_CLOSE_TITLE
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         self._open_title(handler)
         req_payload = bytes.fromhex("01 01")
@@ -3159,11 +3365,18 @@ class TestMEDVIEWTitleService(unittest.TestCase):
 
     def test_query_topics_returns_empty_session(self):
         from server.config import MEDVIEW_QUERY_TOPICS
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Minimal request: titleSlot, queryClass, primaryText, queryFlags=0,
         # queryMode. We only care that the handler survives and emits the
         # documented static fields.
-        req_payload = bytes.fromhex("01 01") + bytes.fromhex("02 00 00") + b"\x04\x82query\x00" + bytes.fromhex("01 00") + bytes.fromhex("02 00 00")
+        req_payload = (
+            bytes.fromhex("01 01")
+            + bytes.fromhex("02 00 00")
+            + b"\x04\x82query\x00"
+            + bytes.fromhex("01 00")
+            + bytes.fromhex("02 00 00")
+        )
         pkts = handler.handle_request(0x01, MEDVIEW_QUERY_TOPICS, 4, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
@@ -3185,6 +3398,7 @@ class TestMEDVIEWWordWheelService(unittest.TestCase):
 
     def test_open_word_wheel_empty_session(self):
         from server.config import MEDVIEW_OPEN_WORD_WHEEL
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01") + b"\x04\x82wheel\x00" + bytes.fromhex("81 83")
         pkts = handler.handle_request(0x01, MEDVIEW_OPEN_WORD_WHEEL, 1, req_payload, 5, 5)
@@ -3199,6 +3413,7 @@ class TestMEDVIEWWordWheelService(unittest.TestCase):
 
     def test_query_word_wheel_zero_status(self):
         from server.config import MEDVIEW_QUERY_WORD_WHEEL
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 02 00 00") + b"\x04\x81q\x00" + bytes.fromhex("82")
         pkts = handler.handle_request(0x01, MEDVIEW_QUERY_WORD_WHEEL, 1, req_payload, 5, 5)
@@ -3210,13 +3425,17 @@ class TestMEDVIEWWordWheelService(unittest.TestCase):
 
     def test_close_word_wheel_acks(self):
         from server.config import MEDVIEW_CLOSE_WORD_WHEEL
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        pkts = handler.handle_request(0x01, MEDVIEW_CLOSE_WORD_WHEEL, 1, bytes.fromhex("01 00"), 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_CLOSE_WORD_WHEEL, 1, bytes.fromhex("01 00"), 5, 5
+        )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_count_key_matches_zero(self):
         from server.config import MEDVIEW_COUNT_KEY_MATCHES
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 00") + b"\x04\x81k\x00" + bytes.fromhex("82")
         pkts = handler.handle_request(0x01, MEDVIEW_COUNT_KEY_MATCHES, 1, req_payload, 5, 5)
@@ -3232,6 +3451,7 @@ class TestMEDVIEWAddressHighlightService(unittest.TestCase):
 
     def test_convert_address_to_va_acks_then_pushes(self):
         from server.config import MEDVIEW_CONVERT_ADDRESS_TO_VA
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         pkts = handler.handle_request(0x01, MEDVIEW_CONVERT_ADDRESS_TO_VA, 1, req_payload, 5, 5)
@@ -3241,6 +3461,7 @@ class TestMEDVIEWAddressHighlightService(unittest.TestCase):
 
     def test_find_highlight_address_zero(self):
         from server.config import MEDVIEW_FIND_HIGHLIGHT_ADDRESS
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 00 03 11 11 11 11 03 22 22 22 22")
         pkts = handler.handle_request(0x01, MEDVIEW_FIND_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5)
@@ -3251,13 +3472,17 @@ class TestMEDVIEWAddressHighlightService(unittest.TestCase):
 
     def test_release_highlight_context_acks(self):
         from server.config import MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        pkts = handler.handle_request(0x01, MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT, 1, bytes.fromhex("01 01"), 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT, 1, bytes.fromhex("01 01"), 5, 5
+        )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_refresh_highlight_address_acks(self):
         from server.config import MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 03 01 00 00 00")
         pkts = handler.handle_request(0x01, MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5)
@@ -3275,6 +3500,7 @@ class TestMEDVIEWSessionService(unittest.TestCase):
             MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
             MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS,
         )
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # First subscribe to type 0 so there's state to drop.
         sub_payload = bytes.fromhex("01 00 85")
@@ -3282,7 +3508,9 @@ class TestMEDVIEWSessionService(unittest.TestCase):
         self.assertIn(0, handler._subscriptions)
         # Then unsubscribe.
         unsub_payload = bytes.fromhex("01 00")
-        pkts = handler.handle_request(0x01, MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS, 2, unsub_payload, 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS, 2, unsub_payload, 5, 5
+        )
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
@@ -3292,12 +3520,18 @@ class TestMEDVIEWSessionService(unittest.TestCase):
         """`handle_iterator_cancel(class, sel, req_id)` drops the one
         subscription whose `(class, req_id)` matches and leaves the rest."""
         from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Subscribe types 0..4 with distinct req_ids 1..5.
         for n_type, req_id in enumerate(range(1, 6)):
             sub_payload = bytes([0x01, n_type, 0x85])
             handler.handle_request(
-                0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, req_id, sub_payload, 5, 5,
+                0x01,
+                MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+                req_id,
+                sub_payload,
+                5,
+                5,
             )
         self.assertEqual(set(handler._subscriptions.keys()), {0, 1, 2, 3, 4})
 
@@ -3308,6 +3542,7 @@ class TestMEDVIEWSessionService(unittest.TestCase):
 
     def test_iterator_cancel_with_no_subscription_is_idempotent(self):
         from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # No state, no exception.
         handler.handle_iterator_cancel(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 42)
@@ -3337,6 +3572,7 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
     def _make_conn(self):
         from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
         from server.connection import ConnectionState
+
         sock = self._FakeSocket()
         conn = ConnectionState(sock)
         handler = MEDVIEWHandler(self.PIPE_IDX, "MEDVIEW")
@@ -3345,7 +3581,12 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
         for n_type, req_id in enumerate(range(1, 6)):
             sub_payload = bytes([0x01, n_type, 0x85])
             handler.handle_request(
-                0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, req_id, sub_payload, 5, 5,
+                0x01,
+                MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+                req_id,
+                sub_payload,
+                5,
+                5,
             )
         conn.services[self.PIPE_IDX] = handler
         return conn, handler, sock
@@ -3353,7 +3594,8 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
     def _build_cancel_frame(self, msg_class, selector, req_id):
         """Build the raw host-block bytes the connection layer receives."""
         from server.mpc import build_host_block
-        return build_host_block(msg_class, selector, req_id, b"\x0F")
+
+        return build_host_block(msg_class, selector, req_id, b"\x0f")
 
     def _parse_wire(self, raw):
         """Strip the leading ACK packet and return the host-block payload
@@ -3361,6 +3603,7 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
         from server.config import PACKET_TERMINATOR
         from server.mpc import parse_host_block
         from server.pipe import parse_pipe_frames
+
         packets = []
         buf = bytearray()
         for b in raw:
@@ -3381,6 +3624,7 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
     def test_cancel_frame_emits_canonical_ack_and_clears_state(self):
         from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
         from server.mpc import ITERATOR_CANCEL_ACK
+
         conn, handler, sock = self._make_conn()
         # Cancel the type=2 iterator (req_id=3 from the seed loop).
         frame = self._build_cancel_frame(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 3)
@@ -3408,16 +3652,16 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
 
         # (d) subscribe_notifications is NOT logged for the cancel frame —
         # the cancel branch must come before the `handle_request` dispatch.
-        cancel_phase = [
-            m for m in medview_logs.output
-            if "subscribe_notifications req_id=3" in m
-        ]
+        cancel_phase = [m for m in medview_logs.output if "subscribe_notifications req_id=3" in m]
         self.assertEqual(
-            cancel_phase, [], "cancel frame leaked into subscribe handler",
+            cancel_phase,
+            [],
+            "cancel frame leaked into subscribe handler",
         )
 
     def test_cancel_frame_on_pipe_without_handler_is_ignored(self):
         from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+
         conn, _handler, sock = self._make_conn()
         bare_pipe = self.PIPE_IDX + 1  # not registered
         frame = self._build_cancel_frame(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 99)
@@ -3437,8 +3681,11 @@ class TestMEDVIEWRemoteFsError(unittest.TestCase):
 
     def test_get_remote_fs_error_returns_zero(self):
         from server.config import MEDVIEW_GET_REMOTE_FS_ERROR
+
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        pkts = handler.handle_request(0x01, MEDVIEW_GET_REMOTE_FS_ERROR, 1, bytes.fromhex("82"), 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_GET_REMOTE_FS_ERROR, 1, bytes.fromhex("82"), 5, 5
+        )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         # 0x82 <word=0> 0x87
         self.assertEqual(reply[0], 0x82)
@@ -3455,11 +3702,10 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
 
     _BM0_PREAMBLE_LEN = 8
     _BM0_KIND5_HEADER_LEN = 30  # wide pixel_byte_count varint
-    _BM0_PIXEL_BYTES = 38400    # 640 × 480 / 8 for 1bpp
+    _BM0_PIXEL_BYTES = 38400  # 640 × 480 / 8 for 1bpp
     _BM0_TRAILER_LEN = 7
     _BM0_CONTAINER_LEN = (
-        _BM0_PREAMBLE_LEN + _BM0_KIND5_HEADER_LEN
-        + _BM0_PIXEL_BYTES + _BM0_TRAILER_LEN
+        _BM0_PREAMBLE_LEN + _BM0_KIND5_HEADER_LEN + _BM0_PIXEL_BYTES + _BM0_TRAILER_LEN
     )
     # bm0 retry form: tag=0x04 var "bm0\0" (4 B, length-prefix 0x84).
     _OPEN_REQ_BM0 = bytes.fromhex("01 01 04 84 62 6d 30 00 01 02 81 83")
@@ -3495,7 +3741,8 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertEqual(reply[2], 0x42)
         self.assertEqual(reply[3], 0x83)
         self.assertEqual(
-            struct.unpack("<I", reply[4:8])[0], self._BM0_CONTAINER_LEN,
+            struct.unpack("<I", reply[4:8])[0],
+            self._BM0_CONTAINER_LEN,
         )
 
     def test_hfs_read_bm0_kind_byte_passes_parser_gate(self):
@@ -3517,18 +3764,18 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
         chunk = reply[4 : 4 + 38]
         expected_header = bytes.fromhex(
-            "00 00"                  # container reserved
-            "01 00"                  # bitmap count = 1
-            "08 00 00 00"            # offset to bitmap[0]
-            "05 00"                  # kind=5, compression=raw
-            "00 00 00 00"            # 2x skip-int (narrow form)
-            "02 02"                  # byte-narrow: planes=1, bpp=1
-            "00 05 c0 03"            # ushort-narrow: width=640, height=480
-            "00 00 00 00"            # palette_count=0, reserved=0
-            "01 2c 01 00"            # u32-wide pixel_byte_count = 38400
-            "0e 00"                  # ushort-narrow trailer_size = 7
-            "1e 00 00 00"            # pixel_data_offset = 30
-            "1e 96 00 00"            # trailer_offset = 30 + 38400 = 38430
+            "00 00"  # container reserved
+            "01 00"  # bitmap count = 1
+            "08 00 00 00"  # offset to bitmap[0]
+            "05 00"  # kind=5, compression=raw
+            "00 00 00 00"  # 2x skip-int (narrow form)
+            "02 02"  # byte-narrow: planes=1, bpp=1
+            "00 05 c0 03"  # ushort-narrow: width=640, height=480
+            "00 00 00 00"  # palette_count=0, reserved=0
+            "01 2c 01 00"  # u32-wide pixel_byte_count = 38400
+            "0e 00"  # ushort-narrow trailer_size = 7
+            "1e 00 00 00"  # pixel_data_offset = 30
+            "1e 96 00 00"  # trailer_offset = 30 + 38400 = 38430
         )
         self.assertEqual(chunk, expected_header)
 
@@ -3537,7 +3784,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         read_req = bytes.fromhex("01 42 03 20 00 00 00 03 26 00 00 00 81 85")
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 13, read_req)
         chunk = reply[4 : 4 + 32]
-        self.assertEqual(chunk, b"\xFF" * 32)
+        self.assertEqual(chunk, b"\xff" * 32)
 
     def test_hfs_read_bm0_trailer_is_empty(self):
         # Trailer at container-offset 38 + 38400 = 38438. Read 7 B.
@@ -3545,7 +3792,8 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         read_req = (
             b"\x01\x42"
             + b"\x03\x07\x00\x00\x00"
-            + b"\x03" + struct.pack("<I", offset)
+            + b"\x03"
+            + struct.pack("<I", offset)
             + b"\x81\x85"
         )
         reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 14, read_req)
@@ -3557,7 +3805,8 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         # fragmentation. Every transport packet remains within PacketSize.
         read_req = (
             b"\x01\x42"
-            + b"\x03" + struct.pack("<I", self._BM0_CONTAINER_LEN)
+            + b"\x03"
+            + struct.pack("<I", self._BM0_CONTAINER_LEN)
             + b"\x03\x00\x00\x00\x00"
             + b"\x81\x85"
         )
@@ -3579,7 +3828,12 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
         handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_OPEN,
+            1,
+            open_req,
+            5,
+            5,
         )
         return handler
 
@@ -3592,14 +3846,14 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
     def test_native_image_reference_opens_and_reads_hfs_baggage(self):
         handler = self._open_handler()
         name = b"!homed.SHG\x00"
-        open_req = (
-            b"\x01\x01\x04"
-            + bytes([0x80 | len(name)])
-            + name
-            + b"\x01\x02\x81\x83"
-        )
+        open_req = b"\x01\x01\x04" + bytes([0x80 | len(name)]) + name + b"\x01\x02\x81\x83"
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 21, open_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_HFS_OPEN,
+            21,
+            open_req,
+            5,
+            5,
         )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply[0], TAG_END_STATIC)
@@ -3618,7 +3872,12 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
             + b"\x81\x85"
         )
         pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_HFS_READ, 22, read_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_HFS_READ,
+            22,
+            read_req,
+            5,
+            5,
         )
         read_reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(
@@ -3629,14 +3888,14 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
     def test_large_hfs_read_streams_all_bytes_before_completion(self):
         handler = self._open_handler()
         name = b"!homed.SHG\x00"
-        open_req = (
-            b"\x01\x01\x04"
-            + bytes([0x80 | len(name)])
-            + name
-            + b"\x01\x02\x81\x83"
-        )
+        open_req = b"\x01\x01\x04" + bytes([0x80 | len(name)]) + name + b"\x01\x02\x81\x83"
         open_pkts = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_HFS_OPEN, 21, open_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_HFS_OPEN,
+            21,
+            open_req,
+            5,
+            5,
         )
         handle = parse_packet(open_pkts[0][:-1]).payload[10]
         baggage = handler.baggage_map["homed.shg"]
@@ -3644,12 +3903,19 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         read_req = (
             b"\x01"
             + bytes([handle])
-            + b"\x03" + struct.pack("<I", len(baggage) - offset)
-            + b"\x03" + struct.pack("<I", offset)
+            + b"\x03"
+            + struct.pack("<I", len(baggage) - offset)
+            + b"\x03"
+            + struct.pack("<I", offset)
             + b"\x81\x85"
         )
         packets = handler.handle_request(
-            0x01, MEDVIEW_SELECTOR_HFS_READ, 22, read_req, 5, 5,
+            0x01,
+            MEDVIEW_SELECTOR_HFS_READ,
+            22,
+            read_req,
+            5,
+            5,
         )
 
         dynamic_block_max = 0x4000
@@ -3673,8 +3939,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
 
         self.assertEqual(
             len(pipe_blocks),
-            (len(baggage[offset:]) + dynamic_block_max - 1)
-            // dynamic_block_max,
+            (len(baggage[offset:]) + dynamic_block_max - 1) // dynamic_block_max,
         )
         replies = []
         for pipe_block in pipe_blocks:
