@@ -26,6 +26,8 @@ from server.config import (
     MEDVIEW_SELECTOR_VA_CONVERT_HASH,
     MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
     MEDVIEW_SELECTOR_VA_RESOLVE,
+    MPC_CLASS_CONTINUATION_LAST,
+    MPC_CLASS_CONTINUATION_MORE,
     OLREGSRV_INTERFACE_GUIDS,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
@@ -2076,6 +2078,122 @@ class TestDIRSRVEnumShn(unittest.TestCase):
 
     def test_key_constant_matches_the_observed_request(self):
         self.assertEqual(self.REQUEST[1], ENUM_SHN_KEY_ICONS)
+
+
+class TestDIRSRVAddShabby(unittest.TestCase):
+    """Class 0x04 selector 0x07 — icon and banner upload."""
+
+    TRACE_HEAD = bytes.fromhex(
+        "04 82 02 00 01 00 05 01 36 04 00 00 03 36 04 00 00 83 83 83"
+    )
+
+    def setUp(self):
+        from server.services import shabby as shabby_mod
+
+        self._pickable_icons = dict(shabby_mod.PICKABLE_ICONS)
+        self._icon_registry = dict(shabby_mod.ICON_REGISTRY)
+
+    def tearDown(self):
+        from server.services import shabby as shabby_mod
+
+        shabby_mod.PICKABLE_ICONS.clear()
+        shabby_mod.PICKABLE_ICONS.update(self._pickable_icons)
+        shabby_mod.ICON_REGISTRY.clear()
+        shabby_mod.ICON_REGISTRY.update(self._icon_registry)
+
+    @staticmethod
+    def _reply_host_block(packets):
+        from server.pipe import parse_pipe_frames
+
+        parsed = parse_packet(packets[0][:-1])
+        frames = parse_pipe_frames(parsed.payload)
+        return parse_host_block(frames[0].content[2:])
+
+    def test_live_chunked_icon_upload_replies_after_the_closing_frame(self):
+        from server.services import shabby as shabby_mod
+
+        blob = shabby_mod.load_shabby_bytes(0x059A)
+        self.assertEqual(len(blob), 1078)
+        expected_id = max(shabby_mod.PICKABLE_ICONS) + 1
+        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+
+        self.assertIsNone(
+            handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
+        )
+        self.assertIsNone(
+            handler.handle_request(
+                MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[:463], 0, 0
+            )
+        )
+        self.assertIsNone(
+            handler.handle_request(
+                MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[463:926], 0, 0
+            )
+        )
+        packets = handler.handle_request(
+            MPC_CLASS_CONTINUATION_LAST, 1, 0, blob[926:], 0, 0
+        )
+
+        host_block = self._reply_host_block(packets)
+        self.assertEqual(host_block.msg_class, 0x04)
+        self.assertEqual(host_block.selector, 0x07)
+        self.assertEqual(host_block.request_id, 4)
+        self.assertEqual(
+            host_block.payload,
+            b"\x83\x00\x00\x00\x00"
+            + b"\x83\x00\x00\x00\x00"
+            + b"\x83"
+            + struct.pack("<I", expected_id)
+            + b"\x87",
+        )
+        self.assertIn(expected_id, shabby_mod.enum_pickable_shabby_ids())
+        self.assertEqual(shabby_mod.load_shabby_bytes(expected_id), blob)
+
+    def test_small_inline_icon_upload_completes_in_the_call_reply(self):
+        from server.services import shabby as shabby_mod
+
+        blob = b"\x00\x00\x01\x00inline-ico"
+        request = (
+            b"\x04\x82\x02\x00"
+            + b"\x01\x00"
+            + b"\x04"
+            + bytes([0x80 | len(blob)])
+            + blob
+            + b"\x03"
+            + struct.pack("<I", len(blob))
+            + b"\x83\x83\x83"
+        )
+        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+
+        packets = handler.handle_request(0x04, 0x07, 9, request, 0, 0)
+
+        host_block = self._reply_host_block(packets)
+        shabby_id = struct.unpack_from("<I", host_block.payload, 11)[0]
+        self.assertEqual(shabby_mod.load_shabby_bytes(shabby_id), blob)
+
+    def test_non_authoring_account_is_refused_before_upload_state_is_created(self):
+        handler = DIRSRVHandler(4, "DIRSRV", signed_in(SUBSCRIBER))
+
+        packets = handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
+
+        host_block = self._reply_host_block(packets)
+        self.assertEqual(struct.unpack_from("<I", host_block.payload, 1)[0], 0x101)
+        self.assertEqual(handler._shabby_uploads, {})
+
+    def test_short_closing_stream_is_refused_and_not_registered(self):
+        from server.services import shabby as shabby_mod
+
+        before = shabby_mod.enum_pickable_shabby_ids()
+        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+        handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
+
+        packets = handler.handle_request(
+            MPC_CLASS_CONTINUATION_LAST, 1, 0, b"short", 0, 0
+        )
+
+        host_block = self._reply_host_block(packets)
+        self.assertEqual(struct.unpack_from("<I", host_block.payload, 1)[0], 0x101)
+        self.assertEqual(shabby_mod.enum_pickable_shabby_ids(), before)
 
 
 class TestDIRSRVGetTicket(unittest.TestCase):

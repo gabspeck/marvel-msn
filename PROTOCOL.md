@@ -861,7 +861,32 @@ The Banner page reaches `mf` only after uploading the image through
 it then writes. Extension → format byte: `.emf`→1, `.mtf`→3, `.wmf`→4,
 `.bmp`→5 (DSNED 0x7F5717C8).
 
-#### 7.2.11 DATAEDCL Delete (application class, selector 0x01)
+#### 7.2.11 TREEEDCL AddShabby (class 0x04, selector 0x07)
+
+`CTreeEditClient::PrivateAddShabby` sends the capability ticket, a format
+byte, the raw file, and the same file length as a DWORD. It receives the
+completed operation status, operation ID, and assigned shabby ID.
+
+```
+ request: [0x04][len][ticket]
+          [0x01][format]
+          [0x04][len][raw file] or [0x05][stream_id][u32 length]
+          [0x03][u32 length]
+          [0x83][0x83][0x83]
+ reply:   [0x83][u32 status=0]
+          [0x83][u32 operation_id=0]
+          [0x83][u32 shabby_id]
+          [0x87]
+```
+
+Observed Change Icon upload: format 0, stream ID 1, 1078-byte ICO, with the
+chunked file carried in two 463-byte `0xE6` frames and one 152-byte `0xE7`
+frame. The reply is deferred until the closing frame and uses the original
+class, selector, and request ID. Format 0 IDs are plain ordinals in the
+`0x0599..0x0A48` picker window. Banner formats use the format byte as the high
+byte of the returned shabby ID.
+
+#### 7.2.12 DATAEDCL Delete (application class, selector 0x01)
 
 After TREEEDCL `DeleteNode` succeeds, MOSSHELL deletes the node's application
 record through `CDataEditClient::PrivateDelete` @ DATAEDCL 0x7F5A183F. The

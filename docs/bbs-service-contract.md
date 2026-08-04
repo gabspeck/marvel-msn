@@ -584,7 +584,7 @@ returns `0x116` if no ticket is held.
 | 4  | `SetProperties` | node mnid (8 B) + compressed `CServiceProperties` |
 | 5  | `LinkNode`      | node mnid (8 B) + parent mnid (8 B) |
 | 6  | `UnlinkNode`    | node mnid (8 B) + parent mnid (8 B) |
-| 7  | `AddShabby`     | shabby id + blob |
+| 7  | `AddShabby`     | format byte + blob + size → shabby id |
 | 8  | `DeleteShabby`  | shabby id |
 | 9  | *(unused by client)* | — |
 | 10 | `OrderChildren` | parent mnid + ordering |

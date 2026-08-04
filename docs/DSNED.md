@@ -326,5 +326,3 @@ Service names DSNED knows: `DIRSRV`, `CONFLOC`, `MEDVIEW`, `BBS`.
 - The `mm` / `ml` / `ds` / `fn` / `zc` / `fi` tags: no observed reader.
 - SASRV selector 2/4/5 argument marshalling is read off the decompiler's
   shifted stack frames and has not been checked live.
-- `AddShabby` (TREEEDCL selector 0x07) request layout is unverified beyond the
-  selector number.

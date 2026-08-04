@@ -10,12 +10,14 @@ from ..config import (
     DIRSRV_BROWSE_FLAGS_HAS_CHILDREN,
     DIRSRV_BROWSE_FLAGS_LEAF,
     DIRSRV_INTERFACE_GUIDS,
+    MPC_CLASS_CONTINUATION_LAST,
+    MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ..log import TRACE
-from ..models import ByteParam, DirsrvRequest, DwordParam, VarParam
+from ..models import ByteParam, ChunkedParam, DirsrvRequest, DwordParam, VarParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
     build_discovery_host_block,
@@ -62,6 +64,7 @@ TREEEDCL_CLASS_EDIT = 0x04
 TREEEDCL_SELECTOR_ADD_NODE = 0x02
 TREEEDCL_SELECTOR_DELETE_NODE = 0x03
 TREEEDCL_SELECTOR_SET_PROPERTIES = 0x04
+TREEEDCL_SELECTOR_ADD_SHABBY = 0x07
 TREEEDCL_SELECTOR_GET_DATASETS = 0x0B
 TREEEDCL_SELECTOR_GET_TICKET = 0x0C
 
@@ -137,6 +140,10 @@ class DIRSRVHandler:
         self.svc_name = svc_name
         # Anonymous when the pipe opens before the login lands.
         self.session = session or Session()
+        # AddShabby image bytes may follow the call head in class-0xE6/0xE7
+        # frames. Stream IDs are unique per connection and this handler is
+        # scoped to one pipe, so they are sufficient keys here.
+        self._shabby_uploads = {}
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Build the IID->selector discovery block for DIRSRV."""
@@ -146,12 +153,20 @@ class DIRSRVHandler:
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Handle a DIRSRV request — dispatch by selector."""
+        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+            return self._take_shabby_continuation(
+                msg_class, selector, payload, server_seq, client_ack
+            )
         if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_NODE:
             reply_payload = build_add_node_reply_payload(payload, session=self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_DELETE_NODE:
             reply_payload = build_delete_node_reply_payload(payload, session=self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_SET_PROPERTIES:
             reply_payload = build_set_properties_reply_payload(payload, session=self.session)
+        elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_SHABBY:
+            reply_payload = self._begin_add_shabby(request_id, payload)
+            if reply_payload is None:
+                return None
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
             reply_payload = build_get_ticket_reply_payload(self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
@@ -173,6 +188,97 @@ class DIRSRVHandler:
             return None
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+
+    def _begin_add_shabby(self, request_id, payload):
+        """Validate an AddShabby head and register or await its image bytes."""
+        if not self.session.is_admin:
+            log.info("add_shabby refused user=%s", self.session.user.username or "-")
+            return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
+
+        send_params, recv_descriptors = parse_request_params(payload)
+        if (
+            len(send_params) != 4
+            or not isinstance(send_params[0], VarParam)
+            or not isinstance(send_params[1], ByteParam)
+            or not isinstance(send_params[2], (VarParam, ChunkedParam))
+            or not isinstance(send_params[3], DwordParam)
+            or recv_descriptors != [0x83, 0x83, 0x83]
+        ):
+            log.warning(
+                "add_shabby invalid request params=%s recv=%s payload=%s",
+                [type(param).__name__ for param in send_params],
+                [f"0x{tag:02x}" for tag in recv_descriptors],
+                payload.hex(),
+            )
+            return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
+
+        ticket, fmt_param, image_param, size_param = send_params
+        if (
+            len(ticket.data) < 2
+            or struct.unpack_from("<H", ticket.data)[0] != len(ticket.data)
+        ):
+            log.warning("add_shabby invalid ticket=%s", ticket.data.hex())
+            return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
+
+        if isinstance(image_param, VarParam):
+            return _add_shabby_result(
+                fmt_param.value, image_param.data, size_param.value
+            )
+
+        if image_param.total_length != size_param.value or size_param.value == 0:
+            log.warning(
+                "add_shabby invalid size stream=%d reference=%d declared=%d",
+                image_param.stream_id,
+                image_param.total_length,
+                size_param.value,
+            )
+            return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
+
+        self._shabby_uploads[image_param.stream_id] = {
+            "request_id": request_id,
+            "format": fmt_param.value,
+            "size": size_param.value,
+            "data": bytearray(),
+        }
+        log.info(
+            "add_shabby_begin format=%d stream=%d bytes=%d",
+            fmt_param.value,
+            image_param.stream_id,
+            size_param.value,
+        )
+        return None
+
+    def _take_shabby_continuation(
+        self, msg_class, stream_id, payload, server_seq, client_ack
+    ):
+        """Collect an AddShabby chunk and answer the original call on 0xE7."""
+        upload = self._shabby_uploads.get(stream_id)
+        if upload is None:
+            log.warning(
+                "add_shabby unexpected continuation class=0x%02x stream=%d bytes=%d",
+                msg_class,
+                stream_id,
+                len(payload),
+            )
+            return None
+
+        upload["data"].extend(payload)
+        if msg_class != MPC_CLASS_CONTINUATION_LAST:
+            return None
+
+        del self._shabby_uploads[stream_id]
+        reply_payload = _add_shabby_result(
+            upload["format"], bytes(upload["data"]), upload["size"]
+        )
+        host_block = build_host_block(
+            TREEEDCL_CLASS_EDIT,
+            TREEEDCL_SELECTOR_ADD_SHABBY,
+            upload["request_id"],
+            reply_payload,
+        )
+        return build_service_packet(
+            self.pipe_idx, host_block, server_seq, client_ack
+        )
 
 
 def build_property_record(properties):
@@ -799,6 +905,41 @@ def build_enum_shn_reply_payload(payload):
         + build_tagged_reply_word(len(ids))
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + b"".join(struct.pack("<I", i) for i in ids)
+    )
+
+
+def _add_shabby_result(fmt, blob, declared_size):
+    """Register one complete upload and build AddShabby's static result."""
+    if len(blob) != declared_size:
+        log.warning(
+            "add_shabby size_mismatch format=%d received=%d declared=%d",
+            fmt,
+            len(blob),
+            declared_size,
+        )
+        return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
+
+    shabby_id = shabby.add_shabby_bytes(fmt, blob)
+    if shabby_id is None:
+        log.warning("add_shabby rejected format=%d bytes=%d", fmt, len(blob))
+        return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
+
+    log.info(
+        "add_shabby status=0 format=%d bytes=%d shabby_id=0x%08x",
+        fmt,
+        len(blob),
+        shabby_id,
+    )
+    return _build_add_shabby_result(0, shabby_id)
+
+
+def _build_add_shabby_result(status, shabby_id):
+    """Build AddShabby's status, operation ID, and assigned shabby ID."""
+    return (
+        build_tagged_reply_dword(status)
+        + build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(shabby_id)
+        + bytes([TAG_END_STATIC])
     )
 
 

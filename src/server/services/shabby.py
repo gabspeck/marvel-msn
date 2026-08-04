@@ -30,6 +30,18 @@ FORMAT_WMF_RAW = 0x03        # LoadAndCallW Meta_init/add/play/close
 FORMAT_WMF_PLACEABLE = 0x04  # magic 0x9AC6CDD7
 FORMAT_BMP = 0x05            # LoadImageA(IMAGE_BITMAP, LR_LOADFROMFILE | LR_DEFAULTSIZE)
 
+# Format 0 is the MOSSHELL Change Icon dialog's generic ICO/EXE/DLL path.
+# The DSNED Banner page supplies the remaining values after checking the file
+# extension. These values come from live client calls and static analysis of
+# MOSSHELL 0x7F40481B and DSNED 0x7F5717C8.
+UPLOAD_FORMATS = {
+    0x00,
+    FORMAT_EMF,
+    FORMAT_WMF_RAW,
+    FORMAT_WMF_PLACEABLE,
+    FORMAT_BMP,
+}
+
 
 def pack_shabby_id(fmt, content_id):
     return ((fmt & 0xFF) << 24) | (content_id & 0xFFFFFF)
@@ -88,3 +100,33 @@ def load_shabby_bytes(shabby_id):
     if not entry.exists():
         return None
     return entry.read_bytes()
+
+
+def add_shabby_bytes(fmt, blob):
+    """Register an uploaded shabby and return its new ID, or None on failure.
+
+    Format 0 is a Change Icon entry and therefore needs a plain ordinal in the
+    picker's visible window. Banner formats keep the format byte in the high
+    byte so MOSSHELL selects the matching Win32 image loader.
+    """
+    if fmt not in UPLOAD_FORMATS or not blob:
+        return None
+
+    if fmt == 0:
+        shabby_id = max(PICKABLE_ICONS, default=PICKABLE_ID_MIN - 1) + 1
+        if shabby_id > PICKABLE_ID_MAX:
+            return None
+        PICKABLE_ICONS[shabby_id] = bytes(blob)
+    else:
+        used_content_ids = [
+            unpack_shabby_id(shabby_id)[1]
+            for shabby_id in ICON_REGISTRY
+            if unpack_shabby_id(shabby_id)[0] == fmt
+        ]
+        content_id = max(used_content_ids, default=0) + 1
+        if content_id > 0xFFFFFF:
+            return None
+        shabby_id = pack_shabby_id(fmt, content_id)
+
+    ICON_REGISTRY[shabby_id] = bytes(blob)
+    return shabby_id
