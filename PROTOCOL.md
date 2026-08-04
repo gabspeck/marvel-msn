@@ -419,7 +419,7 @@ All LOGSRV methods below run on selector **0x06**. Opcodes:
 
 | Op | Method | Request | Reply |
 |----|--------|---------|-------|
-| 0x00 | Login | `0x03` dword (last-update ver) + `0x04` 0x58-byte login blob; recv: 7×`0x83`, 1×`0x84` (16) | 7 dwords, `0x87`, `0x84`(16 zero bytes). First dword = result (0 or 0x0C = success) |
+| 0x00 | Login | `0x03` dword (last-update ver) + `0x04` 0x58-byte credential blob (see 7.1.0); recv: 7×`0x83`, 1×`0x84` (16) | 7 dwords, `0x87`, `0x84`(16 zero bytes). First dword = result (0 or 0x0C = success) |
 | 0x01 | Change password | `0x04`×2 (17-byte NUL-terminated bufs for old/new) | `0x83` result (0 = success) |
 | 0x02 | Post-transfer query (signup) | 3 dwords + recv `0x84` | empty `0x84` |
 | 0x07 | Enumerator (post-login) | `0x85` | **DO NOT REPLY** — server leaves pending forever (see 7.1.1) |
@@ -429,6 +429,51 @@ All LOGSRV methods below run on selector **0x06**. Opcodes:
 | 0x0C | OI commit (billing Name and Address OK) | 0x2FC OI buffer fragmented as 0x06 head + 0xE6/0xE7 continuations | `0x84` var, first dword = status (see 7.1.3) |
 | 0x0D | Post-signup query | 3 dwords (country_id, 0, 0) + recv `0x84` | empty `0x84` |
 | 0x0E | Phone-book update | `0x03` dword=8, recv `0x83` | `0x83` dword=0 stub (see Open Questions) |
+
+#### 7.1.0 Login credential blob (selector 0x00) — 0x58 bytes
+
+`GUIDE.EXE!VerifyAccountViaLogSrv` @ 0x04304024 builds it out of three adjacent
+stack locals and marshals the lot as one `0x04` field:
+
+```
+ 0x00  4 bytes   never written before the send (uninitialised stack)
+ 0x04  65 bytes  member ID, ASCIIZ   lstrcpyA from the Sign In dialog's user id
+ 0x45  19 bytes  password, ASCIIZ    lstrcpyA from the Sign In dialog's password
+```
+
+4 + 65 + 19 = 0x58, and the local following `password` sits at blob + 0x58, so
+the three cover the field exactly. Neither string is hashed or obfuscated —
+credentials travel in the clear.
+
+The cached-credentials record in the registry shares the layout: an empty user
+id makes the function copy the member ID from `cachedRecord + 4`, and a failed
+sign-in clears the cached password at `cachedRecord + 0x45`.
+
+Result codes the client maps (`loginResultCode`, the reply's first dword). The
+message goes into a box titled with string 0x2F0 "The Microsoft Network";
+GUIDE resource string ids resolve as `table (N-1)*16 + index`.
+
+| Code | MCM err | String | Message |
+|------|---------|--------|---------|
+| 0x00, 0x0C | — | — | Success. 0x0C also sets a flag at `DAT_0430a034` |
+| 0x02, 0x0A | 8 | 0x2FC | "This member ID is not valid.##Please make sure that it is correct and try again." |
+| 0x01 | 0x14 | 0x309 | "The Microsoft Network accounts database is not available at this time.##Please try to sign in later." |
+| 0x0D | 0x18 | 0x31E | "This account has been locked.##Please contact Customer Service." |
+| 0x16 | 0x11 | 0x31C | "You are already signed in…##Another computer is signed in under your name." |
+| 0x22 | 0x1A | 0x2C6 | "Network busy.##The Microsoft Network is too busy to sign you in at this time." |
+| 0x23 | 0x1B | 0x2C7 | "Software update required.##…requires a newer version of Windows." |
+| 0x24 | 0x1C | 0x2C8 | "Software update required.##A new version of The Microsoft Network is required…" |
+| anything else | 7 | 0x2F5 | "Password not valid. Please type it again.##If you forgot your password…" |
+
+The catch-all is the password message, so the two credential failures are
+**0x02** (member id resolves to no account) and **any unmapped code** (account
+exists, password does not match).
+
+`LoginDialogProc` @ 0x04304885 holds the same map keyed on the MCM error, plus
+Internet-path cases `VerifyAccountViaLogSrv` never reaches — among them MCM
+error 0x20 → string 0x38D "Cannot connect to The Microsoft Network.##The member
+ID or password is not valid." Nothing in GUIDE.EXE writes 0x20 to that
+variable, so only MCM.DLL's own sign-in path can raise it.
 
 #### 7.1.1 Opcode 0x07 enumerator
 
