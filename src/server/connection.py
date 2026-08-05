@@ -7,6 +7,7 @@ login, directory browsing, and sign-out.
 import contextlib
 import itertools
 import logging
+import threading
 import time
 from collections import defaultdict
 
@@ -62,9 +63,14 @@ def _strip_telnet(data, conn):
 class ConnectionState:
     """Per-connection state and protocol state machine."""
 
-    def __init__(self, conn):
+    def __init__(self, conn, conn_id=0):
         self.conn = conn
+        self.conn_id = conn_id
         self.conn_start = time.monotonic()
+        # Held while a sequence number is read and the packet stamped with it
+        # goes out. A chat broadcast frames packets for connections it does
+        # not own, so without this two threads could stamp the same seq.
+        self.send_lock = threading.RLock()
         self.event_no = 0
         self.rx_pkt_no = 0
         self.tx_pkt_no = 0
@@ -86,9 +92,10 @@ class ConnectionState:
     def _emit(self, level, msg, *args):
         if not log.isEnabledFor(level):
             return
-        self.event_no += 1
-        server_log.set_context(time.monotonic() - self.conn_start, self.event_no)
-        log.log(level, msg, *args)
+        with self.send_lock:
+            self.event_no += 1
+            server_log.set_context(time.monotonic() - self.conn_start, self.event_no)
+            log.log(level, msg, *args)
 
     def info(self, msg, *args):
         self._emit(logging.INFO, msg, *args)
@@ -105,15 +112,42 @@ class ConnectionState:
 
     def _send(self, pkt, level, msg, *args):
         """`msg` must start with `n=%d` — tx_pkt_no is injected as the first arg."""
-        self.tx_pkt_no += 1
-        self._emit(level, msg, self.tx_pkt_no, *args)
-        self.trace_hex("tx_bytes", pkt)
-        self.conn.sendall(pkt)
+        with self.send_lock:
+            self.tx_pkt_no += 1
+            self._emit(level, msg, self.tx_pkt_no, *args)
+            self.trace_hex("tx_bytes", pkt)
+            self.conn.sendall(pkt)
 
     def advance_seq(self):
         seq = self.server_seq
         self.server_seq = (self.server_seq + 1) & 0x7F
         return seq
+
+    def push_service_data(self, pipe_idx, host_block, label):
+        """Send a host block this connection did not ask for, right now.
+
+        A service handler calls this to reach a client whose own thread is
+        blocked in `recv`, so the caller is usually another connection's
+        thread. The send lock keeps the fragments of one push contiguous on
+        the pipe and keeps the sequence numbers monotonic.
+        """
+        with self.send_lock, server_log.connection_scope(self.conn_id):
+            pkts = build_service_packet(
+                pipe_idx, host_block, self.server_seq, self.client_ack,
+            )
+            total = len(pkts)
+            for i, pkt in enumerate(pkts, 1):
+                self._send(
+                    pkt,
+                    logging.INFO,
+                    "tx_svc_push n=%d pipe=%d %s frag=%d/%d len=%d",
+                    pipe_idx,
+                    label,
+                    i,
+                    total,
+                    len(pkt),
+                )
+                self.advance_seq()
 
     def run(self):
         self.info("awaiting_initial_cr")
@@ -154,12 +188,13 @@ class ConnectionState:
         """Send COM\\r and transport params."""
         self.info("rx_empty_terminator")
         self.info("tx_com_trigger")
-        self.conn.sendall(b"COM\r")
-        time.sleep(DELAY_AFTER_COM)
+        with self.send_lock:
+            self.conn.sendall(b"COM\r")
+            time.sleep(DELAY_AFTER_COM)
 
-        params_pkt = build_transport_params()
-        self._send(params_pkt, logging.INFO, "tx_transport_params n=%d len=%d", len(params_pkt))
-        self.transport_started = True
+            params_pkt = build_transport_params()
+            self._send(params_pkt, logging.INFO, "tx_transport_params n=%d len=%d", len(params_pkt))
+            self.transport_started = True
 
     def _handle_raw_packet(self, packet_data):
         pkt = parse_packet(packet_data)
@@ -188,9 +223,10 @@ class ConnectionState:
 
         # ACK the client's packet and update client_ack before processing
         # so that service replies built in this iteration use the correct value
-        self.client_ack = (pkt.seq + 1) & 0x7F
-        ack_pkt = build_ack_packet(self.client_ack)
-        self._send(ack_pkt, logging.DEBUG, "tx_ack n=%d seq=%d ack=%d", pkt.seq, self.client_ack)
+        with self.send_lock:
+            self.client_ack = (pkt.seq + 1) & 0x7F
+            ack_pkt = build_ack_packet(self.client_ack)
+            self._send(ack_pkt, logging.DEBUG, "tx_ack n=%d seq=%d ack=%d", pkt.seq, self.client_ack)
 
         # Process pipe frames
         frames = parse_pipe_frames(pkt.payload, self.pipe_pending)
@@ -243,15 +279,16 @@ class ConnectionState:
             msg.version,
         )
 
-        open_pkt = build_pipe_open_result(msg.client_pipe_idx, self.server_seq, self.client_ack)
-        self._send(
-            open_pkt,
-            logging.INFO,
-            "tx_pipe_open_response n=%d pipe=%d svc=%s",
-            msg.client_pipe_idx,
-            msg.svc_name,
-        )
-        self.advance_seq()
+        with self.send_lock:
+            open_pkt = build_pipe_open_result(msg.client_pipe_idx, self.server_seq, self.client_ack)
+            self._send(
+                open_pkt,
+                logging.INFO,
+                "tx_pipe_open_response n=%d pipe=%d svc=%s",
+                msg.client_pipe_idx,
+                msg.svc_name,
+            )
+            self.advance_seq()
 
         handler_cls = SERVICE_HANDLERS.get(msg.svc_name.casefold())
         if handler_cls is None:
@@ -264,22 +301,28 @@ class ConnectionState:
         if handler_cls:
             handler = handler_cls(msg.client_pipe_idx, msg.svc_name, self.session)
             self.services[msg.client_pipe_idx] = handler
+            # Services that push events outside a request — chat — need the
+            # connection to reach the client's socket from another thread.
+            bind_hook = getattr(handler, "bind_connection", None)
+            if bind_hook is not None:
+                bind_hook(self)
 
             time.sleep(DELAY_BEFORE_REPLY)
-            discovery_pkts = handler.build_discovery_packet(self.server_seq, self.client_ack)
-            total = len(discovery_pkts)
-            for i, pkt in enumerate(discovery_pkts, 1):
-                self._send(
-                    pkt,
-                    logging.INFO,
-                    "tx_discovery n=%d pipe=%d svc=%s frag=%d/%d len=%d",
-                    msg.client_pipe_idx,
-                    msg.svc_name,
-                    i,
-                    total,
-                    len(pkt),
-                )
-                self.advance_seq()
+            with self.send_lock:
+                discovery_pkts = handler.build_discovery_packet(self.server_seq, self.client_ack)
+                total = len(discovery_pkts)
+                for i, pkt in enumerate(discovery_pkts, 1):
+                    self._send(
+                        pkt,
+                        logging.INFO,
+                        "tx_discovery n=%d pipe=%d svc=%s frag=%d/%d len=%d",
+                        msg.client_pipe_idx,
+                        msg.svc_name,
+                        i,
+                        total,
+                        len(pkt),
+                    )
+                    self.advance_seq()
 
     def _handle_service_data(self, pipe_idx, data):
         if len(data) == 1 and data[0] == PIPE_CLOSE_CMD:
@@ -323,30 +366,39 @@ class ConnectionState:
             self.trace_hex("svc_payload", hb.payload)
 
         time.sleep(DELAY_BEFORE_REPLY)
-        reply_pkts = handler.handle_request(
-            hb.msg_class, hb.selector, hb.request_id, hb.payload, self.server_seq, self.client_ack
-        )
+        with self.send_lock:
+            reply_pkts = handler.handle_request(
+                hb.msg_class, hb.selector, hb.request_id, hb.payload,
+                self.server_seq, self.client_ack,
+            )
 
-        if reply_pkts is not None:
-            total = len(reply_pkts)
-            for i, pkt in enumerate(reply_pkts, 1):
-                self._send(
-                    pkt,
-                    logging.INFO,
-                    "tx_svc_reply n=%d pipe=%d svc=%s class=0x%02x selector=0x%02x "
-                    "req_id=%d frag=%d/%d len=%d",
-                    pipe_idx,
-                    handler.svc_name,
-                    hb.msg_class,
-                    hb.selector,
-                    hb.request_id,
-                    i,
-                    total,
-                    len(pkt),
-                )
-                self.advance_seq()
-        else:
-            self.info("svc_no_reply pipe=%d selector=0x%02x", pipe_idx, hb.selector)
+            if reply_pkts is not None:
+                total = len(reply_pkts)
+                for i, pkt in enumerate(reply_pkts, 1):
+                    self._send(
+                        pkt,
+                        logging.INFO,
+                        "tx_svc_reply n=%d pipe=%d svc=%s class=0x%02x selector=0x%02x "
+                        "req_id=%d frag=%d/%d len=%d",
+                        pipe_idx,
+                        handler.svc_name,
+                        hb.msg_class,
+                        hb.selector,
+                        hb.request_id,
+                        i,
+                        total,
+                        len(pkt),
+                    )
+                    self.advance_seq()
+            else:
+                self.info("svc_no_reply pipe=%d selector=0x%02x", pipe_idx, hb.selector)
+
+        # Outside the send lock: a handler that answers by pushing reaches
+        # other connections here, and it must hold no send lock of its own
+        # when it takes the locks that order those pushes.
+        flush_hook = getattr(handler, "flush_pending_events", None)
+        if flush_hook is not None:
+            flush_hook()
 
     def _handle_iterator_cancel_frame(self, hb, handler, pipe_idx):
         """Acknowledge an MPCCL iterator-cancel and invoke the handler hook.
@@ -367,19 +419,20 @@ class ConnectionState:
         host_block = build_host_block(
             hb.msg_class, hb.selector, hb.request_id, ITERATOR_CANCEL_ACK,
         )
-        pkts = build_service_packet(
-            pipe_idx, host_block, self.server_seq, self.client_ack,
-        )
-        total = len(pkts)
-        for i, pkt in enumerate(pkts, 1):
-            self._send(
-                pkt, logging.INFO,
-                "tx_iterator_cancel_ack n=%d pipe=%d svc=%s class=0x%02x "
-                "selector=0x%02x req_id=%d frag=%d/%d len=%d",
-                pipe_idx, handler.svc_name, hb.msg_class, hb.selector,
-                hb.request_id, i, total, len(pkt),
+        with self.send_lock:
+            pkts = build_service_packet(
+                pipe_idx, host_block, self.server_seq, self.client_ack,
             )
-            self.advance_seq()
+            total = len(pkts)
+            for i, pkt in enumerate(pkts, 1):
+                self._send(
+                    pkt, logging.INFO,
+                    "tx_iterator_cancel_ack n=%d pipe=%d svc=%s class=0x%02x "
+                    "selector=0x%02x req_id=%d frag=%d/%d len=%d",
+                    pipe_idx, handler.svc_name, hb.msg_class, hb.selector,
+                    hb.request_id, i, total, len(pkt),
+                )
+                self.advance_seq()
 
     def _all_service_pipes_closed(self):
         if not self.services:
@@ -389,9 +442,10 @@ class ConnectionState:
 
 def handle_connection(conn, addr):
     server_log.reset_context()
-    server_log.set_connection(next(_conn_id_seq))
+    conn_id = next(_conn_id_seq)
+    server_log.set_connection(conn_id)
     log.info("connection_open addr=%s:%d", addr[0], addr[1])
-    state = ConnectionState(conn)
+    state = ConnectionState(conn, conn_id)
     try:
         state.run()
     except (ConnectionError, BrokenPipeError, OSError) as e:

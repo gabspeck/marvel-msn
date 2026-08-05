@@ -12,6 +12,7 @@ TRACE (level 5) is added below DEBUG for hex-dump firehose.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
 import os
@@ -59,6 +60,23 @@ def set_connection(conn_id):
 
 def clear_connection():
     _conn_id.set(0)
+
+
+@contextlib.contextmanager
+def connection_scope(conn_id):
+    """Attribute records to `conn_id` while another connection's thread runs.
+
+    A chat broadcast writes to sockets its own thread does not own. Without
+    this the pushed packets would be logged under the sender's `conn_id` and
+    event counter.
+    """
+    conn_token = _conn_id.set(conn_id)
+    ctx_token = _ctx.set(_ctx.get())
+    try:
+        yield
+    finally:
+        _ctx.reset(ctx_token)
+        _conn_id.reset(conn_token)
 
 
 def set_context(elapsed, event_no):

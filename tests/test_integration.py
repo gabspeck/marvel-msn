@@ -21,8 +21,8 @@ import time
 import unittest
 
 from server import log as server_log
-from server.connection import handle_connection
-from server.models import DwordParam, EndMarker, VarParam
+from server.connection import ConnectionState, handle_connection
+from server.models import DwordParam, EndMarker, PipeOpenRequest, VarParam
 from server.mpc import (
     build_host_block,
     build_tagged_reply_var,
@@ -30,6 +30,15 @@ from server.mpc import (
     parse_tagged_params,
 )
 from server.pipe import build_control_frame, build_pipe_frame
+from server.services.conference import (
+    CONFSRV_EVENT_PARTICIPANT_JOINED,
+    CONFSRV_EVENT_PARTICIPANT_LEFT,
+    CONFSRV_EVENT_PARTICIPANT_LIST,
+    CONFSRV_EVENT_TEXT,
+    CONFSRV_SELECTOR_JOIN,
+    CONFSRV_SELECTOR_SEND,
+)
+from server.services.conference import _rooms as conference_rooms
 from server.services.logsrv import (
     LOGIN_BLOB_LEN,
     LOGIN_BLOB_MEMBER_ID_OFFSET,
@@ -40,7 +49,13 @@ from server.services.logsrv import (
 from server.store import reset_app_store
 from server.transport import build_packet, parse_packet
 
-from .support import ADMIN, ADMIN_PASSWORD, SUBSCRIBER, SUBSCRIBER_PASSWORD
+from .support import (
+    ADMIN,
+    ADMIN_PASSWORD,
+    SUBSCRIBER,
+    SUBSCRIBER_PASSWORD,
+    seed_user,
+)
 
 # Route server logs to stdout when auditing DEBUG/TRACE output.
 if os.environ.get("MSN_LOG_LEVEL"):
@@ -644,6 +659,140 @@ class TestLoginIdentity(_ConnectionHarness):
         buffer = self._billing_reply()
         self.assertIn(b"Jobs\x00", buffer)
         self.assertNotIn(b"Gates\x00", buffer)
+
+
+class _RecordingSocket:
+    """Stands in for a client socket and keeps every packet the server writes."""
+
+    def __init__(self):
+        self.packets = []
+
+    def sendall(self, data):
+        self.packets.append(data)
+
+    def settimeout(self, _timeout):
+        pass
+
+    def close(self):
+        pass
+
+
+class TestChatBroadcast(unittest.TestCase):
+    """Chat events cross connections.
+
+    `ConnectionState` is driven directly: the transport handshake is covered
+    elsewhere and adds nothing here. What matters is that one connection's
+    thread frames and writes packets on another connection's socket.
+    """
+
+    PIPE = 8
+    ROOM = 1
+
+    def setUp(self):
+        reset_app_store()
+        conference_rooms.clear()
+        self.addCleanup(reset_app_store)
+        self.addCleanup(conference_rooms.clear)
+
+    def _connection(self, conn_id, username):
+        """A signed-in connection with an open CONFSRV pipe."""
+        sock = _RecordingSocket()
+        state = ConnectionState(sock, conn_id)
+        state.session.sign_in(seed_user(username))
+        state._handle_pipe_open(
+            PipeOpenRequest(
+                client_pipe_idx=self.PIPE,
+                svc_name="CONFSRV",
+                ver_param="U",
+                version=6,
+            )
+        )
+        sock.packets.clear()
+        return state, sock
+
+    def _call(self, state, selector, payload, req_id):
+        state._handle_service_data(
+            self.PIPE, build_host_block(0x01, selector, req_id, payload),
+        )
+
+    def _join(self, state):
+        self._call(
+            state,
+            CONFSRV_SELECTOR_JOIN,
+            b"\x03" + struct.pack("<I", self.ROOM) + b"\x04\x81\x00\x85",
+            7,
+        )
+
+    def _send_text(self, state, text):
+        record = (
+            struct.pack("<HHI", CONFSRV_EVENT_TEXT, 0, 0)
+            + text.encode("utf-16le")
+            + b"\x00\x00"
+        )
+        self._call(
+            state,
+            CONFSRV_SELECTOR_SEND,
+            b"\x04" + bytes([0x80 | len(record)]) + record,
+            8,
+        )
+
+    @staticmethod
+    def _events(sock):
+        return [parse_packet(pkt[:-1]).payload[8:] for pkt in sock.packets]
+
+    def test_a_second_member_is_announced_and_heard(self):
+        alice, alice_sock = self._connection(1, ADMIN)
+        bob, bob_sock = self._connection(2, SUBSCRIBER)
+
+        self._join(alice)
+        alice_sock.packets.clear()
+        self._join(bob)
+
+        # Bob's roster carries both members; Alice hears that Bob arrived.
+        roster = self._events(bob_sock)[1]
+        self.assertEqual(struct.unpack_from("<H", roster, 1)[0], CONFSRV_EVENT_PARTICIPANT_LIST)
+        self.assertIn(b"Bill Gates", roster)
+        self.assertIn(b"Steve Jobs", roster)
+
+        announced = self._events(alice_sock)[0]
+        self.assertEqual(
+            struct.unpack_from("<H", announced, 1)[0], CONFSRV_EVENT_PARTICIPANT_JOINED,
+        )
+        self.assertIn(b"Steve Jobs", announced)
+        self.assertNotIn(b"Bill Gates", announced)
+
+        # Alice speaks: both connections get the same event.
+        alice_sock.packets.clear()
+        bob_sock.packets.clear()
+        self._send_text(alice, "hello")
+
+        alice_copy = self._events(alice_sock)[1]
+        bob_copy = self._events(bob_sock)[0]
+        self.assertEqual(alice_copy, bob_copy)
+        self.assertEqual(struct.unpack_from("<H", bob_copy, 1)[0], CONFSRV_EVENT_TEXT)
+        self.assertEqual(struct.unpack_from("<I", bob_copy, 5)[0], 1)
+        self.assertEqual(bob_copy[9:].decode("utf-16le").rstrip("\x00"), "hello")
+
+        # Bob leaves: Alice is told, by participant id alone.
+        alice_sock.packets.clear()
+        bob.services[self.PIPE].close()
+
+        left = self._events(alice_sock)[0]
+        self.assertEqual(
+            struct.unpack_from("<H", left, 1)[0], CONFSRV_EVENT_PARTICIPANT_LEFT,
+        )
+        self.assertEqual(struct.unpack_from("<I", left, 5)[0], 2)
+        self.assertEqual(len(left), 9)
+
+    def test_every_pushed_packet_carries_its_own_sequence_number(self):
+        alice, alice_sock = self._connection(1, ADMIN)
+        self._join(alice)
+        self._send_text(alice, "one")
+        self._send_text(alice, "two")
+
+        seqs = [parse_packet(pkt[:-1]).seq for pkt in alice_sock.packets]
+        self.assertEqual(len(seqs), 6)
+        self.assertEqual(seqs, list(range(seqs[0], seqs[0] + len(seqs))))
 
 
 if __name__ == "__main__":

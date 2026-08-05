@@ -3,7 +3,6 @@
 import logging
 import struct
 import threading
-import weakref
 from dataclasses import replace
 
 from ..config import (
@@ -51,8 +50,6 @@ CONFSRV_SELECTOR_SEND = 0x02
 CONFLOC_RESULT_FOUND = 1
 CONFLOC_RESULT_NOT_FOUND = 2
 CONFSRV_JOINED = 3
-CONFSRV_EVENT_TEXT = 0
-CONFSRV_EVENT_PARTICIPANTS = 2
 # CONFAPI CceJoin maps wire status 8 to result 2; TEXTCHAT's join caller maps
 # result 2 to string 0x3C, "This chat is currently full."
 CONFSRV_ROOM_FULL = 8
@@ -62,12 +59,48 @@ CONFSRV_ROLE_SPECTATOR = 0
 CONFSRV_ROLE_PARTICIPANT = 1
 CONFSRV_ROLE_HOST = 2
 
+# Event types. CONFAPI!CConversation::QueueServerEvent @ 0x7F5B1EE2 accepts
+# 0 through 11 on an 8-byte header and hands the payload to the application.
+# TEXTCHAT!DispatchConversationMessage @ 0x7F2D545D routes these five.
+CONFSRV_EVENT_TEXT = 0
+CONFSRV_EVENT_PARTICIPANT_LIST = 2
+CONFSRV_EVENT_PARTICIPANT_JOINED = 4
+CONFSRV_EVENT_PARTICIPANT_LEFT = 5
+CONFSRV_EVENT_ROLE = 7
+
 # Fallback for an incomplete authored room record. Seeded rooms carry their
 # CONFLOC settings in the content store.
 DEFAULT_MESSAGE_LENGTH = 1000
 
-_room_members = {}
-_room_members_lock = threading.Lock()
+
+class _Room:
+    """Live roster for one conference instance, shared by every connection.
+
+    The lock covers the roster and the pushes that report a change to it, so
+    every member reads joins, leaves and text in one order. It is always taken
+    before a connection's send lock and never after, which is why the CONFSRV
+    handler answers from `flush_pending_events` instead of `handle_request`.
+    """
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.members = []
+        self.next_participant_id = 1
+
+
+# Keyed by room id. Rooms are authored directory nodes, so the registry stays
+# bounded, and a retained room keeps its participant ids monotonic.
+_rooms = {}
+_rooms_lock = threading.Lock()
+
+
+def _room_for(room_id):
+    with _rooms_lock:
+        room = _rooms.get(room_id)
+        if room is None:
+            room = _Room()
+            _rooms[room_id] = room
+        return room
 
 
 class CONFLOCHandler:
@@ -450,17 +483,30 @@ class CONFLOCHandler:
 
 
 class CONFSRVHandler:
-    """Join a text conference and service its retained event iterator."""
+    """Join a text conference and service its retained event iterator.
+
+    One handler is one participant. Everything the client sees after the join
+    request — the join record, the roster, other people's text — arrives as an
+    iterator push on the join subscription, so a handler can write to a client
+    whose own thread is parked in `recv`.
+    """
 
     def __init__(self, pipe_idx, svc_name, session=None, content_store=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
         self.session = session or Session()
         self.content_store = content_store or _default_store.content
+        self.connection = None
         self._join_subscription = None
         self._participant_id = None
         self._participant_role = None
-        self._joined_room_id = None
+        self._display_name = ""
+        self._room = None
+        self._room_id = None
+        self._pending = None
+
+    def bind_connection(self, connection):
+        self.connection = connection
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(CONFSRV_INTERFACE_GUIDS)
@@ -468,59 +514,50 @@ class CONFSRVHandler:
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        if selector == CONFSRV_SELECTOR_JOIN:
-            self._join_subscription = (msg_class, request_id)
-            self._participant_id = 1
-            reply_payload = self.build_join_reply_payload(payload)
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            packets = build_service_packet(
-                self.pipe_idx, host_block, server_seq, client_ack,
-            )
-            display_name = self.session.user.display_name
-            if display_name and self._participant_role is not None:
-                packets.extend(
-                    self._build_event_push_packets(
-                        _build_participants_event(
-                            self._participant_id,
-                            self._participant_role,
-                            display_name,
-                        ),
-                        (server_seq + len(packets)) & 0x7F,
-                        client_ack,
-                    )
-                )
-            return packets
+        """Record the request and answer from `flush_pending_events`.
 
-        if selector == CONFSRV_SELECTOR_SEND:
-            ack_host = build_host_block(
-                msg_class, selector, request_id, bytes([TAG_END_STATIC]),
-            )
-            packets = build_service_packet(
-                self.pipe_idx, ack_host, server_seq, client_ack,
-            )
-            event = self._parse_text_event(request_id, payload)
-            if event is not None and self._join_subscription is not None:
-                packets.extend(
-                    self._build_event_push_packets(
-                        event,
-                        (server_seq + len(packets)) & 0x7F,
-                        client_ack,
-                    )
-                )
-            return packets
-
-        log_unhandled_selector(log, msg_class, selector, request_id, payload)
-        return None
-
-    def build_join_reply_payload(self, payload):
-        """Push CONFAPI's initial join record as one complete dynamic item.
-
-        CConversation::CceJoin reads this packed record as status WORD at +0,
-        participant DWORD at +4, role WORD at +8, message limit DWORD at
-        +10, and a counted UTF-16 conference name at +14/+18. The iterator is
-        retained for later chat messages. A full room returns status 8 alone;
-        the complete marker wakes the blocking iterator Next call in both cases.
+        The connection calls this while it holds the send lock. A reply that
+        also reaches the other members of a room must take the room lock, and
+        the room lock is taken before send locks, never after.
         """
+        if selector == CONFSRV_SELECTOR_JOIN:
+            self._pending = (self._deliver_join, (msg_class, request_id, payload))
+        elif selector == CONFSRV_SELECTOR_SEND:
+            self._pending = (self._deliver_message, (msg_class, request_id, payload))
+        else:
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
+        return []
+
+    def flush_pending_events(self):
+        pending, self._pending = self._pending, None
+        if pending is not None:
+            deliver, args = pending
+            deliver(*args)
+
+    def handle_iterator_cancel(self, msg_class, selector, request_id):
+        if self._join_subscription == (msg_class, request_id):
+            self._join_subscription = None
+            self._leave_room()
+
+    def close(self):
+        self._join_subscription = None
+        self._leave_room()
+
+    def _deliver_join(self, msg_class, request_id, payload):
+        """Answer CConversation::CceJoin and publish the roster it joins.
+
+        CceJoin reads the reply record as status WORD at +0, participant DWORD
+        at +4, role WORD at +8, message limit DWORD at +10, and a counted
+        UTF-16 conference name at +14/+18. The iterator stays open and carries
+        every later event. A full room returns status 8 alone; the stream-end
+        marker wakes the blocking Next call in both cases.
+
+        The joiner then gets the whole roster as one type-2 event, and every
+        other member gets a type-4 event for the joiner alone. TEXTCHAT drops
+        text from a participant id it has not been told about, so the roster
+        has to reach a client before that participant speaks.
+        """
+        self._join_subscription = (msg_class, request_id)
         send_params, recv_descriptors = parse_request_params(payload)
         room_id = next(
             (param.value for param in send_params if isinstance(param, DwordParam)),
@@ -534,88 +571,153 @@ class CONFSRVHandler:
                 payload.hex(),
             )
 
-        room = self.content_store.find_app_instance(APP_TEXT_CONFERENCE, room_id)
-        room_name = room.content.name if room is not None else ""
-        conference = room.content.conference if room is not None else None
+        node = self.content_store.find_app_instance(APP_TEXT_CONFERENCE, room_id)
+        conference = node.content.conference if node is not None else None
+        room_name = node.content.name if node is not None else ""
         room_capacity = conference.room_capacity if conference is not None else 0
         message_length = (
             conference.message_length
             if conference is not None
             else DEFAULT_MESSAGE_LENGTH
         )
-        self._leave_room()
-        if room is not None and not _join_room(self, room_id, room_capacity):
-            self._participant_role = None
-            log.info(
-                "join room=%d name=%r capacity=%d status=%d",
-                room_id,
-                room_name,
-                room_capacity,
-                CONFSRV_ROOM_FULL,
-            )
-            return (
-                bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
-                + struct.pack("<H", CONFSRV_ROOM_FULL)
-            )
-        if room is not None:
-            self._joined_room_id = room_id
 
-        name = room_name.encode("utf-16le") + b"\x00\x00"
-        participant_id = self._participant_id or 1
-        username = self.session.user.username.casefold()
-        participant_role = (
-            CONFSRV_ROLE_HOST
-            if room is not None
-            and username
-            and any(host.casefold() == username for host in room.host_usernames)
-            else (
-                CONFSRV_ROLE_PARTICIPANT
-                if conference is None or conference.join_as_participants
-                else CONFSRV_ROLE_SPECTATOR
+        self._leave_room()
+        room = _room_for(room_id)
+        with room.lock:
+            if 0 < room_capacity <= len(room.members):
+                log.info(
+                    "join room=%d name=%r capacity=%d status=%d",
+                    room_id,
+                    room_name,
+                    room_capacity,
+                    CONFSRV_ROOM_FULL,
+                )
+                self._push(
+                    msg_class,
+                    request_id,
+                    bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+                    + struct.pack("<H", CONFSRV_ROOM_FULL),
+                    "join_refused",
+                )
+                return
+
+            self._room = room
+            self._room_id = room_id
+            self._participant_id = room.next_participant_id
+            self._participant_role = _participant_role(node, conference, self.session.user)
+            self._display_name = (
+                self.session.user.display_name or self.session.user.username
             )
-        )
-        self._participant_role = participant_role
-        record = struct.pack(
-            "<HHIHII",
-            CONFSRV_JOINED,
-            0,
-            participant_id,
-            participant_role,
-            message_length,
-            len(name) // 2,
-        ) + name
+            room.next_participant_id += 1
+            room.members.append(self)
+
+            name = room_name.encode("utf-16le") + b"\x00\x00"
+            self._push(
+                msg_class,
+                request_id,
+                bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+                + struct.pack(
+                    "<HHIHII",
+                    CONFSRV_JOINED,
+                    0,
+                    self._participant_id,
+                    self._participant_role,
+                    message_length,
+                    len(name) // 2,
+                )
+                + name,
+                "join",
+            )
+            self._push_event(
+                _build_event(
+                    CONFSRV_EVENT_PARTICIPANT_LIST,
+                    0,
+                    b"".join(member._participant_record() for member in room.members),
+                ),
+                "participant_list",
+            )
+            joined = _build_event(
+                CONFSRV_EVENT_PARTICIPANT_JOINED,
+                self._participant_id,
+                self._participant_record(),
+            )
+            for member in room.members:
+                if member is not self:
+                    member._push_event(joined, "participant_joined")
+            members = len(room.members)
+
         log.info(
             "join room=%d name=%r participant=%d role=%d capacity=%d "
-            "message_limit=%d status=%d",
+            "message_limit=%d members=%d status=%d",
             room_id,
             room_name,
-            participant_id,
-            participant_role,
+            self._participant_id,
+            self._participant_role,
             room_capacity,
             message_length,
+            members,
             CONFSRV_JOINED,
         )
-        return bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]) + record
 
-    def handle_iterator_cancel(self, msg_class, selector, request_id):
-        if self._join_subscription == (msg_class, request_id):
-            self._join_subscription = None
-            self._leave_room()
+    def _deliver_message(self, msg_class, request_id, payload):
+        """Acknowledge CConversation::SendMessageRecord and relay its record.
 
-    def close(self):
-        self._leave_room()
+        Every client-to-server conference message rides selector 2 carrying
+        the same 8-byte header. The sender's own copy comes back over the
+        relay, which is how TEXTCHAT renders it.
+        """
+        self._push(msg_class, request_id, bytes([TAG_END_STATIC]), "send_ack", ack=True)
+        event = self._parse_text_event(request_id, payload)
+        if event is None:
+            return
+        room = self._room
+        if room is None:
+            log.warning("send_text not_joined req_id=%d", request_id)
+            return
+        with room.lock:
+            for member in room.members:
+                member._push_event(event, "text")
 
     def _leave_room(self):
-        room_id = self._joined_room_id
-        if room_id is None:
+        """Drop out of the roster and tell whoever is left."""
+        room, self._room = self._room, None
+        if room is None:
             return
-        with _room_members_lock:
-            members = _room_members.get(room_id)
-            if members is not None:
-                members.discard(self)
-                if not members:
-                    _room_members.pop(room_id, None)
-        self._joined_room_id = None
+        participant_id = self._participant_id
+        self._participant_id = None
+        self._participant_role = None
+        with room.lock:
+            if self in room.members:
+                room.members.remove(self)
+            left = _build_event(CONFSRV_EVENT_PARTICIPANT_LEFT, participant_id)
+            for member in room.members:
+                member._push_event(left, "participant_left")
+            members = len(room.members)
+        log.info(
+            "leave room=%s participant=%s members=%d",
+            self._room_id,
+            participant_id,
+            members,
+        )
+
+    def _participant_record(self):
+        """Pack this member for a TEXTCHAT roster event.
+
+        HandleParticipantListEvent @ TEXTCHAT 0x7F2D54C0 walks the payload in
+        strides of 14 header bytes plus name_length and rejects the whole
+        event with error 0x3A if the last record does not land on its end. The
+        name is not terminated: CreateMemberRecord copies name_length bytes
+        and adds the NUL itself.
+        """
+        name = self._display_name.encode("cp1252", errors="replace")
+        return struct.pack(
+            "<IHIHH",
+            self._participant_id,
+            self._participant_role,
+            len(name),
+            0,
+            0,
+        ) + name
 
     def _parse_text_event(self, request_id, payload):
         send_params, recv_descriptors = parse_request_params(payload)
@@ -625,18 +727,32 @@ class CONFSRVHandler:
             and recv_descriptors == []
         )
         record = send_params[0].data if valid_shape else b""
-        valid_record = (
-            len(record) >= 10
-            and len(record) % 2 == 0
-            and struct.unpack_from("<H", record)[0] == CONFSRV_EVENT_TEXT
-            and record[-2:] == b"\x00\x00"
-        )
-        if not valid_record:
+        if len(record) < 8:
             log.warning(
-                "send_text invalid request req_id=%d params=%d recv=%s record_len=%d",
+                "send invalid request req_id=%d params=%d recv=%s record_len=%d",
                 request_id,
                 len(send_params),
                 [f"0x{tag:02x}" for tag in recv_descriptors],
+                len(record),
+            )
+            return None
+
+        event_type = struct.unpack_from("<H", record)[0]
+        if event_type != CONFSRV_EVENT_TEXT:
+            # CConversation::ErrHostSetStatus rides this selector with a
+            # type-7 record. Host controls are not served yet.
+            log.warning(
+                "send unhandled event_type=%d req_id=%d record_len=%d",
+                event_type,
+                request_id,
+                len(record),
+            )
+            return None
+
+        if len(record) < 10 or len(record) % 2 or record[-2:] != b"\x00\x00":
+            log.warning(
+                "send_text invalid record req_id=%d record_len=%d",
+                request_id,
                 len(record),
             )
             return None
@@ -653,39 +769,57 @@ class CONFSRVHandler:
         )
         return bytes(event)
 
-    def _build_event_push_packets(self, event, server_seq, client_ack):
+    def _push_event(self, event, label):
+        """Deliver one event on this member's retained join iterator."""
+        if self._join_subscription is None:
+            return
         msg_class, request_id = self._join_subscription
-        host_block = build_host_block(
+        self._push(
             msg_class,
-            CONFSRV_SELECTOR_JOIN,
             request_id,
             bytes([TAG_DYNAMIC_STREAM_END]) + event,
-        )
-        return build_service_packet(
-            self.pipe_idx, host_block, server_seq, client_ack,
+            label,
         )
 
+    def _push(self, msg_class, request_id, reply_payload, label, ack=False):
+        if self.connection is None:
+            return
+        selector = CONFSRV_SELECTOR_SEND if ack else CONFSRV_SELECTOR_JOIN
+        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
+        try:
+            self.connection.push_service_data(
+                self.pipe_idx, host_block, f"svc={self.svc_name} {label}",
+            )
+        except OSError as exc:
+            log.warning(
+                "push failed label=%s participant=%s error=%s",
+                label,
+                self._participant_id,
+                exc,
+            )
 
-def _build_participants_event(participant_id, role, display_name):
-    name = display_name.encode("cp1252", errors="replace")
-    participant = struct.pack(
-        "<IHIHH",
-        participant_id,
-        role,
-        len(name),
-        0,
-        0,
-    ) + name
-    return struct.pack("<HHI", CONFSRV_EVENT_PARTICIPANTS, 0, 0) + participant
+
+def _build_event(event_type, sender_id, payload=b""):
+    """Pack CONFAPI's 8-byte event header: type WORD, pad WORD, sender DWORD.
+
+    QueueServerEvent copies the DWORD at +4 into CConfMsg+8 and the rest into
+    the message payload. TEXTCHAT's participant-left handler reads only that
+    DWORD, so a leave event carries no payload at all.
+    """
+    return struct.pack("<HHI", event_type, 0, sender_id) + payload
 
 
-def _join_room(handler, room_id, capacity):
-    with _room_members_lock:
-        members = _room_members.setdefault(room_id, weakref.WeakSet())
-        if capacity > 0 and handler not in members and len(members) >= capacity:
-            return False
-        members.add(handler)
-        return True
+def _participant_role(node, conference, user):
+    username = user.username.casefold()
+    if (
+        node is not None
+        and username
+        and any(host.casefold() == username for host in node.host_usernames)
+    ):
+        return CONFSRV_ROLE_HOST
+    if conference is None or conference.join_as_participants:
+        return CONFSRV_ROLE_PARTICIPANT
+    return CONFSRV_ROLE_SPECTATOR
 
 
 def _build_stored_conference_properties(content_store, record_id):
