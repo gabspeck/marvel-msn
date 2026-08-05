@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "olefile>=0.46",
     "pillow>=9.2",
+    "pyspnego>=0.12.1",
 ]
 
 [project.optional-dependencies]
