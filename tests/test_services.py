@@ -59,6 +59,7 @@ from server.services.conference import (
     CONFSRV_EVENT_PARTICIPANT_JOINED,
     CONFSRV_EVENT_PARTICIPANT_LEFT,
     CONFSRV_EVENT_PARTICIPANT_LIST,
+    CONFSRV_EVENT_ROLE,
     CONFSRV_EVENT_TEXT,
     CONFSRV_JOINED,
     CONFSRV_ROLE_HOST,
@@ -493,6 +494,20 @@ def _joined_handler(pipe_idx, session, room_id, content_store=None, request_id=7
 def _send_text(handler, text, request_id=8, msg_class=0x01):
     """Run one CONFSRV type-0 send through the deferred-reply path."""
     record = struct.pack("<HHI", CONFSRV_EVENT_TEXT, 0, 99) + text.encode("utf-16le") + b"\x00\x00"
+    handler.handle_request(
+        msg_class,
+        CONFSRV_SELECTOR_SEND,
+        request_id,
+        b"\x04" + bytes([0x80 | len(record)]) + record,
+        0,
+        0,
+    )
+    handler.flush_pending_events()
+
+
+def _set_role(handler, target_id, role, request_id=9, msg_class=0x01):
+    """Run one CONFSRV type-7 host-control record, as ErrHostSetStatus packs it."""
+    record = struct.pack("<HHIIH", CONFSRV_EVENT_ROLE, 0, 0, target_id, role)
     handler.handle_request(
         msg_class,
         CONFSRV_SELECTOR_SEND,
@@ -1063,6 +1078,63 @@ class TestConferenceStartup(unittest.TestCase):
         )
         first.close()
         second.close()
+
+    def test_a_host_demotes_a_participant_to_spectator(self):
+        reset_app_store()
+        host, host_connection = _joined_handler(11, signed_in(), 1)
+        member, member_connection = _joined_handler(12, signed_in(SUBSCRIBER), 1)
+        host_connection.packets.clear()
+        host_connection.labels.clear()
+        member_connection.packets.clear()
+        member_connection.labels.clear()
+
+        _set_role(host, member._participant_id, CONFSRV_ROLE_SPECTATOR)
+
+        # The record reaches both, and TEXTCHAT wants a 6-byte payload.
+        self.assertEqual(host_connection.labels, ["svc=CONFSRV send_ack", "svc=CONFSRV role"])
+        self.assertEqual(member_connection.labels, ["svc=CONFSRV role"])
+        pushed = _pushed_payloads(member_connection)[0]
+        event_type, _padding, sender = struct.unpack_from("<HHI", pushed, 1)
+        target_id, role = struct.unpack_from("<IH", pushed, 9)
+        self.assertEqual(event_type, CONFSRV_EVENT_ROLE)
+        self.assertEqual(sender, host._participant_id)
+        self.assertEqual((target_id, role), (2, CONFSRV_ROLE_SPECTATOR))
+        self.assertEqual(len(pushed) - 9, 6)
+        self.assertEqual(member._participant_role, CONFSRV_ROLE_SPECTATOR)
+
+        # A spectator is silent, and a later roster carries the new role.
+        member_connection.packets.clear()
+        _send_text(member, "hello")
+        self.assertEqual(member_connection.labels[-1], "svc=CONFSRV send_ack")
+        self.assertEqual(len(member_connection.packets), 1)
+
+        _later, later_connection = _joined_handler(13, signed_in(SUBSCRIBER), 1)
+        self.assertEqual(
+            _parse_participants(_pushed_payloads(later_connection)[1])[1][1],
+            CONFSRV_ROLE_SPECTATOR,
+        )
+
+    def test_role_changes_are_refused_unless_a_host_asks(self):
+        reset_app_store()
+        host, _host_connection = _joined_handler(11, signed_in(), 1)
+        member, member_connection = _joined_handler(12, signed_in(SUBSCRIBER), 1)
+        other, _other_connection = _joined_handler(13, signed_in(SUBSCRIBER), 1)
+        member_connection.packets.clear()
+        member_connection.labels.clear()
+
+        # A participant may not set anyone's role.
+        _set_role(member, other._participant_id, CONFSRV_ROLE_SPECTATOR)
+        self.assertEqual(other._participant_role, CONFSRV_ROLE_PARTICIPANT)
+
+        # A host may not demote another host, invent a role, or name a stranger.
+        _set_role(host, host._participant_id, CONFSRV_ROLE_SPECTATOR)
+        _set_role(host, member._participant_id, CONFSRV_ROLE_HOST)
+        _set_role(host, 99, CONFSRV_ROLE_SPECTATOR)
+
+        self.assertEqual(host._participant_role, CONFSRV_ROLE_HOST)
+        self.assertEqual(member._participant_role, CONFSRV_ROLE_PARTICIPANT)
+        # Only the acks went out; no role event was relayed.
+        self.assertEqual(member_connection.labels, ["svc=CONFSRV send_ack"])
 
     def test_leaving_tells_the_members_left_behind(self):
         reset_app_store()

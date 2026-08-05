@@ -665,18 +665,129 @@ class CONFSRVHandler:
         Every client-to-server conference message rides selector 2 carrying
         the same 8-byte header. The sender's own copy comes back over the
         relay, which is how TEXTCHAT renders it.
+
+        The acknowledgement is always success. SendMessageRecord turns an RPC
+        error into result 3, and TEXTCHAT reads result 3 as a lost connection:
+        it shows error 0x24 and closes the chat window. A record the server
+        refuses is dropped, not failed.
         """
         self._push(msg_class, request_id, bytes([TAG_END_STATIC]), "send_ack", ack=True)
-        event = self._parse_text_event(request_id, payload)
-        if event is None:
+        record = self._parse_record(request_id, payload)
+        if record is None:
+            return
+        event_type = struct.unpack_from("<H", record)[0]
+        if event_type == CONFSRV_EVENT_TEXT:
+            self._relay_text(request_id, record)
+        elif event_type == CONFSRV_EVENT_ROLE:
+            self._apply_role_change(request_id, record)
+        else:
+            log.warning(
+                "send unhandled event_type=%d req_id=%d record_len=%d",
+                event_type,
+                request_id,
+                len(record),
+            )
+
+    def _relay_text(self, request_id, record):
+        if len(record) < 10 or len(record) % 2 or record[-2:] != b"\x00\x00":
+            log.warning(
+                "send_text invalid record req_id=%d record_len=%d",
+                request_id,
+                len(record),
+            )
             return
         room = self._room
         if room is None:
             log.warning("send_text not_joined req_id=%d", request_id)
             return
+
+        event = bytearray(record)
+        struct.pack_into("<I", event, 4, self._participant_id or 0)
+        text = event[8:-2].decode("utf-16le", errors="replace")
         with room.lock:
+            # A spectator watches and does not speak. TEXTCHAT stops its own
+            # input box, so this only catches a demotion the client has not
+            # processed yet.
+            if self._participant_role == CONFSRV_ROLE_SPECTATOR:
+                log.warning(
+                    "send_text refused req_id=%d participant=%s reason=spectator",
+                    request_id,
+                    self._participant_id,
+                )
+                return
+            log.info(
+                "send_text req_id=%d participant=%d chars=%d text=%r",
+                request_id,
+                self._participant_id or 0,
+                len(text),
+                text,
+            )
             for member in room.members:
-                member._push_event(event, "text")
+                member._push_event(bytes(event), "text")
+
+    def _apply_role_change(self, request_id, record):
+        """Serve CConversation::ErrHostSetStatus.
+
+        SetSelectedMembersRole @ TEXTCHAT 0x7F2D4828 sends one record per
+        selected member, only ever role 0 or 1, and refuses to touch a host
+        itself. HandleParticipantRoleEvent @ 0x7F2D56A5 wants a payload of
+        exactly 6 bytes — participant DWORD then role WORD — and shows error
+        0x3A for any other length. Both the target and the rest of the room
+        need the event: CONFAPI updates the target's own cached role from it.
+        """
+        if len(record) != 14:
+            log.warning(
+                "set_role invalid record req_id=%d record_len=%d",
+                request_id,
+                len(record),
+            )
+            return
+        target_id, role = struct.unpack_from("<IH", record, 8)
+        room = self._room
+        if room is None:
+            log.warning("set_role not_joined req_id=%d", request_id)
+            return
+
+        with room.lock:
+            refusal = self._role_change_refusal(room, target_id, role)
+            if refusal is not None:
+                log.warning(
+                    "set_role refused req_id=%d participant=%s target=%d role=%d "
+                    "reason=%s",
+                    request_id,
+                    self._participant_id,
+                    target_id,
+                    role,
+                    refusal,
+                )
+                return
+
+            target = _member(room, target_id)
+            target._participant_role = role
+            event = bytearray(record)
+            struct.pack_into("<I", event, 4, self._participant_id)
+            log.info(
+                "set_role req_id=%d host=%d target=%d role=%d",
+                request_id,
+                self._participant_id,
+                target_id,
+                role,
+            )
+            for member in room.members:
+                member._push_event(bytes(event), "role")
+
+    def _role_change_refusal(self, room, target_id, role):
+        """Why this member may not set `target_id` to `role`, or None."""
+        if self._participant_role != CONFSRV_ROLE_HOST:
+            return "not_host"
+        if role not in (CONFSRV_ROLE_SPECTATOR, CONFSRV_ROLE_PARTICIPANT):
+            return "role"
+        target = _member(room, target_id)
+        if target is None:
+            return "unknown_target"
+        if target._participant_role == CONFSRV_ROLE_HOST:
+            return "target_is_host"
+        return None
 
     def _leave_room(self):
         """Drop out of the roster and tell whoever is left."""
@@ -719,7 +830,8 @@ class CONFSRVHandler:
             0,
         ) + name
 
-    def _parse_text_event(self, request_id, payload):
+    def _parse_record(self, request_id, payload):
+        """The one variable parameter selector 2 carries, header checked."""
         send_params, recv_descriptors = parse_request_params(payload)
         valid_shape = (
             len(send_params) == 1
@@ -736,38 +848,7 @@ class CONFSRVHandler:
                 len(record),
             )
             return None
-
-        event_type = struct.unpack_from("<H", record)[0]
-        if event_type != CONFSRV_EVENT_TEXT:
-            # CConversation::ErrHostSetStatus rides this selector with a
-            # type-7 record. Host controls are not served yet.
-            log.warning(
-                "send unhandled event_type=%d req_id=%d record_len=%d",
-                event_type,
-                request_id,
-                len(record),
-            )
-            return None
-
-        if len(record) < 10 or len(record) % 2 or record[-2:] != b"\x00\x00":
-            log.warning(
-                "send_text invalid record req_id=%d record_len=%d",
-                request_id,
-                len(record),
-            )
-            return None
-
-        event = bytearray(record)
-        struct.pack_into("<I", event, 4, self._participant_id or 0)
-        text = event[8:-2].decode("utf-16le", errors="replace")
-        log.info(
-            "send_text req_id=%d participant=%d chars=%d text=%r",
-            request_id,
-            self._participant_id or 0,
-            len(text),
-            text,
-        )
-        return bytes(event)
+        return record
 
     def _push_event(self, event, label):
         """Deliver one event on this member's retained join iterator."""
@@ -807,6 +888,17 @@ def _build_event(event_type, sender_id, payload=b""):
     DWORD, so a leave event carries no payload at all.
     """
     return struct.pack("<HHI", event_type, 0, sender_id) + payload
+
+
+def _member(room, participant_id):
+    return next(
+        (
+            member
+            for member in room.members
+            if member._participant_id == participant_id
+        ),
+        None,
+    )
 
 
 def _participant_role(node, conference, user):
