@@ -1,6 +1,7 @@
 """LOGSRV service handler: login, password change, service discovery."""
 
 import logging
+import secrets
 import struct
 
 from ..config import (
@@ -15,12 +16,15 @@ from ..mpc import (
     build_discovery_payload,
     build_host_block,
     build_service_packet,
+    build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_var,
+    build_tagged_reply_word,
     parse_request_params,
 )
 from ..session import Session
 from ..store import app_store as _default_store
+from . import _ntlm
 from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
@@ -35,9 +39,11 @@ LOGSRV_SELECTOR_PM_COMMIT = 0x0B                   # payment-method commit (0x84
 LOGSRV_SELECTOR_BILLING_COMMIT = 0x0C              # billing commit (0x84 var + status)
 LOGSRV_SELECTOR_POST_SIGNUP_QUERY = 0x0D           # post-signup phonebook/server query
 LOGSRV_SELECTOR_EXISTING_MEMBER_PHONEBOOK = 0x0E   # existing-member phonebook fetch
-# OSR2 / MSN 2.5 login: NTLM NEGOTIATE/CHALLENGE/AUTHENTICATE over selector 0x0F.
-# Current stub short-circuits after NEGOTIATE — see project_logsrv_osr2_ntlm.
-LOGSRV_SELECTOR_NTLM_LOGIN = 0x0F
+# OSR2 / MSN 2.5 login. The NTLM exchange runs over two selectors, one leg each:
+# 0x0F carries NEGOTIATE and answers with CHALLENGE, 0x10 carries AUTHENTICATE
+# and answers with the sign-in result.
+LOGSRV_SELECTOR_NTLM_NEGOTIATE = 0x0F
+LOGSRV_SELECTOR_NTLM_AUTHENTICATE = 0x10
 
 # The credential blob the client sends as the second send-param of selector
 # 0x00. `GUIDE.EXE!VerifyAccountViaLogSrv` @ 0x04304024 builds it out of three
@@ -115,8 +121,10 @@ class LOGSRVHandler:
 
         if selector == LOGSRV_SELECTOR_LOGIN:
             reply_payload = _handle_login(payload, self.session)
-        elif selector == LOGSRV_SELECTOR_NTLM_LOGIN:
-            reply_payload = _handle_osr2_bootstrap(payload)
+        elif selector == LOGSRV_SELECTOR_NTLM_NEGOTIATE:
+            reply_payload = _handle_ntlm_negotiate(payload, self.session)
+        elif selector == LOGSRV_SELECTOR_NTLM_AUTHENTICATE:
+            reply_payload = _handle_ntlm_authenticate(payload, self.session)
         elif selector == LOGSRV_SELECTOR_PASSWORD_CHANGE:
             reply_payload = _handle_password_change(payload, self.session)
         elif selector == LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER:
@@ -160,6 +168,15 @@ def _build_bootstrap_payload(result):
 _BOOTSTRAP_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_OK)
 _BAD_MEMBER_ID_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_BAD_MEMBER_ID)
 _BAD_PASSWORD_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_BAD_PASSWORD)
+
+# NTLM MessageType values the two sign-in selectors carry.
+_NTLM_NEGOTIATE = 1
+_NTLM_AUTHENTICATE = 3
+
+# Selector 0x0f owes a 0x84 variable whatever happens. An empty one carries no
+# token header, which is the only shape distinguishable from a real CHALLENGE
+# without inventing a status field.
+_NTLM_NO_CHALLENGE_REPLY = build_tagged_reply_var(0x84, b"")
 
 
 def _handle_login(request_payload, session):
@@ -409,17 +426,127 @@ def _handle_signup_query(request_payload):
     return build_tagged_reply_var(0x84, b"")
 
 
-def _handle_osr2_bootstrap(request_payload):
-    """LOGSRV selector 0x0f — OSR2 (MSN 2.5+) login bootstrap.
+def _handle_ntlm_negotiate(request_payload, session):
+    """LOGSRV selector 0x0f — first leg of the OSR2 (MSN 2.5) sign-in.
 
-    Replaces selector 0x00 for the newer client. Request is 240 bytes
-    (vs 103 for 0x00) so it carries extra account/machine params we
-    haven't RE'd yet. Probe with the old 7-dword + 0x84 reply shape and
-    log the request bytes so we can diff against 0x00 offline.
+    Replaces the plaintext credential blob of selector 0x00. The client sends
+    an NTLM NEGOTIATE and asks for a single 0x84 variable back. The answer is a
+    CHALLENGE carrying the nonce that the AUTHENTICATE on selector 0x10 has to
+    respond to.
     """
-    log.info("osr2_bootstrap payload_len=%d hex=%s", len(request_payload), request_payload.hex())
-    log.info("osr2_bootstrap_reply status=0 dword_count=7 padding=16B")
-    return _BOOTSTRAP_PAYLOAD
+    token = _ntlm_request_token(request_payload)
+    if token is None or _ntlm.token_message_type(token) != _NTLM_NEGOTIATE:
+        return _NTLM_NO_CHALLENGE_REPLY
+
+    server_challenge = secrets.token_bytes(_ntlm.CHALLENGE_LEN)
+    flags, challenge_token = _ntlm.build_challenge(token, server_challenge)
+    session.ntlm_challenge = server_challenge
+    session.ntlm_flags = flags
+    log.info(
+        "ntlm_challenge flags=0x%08x server_challenge=%s token_len=%d",
+        flags,
+        server_challenge.hex(),
+        len(challenge_token),
+    )
+    return build_tagged_reply_var(0x84, _ntlm.wrap_token(challenge_token))
+
+
+def _handle_ntlm_authenticate(request_payload, session):
+    """LOGSRV selector 0x10 — second leg. Validates the AUTHENTICATE and signs in.
+
+    The OSR2 client sends only an LM response, leaving NtChallengeResponse
+    empty, and names itself in the Workstation field. It asks for a 0x82 word
+    and a 0x83 dword back rather than another token.
+    """
+    token = _ntlm_request_token(request_payload)
+    if token is None or _ntlm.token_message_type(token) != _NTLM_AUTHENTICATE:
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+
+    server_challenge = session.ntlm_challenge
+    if server_challenge is None:
+        log.warning("ntlm_authenticate arrived with no challenge on this connection")
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+
+    auth = _ntlm.parse_authenticate(token, session.ntlm_flags)
+    if auth is None:
+        log.warning("ntlm_authenticate token too short len=%d", len(token))
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+
+    log.info(
+        "ntlm_authenticate user=%r domain=%r workstation=%r nt_len=%d lm_len=%d",
+        auth.user_name,
+        auth.domain_name,
+        auth.workstation,
+        len(auth.nt_response),
+        len(auth.lm_response),
+    )
+
+    user = _default_store.users.get_user(auth.user_name)
+    if user is None:
+        log.info(
+            "ntlm_reply result=%d reason=unknown_member_id member_id=%r",
+            LOGIN_RESULT_BAD_MEMBER_ID,
+            auth.user_name,
+        )
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+
+    if not _ntlm.password_matches(auth, server_challenge, user.password):
+        log.info(
+            "ntlm_reply result=%d reason=wrong_password member_id=%r",
+            LOGIN_RESULT_BAD_PASSWORD,
+            user.username,
+        )
+        log.log(TRACE, "ntlm_authenticate token=%s", token.hex())
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_PASSWORD)
+
+    session.sign_in(user)
+    session.ntlm_challenge = None
+    log.info(
+        "ntlm_reply result=0 member_id=%r display_name=%r rights=0x%x",
+        user.username,
+        user.display_name,
+        user.rights,
+    )
+    return _ntlm_result_reply(LOGIN_RESULT_OK)
+
+
+def _ntlm_request_token(request_payload):
+    """Pull the SSPI token out of an NTLM request, or None when it holds none."""
+    send_params, recv_descriptors = parse_request_params(request_payload)
+    blob = next((p.data for p in send_params if isinstance(p, VarParam)), None)
+    if blob is None:
+        log.warning("ntlm no variable param params=%d", len(send_params))
+        log.log(TRACE, "ntlm_request payload=%s", request_payload.hex())
+        return None
+
+    header_type, token = _ntlm.unwrap_token(blob)
+    message_type = _ntlm.token_message_type(token)
+    log.info(
+        "ntlm_request header_type=%s message_type=%s token_len=%d recv=%s",
+        header_type,
+        message_type,
+        len(token),
+        [f"0x{d:02x}" for d in recv_descriptors],
+    )
+    if message_type is None:
+        log.warning("ntlm token is not NTLMSSP head=%s", token[:16].hex())
+        return None
+    return token
+
+
+def _ntlm_result_reply(result):
+    """Build the selector 0x10 reply: a 0x82 word and a 0x83 dword.
+
+    The dword carries the sign-in result, in the vocabulary selector 0x00
+    already uses — 0 signs in, 2 raises "This member ID is not valid.", 3
+    raises "Password not valid. Please type it again." Holding the word at 0
+    while the dword refused still produced the password box, which is what
+    separates the two fields. What the word itself means stays unread.
+    """
+    return build_static_reply(
+        build_tagged_reply_word(0),
+        build_tagged_reply_dword(result),
+    )
 
 
 def _handle_password_change(request_payload, session):

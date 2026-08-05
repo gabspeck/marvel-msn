@@ -18,6 +18,13 @@ class Session:
 
     def __init__(self):
         self.user = ANONYMOUS_USER
+        # Server nonce and negotiated flags held between the NTLM NEGOTIATE on
+        # LOGSRV selector 0x0f and the AUTHENTICATE on 0x10. They sit on the
+        # connection rather than the pipe so a client that reopens LOGSRV
+        # mid-exchange still matches. The short AUTHENTICATE this client sends
+        # carries no flags of its own, so the CHALLENGE's are what verify it.
+        self.ntlm_challenge = None
+        self.ntlm_flags = 0
 
     @property
     def is_authenticated(self):
