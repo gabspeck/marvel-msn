@@ -111,7 +111,10 @@ PROP_CHILD_COUNT = "nc"
 PROP_PARENT_COUNT = "np"
 PROP_RATING = "o"
 PROP_OWNER = "on"
-PROP_MAYBE_SIZE_OR_LEGACY_TITLE = "p"
+# Byte count, always inline DWORD. Two independent writers confirm it: the
+# DSNED Banner page stores the banner's file size and the DLRed page stores the
+# compressed payload's. MOSSHELL reads it through FormatSizeString.
+PROP_SIZE = "p"
 PROP_LANGUAGE = "q"
 PROP_TOPICS = "r"
 PROP_PEOPLE = "s"
@@ -498,14 +501,14 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
                     struct.pack("<I", _default_store.content.count_parents(node.node_id)),
                 )
             )
-        elif name == PROP_MAYBE_SIZE_OR_LEGACY_TITLE:
+        elif name == PROP_SIZE:
             # `p` = byte count, read inline as DWORD. Feeds MOSSHELL
             # FormatSizeString (listview Size column + Properties dialog Size
             # field — same vtable slot 0x140 either way).
             out.append(
                 (
                     0x03,
-                    PROP_MAYBE_SIZE_OR_LEGACY_TITLE,
+                    PROP_SIZE,
                     struct.pack("<I", content.size_bytes & 0xFFFFFFFF),
                 )
             )
@@ -1158,7 +1161,7 @@ def _build_dirsrv_child_node(content_store, parent, properties):
             owner=_property_text(properties, PROP_OWNER),
             created=_property_text(properties, PROP_CREATED),
             modified=_property_text(properties, PROP_LAST_CHANGED),
-            size_bytes=_property_int(properties, PROP_MAYBE_SIZE_OR_LEGACY_TITLE, 0),
+            size_bytes=_property_int(properties, PROP_SIZE, 0),
         ),
         browse_flags=browse_flags,
         delegate=delegate,
@@ -1208,7 +1211,7 @@ _EDITABLE_PROPERTIES = {
     # `(currency & 0xFF) | (amount << 8)` before the SetProperty call, so the
     # server only has to round-trip the word.
     PROP_PRICE: ("price_dword", lambda v: v if isinstance(v, int) else 0),
-    PROP_MAYBE_SIZE_OR_LEGACY_TITLE: (
+    PROP_SIZE: (
         "size_bytes",
         lambda v: v if isinstance(v, int) else 0,
     ),
