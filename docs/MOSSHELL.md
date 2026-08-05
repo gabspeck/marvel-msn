@@ -809,8 +809,9 @@ Since the 'T' branch ignores `'b'`, what happens after
 
 - **`c = 7`** (APP_DOWNLOAD_AND_RUN) — intended design. `Exec` takes the
   `CreateOleWorkerThread(ExecUrlWorkerProc)` branch at `0x7F3FED53`.
-  The worker reads the node's `'fn'` property, FTM-downloads the named
-  file to a temp path, then calls `HRMOSExec(7, "-\"<tempfile>\"")`.
+  `DownloadContentToTempPath @ 0x7F3FE871` does the work and is worth
+  reading in full — see §7.4.3. It downloads the payload to a temp path,
+  and the worker then calls `HRMOSExec(7, "-\"<tempfile>\"")`.
   App #7's registered Filename is `dnr.exe`; DNR's command-line parser
   (`DNR.EXE 0x7F591046`, the entire EXE is 3 functions +
   `ShellExecuteExA`) only accepts the `-"<quotedpath>"` form, then
@@ -831,6 +832,61 @@ Notably: the `-MOS:…` argument format is only produced on the
 `c != 7` sync path. The `dnr.exe` worker path never sees it — the
 worker constructs its own `-"<tempfile>"` command line after the
 download completes, matching DNR's parser.
+
+#### 7.4.3 `DownloadContentToTempPath` @ `0x7F3FE871` — pulling the payload
+
+Two node properties do different jobs here, and mixing them up is easy:
+`fn` names the **local** file, `fi` identifies the **remote** one.
+
+1. `GetTempPathA`, then `GetProperty("fn", …)` appends the base name the
+   DLRed page stored. If that path already exists, it keeps the extension
+   and swaps in a `GetTempFileNameA` stem so nothing is overwritten.
+2. `GetPropSz("e", …)` copies the node's display name — this becomes the
+   transfer's label in the FTM progress UI.
+3. `LoadAndCallW(4, "HrGetXferService", "FTM", &svc)`.
+4. Node vtable `+0x7C` — `CMosTreeNode::GetShabbyViaFtm @ 0x7F3FD800` —
+   with `("fi", <local path>, <display name>)`.
+
+`GetShabbyViaFtm` reads `zc` as a DWORD (defaulting to 0 when the read
+fails or is not 4 bytes long) and calls:
+
+```
+HrFtmDownloadWithUI(<local path>, "DIRSRV", &fri, 0, <display name>, zc, 1, 7, 1)
+```
+
+`fri` is 16 bytes, zeroed first:
+
+| Offset | Contents |
+|---:|---|
+| `+0x00` | node `+0x1C` — the **high** half of the node's wire mnid |
+| `+0x04` | node `+0x18` — the **low** half |
+| `+0x08` | the property name, ASCII, 8 bytes (`"fi"`) |
+
+The two mnid halves are stored in the reverse of their wire order, so a
+node the server knows as `field_0:field_8` arrives as
+`[field_8][field_0]`. FTMAPI's `CXferFile::SetFcfi @ 0x7F6B2BD9` copies
+the service name to offset 0 of the client file id and this identifier to
+offset `0x20`, which is the same slot MOSAF uses for a BBS attachment.
+
+Transfer shape, from `CXferFile::HrStartDownload @ FTMAPI 0x7F6B2565`:
+
+- With the reply's fast-path flag (bit 1) set, the whole transfer comes
+  back from `HrBillClient` only when size2 is at most `0x3CA` (970). Above
+  that the client seeks the local file to 970 and streams the remainder.
+- With the flag clear it goes straight to a **selector 0x01** request from
+  byte zero, sending the 68-byte client file id and expecting a reply with
+  at least 8 static bytes whose first DWORD is non-negative. It then takes
+  the request's dynamic iterator (`+0x48`).
+- `CXferFile::HrQueryProgress @ 0x7F6B27D7` pumps that iterator, writing
+  each chunk to the file. `0x8B0B0009` means nothing is ready yet;
+  `0x0B0B000B` ends the transfer.
+- Reply DWORD 5 selects the unpack step. `3` runs
+  `HrMos2DecompFile @ 0x7F6B34A8`, the inverse of the `HrMos2CompFile` the
+  DLRed page ran before uploading.
+
+A compressed program is always past the 970-byte window, so the practical
+path is: fast-path flag clear, unpack method 3, payload on the
+selector-0x01 iterator.
 
 ## 8. Plug-in hand-off
 
