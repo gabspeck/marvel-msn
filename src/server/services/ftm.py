@@ -17,6 +17,11 @@ Two call patterns are covered:
   resource identifier for an attachment node. Server preserves MOSAF's
   local filename and returns the uploaded MOS2 container for FTMAPI to
   decompress.
+
+- MOSSHELL's Download-and-Run path: client sends name="DIRSRV" plus a
+  file resource identifier naming a node and one of its properties.
+  Server resolves the property to its uploaded shabby and streams the
+  compressed payload on the selector-0x01 iterator.
 """
 
 import logging
@@ -24,23 +29,26 @@ import struct
 from dataclasses import replace
 from pathlib import Path
 
-from ..config import FTM_INTERFACE_GUIDS
+from ..config import FTM_INTERFACE_GUIDS, TAG_DYNAMIC_STREAM_END, TAG_END_STATIC
 from ..models import VarParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
+    build_tagged_reply_dword,
     build_tagged_reply_var,
     parse_request_params,
 )
 from ..session import Session
 from ..store import app_store as _default_store
+from . import shabby
 from ._dispatch import log_unhandled_selector
 
 log = logging.getLogger(__name__)
 
 FTM_SELECTOR_REQUEST_DOWNLOAD = 0x00
+FTM_SELECTOR_START_DOWNLOAD = 0x01
 FTM_SELECTOR_BILL_CLIENT = 0x03
 FTM_CLIENT_FILE_ID_SIZE = 60
 FTM_FILENAME_BYTES = 32
@@ -67,7 +75,14 @@ FTM_REQUEST_REPLY_FLAGS = (
 FTM_FALLBACK_FILENAME = "plans.txt"
 FTM_BBS_SOURCE = "BBS"
 FTM_BBS_FRI_KIND = 2
-FTM_BBS_UNPACK_METHOD = 3
+# Reply dword 5. FTMAPI runs HrMos2DecompFile @ 0x7F6B34A8 over the received
+# file, which is the inverse of the HrMos2CompFile every uploader ran.
+FTM_MOS2_UNPACK_METHOD = 3
+
+FTM_DIRSRV_SOURCE = "DIRSRV"
+# The only property MOSSHELL asks for over FTM. DownloadContentToTempPath @
+# 0x7F3FE871 hardcodes it for the Download-and-Run worker.
+FTM_DIRSRV_FILE_PROPERTY = "fi"
 
 _SIGNUP_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "signup"
 
@@ -108,23 +123,40 @@ class FTMHandler:
         if selector == FTM_SELECTOR_REQUEST_DOWNLOAD:
             filename, content = _resolve_ftm_target(payload)
             log.info("request_download filename=%s content_len=%d", filename, len(content))
-            is_bbs_attachment = filename == FTM_BBS_SOURCE
+            source_names_the_file = filename in (FTM_BBS_SOURCE, FTM_DIRSRV_SOURCE)
+            # A DIRSRV payload is always bigger than the 970-byte fast-path
+            # window CXferFile::HrStartDownload @ FTMAPI 0x7F6B2565 allows, and
+            # the caller already chose the local path, so it takes neither the
+            # HrBillClient shortcut nor a filename override.
+            is_streamed = filename == FTM_DIRSRV_SOURCE
+            unpack_method = (
+                FTM_MOS2_UNPACK_METHOD if source_names_the_file else 0
+            )
             reply_payload = _build_request_download_reply(
                 filename,
                 len(content),
-                unpack_method=FTM_BBS_UNPACK_METHOD if is_bbs_attachment else 0,
-                override_filename=not is_bbs_attachment,
+                unpack_method=unpack_method,
+                override_filename=not source_names_the_file,
+                fast_path=not is_streamed,
             )
-            flags = FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH
-            if not is_bbs_attachment:
+            flags = FTM_FLAG_HAS_UNPACK_METHOD
+            if not is_streamed:
+                flags |= FTM_FLAG_FAST_PATH
+            if not source_names_the_file:
                 flags |= FTM_FLAG_HAS_FILENAME
             log.info(
                 "request_download_reply status=0 size=%d flags=0x%02x unpack=%d filename=%r",
                 len(content),
                 flags,
-                FTM_BBS_UNPACK_METHOD if is_bbs_attachment else 0,
-                None if is_bbs_attachment else filename,
+                unpack_method,
+                None if source_names_the_file else filename,
             )
+        elif selector == FTM_SELECTOR_START_DOWNLOAD:
+            filename, content = _resolve_ftm_target(payload)
+            log.info(
+                "start_download source=%s bytes=%d", filename, len(content)
+            )
+            reply_payload = _build_start_download_reply(content)
         elif selector == FTM_SELECTOR_BILL_CLIENT:
             _, content = _resolve_ftm_target(payload, record_download=True)
             log.info("bill_client content_len=%d", len(content))
@@ -188,6 +220,9 @@ def _resolve_ftm_target(payload, *, record_download=False):
     if source == FTM_BBS_SOURCE:
         return source, _resolve_bbs_attachment(cfi, record_download=record_download)
 
+    if source == FTM_DIRSRV_SOURCE:
+        return source, _resolve_dirsrv_property_file(cfi)
+
     content = _read_signup_file(source)
     if content is not None:
         return source, content
@@ -246,6 +281,48 @@ def _resolve_bbs_attachment(cfi, *, record_download=False):
     return content
 
 
+def _resolve_dirsrv_property_file(cfi):
+    """Resolve MOSSHELL's DIRSRV file request to the shabby a property names.
+
+    `CMosTreeNode::GetShabbyViaFtm` @ MOSSHELL 0x7F3FD800 builds the 16-byte
+    file resource identifier as `[node+0x1c][node+0x18][property name]` — the
+    two halves of the node's wire mnid in reverse order, then up to 8 bytes of
+    ASCII property name. The Download-and-Run worker
+    (`DownloadContentToTempPath` @ 0x7F3FE871) always names `fi`, so the blob
+    is the compressed payload the DLRed page uploaded through AddShabby.
+    """
+    field_8, field_0 = struct.unpack_from("<II", cfi, FTM_FILENAME_BYTES)
+    raw_name = cfi[FTM_FILENAME_BYTES + 8 : FTM_FILENAME_BYTES + 16]
+    prop = raw_name.split(b"\x00", 1)[0].decode("ascii", errors="replace")
+    node_id = f"{field_0}:{field_8}"
+    log.info("resolve_dirsrv_file node=%s property=%r", node_id, prop)
+
+    if prop != FTM_DIRSRV_FILE_PROPERTY:
+        log.warning("resolve_dirsrv_file unsupported property=%r", prop)
+        return b""
+
+    # An unknown id yields a placeholder node, not None — match on the id it
+    # came back with, the same way SetProperties does.
+    node = _default_store.content.get_node(node_id)
+    if node is None or node.node_id != node_id:
+        log.warning("resolve_dirsrv_file unknown node=%s", node_id)
+        return b""
+
+    shabby_id = node.content.dnr_shabby_id
+    if not shabby_id:
+        log.warning("resolve_dirsrv_file node=%s carries no file", node_id)
+        return b""
+
+    blob = shabby.load_shabby_bytes(shabby_id) or b""
+    log.info(
+        "resolve_dirsrv_file node=%s shabby_id=0x%08x bytes=%d",
+        node_id,
+        shabby_id,
+        len(blob),
+    )
+    return blob
+
+
 def _encode_reply_filename(filename):
     """Encode the echoed local filename safely for the reply buffer."""
     encoded = filename.encode("ascii", errors="ignore")[: FTM_FILENAME_BYTES - 1]
@@ -254,12 +331,35 @@ def _encode_reply_filename(filename):
     return encoded + b"\x00"
 
 
+def _build_start_download_reply(content):
+    """HrStartDownload reply: two status dwords, then the file on the iterator.
+
+    `CXferFile::HrStartDownload` @ FTMAPI 0x7F6B2565 sends the 68-byte client
+    file id on selector 0x01, requires a reply whose static section is at
+    least 8 bytes with a non-negative first dword, and then takes the
+    request's dynamic iterator through vtable `+0x48`.
+    `CXferFile::HrQueryProgress` @ 0x7F6B27D7 pumps that iterator and
+    WriteFile's every chunk it yields until the stream reports 0x0B0B000B.
+
+    0x88 rather than 0x86 for the same reason GetChildren uses it: the reader
+    is MPCCL's dynamic iterator waiting on +0x28/+0x2c, not a single-shot
+    Wait(). The transport splits the body across pipe frames on its own.
+    """
+    return (
+        build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(0)
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
+        + content
+    )
+
+
 def _build_request_download_reply(
     filename,
     content_len,
     *,
     unpack_method=0,
     override_filename=True,
+    fast_path=True,
 ):
     """HrRequestDownload reply: 72 bytes inside a 0x84 variable tag.
 
@@ -280,12 +380,20 @@ def _build_request_download_reply(
     method + filename override. BBS downloads use 0x03 and unpack method
     3: MOSAF already supplied the attachment filename, and the transferred
     bytes are the MOS2 container uploaded by the Compose window.
+
+    Download-and-Run uses 0x01. Clearing bit 1 matters: with the fast path on,
+    `CXferFile::HrStartDownload` @ FTMAPI 0x7F6B2565 answers the whole request
+    from HrBillClient when size2 is at most 0x3CA, and seeks the local file to
+    0x3CA before streaming when it is larger. A compressed program is always
+    larger, so it takes the selector-0x01 iterator from byte zero instead.
     """
     buf = bytearray(FTM_REPLY_SIZE)
     struct.pack_into("<I", buf, FTM_REPLY_STATUS_OFFSET, 0)
     struct.pack_into("<I", buf, FTM_REPLY_SIZE1_OFFSET, content_len)
     struct.pack_into("<I", buf, FTM_REPLY_SIZE2_OFFSET, content_len)
-    flags = FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH
+    flags = FTM_FLAG_HAS_UNPACK_METHOD
+    if fast_path:
+        flags |= FTM_FLAG_FAST_PATH
     if override_filename:
         flags |= FTM_FLAG_HAS_FILENAME
     struct.pack_into("<I", buf, FTM_REPLY_FLAGS_OFFSET, flags)

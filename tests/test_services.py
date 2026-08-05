@@ -92,13 +92,15 @@ from server.services.dirsrv import (
 )
 from server.services.ftm import (
     FTM_BBS_SOURCE,
-    FTM_BBS_UNPACK_METHOD,
+    FTM_DIRSRV_SOURCE,
+    FTM_MOS2_UNPACK_METHOD,
     FTM_CLIENT_FILE_ID_SIZE,
     FTM_COUNTER_OFFSET,
     FTM_FALLBACK_FILENAME,
     FTMHandler,
     _build_bill_client_reply,
     _build_request_download_reply,
+    _build_start_download_reply,
     _resolve_ftm_target,
 )
 from server.services.logsrv import (
@@ -3208,7 +3210,7 @@ class TestFTMBbsAttachment(unittest.TestCase):
         payload = _build_request_download_reply(
             FTM_BBS_SOURCE,
             175,
-            unpack_method=FTM_BBS_UNPACK_METHOD,
+            unpack_method=FTM_MOS2_UNPACK_METHOD,
             override_filename=False,
         )
         reply = payload[2:]
@@ -3217,7 +3219,7 @@ class TestFTMBbsAttachment(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<I", reply, 0x10)[0], 0x03)
         self.assertEqual(
             struct.unpack_from("<I", reply, 0x14)[0],
-            FTM_BBS_UNPACK_METHOD,
+            FTM_MOS2_UNPACK_METHOD,
         )
         self.assertEqual(reply[0x28:], b"\x00" * 32)
 
@@ -3259,6 +3261,114 @@ class TestFTMBbsAttachment(unittest.TestCase):
             )
             attachment = app_store.content.get_node("514:1")
             self.assertEqual(attachment.content.bbs.download_count, expected)
+
+
+def _make_dirsrv_file_request(node_id="1:272", prop="fi"):
+    """Synthesize the FRI CMosTreeNode::GetShabbyViaFtm builds for a node."""
+    field_0, field_8 = (int(part) for part in node_id.split(":"))
+    cfi = bytearray(FTM_CLIENT_FILE_ID_SIZE)
+    cfi[: len(FTM_DIRSRV_SOURCE)] = FTM_DIRSRV_SOURCE.encode("ascii")
+    struct.pack_into("<II", cfi, 32, field_8, field_0)
+    name = prop.encode("ascii")
+    cfi[40 : 40 + len(name)] = name
+    return build_tagged_reply_var(0x04, bytes(cfi)) + b"\x84"
+
+
+class TestFTMDownloadAndRun(unittest.TestCase):
+    """MOSSHELL's c==7 worker pulling the payload the DLRed page uploaded."""
+
+    NODE_ID = "1:272"
+
+    def setUp(self):
+        from server.services import shabby as shabby_mod
+
+        reset_app_store()
+        self.addCleanup(reset_app_store)
+        self._registry = dict(shabby_mod.SHABBY_REGISTRY)
+
+        def restore():
+            shabby_mod.SHABBY_REGISTRY.clear()
+            shabby_mod.SHABBY_REGISTRY.update(self._registry)
+
+        self.addCleanup(restore)
+
+        self.blob = b"MOS2" + bytes(range(256)) * 8
+        self.shabby_id = shabby_mod.add_shabby_bytes(
+            shabby_mod.FORMAT_MOS_COMPRESSED, self.blob
+        )
+        node = app_store.content.get_node("1:256")
+        app_store.content.add_node(
+            replace(
+                node,
+                node_id=self.NODE_ID,
+                app_id=7,
+                content=replace(
+                    node.content,
+                    dnr_shabby_id=self.shabby_id,
+                    dnr_file_name="WINDIFF.EXE",
+                    dnr_compression=3,
+                    size_bytes=len(self.blob),
+                ),
+            )
+        )
+
+    def test_fri_resolves_the_uploaded_payload(self):
+        source, content = _resolve_ftm_target(
+            _make_dirsrv_file_request(self.NODE_ID)
+        )
+        self.assertEqual(source, FTM_DIRSRV_SOURCE)
+        self.assertEqual(content, self.blob)
+
+    def test_unknown_property_resolves_to_nothing(self):
+        _, content = _resolve_ftm_target(
+            _make_dirsrv_file_request(self.NODE_ID, prop="mf")
+        )
+        self.assertEqual(content, b"")
+
+    def test_request_download_clears_fast_path_and_keeps_the_local_name(self):
+        handler = FTMHandler(5, "FTM")
+        pkts = handler.handle_request(
+            0x01, 0x00, 1, _make_dirsrv_file_request(self.NODE_ID), 10, 10
+        )
+
+        reply = _build_request_download_reply(
+            FTM_DIRSRV_SOURCE,
+            len(self.blob),
+            unpack_method=FTM_MOS2_UNPACK_METHOD,
+            override_filename=False,
+            fast_path=False,
+        )[2:]
+        self.assertEqual(struct.unpack_from("<I", reply, 0x08)[0], len(self.blob))
+        self.assertEqual(struct.unpack_from("<I", reply, 0x0C)[0], len(self.blob))
+        # bit 0 only: no HrBillClient shortcut, no filename override.
+        self.assertEqual(struct.unpack_from("<I", reply, 0x10)[0], 0x01)
+        self.assertEqual(
+            struct.unpack_from("<I", reply, 0x14)[0], FTM_MOS2_UNPACK_METHOD
+        )
+        self.assertEqual(reply[0x28:], b"\x00" * 32)
+        self.assertIsNotNone(pkts)
+
+    def test_start_download_streams_the_payload_on_the_iterator(self):
+        handler = FTMHandler(5, "FTM")
+
+        pkts = handler.handle_request(
+            0x01, 0x01, 2, _make_dirsrv_file_request(self.NODE_ID), 10, 10
+        )
+
+        self.assertIsNotNone(pkts)
+        # 8 static bytes, 0x87, 0x88, then the payload — the shape
+        # HrStartDownload checks before it takes the dynamic iterator.
+        self.assertEqual(
+            _build_start_download_reply(self.blob),
+            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87\x88" + self.blob,
+        )
+        # A payload this size has to cross pipe frames, and every packet has
+        # to stay inside the client's receive buffer.
+        self.assertIsNotNone(pkts)
+        self.assertGreater(len(pkts), 1)
+        self.assertTrue(all(len(pkt) <= 1024 for pkt in pkts))
+        for pkt in pkts:
+            self.assertTrue(parse_packet(pkt[:-1]).crc_ok)
 
 
 class TestPropertyRecord(unittest.TestCase):
