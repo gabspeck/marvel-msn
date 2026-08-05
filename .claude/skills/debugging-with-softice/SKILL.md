@@ -3,7 +3,7 @@ name: debugging-with-softice
 description: instructions on how to debug using the softice MCP
 ---
 
-* The SoftICE serial transport base path is `/tmp/win95.com1` — pass that to `mcp__softice__connect`.
+* The SoftICE serial transport path is `/tmp/win95.COM1.pty` — pass that to `mcp__softice__connect`.
 
 * Always use `ADDR <context handle>` to set the correct address context for your breakpoints before arming them, 
 otherwise they won't hit
