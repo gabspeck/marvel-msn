@@ -298,6 +298,46 @@ Room capacity edit 102, message length edit 105, "join as participants"
 checkbox 107. Validation strings 0xC8–0xCD bound capacity to 2–10,000 and
 message length to 50–1000.
 
+### 7.3 Download and Run (0x67)
+
+`DlrEd_ShowFileName` @ `0x7F572387` fills the page: it reads `fn` through node
+vtable `+0x50` (`GetPropSz`, so either string wire type works) into static 102,
+falling back to `""` at `0x7F5771F0` when the read fails.
+
+The file picker is `DlrEd_OnChooseFile` @ `0x7F5723BE`:
+
+1. `GetOpenFileNameA` with no extension filter (`Flags` 0x1004).
+2. `LoadLibraryA("FTMAPI.DLL")` + `GetProcAddress("HrMos2CompFile")`.
+3. `GetTempPathA`/`GetTempFileNameA`, then
+   `HrMos2CompFile(temp, chosen, 0, 0)`. Everything downstream carries the
+   **compressed** stream, never the authored file.
+4. A zero-length result re-prompts through string 0x138.
+5. `CreateFileMappingA`/`MapViewOfFile`, then node vtable `+0x138`
+   `AddShabby(0x85, view, cbCompressed, &shabby_id)`. Format `0x85` sits
+   outside the image-format range the Banner page uses — it marks a
+   MOS-compressed payload, and MOSSHELL's image-loader switch never sees it.
+6. Four `+0x12C` `SetProperty` calls, each aborting the chain on failure:
+
+   | Tag | Type | Value |
+   |-----|------|-------|
+   | `fi` | 0x0F | the shabby id AddShabby returned |
+   | `zc` | 0x03 | 3 — the compression code, hardcoded |
+   | `fn` | 0x0A | the chosen file's base name |
+   | `p`  | 0x03 | compressed byte count |
+
+7. The temp file is deleted on every exit path. Failures reach the member
+   through `ReportMosXErr`, which renders MCM's "This task cannot be completed
+   at this time" — so refusing the format-0x85 upload fails the whole page with
+   no indication of which step broke.
+
+The Forum Manager help-file picker, `HelpEd_OnChooseHelpFile` @ `0x7F57290F`,
+reuses `fi`/`fn`/`p` but stores its file **by value**: the mapped bytes go out
+as `fi` type 0x0E with no compression and no `AddShabby`. It takes its title
+from string 0x133, its filter from 0x134 (tabs rewritten to NULs), and two
+accepted extensions from 0x135/0x136 via `CompareStringA` (0x137 on a
+mismatch). It also requires the file to open with `0x5F3F` — `"?_"`, the
+WinHelp signature.
+
 ## 8. Creating nodes
 
 `GetFlagsForNewNode` (`+0x38`) returns the `b` byte for a new child — `0` for
@@ -315,14 +355,17 @@ property name, which pins all DIRSRV writes to TREEEDCL selector 0x04.
 ## 9. Property-name vocabulary
 
 DSNED's own table at `0x7F577188`: `tp t s r l n j k mf h mm ml ds q o ca m f
-b g c p`, plus `fn zc fi i _F` further on. `m`, `mm`, `ml`, `ds`, `fn`, `zc`
-and `fi` have no consumer in the property sheets covered here — `m` is the
-Security token id (§6); the rest are unresolved.
+b g c p`, plus `fn zc fi i _F` further on. `m` is the Security token id (§6).
+`fi`, `fn` and `zc` belong to the Download and Run page (§7.3). `mm`, `ml` and
+`ds` have no consumer in the property sheets covered here.
 
 Service names DSNED knows: `DIRSRV`, `CONFLOC`, `MEDVIEW`, `BBS`.
 
 ## 10. Open questions
 
-- The `mm` / `ml` / `ds` / `fn` / `zc` / `fi` tags: no observed reader.
+- The `mm` / `ml` / `ds` tags: no observed reader.
+- The download side of §7.3. DSNED writes `fi`/`zc`/`fn`/`p`, but the reader
+  that turns them back into a running program — `HrMos2CompFile`'s inverse and
+  whichever module drives it — has not been traced.
 - SASRV selector 2/4/5 argument marshalling is read off the decompiler's
   shifted stack frames and has not been checked live.
