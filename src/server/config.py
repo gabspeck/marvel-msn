@@ -5,6 +5,10 @@ import uuid
 # --- Network ---
 HOST = "0.0.0.0"
 PORT = 2323
+# Pending connections the kernel queues while the accept loop is between
+# accept() calls. Each accepted connection runs on its own thread, so this
+# only has to absorb clients that dial in at the same instant.
+LISTEN_BACKLOG = 8
 
 # --- Packet framing ---
 PACKET_TERMINATOR = 0x0D
