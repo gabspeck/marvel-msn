@@ -2237,15 +2237,15 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         from server.services import shabby as shabby_mod
 
         self._pickable_icons = dict(shabby_mod.PICKABLE_ICONS)
-        self._icon_registry = dict(shabby_mod.ICON_REGISTRY)
+        self._icon_registry = dict(shabby_mod.SHABBY_REGISTRY)
 
     def tearDown(self):
         from server.services import shabby as shabby_mod
 
         shabby_mod.PICKABLE_ICONS.clear()
         shabby_mod.PICKABLE_ICONS.update(self._pickable_icons)
-        shabby_mod.ICON_REGISTRY.clear()
-        shabby_mod.ICON_REGISTRY.update(self._icon_registry)
+        shabby_mod.SHABBY_REGISTRY.clear()
+        shabby_mod.SHABBY_REGISTRY.update(self._icon_registry)
 
     @staticmethod
     def _reply_host_block(packets):
@@ -2340,6 +2340,41 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         host_block = self._reply_host_block(packets)
         self.assertEqual(struct.unpack_from("<I", host_block.payload, 1)[0], 0x101)
         self.assertEqual(shabby_mod.enum_pickable_shabby_ids(), before)
+
+    def test_download_and_run_payload_uploads_under_format_0x85(self):
+        """DSNED 0x7F5723BE uploads the compressed DnR file, not an image."""
+        from server.services import shabby as shabby_mod
+
+        blob = bytes(range(256)) * 8
+        head = (
+            b"\x04\x82\x02\x00"
+            + bytes([0x01, shabby_mod.FORMAT_MOS_COMPRESSED])
+            + b"\x05\x01"
+            + struct.pack("<I", len(blob))
+            + b"\x03"
+            + struct.pack("<I", len(blob))
+            + b"\x83\x83\x83"
+        )
+        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+
+        self.assertIsNone(handler.handle_request(0x04, 0x07, 7, head, 0, 0))
+        self.assertIsNone(
+            handler.handle_request(MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[:900], 0, 0)
+        )
+        packets = handler.handle_request(
+            MPC_CLASS_CONTINUATION_LAST, 1, 0, blob[900:], 0, 0
+        )
+
+        host_block = self._reply_host_block(packets)
+        self.assertEqual(struct.unpack_from("<I", host_block.payload, 1)[0], 0)
+        shabby_id = struct.unpack_from("<I", host_block.payload, 11)[0]
+        self.assertEqual(
+            shabby_mod.unpack_shabby_id(shabby_id)[0],
+            shabby_mod.FORMAT_MOS_COMPRESSED,
+        )
+        self.assertEqual(shabby_mod.load_shabby_bytes(shabby_id), blob)
+        # The payload must stay out of the Change Icon picker.
+        self.assertNotIn(shabby_id, shabby_mod.enum_pickable_shabby_ids())
 
 
 class TestDIRSRVGetTicket(unittest.TestCase):
@@ -2669,6 +2704,37 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         self.assertEqual(
             build_props(["h"], node, is_children=False),
             [(0x03, "h", struct.pack("<I", selected_id))],
+        )
+
+    def test_download_and_run_page_writes_survive_the_next_property_read(self):
+        """The four writes DSNED 0x7F5723BE makes after AddShabby returns."""
+        store = _SetPropertiesContentStore()
+        shabby_id = 0x85000001
+        request = self._request(
+            [
+                (0x0F, "fi", struct.pack("<I", shabby_id)),
+                (0x03, "zc", struct.pack("<I", 3)),
+                (0x0A, "fn", self._ascii("SETUP.EXE")),
+                (0x03, "p", struct.pack("<I", 51700)),
+            ]
+        )
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(reply, self.OK)
+        node = store.get_node(store.NODE_ID)
+        self.assertEqual(node.content.dnr_shabby_id, shabby_id)
+        self.assertEqual(node.content.dnr_compression, 3)
+        self.assertEqual(node.content.dnr_file_name, "SETUP.EXE")
+        self.assertEqual(node.content.size_bytes, 51700)
+        self.assertEqual(
+            build_props(["fi", "zc", "fn", "p"], node, is_children=False),
+            [
+                (0x03, "fi", struct.pack("<I", shabby_id)),
+                (0x03, "zc", struct.pack("<I", 3)),
+                (0x0A, "fn", b"\x01SETUP.EXE\x00"),
+                (0x03, "p", struct.pack("<I", 51700)),
+            ],
         )
 
     def test_untouched_fields_survive_a_partial_write(self):

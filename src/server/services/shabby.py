@@ -1,4 +1,7 @@
-"""Shabby icon protocol — DIRSRV GetShabby RPC.
+"""Shabby blob protocol — DIRSRV GetShabby / AddShabby RPC.
+
+A shabby is a server-side blob addressed by a DWORD Shabby ID. Node icons are
+the main consumer, and the Download-and-Run payload rides the same store.
 
 The client requests a node icon by sending a Shabby ID (DWORD) on the DIRSRV
 pipe. Two consumers:
@@ -23,15 +26,21 @@ from pathlib import Path
 
 # Format byte values — top byte of the Shabby ID DWORD.
 # Used by MOSSHELL LoadShabbyIconForNode switch (mf path) and by us to
-# namespace the ICON_REGISTRY (h path doesn't care).
+# namespace the SHABBY_REGISTRY (h path doesn't care).
 FORMAT_EMF = 0x01            # GetEnhMetaFileA
 FORMAT_ICO = 0x02            # ExtractIconExA (ICO/EXE/DLL) — h property
 FORMAT_WMF_RAW = 0x03        # LoadAndCallW Meta_init/add/play/close
 FORMAT_WMF_PLACEABLE = 0x04  # magic 0x9AC6CDD7
 FORMAT_BMP = 0x05            # LoadImageA(IMAGE_BITMAP, LR_LOADFROMFILE | LR_DEFAULTSIZE)
 
+# Not an image. The DSNED Download-and-Run page (DLRed, App #22) uploads the
+# authored file under this format after running it through
+# FTMAPI.DLL!HrMos2CompFile — so the blob is the compressed stream, not the
+# file the author picked. Static analysis of DSNED 0x7F5723BE.
+FORMAT_MOS_COMPRESSED = 0x85
+
 # Format 0 is the MOSSHELL Change Icon dialog's generic ICO/EXE/DLL path.
-# The DSNED Banner page supplies the remaining values after checking the file
+# The DSNED Banner page supplies the image values after checking the file
 # extension. These values come from live client calls and static analysis of
 # MOSSHELL 0x7F40481B and DSNED 0x7F5717C8.
 UPLOAD_FORMATS = {
@@ -40,6 +49,7 @@ UPLOAD_FORMATS = {
     FORMAT_WMF_RAW,
     FORMAT_WMF_PLACEABLE,
     FORMAT_BMP,
+    FORMAT_MOS_COMPRESSED,
 }
 
 
@@ -77,7 +87,7 @@ PICKABLE_ICONS = {
 # on a hit.
 DEFAULT_NODE_ICON_ID = 0x0599
 
-ICON_REGISTRY = {
+SHABBY_REGISTRY = {
     pack_shabby_id(FORMAT_BMP, 1): _ICONS_DIR / "default_16.bmp",
     pack_shabby_id(FORMAT_ICO, 1): _ICONS_DIR / "folder.ico",
     pack_shabby_id(FORMAT_ICO, 2): _ICONS_DIR / "default.ico",
@@ -91,8 +101,8 @@ def enum_pickable_shabby_ids():
 
 
 def load_shabby_bytes(shabby_id):
-    """Return the raw icon-file bytes for `shabby_id`, or None if unknown."""
-    entry = ICON_REGISTRY.get(shabby_id)
+    """Return the raw blob bytes for `shabby_id`, or None if unknown."""
+    entry = SHABBY_REGISTRY.get(shabby_id)
     if entry is None:
         return None
     if isinstance(entry, (bytes, bytearray)):
@@ -106,8 +116,9 @@ def add_shabby_bytes(fmt, blob):
     """Register an uploaded shabby and return its new ID, or None on failure.
 
     Format 0 is a Change Icon entry and therefore needs a plain ordinal in the
-    picker's visible window. Banner formats keep the format byte in the high
-    byte so MOSSHELL selects the matching Win32 image loader.
+    picker's visible window. Every other format keeps its format byte in the
+    high byte, which is what lets MOSSHELL pick the matching Win32 image
+    loader for a banner.
     """
     if fmt not in UPLOAD_FORMATS or not blob:
         return None
@@ -120,7 +131,7 @@ def add_shabby_bytes(fmt, blob):
     else:
         used_content_ids = [
             unpack_shabby_id(shabby_id)[1]
-            for shabby_id in ICON_REGISTRY
+            for shabby_id in SHABBY_REGISTRY
             if unpack_shabby_id(shabby_id)[0] == fmt
         ]
         content_id = max(used_content_ids, default=0) + 1
@@ -128,5 +139,5 @@ def add_shabby_bytes(fmt, blob):
             return None
         shabby_id = pack_shabby_id(fmt, content_id)
 
-    ICON_REGISTRY[shabby_id] = bytes(blob)
+    SHABBY_REGISTRY[shabby_id] = bytes(blob)
     return shabby_id

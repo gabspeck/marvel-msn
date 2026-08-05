@@ -92,6 +92,13 @@ PROP_NAME = "e"
 # intercepts the name before marshalling — it widens the ANSI edit-box text to
 # UTF-16, swaps the tag to `f` and the wire type to 0x0B.
 PROP_NAME_EDIT = "f"
+# Download-and-Run file, written by the DSNED DLRed page @ 0x7F5723BE: `fi` is
+# the AddShabby id of the compressed payload (write type 0x0F), `fn` its base
+# name (0x0A). The Forum Manager help page @ 0x7F57290F reuses the same two
+# tags for a .HLP, but stores that one inline as a type-0x0E blob instead of
+# by shabby id.
+PROP_FILE_ID = "fi"
+PROP_FILE_NAME = "fn"
 PROP_GENERATION = "g"
 PROP_SECONDARY_ICON = "h"
 PROP_DELEGATE_FIELD10 = "i"
@@ -117,6 +124,9 @@ PROP_SECONDARY_ICON_ALT = "wv"
 PROP_RIGHTS = "x"
 PROP_VENDOR_ID = "y"
 PROP_PRICE = "z"
+# Compression code for the `fi` payload. DLRed hardcodes 3 — the algorithm
+# FTMAPI!HrMos2CompFile just ran over the authored file.
+PROP_FILE_COMPRESSION = "zc"
 
 # Browse-language LCIDs advertised in GetChildren replies with propList=["q"].
 # Each value becomes a row in the View > Options > General "Content view"
@@ -620,6 +630,20 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             out.append((0x03, PROP_PRICE, struct.pack("<I", content.price_dword)))
         elif name == PROP_RATING:
             out.append((0x03, PROP_RATING, struct.pack("<I", content.rating_dword)))
+        elif name == PROP_FILE_ID:
+            # Inline DWORD shabby id, same shape as 'mf'/'h'. DLRed reads it
+            # only to decide whether the node already carries a file
+            # (DSNED 0x7F572846 maps present/absent onto editor state 1/2).
+            out.append((0x03, PROP_FILE_ID, struct.pack("<I", content.dnr_shabby_id)))
+        elif name == PROP_FILE_NAME:
+            # Wire 0x0A, the type DLRed itself writes. Its reader
+            # (DSNED 0x7F572387) pulls the value through GetPropSz into
+            # SetDlgItemTextA, so the cache has to hold ANSI.
+            out.append((0x0A, PROP_FILE_NAME, _sz(content.dnr_file_name)))
+        elif name == PROP_FILE_COMPRESSION:
+            out.append(
+                (0x03, PROP_FILE_COMPRESSION, struct.pack("<I", content.dnr_compression))
+            )
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
@@ -1192,6 +1216,12 @@ _EDITABLE_PROPERTIES = {
     # built from its selection. NodeContent holds a single LCID, so the first
     # entry wins and an empty selection leaves the node locale-neutral.
     PROP_LANGUAGE: ("language", lambda v: v[0] if isinstance(v, list) and v else 0),
+    # The three Download-and-Run writes that follow a successful AddShabby.
+    # `fi` guards on int because the Forum Manager help page sends the same tag
+    # as a type-0x0E inline blob, which this server does not store.
+    PROP_FILE_ID: ("dnr_shabby_id", lambda v: v if isinstance(v, int) else 0),
+    PROP_FILE_NAME: ("dnr_file_name", lambda v: v if isinstance(v, str) else ""),
+    PROP_FILE_COMPRESSION: ("dnr_compression", lambda v: v if isinstance(v, int) else 0),
 }
 
 

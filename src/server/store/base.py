@@ -99,6 +99,15 @@ class NodeContent:
     # triggers the DWORD-as-time_t path; "_D" is BBSNAV territory). 0 = no
     # cached date → server skips emitting `w`, cell renders blank.
     modified_filetime: int = 0
+    # Download-and-Run payload, authored on the DSNED DLRed page
+    # (DSNED 0x7F5723BE). The page compresses the chosen file through
+    # FTMAPI!HrMos2CompFile, uploads the result with AddShabby format 0x85,
+    # then writes the returned shabby id as `fi`, the compression code as `zc`,
+    # the file's base name as `fn`, and the compressed byte count as `p`
+    # (`size_bytes` above). A node with dnr_shabby_id 0 has no file yet.
+    dnr_shabby_id: int = 0
+    dnr_file_name: str = ""
+    dnr_compression: int = 0
     # Optional BBS-only sub-struct. None for DIRSRV/MEDVIEW nodes; set on BBS
     # board/conversation/reply nodes so build_bbs_props can read BBS-only tags.
     bbs: BbsFields | None = None
