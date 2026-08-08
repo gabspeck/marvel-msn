@@ -14,7 +14,12 @@ import pathlib
 import struct
 from dataclasses import dataclass, replace
 
-from ..mos_apps import APP_DIRECTORY_SERVICE, APP_MEDIA_VIEWER, APP_TEXT_CONFERENCE
+from ..mos_apps import (
+    APP_DIRECTORY_SERVICE,
+    APP_DOWNLOAD_AND_RUN,
+    APP_MEDIA_VIEWER,
+    APP_TEXT_CONFERENCE,
+)
 from .base import (
     RIGHTS_AUTHORING,
     RIGHTS_NONE,
@@ -328,6 +333,70 @@ def _medview_sample_leaf(f0, name, size_bytes):
 
 _MEDVIEW_SAMPLES_KEY = f"1:{0x10E}"
 
+# A Download-and-Run leaf whose payload the server generates, so a transfer can
+# be checked without the client's compressor in the way. The body is plain text
+# served with compression code 0, which makes FTMAPI skip HrMos2DecompFile and
+# write the bytes straight to disk — so the downloaded file is comparable to
+# DNR_TEST_PAYLOAD byte for byte.
+#
+# Every line is fixed width and carries its own offset, so a diff names the
+# exact byte where a transfer went wrong instead of leaving it to be inferred.
+DNR_TEST_LINE_COUNT = 4096
+
+
+def _build_dnr_test_payload():
+    lines = [
+        f"line {n:06d} offset {n * 48:08d} "
+        f"{'.' * 9}{(n % 10)}{'.' * 8}\r\n".encode("ascii")
+        for n in range(DNR_TEST_LINE_COUNT)
+    ]
+    assert all(len(line) == 48 for line in lines), "payload lines must be fixed width"
+    return b"".join(lines)
+
+
+DNR_TEST_PAYLOAD = _build_dnr_test_payload()
+DNR_TEST_SHABBY_ID = 0x00FF0001
+DNR_TEST_FILE_NAME = "dnrtest.txt"
+
+_DNR_TEST_KEY, _DNR_TEST_MNID = mnid_key(1, 0x111)
+_DNR_TEST_NODE = DirectoryNode(
+    node_id=_DNR_TEST_KEY,
+    is_container=False,
+    app_id=APP_DOWNLOAD_AND_RUN,
+    mnid_a=_DNR_TEST_MNID,
+    content=replace(
+        _container_content("DnR Transfer Test", type_str="Download-and-Run File"),
+        dnr_shabby_id=DNR_TEST_SHABBY_ID,
+        dnr_file_name=DNR_TEST_FILE_NAME,
+        dnr_compression=0,
+        size_bytes=len(DNR_TEST_PAYLOAD),
+    ),
+)
+
+# The same test, one step further along: a real MOS2 container captured from a
+# DLRed upload of WINDIFF.EXE, so the compressed path can be exercised without
+# re-uploading it every time. Declares 107520 uncompressed bytes in four
+# 32768-byte chunks, compressed to 51700.
+DNR_MOS2_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "dnr" / "windiff.mos2"
+DNR_MOS2_SHABBY_ID = 0x00FF0002
+DNR_MOS2_FILE_NAME = "WINDIFF.EXE"
+DNR_MOS2_COMPRESSED_SIZE = 51700
+
+_DNR_MOS2_KEY, _DNR_MOS2_MNID = mnid_key(1, 0x112)
+_DNR_MOS2_NODE = DirectoryNode(
+    node_id=_DNR_MOS2_KEY,
+    is_container=False,
+    app_id=APP_DOWNLOAD_AND_RUN,
+    mnid_a=_DNR_MOS2_MNID,
+    content=replace(
+        _container_content("DnR Compressed Test", type_str="Download-and-Run File"),
+        dnr_shabby_id=DNR_MOS2_SHABBY_ID,
+        dnr_file_name=DNR_MOS2_FILE_NAME,
+        dnr_compression=3,
+        size_bytes=DNR_MOS2_COMPRESSED_SIZE,
+    ),
+)
+
 _DEFAULT_CHAT_KEY, _DEFAULT_CHAT_MNID = mnid_key(1, 0x10F)
 _DEFAULT_CHAT_ROOM = DirectoryNode(
     node_id=_DEFAULT_CHAT_KEY,
@@ -607,6 +676,8 @@ DIRECTORY_NODES = [
         for f0, name, size_bytes in MEDVIEW_SAMPLE_LEAF_DEFS
     ],
     _DEFAULT_CHAT_ROOM,
+    _DNR_TEST_NODE,
+    _DNR_MOS2_NODE,
     *BBS_NODES,
 ]
 
@@ -651,8 +722,12 @@ DIRECTORY_CHILDREN = {
     _ARTS_AND_ENTERTAINMENT_KEY: [f"1:{f8}" for f8, _ in A_AND_E_CHILD_DEFS],
     _ARTES_E_ENTRETENIMENTO_KEY: [f"1:{f8}" for f8, _ in A_AND_E_BR_CHILD_DEFS],
     _MEDVIEW_SAMPLES_KEY: [
-        f"{f0}:0" for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS
+        *[f"{f0}:0" for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS],
+        _DNR_TEST_NODE.node_id,
+        _DNR_MOS2_NODE.node_id,
     ],
+    _DNR_TEST_NODE.node_id: [],
+    _DNR_MOS2_NODE.node_id: [],
     # BBS board "Climbing BBS" listed under "Sports, Health and Fitness"
     # (c=2 = APP_BBS_SERVICE, b bit 0x04 = delegate). Opening it hands the
     # folder to bbsnav, which enumerates the thread list over svc "BBS".

@@ -24,6 +24,8 @@ pickable window below and writes the chosen id back into `h`.
 
 from pathlib import Path
 
+from ..store import fixtures
+
 # Format byte values — top byte of the Shabby ID DWORD.
 # Used by MOSSHELL LoadShabbyIconForNode switch (mf path) and by us to
 # namespace the SHABBY_REGISTRY (h path doesn't care).
@@ -91,6 +93,12 @@ SHABBY_REGISTRY = {
     pack_shabby_id(FORMAT_BMP, 1): _ICONS_DIR / "default_16.bmp",
     pack_shabby_id(FORMAT_ICO, 1): _ICONS_DIR / "folder.ico",
     pack_shabby_id(FORMAT_ICO, 2): _ICONS_DIR / "default.ico",
+    # Server-generated Download-and-Run payload, uncompressed. Backs the
+    # "DnR Transfer Test" node so a transfer can be verified end to end
+    # without the client's compressor in the path.
+    fixtures.DNR_TEST_SHABBY_ID: fixtures.DNR_TEST_PAYLOAD,
+    # A captured DLRed upload, so the compressed path needs no re-upload.
+    fixtures.DNR_MOS2_SHABBY_ID: fixtures.DNR_MOS2_PATH,
     **PICKABLE_ICONS,
 }
 

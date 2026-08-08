@@ -92,16 +92,18 @@ from server.services.dirsrv import (
 )
 from server.services.ftm import (
     FTM_BBS_SOURCE,
-    FTM_DIRSRV_SOURCE,
-    FTM_MOS2_UNPACK_METHOD,
     FTM_CLIENT_FILE_ID_SIZE,
     FTM_COUNTER_OFFSET,
+    FTM_DIRSRV_SOURCE,
     FTM_FALLBACK_FILENAME,
+    FTM_MOS2_UNPACK_METHOD,
     FTMHandler,
     _build_bill_client_reply,
     _build_request_download_reply,
-    _build_start_download_reply,
+    _build_start_download_blocks,
     _resolve_ftm_target,
+    mos2_chunk_spans,
+    mos2_original_size,
 )
 from server.services.logsrv import (
     LOGIN_BLOB_LEN,
@@ -1898,6 +1900,8 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((0x1000, 0), "Employee Handbook Example"),
                     ((0x1001, 0), "France Magazine"),
                     ((0x1002, 0), "MediaView Online Documentation"),
+                    ((1, 0x111), "DnR Transfer Test"),
+                    ((1, 0x112), "DnR Compressed Test"),
                 ],
             ),
         ]
@@ -3278,6 +3282,11 @@ class TestFTMDownloadAndRun(unittest.TestCase):
     """MOSSHELL's c==7 worker pulling the payload the DLRed page uploaded."""
 
     NODE_ID = "1:272"
+    # What the captured Windiff.exe upload declared.
+    ORIGINAL_SIZE = 107520
+    # A 0x84 variable field holding two dwords, then end-of-static. Sending
+    # 0x83 dwords here instead is what MPCCL answered 0x8B0B0008 to.
+    STATIC_PREFIX = b"\x84\x88" + b"\x00" * 8 + b"\x87"
 
     def setUp(self):
         from server.services import shabby as shabby_mod
@@ -3292,7 +3301,15 @@ class TestFTMDownloadAndRun(unittest.TestCase):
 
         self.addCleanup(restore)
 
-        self.blob = b"MOS2" + bytes(range(256)) * 8
+        # A MOS2 container in the shape HrMos2DecompFile @ 0x7F6B34A8
+        # validates, long enough to cross the 0x4000 dynamic-block boundary.
+        header = (
+            b"MOS2"
+            + struct.pack("<HH", 0x0010, 0x8000)
+            + struct.pack("<I", self.ORIGINAL_SIZE)
+            + b"\x00" * 8
+        )
+        self.blob = header + bytes(range(256)) * 160
         self.shabby_id = shabby_mod.add_shabby_bytes(
             shabby_mod.FORMAT_MOS_COMPRESSED, self.blob
         )
@@ -3355,20 +3372,127 @@ class TestFTMDownloadAndRun(unittest.TestCase):
             0x01, 0x01, 2, _make_dirsrv_file_request(self.NODE_ID), 10, 10
         )
 
+        from server.pipe import parse_pipe_frames
+
+        # 8 static bytes then 0x87 — the shape HrStartDownload checks before
+        # it takes the request's dynamic iterator.
         self.assertIsNotNone(pkts)
-        # 8 static bytes, 0x87, 0x88, then the payload — the shape
-        # HrStartDownload checks before it takes the dynamic iterator.
-        self.assertEqual(
-            _build_start_download_reply(self.blob),
-            b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87\x88" + self.blob,
+        opening = parse_host_block(
+            parse_pipe_frames(parse_packet(pkts[0][:-1]).payload)[0].content[2:]
         )
+        self.assertEqual(opening.payload[:11], self.STATIC_PREFIX)
         # A payload this size has to cross pipe frames, and every packet has
         # to stay inside the client's receive buffer.
-        self.assertIsNotNone(pkts)
         self.assertGreater(len(pkts), 1)
         self.assertTrue(all(len(pkt) <= 1024 for pkt in pkts))
         for pkt in pkts:
             self.assertTrue(parse_packet(pkt[:-1]).crc_ok)
+
+    def test_stream_raises_all_three_signals_within_the_receive_buffer(self):
+        """ProcessTaggedServiceReply @ MPCCL 0x04604F26 pins every rule here.
+
+        It allocates the dynamic receive state with a 0x4000 capacity, and
+        routes the tags to three different signals: 0x85 delivers a chunk,
+        0x88 also ends the iterator message, and only 0x86 reaches
+        SignalRequestCompletion. HrFinishRequest @ FTMAPI 0x7F6B1800 loops on
+        the message-complete code, so ending on 0x88 hangs at 100%.
+        """
+        blocks = _build_start_download_blocks(self.blob)
+        *data_blocks, completion = blocks
+
+        self.assertGreater(len(data_blocks), 1)
+        self.assertEqual(completion, bytes([0x86]))
+        self.assertEqual(data_blocks[0][:11], self.STATIC_PREFIX)
+        # Every block closes its own message: 0x85 would append into one
+        # 0x4000 receive state and corrupt everything past the first block.
+        self.assertEqual(data_blocks[0][11], 0x88)
+        for block in data_blocks[1:]:
+            self.assertEqual(block[0], 0x88)
+        # No block's dynamic payload may exceed the receive buffer.
+        self.assertLessEqual(len(data_blocks[0]) - 12, 0x4000)
+        for block in data_blocks[1:]:
+            self.assertLessEqual(len(block) - 1, 0x4000)
+        # Every byte, in order.
+        rebuilt = data_blocks[0][12:] + b"".join(
+            block[1:] for block in data_blocks[1:]
+        )
+        self.assertEqual(rebuilt, self.blob)
+
+    def test_reply_sizes_both_state_the_transferred_length(self):
+        """size1 pre-sizes the receiving file — HrInit @ FTMAPI 0x7F6B1FC4."""
+        reply = _build_request_download_reply(
+            FTM_DIRSRV_SOURCE,
+            len(self.blob),
+            unpack_method=FTM_MOS2_UNPACK_METHOD,
+            override_filename=False,
+            fast_path=False,
+        )[2:]
+
+        # Both are the transferred length: size1 pre-sizes the file that
+        # receives the compressed bytes, so the container's larger
+        # uncompressed count would pad it with a garbage tail.
+        self.assertEqual(struct.unpack_from("<I", reply, 0x08)[0], len(self.blob))
+        self.assertEqual(struct.unpack_from("<I", reply, 0x0C)[0], len(self.blob))
+        self.assertEqual(mos2_original_size(self.blob), self.ORIGINAL_SIZE)
+
+    def test_seeded_test_node_serves_its_payload_without_an_unpack_step(self):
+        """The generated payload is plain text, so it must reach disk as-is.
+
+        HrMos2DecompFile @ FTMAPI 0x7F6B34A8 rejects anything that does not
+        open with a valid MOS2 header, so asking for unpack method 3 on an
+        uncompressed payload fails the transfer.
+        """
+        from server.store import fixtures
+
+        source, content = _resolve_ftm_target(
+            _make_dirsrv_file_request(fixtures._DNR_TEST_NODE.node_id)
+        )
+
+        self.assertEqual(source, FTM_DIRSRV_SOURCE)
+        self.assertEqual(content, fixtures.DNR_TEST_PAYLOAD)
+        self.assertIsNone(mos2_original_size(content))
+
+        handler = FTMHandler(5, "FTM")
+        pkts = handler.handle_request(
+            0x01,
+            0x00,
+            1,
+            _make_dirsrv_file_request(fixtures._DNR_TEST_NODE.node_id),
+            10,
+            10,
+        )
+        self.assertIsNotNone(pkts)
+        reply = _build_request_download_reply(
+            FTM_DIRSRV_SOURCE,
+            len(content),
+            unpack_method=0,
+            override_filename=False,
+            fast_path=False,
+        )[2:]
+        self.assertEqual(struct.unpack_from("<I", reply, 0x14)[0], 0)
+        self.assertEqual(struct.unpack_from("<I", reply, 0x08)[0], len(content))
+        self.assertEqual(struct.unpack_from("<I", reply, 0x0C)[0], len(content))
+
+    def test_seeded_compressed_node_serves_a_real_container(self):
+        """The captured DLRed upload, so the MOS2 path needs no re-upload."""
+        from server.store import fixtures
+
+        source, content = _resolve_ftm_target(
+            _make_dirsrv_file_request(fixtures._DNR_MOS2_NODE.node_id)
+        )
+
+        self.assertEqual(source, FTM_DIRSRV_SOURCE)
+        self.assertEqual(len(content), fixtures.DNR_MOS2_COMPRESSED_SIZE)
+        self.assertEqual(mos2_original_size(content), 107520)
+        self.assertEqual(
+            [f"{s}-{e}" for s, e in mos2_chunk_spans(content)],
+            ["20-17063", "17063-35079", "35079-45864", "45864-51700"],
+        )
+
+    def test_mos2_header_is_validated_before_its_size_is_trusted(self):
+        self.assertEqual(mos2_original_size(self.blob), self.ORIGINAL_SIZE)
+        self.assertIsNone(mos2_original_size(b"MOS2" + b"\x00" * 32))
+        self.assertIsNone(mos2_original_size(b"not a container"))
 
 
 class TestPropertyRecord(unittest.TestCase):
