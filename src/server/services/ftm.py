@@ -25,18 +25,23 @@ Two call patterns are covered:
 """
 
 import logging
+import os
 import struct
 from dataclasses import replace
 from pathlib import Path
 
-from ..config import FTM_INTERFACE_GUIDS, TAG_DYNAMIC_STREAM_END, TAG_END_STATIC
+from ..config import (
+    FTM_INTERFACE_GUIDS,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
+    TAG_DYNAMIC_STREAM_END,
+    TAG_END_STATIC,
+)
 from ..models import VarParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
-    build_tagged_reply_dword,
     build_tagged_reply_var,
     parse_request_params,
 )
@@ -79,12 +84,56 @@ FTM_BBS_FRI_KIND = 2
 # file, which is the inverse of the HrMos2CompFile every uploader ran.
 FTM_MOS2_UNPACK_METHOD = 3
 
+# One dynamic block's cap. ProcessTaggedServiceReply @ MPCCL 0x04604F26
+# allocates the receive state with this capacity, so a longer block overruns it.
+_DYNAMIC_BLOCK_MAX = 0x4000
+
+# HrStartDownload's static reply. CXferFile::HrStartDownload @ FTMAPI 0x7F6B2565
+# reads the field's length through vtable +0x10, rejects anything under 8 bytes
+# with 0x8000FFFF, and then treats the first dword as a status that must not be
+# negative. It travels as a 0x84 variable field: MPCCL's parser accepts 0x84
+# against a declared 0x89 descriptor, and a mismatch here is what produced the
+# measured 0x8B0B0008.
+_START_DOWNLOAD_STATUS = struct.pack("<II", 0, 0)
+
+# MOS2 container header, validated by HrMos2DecompFile @ FTMAPI 0x7F6B34A8:
+# "MOS2", a u16 that has to read 0x0010, the u16 chunk size, then the
+# uncompressed byte count. Anything else is rejected with 0x80004005.
+_MOS2_MAGIC = b"MOS2"
+_MOS2_VERSION = 0x0010
+_MOS2_HEADER_SIZE = 0x14
+
 FTM_DIRSRV_SOURCE = "DIRSRV"
 # The only property MOSSHELL asks for over FTM. DownloadContentToTempPath @
 # 0x7F3FE871 hardcodes it for the Download-and-Run worker.
 FTM_DIRSRV_FILE_PROPERTY = "fi"
 
 _SIGNUP_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "signup"
+
+# Debug aid: when set, every Download-and-Run payload the server serves is
+# written here, so the bytes on the wire can be diffed against what the client
+# ends up with. Off unless the environment asks for it.
+_DOWNLOAD_DUMP_PATH = os.environ.get("MSN_DNR_DUMP")
+
+# Debug aid: serve a MOS2 payload with unpack method 0, so the client writes
+# the compressed bytes straight to disk instead of decompressing them. That
+# turns "did the compressed stream arrive intact?" into a plain file compare.
+_DNR_FORCE_RAW = bool(os.environ.get("MSN_DNR_FORCE_RAW"))
+
+
+def _dump_debug_bytes(path, blob):
+    """Write a diagnostic copy of `blob`, never failing the caller.
+
+    This runs inside a request handler, so an I/O error escaping here would
+    drop the client's connection.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(blob)
+    except OSError as exc:
+        log.warning("debug_dump_failed path=%s error=%s", path, exc)
+        return
+    log.info("debug_dump path=%s bytes=%d", path, len(blob))
 
 # SIGNUP.EXE!FUN_004029d8 opens these four in order and fails if any
 # CreateFile(OPEN_EXISTING) returns INVALID_HANDLE_VALUE.  The FTM client
@@ -98,6 +147,41 @@ SIGNUP_LOGSRV_FILENAMES = (
     "newtips.rtf",
 )
 SIGNUP_LOGSRV_SOURCE = "LOGSRV"
+
+def mos2_original_size(blob):
+    """Return the uncompressed size a MOS2 container declares, else None."""
+    if len(blob) < _MOS2_HEADER_SIZE or not blob.startswith(_MOS2_MAGIC):
+        return None
+    if struct.unpack_from("<H", blob, 4)[0] != _MOS2_VERSION:
+        return None
+    return struct.unpack_from("<I", blob, 8)[0]
+
+
+def mos2_chunk_spans(blob):
+    """Return each compressed chunk's (start, end) inside a MOS2 container.
+
+    HrMos2DecompFile @ FTMAPI 0x7F6B34A8 walks the body as a run of
+    `[u32 compressed_length][compressed bytes]`, one per uncompressed chunk.
+    Knowing where they sit is what lets a corrupt region in the decompressed
+    file be traced back to a byte range on the wire.
+    """
+    original = mos2_original_size(blob)
+    if original is None:
+        return []
+    chunk_size = struct.unpack_from("<H", blob, 6)[0]
+    if not chunk_size:
+        return []
+    count = -(-original // chunk_size)
+    spans = []
+    pos = _MOS2_HEADER_SIZE
+    for _ in range(count):
+        if pos + 4 > len(blob):
+            break
+        length = struct.unpack_from("<I", blob, pos)[0]
+        spans.append((pos, pos + 4 + length))
+        pos += 4 + length
+    return spans
+
 
 def _read_signup_file(filename):
     """Return the bytes of a file in the signup data dir, or None."""
@@ -129,9 +213,19 @@ class FTMHandler:
             # the caller already chose the local path, so it takes neither the
             # HrBillClient shortcut nor a filename override.
             is_streamed = filename == FTM_DIRSRV_SOURCE
-            unpack_method = (
-                FTM_MOS2_UNPACK_METHOD if source_names_the_file else 0
-            )
+            # The container decides, not the source: a payload that is not a
+            # MOS2 stream must be written straight to disk, or HrMos2DecompFile
+            # rejects it. BBS attachments are always MOS2.
+            if filename == FTM_BBS_SOURCE:
+                unpack_method = FTM_MOS2_UNPACK_METHOD
+            elif is_streamed:
+                unpack_method = (
+                    FTM_MOS2_UNPACK_METHOD
+                    if mos2_original_size(content) is not None and not _DNR_FORCE_RAW
+                    else 0
+                )
+            else:
+                unpack_method = 0
             reply_payload = _build_request_download_reply(
                 filename,
                 len(content),
@@ -153,10 +247,27 @@ class FTMHandler:
             )
         elif selector == FTM_SELECTOR_START_DOWNLOAD:
             filename, content = _resolve_ftm_target(payload)
+            send_params, recv_descriptors = parse_request_params(payload)
+            # ProcessTaggedServiceReply @ MPCCL 0x04604F26 answers 0x8B0B0008
+            # when a static reply tag does not match the descriptor the request
+            # declared here, so these are the authority on the reply's shape.
             log.info(
-                "start_download source=%s bytes=%d", filename, len(content)
+                "start_download source=%s bytes=%d send=%s recv=%s",
+                filename,
+                len(content),
+                [type(param).__name__ for param in send_params],
+                [f"0x{tag:02x}" for tag in recv_descriptors],
             )
-            reply_payload = _build_start_download_reply(content)
+            log.info(
+                "start_download_chunks spans=%s block_bounds=%s",
+                [f"{start}-{end}" for start, end in mos2_chunk_spans(content)],
+                list(range(_DYNAMIC_BLOCK_MAX, len(content), _DYNAMIC_BLOCK_MAX)),
+            )
+            if _DOWNLOAD_DUMP_PATH:
+                _dump_debug_bytes(Path(_DOWNLOAD_DUMP_PATH), content)
+            return self._build_start_download_packets(
+                msg_class, selector, request_id, content, server_seq, client_ack
+            )
         elif selector == FTM_SELECTOR_BILL_CLIENT:
             _, content = _resolve_ftm_target(payload, record_download=True)
             log.info("bill_client content_len=%d", len(content))
@@ -168,6 +279,92 @@ class FTMHandler:
 
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+
+    def _build_start_download_packets(
+        self, msg_class, selector, request_id, content, server_seq, client_ack
+    ):
+        """Stream the payload in 0x4000-byte dynamic blocks, 0x88 last.
+
+        `ProcessTaggedServiceReply` @ MPCCL 0x04604F26 decides what each
+        dynamic tag signals:
+
+            (tag & 0x8F) == 0x86  -> SignalRequestCompletion, and nothing else
+            (tag & 0x60) != 0x40  -> SignalIteratorDataAvailable
+            (tag & 0x8F) == 0x88  -> SignalIteratorMessageComplete
+
+        So 0x85 delivers a chunk, and 0x88 delivers a chunk *and* ends the
+        iterator message. 0x86 never reaches the iterator at all — it belongs
+        to the single-shot Wait() path. `CXferFile::HrQueryProgress` @ FTMAPI
+        0x7F6B27D7 reads the iterator, so the stream has to end on 0x88 for
+        the transfer's done flag (`+0x274` bit 3) to be set. Without it
+        `HrFinishRequest` @ 0x7F6B1800 answers E_FAIL with every byte
+        already on disk.
+
+        The same function allocates the dynamic receive state with a 0x4000
+        capacity, which caps one block's payload — the reason MEDVIEW's HFS
+        read splits on the same boundary.
+        """
+        blocks = _build_start_download_blocks(content)
+        packets = []
+        for block in blocks:
+            host_block = build_host_block(msg_class, selector, request_id, block)
+            packets.extend(
+                build_service_packet(
+                    self.pipe_idx,
+                    host_block,
+                    (server_seq + len(packets)) & 0x7F,
+                    client_ack,
+                )
+            )
+        log.info(
+            "start_download_stream req_id=%d bytes=%d blocks=%d fragments=%d",
+            request_id,
+            len(content),
+            len(blocks),
+            len(packets),
+        )
+        return packets
+
+
+def _build_start_download_blocks(content):
+    """Split a payload into the dynamic blocks HrStartDownload's reply carries.
+
+    The first block leads with the static section, which is the shape
+    `CXferFile::HrStartDownload` @ FTMAPI 0x7F6B2565 checks before it takes the
+    iterator. Every block after that is dynamic bytes alone.
+
+    Every chunk closes its own message with 0x88, and one bare 0x86 ends the
+    request. `ProcessTaggedServiceReply` @ MPCCL 0x04604F26 routes the tags to
+    three signals:
+
+        0x85  SignalIteratorDataAvailable          — appends, message stays open
+        0x88  ... and SignalIteratorMessageComplete — closes the message
+        0x86  SignalRequestCompletion              — ends the request
+
+    0x85 is unusable for a payload of any size. That same function reuses the
+    queued receive state while the queue is not empty, so consecutive 0x85
+    blocks all accumulate into one state built with a 0x4000 capacity, and
+    everything past the first block's worth comes out corrupt. One message per
+    block keeps each within that capacity and lets the reader drain between
+    them.
+
+    `CXferFile::HrQueryProgress` @ 0x7F6B27D7 writes one message per pump and
+    sets the done flag only on 0x0B0B000B, which is the request completion.
+    `HrFinishRequest` @ 0x7F6B1800 loops over the per-message 0x0B0B000C codes
+    until it sees it.
+    """
+    blocks = []
+    for start in range(0, max(len(content), 1), _DYNAMIC_BLOCK_MAX):
+        chunk = content[start : start + _DYNAMIC_BLOCK_MAX]
+        prefix = b""
+        if not blocks:
+            prefix = (
+                build_tagged_reply_var(0x84, _START_DOWNLOAD_STATUS)
+                + bytes([TAG_END_STATIC])
+            )
+        blocks.append(prefix + bytes([TAG_DYNAMIC_STREAM_END]) + chunk)
+    blocks.append(bytes([TAG_DYNAMIC_COMPLETE_SIGNAL]))
+    return blocks
 
 
 def _extract_client_file_id(payload):
@@ -331,28 +528,6 @@ def _encode_reply_filename(filename):
     return encoded + b"\x00"
 
 
-def _build_start_download_reply(content):
-    """HrStartDownload reply: two status dwords, then the file on the iterator.
-
-    `CXferFile::HrStartDownload` @ FTMAPI 0x7F6B2565 sends the 68-byte client
-    file id on selector 0x01, requires a reply whose static section is at
-    least 8 bytes with a non-negative first dword, and then takes the
-    request's dynamic iterator through vtable `+0x48`.
-    `CXferFile::HrQueryProgress` @ 0x7F6B27D7 pumps that iterator and
-    WriteFile's every chunk it yields until the stream reports 0x0B0B000B.
-
-    0x88 rather than 0x86 for the same reason GetChildren uses it: the reader
-    is MPCCL's dynamic iterator waiting on +0x28/+0x2c, not a single-shot
-    Wait(). The transport splits the body across pipe frames on its own.
-    """
-    return (
-        build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
-        + content
-    )
-
-
 def _build_request_download_reply(
     filename,
     content_len,
@@ -365,8 +540,14 @@ def _build_request_download_reply(
 
       dword  0: HRESULT (0 = success)
       dword  1: echoed into param_1+0x260
-      dword  2: size1 -> CXferFile+0x08 (FSetFileSize) — use content length
-      dword  3: size2 -> CXferFile+0x0c  (<= 0x3ca triggers fast path) — same
+      dword  2: size1 -> CXferFile+0x08. HrInit @ FTMAPI 0x7F6B1FC4 hands it
+                to _FSetFileSize on the handle that RECEIVES the transfer —
+                the temp file when an unpack method is set, the final file
+                otherwise. It is therefore the transferred byte count, never
+                the post-unpack size: over-stating it leaves the received
+                file padded with a garbage tail.
+      dword  3: size2 -> CXferFile+0x0c. GetPercentageDone @ 0x7F6B27AF
+                divides by it, and <= 0x3ca triggers the fast path
       dword  4: flags  -> CXferFile+0x10  (bit 0 = has unpack method,
                                            bit 1 = fast path via HrBillClient,
                                            bit 3 = filename follows at +40)
