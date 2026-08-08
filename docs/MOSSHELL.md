@@ -874,12 +874,13 @@ Transfer shape, from `CXferFile::HrStartDownload @ FTMAPI 0x7F6B2565`:
   back from `HrBillClient` only when size2 is at most `0x3CA` (970). Above
   that the client seeks the local file to 970 and streams the remainder.
 - With the flag clear it goes straight to a **selector 0x01** request from
-  byte zero, sending the 68-byte client file id and expecting a reply with
-  at least 8 static bytes whose first DWORD is non-negative. It then takes
-  the request's dynamic iterator (`+0x48`).
-- `CXferFile::HrQueryProgress @ 0x7F6B27D7` pumps that iterator, writing
-  each chunk to the file. `0x8B0B0009` means nothing is ready yet;
-  `0x0B0B000B` ends the transfer.
+  byte zero, sending the 68-byte client file id. The request declares
+  receive descriptors `[0x84, 0x85]`.
+- `CXferFile::HrQueryProgress @ 0x7F6B27D7` pumps the request's dynamic
+  iterator (`+0x48`), writing each message to the file. `0x8B0B0009` means
+  nothing is ready yet; `0x0B0B000C` ends one message and `0x0B0B000B`
+  ends the transfer. `HrFinishRequest @ 0x7F6B1800` loops over the former
+  until it sees the latter.
 - Reply DWORD 5 selects the unpack step. `3` runs
   `HrMos2DecompFile @ 0x7F6B34A8`, the inverse of the `HrMos2CompFile` the
   DLRed page ran before uploading.
@@ -887,6 +888,126 @@ Transfer shape, from `CXferFile::HrStartDownload @ FTMAPI 0x7F6B2565`:
 A compressed program is always past the 970-byte window, so the practical
 path is: fast-path flag clear, unpack method 3, payload on the
 selector-0x01 iterator.
+
+#### 7.4.4 What the selector-0x01 reply has to look like
+
+Four properties, each established by measuring the running client. Getting
+any one wrong fails the transfer in a way that does not name the step.
+
+**A `0x84` variable field, not `0x83` dwords.**
+`ProcessTaggedServiceReply @ MPCCL 0x04604F26` answers `0x8B0B0008` when a
+static reply tag does not match the descriptor the request declared, and it
+accepts `0x84` against a declared `0x89`. `HrStartDownload` reads the field's
+length through vtable `+0x10`, rejects anything under 8 bytes with
+`0x8000FFFF`, and treats the first DWORD as a status that must not be
+negative.
+
+**No dynamic block may exceed `0x4000`.** That same function allocates the
+dynamic receive state with a `0x4000` capacity, and reuses the queued state
+while the queue is not empty — so oversized or continued blocks accumulate
+into one state and everything past the first block's worth comes back
+corrupt.
+
+**Three tags, three different signals**, and a transfer needs all of them in
+order:
+
+| Tag | Reaches | Meaning |
+|---|---|---|
+| `0x85` | `SignalIteratorDataAvailable` | a chunk; the message stays open |
+| `0x88` | that **and** `SignalIteratorMessageComplete` | the chunk that closes a message |
+| `0x86` | `SignalRequestCompletion` only | the request is finished |
+
+`0x86` never reaches the iterator, so a stream ending on it hangs at 100%
+with every byte already written. `0x88` alone ends each message but never the
+request, so `HrFinishRequest` spins on `0x0B0B000C` forever. The working
+shape is one `0x88`-terminated message per block, then a bare `0x86`.
+
+**DWORD 2 is a preallocation size, not the unpacked size.** `HrInit @ FTMAPI
+0x7F6B1FC4` hands it to `_FSetFileSize` on the handle that *receives* the
+transfer — the temp file when an unpack method is set, the final file
+otherwise. It must therefore state the transferred byte count; the
+container's larger uncompressed count leaves the received file padded with a
+garbage tail.
+
+#### 7.4.5 MOS2 container format
+
+`HrMos2CompFile @ 0x7F6B3163` writes a 20-byte header then one
+`[u32 compressed_length][compressed bytes]` record per chunk.
+`HrMos2DecompFile @ 0x7F6B34A8` validates the header and rejects anything
+else with `0x80004005`.
+
+| Offset | Size | Contents |
+|---:|---:|---|
+| `+0x00` | 4 | `"MOS2"` |
+| `+0x04` | 2 | version, must read `0x0010` |
+| `+0x06` | 2 | chunk size, clamped to `0x8000` by both codecs |
+| `+0x08` | 4 | uncompressed byte count |
+| `+0x0C` | 8 | source `FILETIME`, restored on the output |
+
+Chunk count is `ceil(uncompressed / chunk_size)`, so the final chunk is
+usually short. Each compressed chunk opens with the 16-bit marker `0x4B43`
+(`"CK"` on the wire), written by `FUN_7F6B3F70` and checked by
+`FUN_7F6B6C70`.
+
+The codec is MRCI. Both sides build a context from the chunk size and return
+a working-buffer size of `chunk + 7`; the compressor's context is signed
+`"MCIC"` and the decompressor's `"MDIC"`. Chunks are self-contained: the
+compressor keeps a 64 KB sliding window and a history flag, but
+`HrMos2CompFile` calls the reset (`FUN_7F6B3AA0`) after every chunk, which
+clears that flag — so the encoder always runs in no-history mode and the
+stateless decompressor matches it.
+
+#### 7.4.6 Open: the decode desynchronises mid-chunk
+
+A Download-and-Run payload arrives intact and still decompresses wrong. The
+fault is inside the MRCI decode; every other stage is cleared by
+measurement.
+
+| Stage | How it was checked | Result |
+|---|---|---|
+| Upload | DSNED's mapped view vs. the stored blob | identical |
+| Wire | the client's temp file, all 51,700 bytes | identical |
+| Container | header, four chunk lengths, `"CK"` markers | well-formed |
+| Decode input | breakpoints on all four chunks | correct lengths and data |
+| **Decode output** | buffer read before `WriteFile` | **wrong from a fixed offset** |
+| File write | buffer compared against the file | identical |
+
+For `CDPLAYER.EXE` the decompressed buffer opens `4D 5A 90 00`, stays
+byte-exact for 8,332 bytes, then diverges. The wrong bytes appear nowhere in
+the source file, so they are not a mis-resolved copy — the Huffman bit
+stream has lost sync and is emitting wrong literals. The chunk still reports
+a full `0x8000` bytes because the bit reader returns zeros at input
+exhaustion without raising its error flag:
+
+```c
+if      (DAT_7f6bb850 <  DAT_7f6bb84c) { read byte; ptr++; }
+else if (DAT_7f6bb850 == DAT_7f6bb84c) { bits = 0; }   /* end: zeros, no error */
+else                                   { DAT_7f6bb83c = 1; }
+```
+
+Damage is confined to full `0x8000`-byte chunks; a short final chunk always
+decodes correctly, and a payload small enough to fit one partial chunk
+round-trips perfectly.
+
+Ruled out, with evidence — do not re-derive these:
+
+- **A circular history window.** `FUN_7F6B5AA0` does resolve an over-long
+  back-reference by wrapping to `cursor + 0x8000 - distance`, which would
+  read the previous chunk's output from the reused, never-cleared
+  `lpBuffer`. A breakpoint on that branch (`0x7F6B609B`) never fired, so no
+  match ever reaches beyond the current chunk.
+- **Cross-chunk encoder history.** The history flag is cleared after every
+  chunk (§7.4.5).
+- **Undersized buffers.** Both codecs return `chunk + 7`, ample for a
+  `0x8000` chunk and its compressed input.
+- **Shared global state between the codecs.** The encoder's tables are
+  heap-allocated; they do not overlap the decoder's statics at
+  `0x7F6B8538`–`0x7F6B8658` or `0x7F6BB838`+.
+
+Next step: `FUN_7F6B6B30` dispatches a 2-bit opcode — `1` decodes against
+the fixed tables `FUN_7F6B6840` builds once per process, `2` takes the
+dynamic-table path at `FUN_7F6B61B0`. A breakpoint on `0x7F6B61B0` says
+which branch is in use and therefore which one loses sync.
 
 ## 8. Plug-in hand-off
 

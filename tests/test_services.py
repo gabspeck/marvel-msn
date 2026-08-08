@@ -1902,6 +1902,7 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((0x1002, 0), "MediaView Online Documentation"),
                     ((1, 0x111), "DnR Transfer Test"),
                     ((1, 0x112), "DnR Compressed Test"),
+                    ((1, 0x113), "DnR Compressed Test B"),
                 ],
             ),
         ]

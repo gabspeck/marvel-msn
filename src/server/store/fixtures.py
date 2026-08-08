@@ -397,6 +397,32 @@ _DNR_MOS2_NODE = DirectoryNode(
     ),
 )
 
+# A second captured container, kept because its first chunk decodes wrong
+# while WINDIFF's does not. HrMos2DecompFile reuses one output buffer across
+# chunks and resolves an over-long back-reference by wrapping into that
+# buffer's tail (FTMAPI 0x7F6B609B), so chunk 0 reads uninitialised heap and
+# later chunks read the previous chunk's output. That predicts this payload's
+# result varies between runs while WINDIFF's does not.
+DNR_MOS2B_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "dnr" / "cdplayer.mos2"
+DNR_MOS2B_SHABBY_ID = 0x00FF0003
+DNR_MOS2B_FILE_NAME = "CDPLAYER.EXE"
+DNR_MOS2B_COMPRESSED_SIZE = 40748
+
+_DNR_MOS2B_KEY, _DNR_MOS2B_MNID = mnid_key(1, 0x113)
+_DNR_MOS2B_NODE = DirectoryNode(
+    node_id=_DNR_MOS2B_KEY,
+    is_container=False,
+    app_id=APP_DOWNLOAD_AND_RUN,
+    mnid_a=_DNR_MOS2B_MNID,
+    content=replace(
+        _container_content("DnR Compressed Test B", type_str="Download-and-Run File"),
+        dnr_shabby_id=DNR_MOS2B_SHABBY_ID,
+        dnr_file_name=DNR_MOS2B_FILE_NAME,
+        dnr_compression=3,
+        size_bytes=DNR_MOS2B_COMPRESSED_SIZE,
+    ),
+)
+
 _DEFAULT_CHAT_KEY, _DEFAULT_CHAT_MNID = mnid_key(1, 0x10F)
 _DEFAULT_CHAT_ROOM = DirectoryNode(
     node_id=_DEFAULT_CHAT_KEY,
@@ -678,6 +704,7 @@ DIRECTORY_NODES = [
     _DEFAULT_CHAT_ROOM,
     _DNR_TEST_NODE,
     _DNR_MOS2_NODE,
+    _DNR_MOS2B_NODE,
     *BBS_NODES,
 ]
 
@@ -725,9 +752,11 @@ DIRECTORY_CHILDREN = {
         *[f"{f0}:0" for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS],
         _DNR_TEST_NODE.node_id,
         _DNR_MOS2_NODE.node_id,
+        _DNR_MOS2B_NODE.node_id,
     ],
     _DNR_TEST_NODE.node_id: [],
     _DNR_MOS2_NODE.node_id: [],
+    _DNR_MOS2B_NODE.node_id: [],
     # BBS board "Climbing BBS" listed under "Sports, Health and Fitness"
     # (c=2 = APP_BBS_SERVICE, b bit 0x04 = delegate). Opening it hands the
     # folder to bbsnav, which enumerates the thread list over svc "BBS".
