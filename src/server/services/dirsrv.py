@@ -1,8 +1,11 @@
 """DIRSRV service handler: directory browsing, property records."""
 
 import logging
+import os
 import struct
+import time
 from dataclasses import replace
+from pathlib import Path
 
 from ..config import (
     DIRSRV_BROWSE_FLAGS_CONTAINER,
@@ -144,6 +147,26 @@ SUPPORTED_BROWSE_LCIDS = (
 
 log = logging.getLogger(__name__)
 
+# Debug aid: when set, every completed AddShabby upload is written here, so
+# two uploads of the same file can be diffed against each other.
+_UPLOAD_DUMP_DIR = os.environ.get("MSN_UPLOAD_DUMP")
+
+
+def _dump_debug_bytes(path, blob):
+    """Write a diagnostic copy of `blob`, never failing the caller.
+
+    This runs inside a request handler, so letting an I/O error escape would
+    tear down the client's connection — a missing dump directory once did
+    exactly that mid-upload.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(blob)
+    except OSError as exc:
+        log.warning("debug_dump_failed path=%s error=%s", path, exc)
+        return
+    log.info("debug_dump path=%s bytes=%d", path, len(blob))
+
 
 class DIRSRVHandler:
     """Handles DIRSRV service requests on a logical pipe."""
@@ -252,6 +275,7 @@ class DIRSRVHandler:
             "format": fmt_param.value,
             "size": size_param.value,
             "data": bytearray(),
+            "frames": [],
         }
         log.info(
             "add_shabby_begin format=%d stream=%d bytes=%d",
@@ -276,8 +300,20 @@ class DIRSRVHandler:
             return None
 
         upload["data"].extend(payload)
+        upload["frames"].append(len(payload))
         if msg_class != MPC_CLASS_CONTINUATION_LAST:
             return None
+
+        sizes = upload["frames"]
+        modal = max(set(sizes), key=sizes.count) if sizes else 0
+        odd = [(i, n) for i, n in enumerate(sizes) if n != modal]
+        log.info(
+            "add_shabby_frames count=%d modal=%d total=%d odd=%s",
+            len(sizes),
+            modal,
+            sum(sizes),
+            odd[:12],
+        )
 
         del self._shabby_uploads[stream_id]
         reply_payload = _add_shabby_result(
@@ -958,11 +994,21 @@ def _add_shabby_result(fmt, blob, declared_size):
         log.warning("add_shabby rejected format=%d bytes=%d", fmt, len(blob))
         return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
 
+    if _UPLOAD_DUMP_DIR:
+        _dump_debug_bytes(
+            Path(_UPLOAD_DUMP_DIR) / f"upload_{time.strftime('%H%M%S')}_{len(blob)}.bin",
+            blob,
+        )
+
+    # The head is worth logging: a Download-and-Run payload is HrMos2CompFile
+    # output and has to open "MOS2" for FTMAPI's HrMos2DecompFile to accept it
+    # on the way back down.
     log.info(
-        "add_shabby status=0 format=%d bytes=%d shabby_id=0x%08x",
+        "add_shabby status=0 format=%d bytes=%d shabby_id=0x%08x head=%s",
         fmt,
         len(blob),
         shabby_id,
+        blob[:16].hex(),
     )
     return _build_add_shabby_result(0, shabby_id)
 
