@@ -330,6 +330,11 @@ The file picker is `DlrEd_OnChooseFile` @ `0x7F5723BE`:
    at this time" — so refusing the format-0x85 upload fails the whole page with
    no indication of which step broke.
 
+On the Win95 VM this upload path produces a container that does not decode
+back to its input — the fault is in `HrMos2CompFile`, not in the transfer or
+the server. See docs/MOSSHELL.md §7.4.6. Payloads whose container is built
+server-side (`tools/mos2_compress.py`) download and run correctly.
+
 The Forum Manager help-file picker, `HelpEd_OnChooseHelpFile` @ `0x7F57290F`,
 reuses `fi`/`fn`/`p` but stores its file **by value**: the mapped bytes go out
 as `fi` type 0x0E with no compression and no `AddShabby`. It takes its title

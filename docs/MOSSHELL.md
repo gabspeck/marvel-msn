@@ -1017,11 +1017,22 @@ Ruled out, with evidence — do not re-derive these:
 - **A stale reference copy.** The VM's own `CDPLAYER.EXE` hashes identically
   to the copy used for comparison.
 
+**Confirmed by substitution.** A MOS2 container built on the server rather
+than by the client — `tools/mos2_compress.py`, plain raw DEFLATE behind the
+`"CK"` marker — downloads, unpacks byte-exact and runs. Everything downstream
+of the compressor is therefore correct, and Download-and-Run is usable today
+for any server-authored payload. Only `HrMos2CompFile` is broken.
+
 Open question: whether `HrMos2CompFile` is genuinely this broken, or whether
-the emulated CPU mis-executes part of the encoder. The encoder does heavy
-pointer arithmetic and uses `_setjmp`; the decoder, which is far simpler, is
-provably correct on the same machine. Compressing the same file under a
-different emulator or on real hardware would separate the two.
+the emulated CPU mis-executes part of the encoder. The VM runs
+`cpu_use_dynarec = 1` on a Pentium MMX, and 86Box's old recompiler
+(`DYNAREC=ON`, `NEW_DYNAREC=OFF`) devotes the first 256 entries of
+`recomp_opcodes[512]` to 16-bit-data variants. The compressor's hot loop is
+almost entirely 16-bit — a `word` position counter at `0x7F6B9958` driven by
+`0x66`-prefixed memory `INC`/`ADD`/`CMP`, with both hash chain tables held as
+words — while the decoder, which is provably correct on the same machine, is
+straight 32-bit code. Re-running the compression with the recompiler disabled
+separates a client bug from an emulation bug.
 
 ## 8. Plug-in hand-off
 
