@@ -957,57 +957,71 @@ compressor keeps a 64 KB sliding window and a history flag, but
 clears that flag — so the encoder always runs in no-history mode and the
 stateless decompressor matches it.
 
-#### 7.4.6 Open: the decode desynchronises mid-chunk
+#### 7.4.6 The payload is encoded wrong — the compressor, not the transfer
 
-A Download-and-Run payload arrives intact and still decompresses wrong. The
-fault is inside the MRCI decode; every other stage is cleared by
-measurement.
+A Download-and-Run payload arrives byte-perfect and still decompresses wrong.
+Every stage except the compression is cleared by measurement.
 
 | Stage | How it was checked | Result |
 |---|---|---|
 | Upload | DSNED's mapped view vs. the stored blob | identical |
-| Wire | the client's temp file, all 51,700 bytes | identical |
-| Container | header, four chunk lengths, `"CK"` markers | well-formed |
-| Decode input | breakpoints on all four chunks | correct lengths and data |
-| **Decode output** | buffer read before `WriteFile` | **wrong from a fixed offset** |
-| File write | buffer compared against the file | identical |
+| Wire | the client's own temp file, all 51,700 bytes | identical |
+| Container | header, chunk lengths, `"CK"` markers | well-formed |
+| Decode input | breakpoints on every chunk | correct lengths and data |
+| Decoder | output compared against host `zlib` | **bit-identical** |
+| File write | decoder buffer compared against the file | identical |
+| **Compressed stream** | inflated on the host | **does not encode its input** |
 
-For `CDPLAYER.EXE` the decompressed buffer opens `4D 5A 90 00`, stays
-byte-exact for 8,332 bytes, then diverges. The wrong bytes appear nowhere in
-the source file, so they are not a mis-resolved copy — the Huffman bit
-stream has lost sync and is emitting wrong literals. The chunk still reports
-a full `0x8000` bytes because the bit reader returns zeros at input
-exhaustion without raising its error flag:
+**A MOS2 chunk is standard raw DEFLATE** after the two-byte `"CK"` marker.
+`FUN_7F6B6840` builds 144x8 / 112x9 / 24x7 / 8x8 code lengths over 288 symbols
+plus 30 symbols at 5 bits — DEFLATE's fixed literal/length and distance
+tables exactly — and `FUN_7F6B6B30` reads a 1-bit final flag then a 2-bit
+block type with 3 reserved as an error.
 
-```c
-if      (DAT_7f6bb850 <  DAT_7f6bb84c) { read byte; ptr++; }
-else if (DAT_7f6bb850 == DAT_7f6bb84c) { bits = 0; }   /* end: zeros, no error */
-else                                   { DAT_7f6bb83c = 1; }
-```
+That makes the client's decoder checkable against `zlib`: inflating every
+chunk with `zlib.decompressobj(-15)` and truncating each to the chunk size
+reproduces the client's output **byte for byte**. The decoder is correct.
 
-Damage is confined to full `0x8000`-byte chunks; a short final chunk always
-decodes correctly, and a payload small enough to fit one partial chunk
-round-trips perfectly.
+The streams themselves are not. Inflating them and diffing against the source
+file shows the encoder emitting symbols that do not describe its input:
+
+| File | Chunk 0 | Chunk 1 | Chunk 2 | Chunk 3 |
+|---|---|---|---|---|
+| `CDPLAYER.EXE` | false match @8332 | false match @13445 | OK (partial) | — |
+| `WINDIFF.EXE` | OK | wrong literal @31549 | false match @6010 | OK (partial) |
+
+At `CDPLAYER.EXE` offset 8332 the stream emits `match len=3 dist=162`, a
+perfectly legal back-reference that copies `00 52 FF` from offset 8170 where
+the file holds `C2 10 00`. Those six bytes occur nowhere earlier in the file,
+so no valid match existed — the encoder emitted a hash candidate it never
+verified. `WINDIFF.EXE` chunk 1 instead emits a wrong *literal*, which no
+matcher bug explains: the encoder's view of its own input is wrong.
+
+The damage is confined to full `0x8000` chunks; every short final chunk
+encodes correctly, and a payload small enough to fit one partial chunk
+round-trips perfectly. The streams also self-terminate a few bytes off the
+chunk size (32,758 / 32,760 / 32,774 / 32,784 observed), which is why a
+decompressed file can come out short.
 
 Ruled out, with evidence — do not re-derive these:
 
-- **A circular history window.** `FUN_7F6B5AA0` does resolve an over-long
-  back-reference by wrapping to `cursor + 0x8000 - distance`, which would
-  read the previous chunk's output from the reused, never-cleared
-  `lpBuffer`. A breakpoint on that branch (`0x7F6B609B`) never fired, so no
-  match ever reaches beyond the current chunk.
-- **Cross-chunk encoder history.** The history flag is cleared after every
-  chunk (§7.4.5).
-- **Undersized buffers.** Both codecs return `chunk + 7`, ample for a
-  `0x8000` chunk and its compressed input.
-- **Shared global state between the codecs.** The encoder's tables are
-  heap-allocated; they do not overlap the decoder's statics at
-  `0x7F6B8538`–`0x7F6B8658` or `0x7F6BB838`+.
+- **A circular history window.** `FUN_7F6B5AA0` resolves an over-long
+  back-reference by wrapping to `cursor + 0x8000 - distance`, into the reused
+  and never-cleared `lpBuffer`. A breakpoint on that branch (`0x7F6B609B`)
+  never fired, and inflating with different preset dictionaries gives
+  identical output, so nothing references before a chunk's start.
+- **Cross-chunk encoder history.** The flag is cleared per chunk (SS 7.4.5).
+- **Undersized buffers.** Both codecs return `chunk + 7`.
+- **Shared codec globals.** The encoder's tables are heap-allocated and do not
+  overlap the decoder's statics.
+- **A stale reference copy.** The VM's own `CDPLAYER.EXE` hashes identically
+  to the copy used for comparison.
 
-Next step: `FUN_7F6B6B30` dispatches a 2-bit opcode — `1` decodes against
-the fixed tables `FUN_7F6B6840` builds once per process, `2` takes the
-dynamic-table path at `FUN_7F6B61B0`. A breakpoint on `0x7F6B61B0` says
-which branch is in use and therefore which one loses sync.
+Open question: whether `HrMos2CompFile` is genuinely this broken, or whether
+the emulated CPU mis-executes part of the encoder. The encoder does heavy
+pointer arithmetic and uses `_setjmp`; the decoder, which is far simpler, is
+provably correct on the same machine. Compressing the same file under a
+different emulator or on real hardware would separate the two.
 
 ## 8. Plug-in hand-off
 
