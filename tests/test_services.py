@@ -1,5 +1,6 @@
 """Tests for LOGSRV and DIRSRV service payload builders."""
 
+import hashlib
 import struct
 import unittest
 from dataclasses import replace
@@ -1903,6 +1904,7 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((1, 0x111), "DnR Transfer Test"),
                     ((1, 0x112), "DnR Compressed Test"),
                     ((1, 0x113), "DnR Compressed Test B"),
+                    ((1, 0x114), "DnR Server-Compressed"),
                 ],
             ),
         ]
@@ -3488,6 +3490,44 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         self.assertEqual(
             [f"{s}-{e}" for s, e in mos2_chunk_spans(content)],
             ["20-17063", "17063-35079", "35079-45864", "45864-51700"],
+        )
+
+    def test_server_built_container_round_trips(self):
+        """The seeded container must decode back to WINDIFF.EXE exactly.
+
+        A MOS2 chunk is raw DEFLATE behind a "CK" marker, so the container is
+        built here rather than by the client, whose HrMos2CompFile emits
+        streams that do not decode back to their input.
+        """
+        import sys
+        import zlib
+
+        sys.path.insert(0, "tools")
+        from mos2_compress import CHUNK, MARKER
+
+        from server.store import fixtures
+
+        blob = fixtures.DNR_MOS2OK_PATH.read_bytes()
+        self.assertEqual(len(blob), fixtures.DNR_MOS2OK_COMPRESSED_SIZE)
+        total = mos2_original_size(blob)
+        self.assertEqual(total, 107520)
+
+        pos, out = 0x14, b""
+        for _ in range(-(-total // CHUNK)):
+            length = struct.unpack_from("<I", blob, pos)[0]
+            pos += 4
+            body = blob[pos : pos + length]
+            pos += length
+            self.assertEqual(body[:2], MARKER)
+            # FUN_7F6B55B0 refuses a record longer than chunk + 7.
+            self.assertLessEqual(length, CHUNK + 7)
+            d = zlib.decompressobj(-15)
+            out += (d.decompress(body[2:]) + d.flush())[:CHUNK]
+
+        # Digest rather than a second copy of the binary.
+        self.assertEqual(len(out), total)
+        self.assertEqual(
+            hashlib.md5(out).hexdigest(), "2591b2b19f3edfba8180aac8df673a65"
         )
 
     def test_mos2_header_is_validated_before_its_size_is_trusted(self):

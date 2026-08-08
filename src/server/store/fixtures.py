@@ -423,6 +423,32 @@ _DNR_MOS2B_NODE = DirectoryNode(
     ),
 )
 
+# The same WINDIFF.EXE, but with the container built here by
+# tools/mos2_compress.py instead of by the client. HrMos2CompFile on the VM
+# emits streams that do not decode back to their input (docs/MOSSHELL.md
+# 7.4.6); a MOS2 chunk is plain raw DEFLATE behind a "CK" marker, so a correct
+# one can be produced server-side. Downloading this should yield a byte-exact
+# WINDIFF.EXE that runs.
+DNR_MOS2OK_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "dnr" / "windiff_ok.mos2"
+DNR_MOS2OK_SHABBY_ID = 0x00FF0004
+DNR_MOS2OK_FILE_NAME = "WINDIFF.EXE"
+DNR_MOS2OK_COMPRESSED_SIZE = 51759
+
+_DNR_MOS2OK_KEY, _DNR_MOS2OK_MNID = mnid_key(1, 0x114)
+_DNR_MOS2OK_NODE = DirectoryNode(
+    node_id=_DNR_MOS2OK_KEY,
+    is_container=False,
+    app_id=APP_DOWNLOAD_AND_RUN,
+    mnid_a=_DNR_MOS2OK_MNID,
+    content=replace(
+        _container_content("DnR Server-Compressed", type_str="Download-and-Run File"),
+        dnr_shabby_id=DNR_MOS2OK_SHABBY_ID,
+        dnr_file_name=DNR_MOS2OK_FILE_NAME,
+        dnr_compression=3,
+        size_bytes=DNR_MOS2OK_COMPRESSED_SIZE,
+    ),
+)
+
 _DEFAULT_CHAT_KEY, _DEFAULT_CHAT_MNID = mnid_key(1, 0x10F)
 _DEFAULT_CHAT_ROOM = DirectoryNode(
     node_id=_DEFAULT_CHAT_KEY,
@@ -705,6 +731,7 @@ DIRECTORY_NODES = [
     _DNR_TEST_NODE,
     _DNR_MOS2_NODE,
     _DNR_MOS2B_NODE,
+    _DNR_MOS2OK_NODE,
     *BBS_NODES,
 ]
 
@@ -753,10 +780,12 @@ DIRECTORY_CHILDREN = {
         _DNR_TEST_NODE.node_id,
         _DNR_MOS2_NODE.node_id,
         _DNR_MOS2B_NODE.node_id,
+        _DNR_MOS2OK_NODE.node_id,
     ],
     _DNR_TEST_NODE.node_id: [],
     _DNR_MOS2_NODE.node_id: [],
     _DNR_MOS2B_NODE.node_id: [],
+    _DNR_MOS2OK_NODE.node_id: [],
     # BBS board "Climbing BBS" listed under "Sports, Health and Fitness"
     # (c=2 = APP_BBS_SERVICE, b bit 0x04 = delegate). Opening it hands the
     # folder to bbsnav, which enumerates the thread list over svc "BBS".

@@ -100,6 +100,7 @@ SHABBY_REGISTRY = {
     # A captured DLRed upload, so the compressed path needs no re-upload.
     fixtures.DNR_MOS2_SHABBY_ID: fixtures.DNR_MOS2_PATH,
     fixtures.DNR_MOS2B_SHABBY_ID: fixtures.DNR_MOS2B_PATH,
+    fixtures.DNR_MOS2OK_SHABBY_ID: fixtures.DNR_MOS2OK_PATH,
     **PICKABLE_ICONS,
 }
 
