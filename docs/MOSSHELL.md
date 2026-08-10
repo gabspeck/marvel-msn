@@ -982,40 +982,119 @@ That makes the client's decoder checkable against `zlib`: inflating every
 chunk with `zlib.decompressobj(-15)` and truncating each to the chunk size
 reproduces the client's output **byte for byte**. The decoder is correct.
 
-The streams themselves are not. Inflating them and diffing against the source
-file shows the encoder emitting symbols that do not describe its input:
+##### The compressor is a faithful zlib 0.9x port
 
-| File | Chunk 0 | Chunk 1 | Chunk 2 | Chunk 3 |
+`HrMos2CompFile` drives one MRCI compress call per chunk. Every stage matches
+zlib 0.95 line for line; none of them carries a logic defect.
+
+| Address | zlib 0.95 equivalent | Notes |
+|---|---|---|
+| `FUN_7F6B39E0` | MRCI `"MCIC"` entry | copies the chunk into the window, owns the history flag |
+| `FUN_7F6B3AF0` | `deflate` setup | window duplication / slide, hash-table init, `setjmp` guard |
+| `FUN_7F6B3BE0` | `deflate_slow` | lazy matching, `TOO_FAR` = 0x1000, distance `strstart - prev_match - 1` |
+| `FUN_7F6B53E0` | `longest_match` | `MAX_DIST` 0x7EFA, `good_match` / `nice_match` / `max_chain` all honoured |
+| `FUN_7F6B5270` | `ct_tally` | `l_buf` / `d_buf` / `flag_buf` bitmap, `(last_lit & 0xFFF)` early-flush heuristic |
+| `FUN_7F6B4FA0` | `ct_flush_block` | stored / static / dynamic choice, flushes the partial flag byte first |
+| `FUN_7F6B50F0` | `compress_block` | replays `l_buf` against the flag bits |
+
+Static tables sit where zlib puts them: `length_code[256]` at `0x7F6BB448`,
+`dist_code[512]` at `0x7F6BB548`, `base_length` at `0x7F6BB748` and
+`base_dist` at `0x7F6BB7C0`. `ct_tally` and `compress_block` index them
+identically, so tallying and emission cannot disagree.
+
+zlib's tail clamp is relocated, not missing: `longest_match` returns `best_len`
+unclamped and the caller applies `if (lookahead < match_length) match_length =
+lookahead` immediately after the call.
+
+##### Window layout
+
+The context holds a 64 KiB window and a "have history" flag at `ctx+0x20`.
+
+- Chunk 0 is loaded at `window+0`, duplicated up into `window+0x8000`, and the
+  `head` table is cleared.
+- Chunk N is loaded at `window+0x8000` over its predecessor's slide-down, the
+  hash tables are slid by `m >= 0x8000 ? m - 0x8000 : NIL`, and after the pass
+  the high half is copied down to `window+0`.
+- A chunk shorter than `0x8000` clears the flag, dropping history.
+
+`strstart` therefore runs `0x8000`..`0x10000` in absolute window coordinates,
+and a chunk's stream may legally reference up to `MAX_DIST` bytes into its
+predecessor.
+
+##### The defect signature
+
+The encoder's loop consumes exactly `lookahead` = `0x8000` input bytes, so the
+emitted token lengths must sum to `0x8000`. They do not. Each corrupt chunk
+consumes its whole body and lands on the end-of-block symbol, yet decodes to
+the wrong length:
+
+| Payload | Chunk | Decoded | Expected | Drift |
 |---|---|---|---|---|
-| `CDPLAYER.EXE` | false match @8332 | false match @13445 | OK (partial) | — |
-| `WINDIFF.EXE` | OK | wrong literal @31549 | false match @6010 | OK (partial) |
+| `CDPLAYER.EXE` | 0 | 32,774 | 32,768 | **+6** |
+| `CDPLAYER.EXE` | 1 | 32,784 | 32,768 | **+16** |
+| `CDPLAYER.EXE` | 2 | 22,528 | 22,528 | 0 |
+| `WINDIFF.EXE` | 0 | 32,768 | 32,768 | 0 |
+| `WINDIFF.EXE` | 1 | 32,758 | 32,768 | **-10** |
+| `WINDIFF.EXE` | 2 | 32,760 | 32,768 | **-8** |
+| `WINDIFF.EXE` | 3 | 9,216 | 9,216 | 0 |
 
-At `CDPLAYER.EXE` offset 8332 the stream emits `match len=3 dist=162`, a
-perfectly legal back-reference that copies `00 52 FF` from offset 8170 where
-the file holds `C2 10 00`. Those six bytes occur nowhere earlier in the file,
-so no valid match existed — the encoder emitted a hash candidate it never
-verified. `WINDIFF.EXE` chunk 1 instead emits a wrong *literal*, which no
-matcher bug explains: the encoder's view of its own input is wrong.
+A chunk is either exact or drifts; nothing in between. The drift is the whole
+defect — the encoder emits tokens describing a different number of bytes than
+it consumed, so from the first bad token every later position is offset
+against the source. Byte comparisons past that point measure the offset, not
+independent corruption.
 
-The damage is confined to full `0x8000` chunks; every short final chunk
-encodes correctly, and a payload small enough to fit one partial chunk
-round-trips perfectly. The streams also self-terminate a few bytes off the
-chunk size (32,758 / 32,760 / 32,774 / 32,784 observed), which is why a
-decompressed file can come out short.
+The token stream is otherwise self-consistent. The dynamic Huffman tree in
+each corrupt block is **optimal for the symbols actually emitted** (0.00%
+excess over a freshly built tree on the decoded frequencies), so the tree, the
+code-length table and the emitted codes all agree. This is not a
+code-assignment, table-ordering or bit-alignment fault.
 
 Ruled out, with evidence — do not re-derive these:
 
 - **A circular history window.** `FUN_7F6B5AA0` resolves an over-long
   back-reference by wrapping to `cursor + 0x8000 - distance`, into the reused
   and never-cleared `lpBuffer`. A breakpoint on that branch (`0x7F6B609B`)
-  never fired, and inflating with different preset dictionaries gives
-  identical output, so nothing references before a chunk's start.
-- **Cross-chunk encoder history.** The flag is cleared per chunk (SS 7.4.5).
+  never fired.
+- **Cross-chunk history.** Inflating chunk N with chunk N-1 supplied as a
+  preset dictionary changes nothing — same divergence offsets, same output.
+- **A wrong Huffman table or a bit-level desync.** The trees are optimal for
+  the emitted symbols and every block consumes its input exactly.
+- **A `flag_buf` desync.** `ct_flush_block` writes the partial flag byte before
+  building the trees, and block token counts modulo 8 do not predict which
+  chunks are corrupt.
+- **Non-determinism.** Two independent compressions of `CDPLAYER.EXE` differ
+  from the source at the same 36,872 positions and are byte-identical to each
+  other.
+- **A stale reference copy.** The compressed stream and the reference file
+  carry the same PE `TimeDateStamp`, `CheckSum` and section table, so the VM
+  is compressing the same build being compared against.
 - **Undersized buffers.** Both codecs return `chunk + 7`.
 - **Shared codec globals.** The encoder's tables are heap-allocated and do not
   overlap the decoder's statics.
-- **A stale reference copy.** The VM's own `CDPLAYER.EXE` hashes identically
-  to the copy used for comparison.
+
+##### Open
+
+No algorithmic defect survives review, and the corruption is deterministic, so
+the remaining candidate is execution rather than the algorithm. The VM runs
+`cpu_use_dynarec = 1`; 86Box's old recompiler reserves the first 256 entries
+of `recomp_opcodes[512]` for 16-bit-data variants, and `longest_match` is
+almost entirely 16-bit — a word `strstart` at `0x7F6B9958`, `0x66`-prefixed
+memory operands, word hash-chain tables, and byte compares staged through `CL`:
+
+```
+7F6B545B  MOV  DI, word ptr [ESP + 0x20]     ; cur_match, 16-bit
+7F6B5460  MOV  ESI, EDI
+7F6B5462  AND  ESI, 0xFFFF
+7F6B5468  ADD  ESI, [0x7F6B8360]             ; window + cur_match
+7F6B546E  LEA  EBX, [EAX + ESI*0x1]          ; + best_len
+7F6B5471  MOV  CL, byte ptr [ESP + 0x12]     ; scan_end
+7F6B5475  CMP  byte ptr [EBX], CL
+```
+
+The decoder, provably correct on the same machine, is straight 32-bit code.
+**Untested:** re-run the compression with the recompiler off. Shut the VM down
+first — 86Box rewrites `86box.cfg` on exit.
 
 **Confirmed by substitution.** A MOS2 container built on the server rather
 than by the client — `tools/mos2_compress.py`, plain raw DEFLATE behind the
