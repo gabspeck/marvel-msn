@@ -2441,9 +2441,13 @@ class _AddNodeContentStore:
         parent = next(node for node in default_seed().directory_nodes if node.node_id == "1:16")
         self.nodes = {parent.node_id: parent}
         self.children = {parent.node_id: []}
+        self.retired = set()
 
     def get_node(self, node_id):
         return self.nodes.get(node_id)
+
+    def is_node_id_free(self, node_id):
+        return node_id not in self.nodes and node_id not in self.retired
 
     def get_children(self, node_id):
         return [self.nodes[child_id] for child_id in self.children.get(node_id, [])]
@@ -2510,6 +2514,48 @@ class TestDIRSRVAddNode(unittest.TestCase):
         self.assertTrue(node.is_container)
         self.assertEqual(node.host_usernames, ())
         self.assertEqual(node.secondary_icon_shabby_id, 0x059B)
+
+    def test_a_deleted_childs_mnid_is_not_handed_to_the_next_node(self):
+        # Create an Encarta node (c=11), delete it, then create a
+        # Download-and-Run node (c=7). Reissuing the mnid leaves MOSSHELL
+        # holding the Encarta 'c' for the new node, and DSNED's GETPMTE
+        # switches on 'c' — the sheet loses its Download and Run page.
+        store = _AddNodeContentStore()
+
+        def create(app_id, type_str, name):
+            properties = build_property_record(
+                [
+                    (0x03, "c", struct.pack("<I", app_id)),
+                    (0x03, "g", struct.pack("<I", 1)),
+                    (0x01, "b", b"\x00"),
+                    (0x03, "m", struct.pack("<I", 0)),
+                    (0x0A, "ca", b"\x01\x00"),
+                    (0x03, "o", struct.pack("<I", 0)),
+                    (0x10, "q", struct.pack("<II", 1, 0x0409)),
+                    (0x0A, "tp", b"\x01" + type_str.encode() + b"\x00"),
+                    (0x0B, "f", b"\x01" + name.encode() + b"\x00"),
+                ]
+            )
+            request = (
+                self._tagged_var(b"\x02\x00")
+                + self._tagged_var(struct.pack("<II", 1, 16))
+                + self._tagged_var(properties)
+                + b"\x83\x83\x84"
+            )
+            reply = build_add_node_reply_payload(request, store)
+            return f"{struct.unpack('<I', reply[-8:-4])[0]}:{struct.unpack('<I', reply[-4:])[0]}"
+
+        encarta = create(11, "Microsoft Encarta Viewer", "New Microsoft Encarta Viewer")
+        self.assertEqual(store.get_node(encarta).app_id, 11)
+
+        store.retired.add(encarta)
+        del store.nodes[encarta]
+        store.children["1:16"].remove(encarta)
+
+        dnr = create(7, "Download-and-Run File", "New Download-and-Run File")
+
+        self.assertNotEqual(dnr, encarta)
+        self.assertEqual(store.get_node(dnr).app_id, 7)
 
     def test_created_chat_adds_its_creator_to_the_host_list(self):
         properties = build_property_record(

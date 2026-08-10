@@ -21,9 +21,22 @@ class InMemoryContentStore:
         self._nodes = {n.node_id: n for n in nodes}
         self._children = children
         self._fallback = fallback
+        self._retired = set()
 
     def get_node(self, node_id):
         return self._nodes.get(node_id, self._fallback)
+
+    def is_node_id_free(self, node_id):
+        """Report whether `node_id` has never been issued.
+
+        A deleted mnid stays taken. MOSSHELL caches properties per deid and
+        re-reads a node only when its 'g' moves, so a recycled mnid leaves the
+        client holding the dead node's cached values. 'c' is the damaging one:
+        DSNED's GETPMTE switches on it to pick the editor, so a new
+        Download-and-Run node handed a retired Encarta node's mnid gets the
+        Encarta vtable and loses its Download and Run page.
+        """
+        return node_id not in self._nodes and node_id not in self._retired
 
     def find_by_go_word(self, go_word):
         if not go_word:
@@ -129,6 +142,7 @@ class InMemoryContentStore:
         for gone in doomed:
             self._nodes.pop(gone, None)
             self._children.pop(gone, None)
+        self._retired |= doomed
         for parent_id, ids in self._children.items():
             if any(i in doomed for i in ids):
                 ids[:] = [i for i in ids if i not in doomed]

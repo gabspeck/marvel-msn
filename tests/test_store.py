@@ -117,6 +117,30 @@ class TestRemoveNode(unittest.TestCase):
     def test_unknown_node_reports_no_removal(self):
         self.assertFalse(app_store.content.remove_node(_NEW_MESSAGE))
 
+    def test_a_deleted_mnid_is_never_reissued(self):
+        content = app_store.content
+        doomed = content.get_children(_BOARD)[0].node_id
+        self.assertFalse(content.is_node_id_free(doomed))
+
+        self.assertTrue(content.remove_node(doomed))
+
+        # The client caches properties per deid, so handing this mnid to a new
+        # node would leave it wearing the dead node's cached 'c'.
+        self.assertFalse(content.is_node_id_free(doomed))
+
+    def test_removing_a_board_retires_its_messages_too(self):
+        content = app_store.content
+        messages = [node.node_id for node in content.get_children(_BOARD)]
+        self.assertTrue(messages)
+
+        self.assertTrue(content.remove_node(_BOARD))
+
+        for message in messages:
+            self.assertFalse(content.is_node_id_free(message))
+
+    def test_an_unused_mnid_is_free(self):
+        self.assertTrue(app_store.content.is_node_id_free(_NEW_MESSAGE))
+
     def test_the_parent_change_stamp_advances(self):
         # `g` is the only signal QueryOutOfDate acts on — without a bump the
         # deleted row survives every refresh.

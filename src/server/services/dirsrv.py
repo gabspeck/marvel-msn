@@ -1562,8 +1562,7 @@ def _allocate_child_mnid(content_store, parent_id, parent_mnid):
     field_8 = max(used_field_8) + 1
     while field_8 <= 0xFFFFFFFF:
         node_id = f"{field_0}:{field_8}"
-        existing = content_store.get_node(node_id)
-        if existing is None or existing.node_id != node_id:
+        if content_store.is_node_id_free(node_id):
             return struct.pack("<II", field_0, field_8)
         field_8 += 1
     raise ValueError("no free child MNID remains")
@@ -1573,8 +1572,7 @@ def _allocate_app_instance_mnid(content_store, app_id, field_8):
     instance_id = 1
     while instance_id <= 0xFFFFFFFF:
         node_id = f"{instance_id}:{field_8}"
-        existing = content_store.get_node(node_id)
-        node_id_is_free = existing is None or existing.node_id != node_id
+        node_id_is_free = content_store.is_node_id_free(node_id)
         if node_id_is_free and content_store.find_app_instance(app_id, instance_id) is None:
             return struct.pack("<II", instance_id, field_8)
         instance_id += 1
