@@ -15,6 +15,7 @@ from . import log as server_log
 from .config import (
     DELAY_AFTER_COM,
     DELAY_BEFORE_REPLY,
+    ESCAPE_CHAR,
     PACKET_TERMINATOR,
     PIPE_CLOSE_CMD,
     SOCKET_TIMEOUT,
@@ -33,6 +34,7 @@ from .pipe import parse_pipe0_content, parse_pipe_frames
 from .services import SERVICE_HANDLERS
 from .session import Session
 from .transport import build_ack_packet, build_transport_params, parse_packet
+from .wire import byte_unstuff
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +87,10 @@ class ConnectionState:
         # packets; parse_pipe_frame reads a content length only when a pipe
         # owes nothing.
         self.pipe_pending = {}
+        # The client can split a two-byte escape across transport packets.
+        # Keep the whole first stuffed payload until the next packet supplies
+        # the escape code, so each packet's pipe header remains separate.
+        self.rx_stuffed_pending = b""
         self.pipes_closed = set()
         self.buf = bytearray()
         self.transport_started = False
@@ -122,6 +128,26 @@ class ConnectionState:
         seq = self.server_seq
         self.server_seq = (self.server_seq + 1) & 0x7F
         return seq
+
+    def _decode_transport_payloads(self, stuffed_payload):
+        """Decode one wire payload, preserving an escape split across packets."""
+        payloads = []
+        if self.rx_stuffed_pending:
+            # A continuation packet starts with its own pipe header. The first
+            # byte after that header completes the preceding escape sequence.
+            if len(stuffed_payload) < 2:
+                return payloads
+            payloads.append(byte_unstuff(self.rx_stuffed_pending + stuffed_payload[1:2]))
+            self.rx_stuffed_pending = b""
+            stuffed_payload = stuffed_payload[:1] + stuffed_payload[2:]
+
+        if not stuffed_payload:
+            return payloads
+        if stuffed_payload[-1] == ESCAPE_CHAR:
+            self.rx_stuffed_pending = stuffed_payload
+        else:
+            payloads.append(byte_unstuff(stuffed_payload))
+        return payloads
 
     def push_service_data(self, pipe_idx, host_block, label):
         """Send a host block this connection did not ask for, right now.
@@ -228,19 +254,22 @@ class ConnectionState:
             ack_pkt = build_ack_packet(self.client_ack)
             self._send(ack_pkt, logging.DEBUG, "tx_ack n=%d seq=%d ack=%d", pkt.seq, self.client_ack)
 
-        # Process pipe frames
-        frames = parse_pipe_frames(pkt.payload, self.pipe_pending)
-        for pf in frames:
-            self.pipe_buffers[pf.pipe_idx].extend(pf.content)
+        # CRC covers the still-stuffed bytes. Decode only after validation,
+        # carrying a trailing escape into the next DATA packet when needed.
+        stuffed_payload = packet_data[2:-4]
+        for payload in self._decode_transport_payloads(stuffed_payload):
+            frames = parse_pipe_frames(payload, self.pipe_pending)
+            for pf in frames:
+                self.pipe_buffers[pf.pipe_idx].extend(pf.content)
 
-            if pf.last_data:
-                assembled = bytes(self.pipe_buffers[pf.pipe_idx])
-                self.pipe_buffers[pf.pipe_idx].clear()
+                if pf.last_data:
+                    assembled = bytes(self.pipe_buffers[pf.pipe_idx])
+                    self.pipe_buffers[pf.pipe_idx].clear()
 
-                if pf.pipe_idx == 0:
-                    self._handle_pipe0_message(assembled)
-                else:
-                    self._handle_service_data(pf.pipe_idx, assembled)
+                    if pf.pipe_idx == 0:
+                        self._handle_pipe0_message(assembled)
+                    else:
+                        self._handle_service_data(pf.pipe_idx, assembled)
 
     def _handle_pipe0_message(self, assembled):
         msg = parse_pipe0_content(assembled)

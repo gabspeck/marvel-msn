@@ -1,8 +1,19 @@
 """Tests for transport packet building and parsing."""
 
+import struct
 import unittest
 
+from server.connection import ConnectionState
+from server.pipe import build_pipe_frame
 from server.transport import build_ack_packet, build_packet, build_transport_params, parse_packet
+from server.wire import byte_stuff, crc32, encode_header_byte, mask_crc
+
+
+def _packet_from_stuffed_payload(seq, stuffed_payload):
+    wire_data = bytes([encode_header_byte(seq | 0x80), encode_header_byte(0x80)])
+    wire_data += stuffed_payload
+    crc = mask_crc(struct.pack("<I", crc32(wire_data)))
+    return wire_data + crc
 
 
 class TestBuildParseRoundtrip(unittest.TestCase):
@@ -82,6 +93,50 @@ class TestParsePacket(unittest.TestCase):
         self.assertEqual(parsed.type, "DATA")
         self.assertEqual(parsed.seq, 0)
         self.assertEqual(parsed.ack, 0)
+
+
+class TestSplitEscapeReceive(unittest.TestCase):
+    class _Socket:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+    def test_escape_split_across_crc_valid_packets_survives_reassembly(self):
+        pipe_idx = 4
+        content = b"SVC!" + b"A" * 233 + b"\x0b" + b"B" * 229
+        first_content_len = 238
+
+        first_payload = build_pipe_frame(pipe_idx, content, last=False)
+        first_payload = first_payload[: 3 + first_content_len]
+        second_header = build_pipe_frame(pipe_idx, b"", last=True)[:1]
+
+        stuffed_first = byte_stuff(first_payload)
+        self.assertTrue(stuffed_first.endswith(b"\x1b\x33"))
+        first_packet = _packet_from_stuffed_payload(1, stuffed_first[:-1])
+        self.assertEqual(len(first_packet[2:-4]), 241)
+        second_packet = _packet_from_stuffed_payload(
+            2, second_header + stuffed_first[-1:] + byte_stuff(content[first_content_len:])
+        )
+
+        state = ConnectionState(self._Socket())
+        received = []
+        state._handle_service_data = lambda idx, data: received.append((idx, data))
+
+        state._handle_raw_packet(first_packet)
+        self.assertEqual(received, [])
+        self.assertTrue(state.rx_stuffed_pending)
+
+        bad_second_packet = bytearray(second_packet)
+        bad_second_packet[-1] ^= 0xFF
+        state._handle_raw_packet(bytes(bad_second_packet))
+        self.assertEqual(received, [])
+        self.assertTrue(state.rx_stuffed_pending)
+
+        state._handle_raw_packet(second_packet)
+        self.assertEqual(received, [(pipe_idx, content)])
+        self.assertEqual(state.rx_stuffed_pending, b"")
 
 
 class TestTransportParams(unittest.TestCase):
