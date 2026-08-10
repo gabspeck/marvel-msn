@@ -1073,45 +1073,63 @@ Ruled out, with evidence — do not re-derive these:
 - **Shared codec globals.** The encoder's tables are heap-allocated and do not
   overlap the decoder's statics.
 
-##### Open
+##### The matcher emits unverified matches
 
-No algorithmic defect survives review, and the corruption is deterministic, so
-the remaining candidate is execution rather than the algorithm. The VM runs
-`cpu_use_dynarec = 1`; 86Box's old recompiler reserves the first 256 entries
-of `recomp_opcodes[512]` for 16-bit-data variants, and `longest_match` is
-almost entirely 16-bit — a word `strstart` at `0x7F6B9958`, `0x66`-prefixed
-memory operands, word hash-chain tables, and byte compares staged through `CL`:
+Measured on the VM with a self-identifying text payload (fixed 64-byte lines,
+each carrying its own absolute offset), five of six chunks encode perfectly and
+chunk 3 drifts by -3262. A faithful host port of `deflate_slow` and
+`longest_match` reproduces the client's parse **token for token for the first
+3398 tokens**, then splits:
+
+| token 3398 | |
+|---|---|
+| correct | `lit '6'` |
+| client | `match(len=7, dist=244)` |
+
+Breaking at `deflate_slow` (`0x7F6B3BE0`) on the chunk-3 call and dumping the
+window settles what the stream alone could not:
 
 ```
-7F6B545B  MOV  DI, word ptr [ESP + 0x20]     ; cur_match, 16-bit
-7F6B5460  MOV  ESI, EDI
-7F6B5462  AND  ESI, 0xFFFF
-7F6B5468  ADD  ESI, [0x7F6B8360]             ; window + cur_match
-7F6B546E  LEA  EBX, [EAX + ESI*0x1]          ; + best_len
-7F6B5471  MOV  CL, byte ptr [ESP + 0x12]     ; scan_end
-7F6B5475  CMP  byte ptr [EBX], CL
+window base [0x7F6B8360] = 0x005034E0   head 0x004F34DC   prev 0x004E34D8
+window+0xED4D  "6D40 L01973 foxtrot lima foxtro"   <- scan
+window+0xEC59  "bravo lima bravo lima bravo lim"   <- the matched candidate
 ```
 
-The decoder, provably correct on the same machine, is straight 32-bit code.
-**Untested:** re-run the compression with the recompiler off. Shut the VM down
-first — 86Box rewrites `86box.cfg` on exit.
+The window holds exactly the file's bytes, so the input buffer is correct. The
+two regions differ **at the first byte**. The compressor emitted a
+back-reference between them anyway.
+
+So `longest_match` cannot have verified this candidate: its own entry test
+compares `match[0]` against `scan[0]` before extending. The emitted pair
+`(prev_length, prev_match)` therefore did not come from a search at the
+position the match was written to — a `match_start` that no search validated
+for this `scan`. `longest_match` leaves `match_start` untouched when no
+candidate beats `best_len`, which starts at `prev_length`, so a stale value can
+survive across iterations and be paired with a length found elsewhere.
+
+Note the tuning constants at `0x7F6B8370` are `{4096, 32, 258, 258}` but the
+code reads `0x7F6B8374` as `max_lazy_match` and `0x7F6B8378` as `good_match` —
+the reverse of zlib's `{good_length, max_lazy, nice_length, max_chain}`. A
+`max_lazy_match` of 32 makes the lazy search skip far more often than zlib
+intends, and every skipped search is an iteration that leaves `match_start`
+stale.
+
+Ruled out by this measurement, in addition to the list above:
+
+- **A corrupt input buffer.** The window is byte-correct at the faulting scan.
+- **The emulator.** The corruption reproduces with `cpu_use_dynarec = 0`.
 
 **Confirmed by substitution.** A MOS2 container built on the server rather
 than by the client — `tools/mos2_compress.py`, plain raw DEFLATE behind the
 `"CK"` marker — downloads, unpacks byte-exact and runs. Everything downstream
-of the compressor is therefore correct, and Download-and-Run is usable today
-for any server-authored payload. Only `HrMos2CompFile` is broken.
+of the compressor is correct, and Download-and-Run is usable today for any
+server-authored payload. Only `HrMos2CompFile` is broken.
 
-Open question: whether `HrMos2CompFile` is genuinely this broken, or whether
-the emulated CPU mis-executes part of the encoder. The VM runs
-`cpu_use_dynarec = 1` on a Pentium MMX, and 86Box's old recompiler
-(`DYNAREC=ON`, `NEW_DYNAREC=OFF`) devotes the first 256 entries of
-`recomp_opcodes[512]` to 16-bit-data variants. The compressor's hot loop is
-almost entirely 16-bit — a `word` position counter at `0x7F6B9958` driven by
-`0x66`-prefixed memory `INC`/`ADD`/`CMP`, with both hash chain tables held as
-words — while the decoder, which is provably correct on the same machine, is
-straight 32-bit code. Re-running the compression with the recompiler disabled
-separates a client bug from an emulation bug.
+**Open:** which iteration writes the stale `match_start`. SoftICE conditional
+breakpoints are unusable over the serial console — its syntax-hint overlay
+eats keystrokes after `IF`, so `IF (eax==0)` arrives as `I ==0)` — so catching
+the exact iteration needs a `BPM` on the `prev`/`match_start` globals rather
+than a conditional `BPX`.
 
 ## 8. Plug-in hand-off
 
