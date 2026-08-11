@@ -225,7 +225,42 @@ twice over the box text — once to measure, once to write. What it emits:
 
 So `red shoes` → `'red' & 'shoes'`, and `cat*` → `'cat%'`.
 
-`contains` is substring matching: the lexer adds no leading or trailing `%`.
+### 5.2.1 What the terms mean — whole words
+
+The Containing box's **What's This?** help is the only statement of the
+matching rules anywhere, and both of its tables are headed with the word
+*word*:
+
+| These criteria | Find services with the |
+|---|---|
+| `Kids games`, `Kids and Games` | word "kids" and the word "games" |
+| `kids, GAMES`, `Kids or Games` | word "kids" or the word "games" |
+| `"Kids and games"` | exact phrase "kids and games" |
+
+| These criteria | Find services with words like |
+|---|---|
+| `gam*` | "game", "games" and "gaming" |
+| `b?ll` | "Ball", "bell" and "bill" |
+| `ca?` | "Cat" and "cab" |
+
+Searches are not case-sensitive.
+
+A term therefore has to cover a word end to end. `ca?` finding "cat" and "cab"
+but not "cabbage", and `b?ll` finding "bill" but not "bulldozer", is the whole
+distinction — the wildcards range inside one word, and a term with no wildcard
+matches only the exact word. `climb` does not find "Climbing"; `climb*` does.
+
+A double-quoted run arrives as one term with spaces in it, and matches that run
+of words in order.
+
+The help also says wildcards go "in the middle or end" of the criteria. That is
+guidance to the user, not something the server can enforce — the lexer emits a
+leading `%` if one is typed, and the server evaluates it like any other.
+
+Word boundaries fall on anything that is not a letter or a digit, in the
+indexed text and inside a term alike. Nothing in the help says so; it is what
+makes the rules usable against real names, where "Sports, Health and Fitness"
+has to hold the word "sports" rather than "sports,".
 
 ### 5.3 Type combo — the scope fragment
 

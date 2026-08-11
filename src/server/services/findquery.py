@@ -19,8 +19,28 @@ Two fragment shapes exist, and they use different operator alphabets:
     so this half of the grammar is fixed by the resource strings and only ever
     takes seven shapes.
 
-`contains` is substring matching, not equality: the whole point of the dialog
-is "Containing", and the lexer emits no leading or trailing `%`.
+`contains` matches **whole words**, not substrings. The Containing box's
+"What's This?" help is explicit about it — both of its tables are headed "Find
+services with the Word …" and "Find services with words like …" — and its
+examples only hold under word matching:
+
+    Kids games        word "kids" AND word "games"
+    Kids and Games    the same
+    kids, GAMES       word "kids" OR word "games"
+    Kids or Games     the same
+    "Kids and games"  the exact phrase
+    gam*              "game", "games", "gaming"
+    b?ll              "Ball", "bell", "bill"
+    ca?               "Cat" and "cab"
+
+`ca?` finding "cat" and "cab" but not "cabbage", and `b?ll` finding "bill" but
+not "bulldozer", is the whole distinction: the wildcards range inside one word
+and the term has to cover that word end to end. Searches are not
+case-sensitive.
+
+The help also says wildcards go "in the middle or end" of the criteria. That is
+guidance to the user, not something the server can see — the lexer will happily
+emit a leading `%` if one is typed, and it is evaluated like any other.
 """
 
 from __future__ import annotations
@@ -235,7 +255,9 @@ class _Parser:
         if parts is None:
             raise QueryError(f"{field} is not a text field")
         matches = self.parse_term_expression()
-        return lambda fields: matches("\n".join(str(fields.get(p, "")) for p in parts))
+        return lambda fields: matches(
+            _word_sequence(" ".join(str(fields.get(p, "")) for p in parts))
+        )
 
     def parse_term_expression(self):
         left = self.parse_term_and()
@@ -276,12 +298,39 @@ def _negate(inner):
     return lambda value: not inner(value)
 
 
+# Anything that is not a letter or a digit separates words, in the indexed text
+# and inside a term alike. It is what makes `sports` match the name
+# "Sports, Health and Fitness" — the comma ends the word rather than belonging
+# to it.
+_WORD_SEPARATOR_RE = re.compile(r"[^0-9A-Za-z]+")
+
+# A term has to cover a word end to end, so it is anchored to word boundaries
+# rather than searched for anywhere in the text.
+_WORD_START = r"(?:\A|(?<= ))"
+_WORD_END = r"(?:\Z|(?= ))"
+
+
+def _word_sequence(text):
+    """Fold a field's text down to the space-separated words the index holds."""
+    return _WORD_SEPARATOR_RE.sub(" ", text).strip()
+
+
 def _term_matcher(term):
-    """Compile one quoted term into a case-insensitive substring test.
+    """Compile one quoted term into a case-insensitive whole-word test.
 
     `%` and `_` are the wildcards `CQueryLexer_EmitToken` lowers `*` and `?`
     into; a backslash before any character makes that character literal, which
     is how the lexer ships a user's own `%`, `_`, `\\` or `-`.
+
+    Both wildcards stay inside one word — `\\S` never matches the space that
+    separates two — so `ca_` finds "cat" and "cab" but not "cabbage", and
+    `gam%` finds "gaming" but not "endgame". A term with no wildcard at all
+    matches only the exact word, which is why `climb` does not find "Climbing"
+    and `a` finds nothing unless something is literally named "a".
+
+    A term may hold spaces: the lexer turns a double-quoted run into one term,
+    so `"Kids and games"` arrives as a single term and matches that run of
+    words in order.
     """
     pattern = []
     index = 0
@@ -289,13 +338,31 @@ def _term_matcher(term):
         char = term[index]
         index += 1
         if char == "\\" and index < len(term):
-            pattern.append(re.escape(term[index]))
+            pattern.append(_literal_pattern(term[index]))
             index += 1
         elif char == "%":
-            pattern.append(".*")
+            pattern.append(r"\S*")
         elif char == "_":
-            pattern.append(".")
+            pattern.append(r"\S")
         else:
-            pattern.append(re.escape(char))
-    compiled = re.compile("".join(pattern), re.IGNORECASE | re.DOTALL)
+            pattern.append(_literal_pattern(char))
+    # A run of separators in the term folds to the single space the text was
+    # folded to. The only bare spaces in `pattern` are the ones
+    # `_literal_pattern` put there, so collapsing them cannot touch a wildcard.
+    body = re.sub(r" +", " ", "".join(pattern)).strip()
+    if not body:
+        # Nothing but separators. No word can match it, and treating it as a
+        # match-all would put the whole directory in the results window.
+        return lambda value: False
+    compiled = re.compile(_WORD_START + body + _WORD_END, re.IGNORECASE)
     return lambda value: compiled.search(value) is not None
+
+
+def _literal_pattern(char):
+    """One literal term character, folded the same way the text is.
+
+    A separator in the term has to line up with the single space the text was
+    folded to, or a phrase term would never match anything it was typed
+    against.
+    """
+    return " " if _WORD_SEPARATOR_RE.fullmatch(char) else re.escape(char)

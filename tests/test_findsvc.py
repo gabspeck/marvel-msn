@@ -13,7 +13,12 @@ import unittest
 from server.config import FINDSVC_INTERFACE_GUIDS
 from server.mpc import decode_dirsrv_request
 from server.services.dirsrv import _size_value, build_get_properties_reply_payload
-from server.services.findquery import QueryError, parse_query
+from server.services.findquery import (
+    QueryError,
+    _term_matcher,
+    _word_sequence,
+    parse_query,
+)
 from server.services.findsvc import (
     FINDSVC_CLASS_SEARCH,
     FINDSVC_SEARCH,
@@ -157,7 +162,7 @@ class TestSearchFraming(unittest.TestCase):
 
 
 class TestQueryEvaluation(unittest.TestCase):
-    def test_single_term_matches_a_substring_of_the_name(self):
+    def test_single_term_matches_a_whole_word_of_the_name(self):
         # `movies` typed into the Containing box with only the Name box ticked.
         _status, _count, mnids = _search("(NAME contains 'movies')")
         self.assertIn("Movies", _names(mnids))
@@ -198,6 +203,16 @@ class TestQueryEvaluation(unittest.TestCase):
     def test_combined_field_searches_every_part(self):
         # SEARCH_PROPS is the mask-7 column: name, subject and description.
         self.assertIn("Movies", _names(_search("(SEARCH_PROPS contains 'movies')")[2]))
+
+    def test_a_term_does_not_match_a_longer_word(self):
+        # The whole point of word matching: `climb` is not the word "Climbing",
+        # so it takes a wildcard to reach it. Under substring matching every
+        # one-letter search returned most of the directory.
+        self.assertEqual(_names(_search("(NAME contains 'climb')")[2]), [])
+        self.assertIn("Climbing BBS", _names(_search("(NAME contains 'climb%')")[2]))
+
+    def test_a_term_does_not_match_the_tail_of_a_word(self):
+        self.assertEqual(_names(_search("(NAME contains 'ovies')")[2]), [])
 
     def test_unmatched_query_answers_zero_hits_not_an_error(self):
         status, count, mnids = _search("(NAME contains 'nosuchthing')")
@@ -296,6 +311,81 @@ class TestChatRoomOccupancy(unittest.TestCase):
             self.assertTrue(node.content.modified_filetime, f"{node.node_id} {node.content.name!r}")
 
 
+class TestWhatsThisExamples(unittest.TestCase):
+    """Every example in the Containing box's "What's This?" help, verbatim.
+
+    The help is the only statement of these rules anywhere — the lexer decides
+    what reaches the wire, and this is what the wire form has to mean. Terms
+    are written here as `CQueryLexer_EmitToken` would compile the criteria in
+    the left-hand column.
+    """
+
+    def matches(self, term, text):
+        return _term_matcher(term)(_word_sequence(text))
+
+    def test_two_words_mean_and(self):
+        # "Kids games" and "Kids and Games" both -> word "kids" AND "games".
+        for term_expr in ("'Kids' & 'games'", "'Kids' & 'Games'"):
+            with self.subTest(term_expr):
+                predicate = parse_query(f"(NAME contains {term_expr})")
+                self.assertTrue(predicate(_fields("Kids games online")))
+                self.assertFalse(predicate(_fields("Kids only")))
+
+    def test_comma_and_or_mean_or(self):
+        # "kids, GAMES" and "Kids or Games" both -> word "kids" OR "games".
+        for term_expr in ("'kids' | 'GAMES'", "'Kids' | 'Games'"):
+            with self.subTest(term_expr):
+                predicate = parse_query(f"(NAME contains {term_expr})")
+                self.assertTrue(predicate(_fields("Games night")))
+                self.assertTrue(predicate(_fields("Kids only")))
+                self.assertFalse(predicate(_fields("Grown ups")))
+
+    def test_a_quoted_run_is_an_exact_phrase(self):
+        # '"Kids and games"' -> the exact phrase, so the words must be adjacent
+        # and in order. Inside the quotes "and" is text, not the AND operator.
+        self.assertTrue(self.matches("Kids and games", "Fun: kids and games!"))
+        self.assertFalse(self.matches("Kids and games", "games and kids"))
+        self.assertFalse(self.matches("Kids and games", "kids and board games"))
+
+    def test_searches_are_not_case_sensitive(self):
+        self.assertTrue(self.matches("KIDS", "kids"))
+        self.assertTrue(self.matches("kids", "KIDS"))
+
+    def test_asterisk_matches_the_rest_of_the_word(self):
+        # gam* -> "game", "games" and "gaming".
+        for word in ("game", "games", "gaming"):
+            with self.subTest(word):
+                self.assertTrue(self.matches("gam%", word))
+        # ...but only from the start of a word.
+        self.assertFalse(self.matches("gam%", "endgame"))
+
+    def test_question_mark_matches_one_character(self):
+        # b?ll -> "Ball", "bell" and "bill".
+        for word in ("Ball", "bell", "bill"):
+            with self.subTest(word):
+                self.assertTrue(self.matches("b_ll", word))
+        self.assertFalse(self.matches("b_ll", "bulldozer"))
+        self.assertFalse(self.matches("b_ll", "bll"))
+
+    def test_question_mark_at_the_end_still_needs_a_character(self):
+        # ca? -> "Cat" and "cab", and nothing longer or shorter.
+        self.assertTrue(self.matches("ca_", "Cat"))
+        self.assertTrue(self.matches("ca_", "cab"))
+        self.assertFalse(self.matches("ca_", "cabbage"))
+        self.assertFalse(self.matches("ca_", "ca"))
+
+    def test_punctuation_in_the_text_ends_a_word(self):
+        # Nothing in the help says so, but it is what makes the rules usable
+        # against real names: "Sports, Health and Fitness" holds the word
+        # "sports", not "sports,".
+        self.assertTrue(self.matches("sports", "Sports, Health and Fitness"))
+
+
+def _fields(name):
+    """The searchable columns of a node named `name`, and nothing else."""
+    return {"name": name, "topics": "", "description": "", "place": "", "locale": ""}
+
+
 class TestScopeFragments(unittest.TestCase):
     def _app_ids(self, query):
         by_mnid = {node.mnid_a: node.app_id for node in app_store.content.all_nodes()}
@@ -326,9 +416,11 @@ class TestScopeFragments(unittest.TestCase):
 class TestLocaleFragment(unittest.TestCase):
     def test_show_all_languages_off_scopes_to_one_lcid(self):
         # ShowAllLanguages=FALSE appends `LOCALES contains '<LCID:%08X>'`.
-        hits = _names(_search("(NAME contains 'a') AND (LOCALES contains '00000416')")[2])
-        self.assertIn("Artes e Entretenimento", hits)
-        self.assertNotIn("Arts and Entertainment", hits)
+        # "Design" is the name both localised nodes share, so only the locale
+        # fragment can be what separates them.
+        hits = _names(_search("(NAME contains 'design') AND (LOCALES contains '00000416')")[2])
+        self.assertIn("Arte e Design", hits)
+        self.assertNotIn("Art and Design", hits)
 
 
 class TestQueryErrors(unittest.TestCase):
