@@ -43,8 +43,9 @@ from .rooms import room_population
 # DIRSRV wire selectors. Slot indices resolve to IIDs via the discovery table
 # advertised in build_discovery_packet. Names mirror TREENVCL.DLL vtable
 # methods (IID table 0x7F633270..0x7F6332EC).
+DIRSRV_CLASS_TREE = 0x03
 DIRSRV_SELECTOR_GET_PROPERTIES = 0x00  # self record (with dword_0=1 override = children)
-DIRSRV_SELECTOR_GET_PARENTS = 0x01  # TODO: unhandled; warn when observed
+DIRSRV_SELECTOR_GET_PARENTS = 0x01  # CTreeNavClient::GetParents
 DIRSRV_SELECTOR_GET_CHILDREN = 0x02  # GetRelatives dir=0
 DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWord
 # Slot 4 (IID 00028B28) is GetShabby — CTreeNavClient::GetShabby
@@ -210,6 +211,9 @@ class DIRSRVHandler:
             reply_payload = build_get_ticket_reply_payload(self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
             reply_payload = build_get_datasets_reply_payload()
+        elif msg_class == DIRSRV_CLASS_TREE and selector == DIRSRV_SELECTOR_GET_PARENTS:
+            request = decode_dirsrv_request(payload)
+            reply_payload = build_get_parents_reply_payload(request, self.session.user.rights)
         elif selector == DIRSRV_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
             reply_payload = build_get_properties_reply_payload(request, self.session.user.rights)
@@ -793,6 +797,24 @@ def build_get_children_reply_payload(request=None, rights=RIGHTS_NONE):
     return build_tree_reply_wire(records_with_ids)
 
 
+def build_get_parents_reply_payload(request=None, rights=RIGHTS_NONE):
+    """Build a DIRSRV GetParents (selector 0x01) reply: direct parents."""
+    if request is None:
+        request = DirsrvRequest()
+
+    requested_props = _parse_prop_group(request.prop_group)
+    _log_request("get_parents", request, requested_props)
+
+    content_store = _default_store.content
+    records_with_ids = [
+        (parent.node_id, build_props(requested_props, parent, is_children=True, rights=rights))
+        for parent in content_store.get_parents(request.node_id)
+    ]
+
+    _log_reply("get_parents_reply", records_with_ids)
+    return build_tree_reply_wire(records_with_ids)
+
+
 def _collect_children_records(request, requested_props, rights):
     """Return [(src_node_id, prop_tuples)] for the GetChildren body."""
     if request.node_id == "0:0" and requested_props == [PROP_LANGUAGE]:
@@ -854,7 +876,7 @@ def _log_reply(kind, records_with_ids):
 
 
 def build_tree_reply_wire(records_with_ids):
-    """Build the shared MOS-tree reply framing for GetProperties/GetChildren.
+    """Build the shared MOS-tree reply framing for tree record iterators.
 
     Used by both DIRSRV and BBS (the BBS read channel rides the same generic
     TREENVCL tree, so its reply framing is identical — only the per-node tag

@@ -155,6 +155,25 @@ details view instead sends an empty 0x0A string to render a blank cell.
 `CMosTreeEdit::SetProperty` writes the name under, and the Find row is the only
 reader of it.
 
+### 4.1 Result activation — DIRSRV GetParents
+
+Double-clicking a row transfers control from MOSFIND.DLL to MSNFIND.EXE.
+`ResolveFirstParentIdentity` @ `0x7F373CE3` uses its dedicated
+`CTreeNavClient` and calls `GetParents` for the selected row's MNID with
+properties `{c,a}`. The
+observed request for MSN Today was:
+
+```
+class=0x03 selector=0x01 req_id=0
+node=4:0 flags=0 max=0 props=c,a locale=[] recv=83,83,85
+```
+
+The reply uses the same status/count/`0x87`/`0x88` record iterator as
+GetChildren. The records are the node's direct parents in directory-link
+order. MSNFIND calls `GetNthNode(iterator, 0)` and ignores later records, then
+reads the first parent's `c` and `a` to continue activation. For `4:0`, that
+parent is Member Assistance (US), `1:17`.
+
 ## 5. The query string
 
 `CFindDialog_BuildQueryString` @ 0x7E9B2526 joins up to four fragments, each in

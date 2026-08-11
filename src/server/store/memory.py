@@ -84,7 +84,15 @@ class InMemoryContentStore:
 
     def count_parents(self, node_id):
         """Return the number of parents that list `node_id` as a child."""
-        return sum(node_id in child_ids for child_ids in self._children.values())
+        return len(self.get_parents(node_id))
+
+    def get_parents(self, node_id):
+        """Return direct parents in directory-link order."""
+        return [
+            self._nodes[parent_id]
+            for parent_id, child_ids in self._children.items()
+            if node_id in child_ids and parent_id in self._nodes
+        ]
 
     def add_node(self, node):
         """Register a node by mnid, replacing any node already under that key.

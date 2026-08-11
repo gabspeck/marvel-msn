@@ -45,6 +45,7 @@ from server.mpc import (
     build_host_block,
     build_service_packet,
     build_tagged_reply_var,
+    decode_dirsrv_request,
     parse_host_block,
     parse_tagged_params,
 )
@@ -72,8 +73,8 @@ from server.services.conference import (
     CONFLOCHandler,
     CONFSRVHandler,
 )
-from server.services.rooms import _rooms as conference_rooms
 from server.services.dirsrv import (
+    DIRSRV_CLASS_TREE,
     DS_E_NOT_FOUND,
     ENUM_SHN_KEY_ICONS,
     SUPPORTED_BROWSE_LCIDS,
@@ -85,6 +86,7 @@ from server.services.dirsrv import (
     build_get_children_reply_payload,
     build_get_datasets_reply_payload,
     build_get_deid_from_go_word_reply_payload,
+    build_get_parents_reply_payload,
     build_get_properties_reply_payload,
     build_get_ticket_reply_payload,
     build_property_record,
@@ -125,6 +127,7 @@ from server.services.olregsrv import (
     OLREGSRVHandler,
     build_olregsrv_service_map_payload,
 )
+from server.services.rooms import _rooms as conference_rooms
 from server.services.sasrv import (
     SA_E_BAD_LIST_KIND,
     SASRV_TOKENS,
@@ -2157,6 +2160,53 @@ class TestDIRSRVReply(unittest.TestCase):
             self.assertNotIn(b"\x04q\x00" + struct.pack("<II", 1, lcid), addrbar_payload)
 
 
+class TestDIRSRVGetParents(unittest.TestCase):
+    """Selector 0x01 used when MSNFIND activates a result row."""
+
+    REQUEST = bytes.fromhex(
+        "04880400000000000000"
+        "0100"
+        "0300000000"
+        "0302000000"
+        "048463006100"
+        "048400000000"
+        "838385"
+    )
+
+    def test_exact_msn_today_request_returns_member_assistance_parent(self):
+        request = decode_dirsrv_request(self.REQUEST)
+        self.assertEqual(request.node_id, "4:0")
+        self.assertEqual(request.prop_group, "c\x00a")
+        self.assertEqual(request.dword_0, 0)
+        self.assertEqual(request.dword_1, 2)
+
+        records = _walk_get_children_records(build_get_parents_reply_payload(request))
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["c"], struct.pack("<I", 1))
+        self.assertEqual(records[0]["a"], struct.pack("<II", 1, 0x11))
+
+    def test_handler_routes_observed_tree_class_and_selector(self):
+        handler = DIRSRVHandler(pipe_idx=5, svc_name="DIRSRV")
+
+        packets = handler.handle_request(
+            msg_class=DIRSRV_CLASS_TREE,
+            selector=0x01,
+            request_id=0,
+            payload=self.REQUEST,
+            server_seq=0,
+            client_ack=0,
+        )
+
+        self.assertIsNotNone(packets)
+        parsed = parse_packet(packets[0][:-1])
+        self.assertTrue(parsed.crc_ok)
+        self.assertEqual(
+            parsed.payload[8:],
+            build_get_parents_reply_payload(decode_dirsrv_request(self.REQUEST)),
+        )
+
+
 class TestDIRSRVUnhandledSelector(unittest.TestCase):
     """DIRSRV must warn (not silently fall through to GetProperties) on
     selectors that have no registered handler — keeps unmapped client
@@ -2165,13 +2215,13 @@ class TestDIRSRVUnhandledSelector(unittest.TestCase):
 
     def test_unknown_selector_warns_and_returns_none(self):
         handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV")
-        # Selector 0x01 (GetParents) — no handler today, must surface as
-        # an `unhandled` warning, not a self-record reply.
+        # Selector 0x07 has no TREENVCL method and must surface as an
+        # `unhandled` warning, not a self-record reply.
         payload = b""
         with self.assertLogs("server.services.dirsrv", level="WARNING") as cap:
             result = handler.handle_request(
-                msg_class=0x01,
-                selector=0x01,
+                msg_class=DIRSRV_CLASS_TREE,
+                selector=0x07,
                 request_id=0,
                 payload=payload,
                 server_seq=0,
