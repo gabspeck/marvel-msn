@@ -314,6 +314,18 @@ MOSABP_INTERFACE_GUIDS = [
     (_guid_le("00028B22-0000-0000-C000-000000000046"), 0x01),
 ]
 
+# FindSvc (directory search — MOSFIND.DLL, the COM server behind the
+# Find > MSN Service dialog).  `CFindConnection::HrSearch` @ 0x7E9B136A hands
+# the marshaller's slot 0x24 the IID array based at 0x7E9B45E8, which opens on
+# the contiguous run 00028BB0.  The array's end is not encoded in the binary;
+# 00028BB6 starts LOGSRV's own table, so the run is read as 00028BB0..00028BB5.
+# Only the first entry matters on the wire — the channel resolves it and every
+# request carries the selector assigned here as its class byte, so HrSearch's
+# `GetMethod(1)` arrives as class 0x01 selector 0x01.
+FINDSVC_INTERFACE_GUIDS = [
+    (_guid_le(f"00028BB{x}-0000-0000-C000-000000000046"), x + 1) for x in range(6)
+]
+
 # SASRV (system-administration service).  SACLIENT.DLL's
 # CSysAdminClient::CSysAdminClient at 0x7F3410F1 passes the 29-entry IID table
 # at 0x7F347570 to MPCCL while opening service "SASRV", version 4.

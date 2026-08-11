@@ -26,6 +26,16 @@ class InMemoryContentStore:
     def get_node(self, node_id):
         return self._nodes.get(node_id, self._fallback)
 
+    def all_nodes(self):
+        """Every registered node, for whole-directory scans.
+
+        The fallback is deliberately absent: it is the answer to a lookup for a
+        node that does not exist, not an entry in the directory, and a FindSvc
+        search that returned it would put a row in the results list whose mnid
+        resolves back to the same placeholder.
+        """
+        return list(self._nodes.values())
+
     def is_node_id_free(self, node_id):
         """Report whether `node_id` has never been issued.
 

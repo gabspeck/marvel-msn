@@ -1025,7 +1025,49 @@ what look like token ids in the second DWORD (`03 04000000 03 03000000 01 01`).
 It sits outside the 7..0x0B master-list range, so it is a different entry
 point — most likely `CreateSysAdminToken`'s own fetch. Unserved.
 
-### 7.8 CONFLOC / CONFSRV
+### 7.8 FindSvc (directory search)
+
+MOSFIND.DLL opens service `"FindSvc"` version 2 from
+`CFindConnection::HrSearch` @ 0x7E9B136A, straight on the MPC marshaller —
+no TREENVCL. Discovery must carry the contiguous run `00028BB0..00028BB5`;
+the channel resolves the first entry, so requests arrive as class `0x01`.
+
+One method.
+
+| Sel | Method | Request | Reply |
+|-----|--------|---------|-------|
+| 0x01 | Search | `04 [query ASCIIZ] 03 [1] 83 83 85` | two blocks: `83 [status] 83 [count] 87 88 [count × 8-byte mnid]`, then a bare `86` |
+
+The dynamic section is a flat mnid array and nothing else — FindSvc answers
+which nodes match, never what they are. `CFindResultSet_GetNextRow`
+@ 0x7E9B182B then takes those ids 20 at a time to a second `CTreeNavClient`
+on `"DIRSRV"` and resolves each batch with one GetProperties call for
+`{f, c, a, tp, w, p}`. That is the only caller that sends a multi-id node
+array, and the only one that asks for `f`.
+
+Both terminators are required. The ids ride `0x88` because `0x86` never reaches
+the iterator, but after the last id the pump waits again and
+`WaitIncremental` @ MPCCL 0x046049BC returns `(request+0x18 == 0) + 0x0B0B000B`
+— so it answers `0x0B0B000C` forever until `SignalRequestCompletion` sets that
+field, which only `0x86` does. `0x88` alone hangs the dialog on "Retrieving
+results" with every row already rendered. Same two-block shape as FTM's
+download (§7.3).
+
+The request's DWORD is always 1 — `CFindDialog_BuildScopeFragment` @ 0x7E9B2FC1
+writes that literal into the out-parameter the query builder hands it. Logged,
+not acted on.
+
+Result-row wire types differ from the Properties sheet's, because
+`CFindNav_FillResultRow` @ 0x7E9B1D6A reads each value directly:
+`f` = 0x0B (it narrows with `WideCharToMultiByte`), `tp` = 0x0A (`lstrcpynA`),
+`w` = 0x0C (`FileTimeToLocalFileTime` — never the details view's empty-string
+form for an undated node). Missing `c`, `a`, `f` or `w` fails the row with
+0x8B0B0080 and it never reaches the list.
+
+Query grammar, dialog control map and the STRINGTABLE scope fragments are in
+`docs/MOSFIND.md`.
+
+### 7.9 CONFLOC / CONFSRV
 
 Static-only — not implemented on the server side. See Open Questions.
 

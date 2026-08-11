@@ -2,6 +2,7 @@ from ._dispatch import log_unhandled_selector
 from .bbs import BBSHandler
 from .conference import CONFLOCHandler, CONFSRVHandler
 from .dirsrv import DIRSRVHandler
+from .findsvc import FindSvcHandler
 from .ftm import FTMHandler
 from .logsrv import LOGSRVHandler
 from .medview import MEDVIEWHandler
@@ -13,6 +14,7 @@ from .sasrv import SASRVHandler
 SERVICE_HANDLERS = {
     "logsrv": LOGSRVHandler,
     "dirsrv": DIRSRVHandler,
+    "findsvc": FindSvcHandler,
     "ftm": FTMHandler,
     "olregsrv": OLREGSRVHandler,
     "onlstmt": OnlStmtHandler,

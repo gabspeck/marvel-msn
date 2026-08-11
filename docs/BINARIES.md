@@ -383,11 +383,13 @@ Standard COM stub — `DllCanUnloadNow` + `DllGetClassObject` only. Probably the
 
 ### MOSFIND.DLL — *Find service COM server* (DLL, 25 KB)
 
-COM stub backing MSNFIND.EXE's Find dialog. Two exports: the COM lifecycle. Imports TREENVCL/SVCPROP — i.e., it navigates the Find service subtree.
+Owns the **Find > MSN Service** dialog and both halves of the search. Two exports, the COM lifecycle; `DllGetClassObject` hands out a `CFindConnection` (IIDs `00028BB3` / `00028BB4`) and a `CFindDialog`.
 
-**Imports**: `SVCPROP.DLL`, `TREENVCL.DLL`, `MSVCRT20.dll`.
+The dialog compiles the user's input into one query string (`(NAME contains 'movies') AND (APPID = 1)`) and `CFindConnection::HrSearch` @ `0x7E9B136A` sends it to service `"FindSvc"` version 2 — opened straight on the MPC marshaller, not through TREENVCL. The reply is a flat array of 8-byte mnids; the result-set object then resolves them 20 at a time through a second `CTreeNavClient` on `"DIRSRV"` asking for `{f, c, a, tp, w, p}`.
 
-**Ghidra status**: Not imported.
+**Imports**: `SVCPROP.DLL`, `TREENVCL.DLL`, `MOSMISC.DLL`, `ole32`, `MSVCRT20.dll`.
+
+**Ghidra status**: Annotated (search path, query builder, lexer). **Notes**: see `docs/MOSFIND.md` for the query grammar and STRINGTABLE scope fragments, `PROTOCOL.md` §7.8 for the wire shapes.
 
 ### FINDSTUB.DLL — *Find client stub* (DLL, 10 KB)
 
