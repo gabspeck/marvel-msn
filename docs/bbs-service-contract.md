@@ -729,11 +729,48 @@ open.
 
 BBSNAV.NAV serves **both** App #2 (MSN BBS) and App #10 (Internet Newsgroups).
 The variant is a **runtime branch**, not a separate binary:
-`CBbs_FIsMsnBbs` (`0x7F600D21`) returns `(FUN_7F6017B3(win+0x88) & 7) == 0` →
-"MSN" vs "Net" (selects the registry value prefix and gates commands; strings
-"This command is not available in Internet Newsgroups." / "…available only in
-Internet Newsgroups."). The Internet path also formats RFC-822/NNTP headers
+`CBbs_FIsPlainTextFormat` (`0x7F600D21`) returns
+`(CBbs_GetFolderFlags(win+0x88) & 7) == 0` → "Net" vs "MSN" (selects the
+registry value prefix and gates commands; strings "This command is not
+available in Internet Newsgroups." / "…available only in Internet
+Newsgroups."). The Internet path also formats RFC-822/NNTP headers
 ("Newsgroups: " `0x7F610CD8`).
+
+The predicate reads the **format field**, `_F` bits 0..2 — not the MSN-vs-Usenet
+radio, which is bit `0x800` and has no reader outside the property page. A board
+carrying `_F` bit `0x800` still composes as a newsgroup if its format field is 0.
+
+`CBbs_GetFolderFlags` (`0x7F6017B3`) reaches the tag through
+`CMosTreeNode::GetPropertyBuf` (node vtable `+0x44`, MOSSHELL `0x7F3FCF19`),
+which returns a **pointer** into the property cache instead of copying. It
+pre-zeroes its output and leaves it at 0 when the read fails, so an uncached
+`_F` is indistinguishable from format 0 — plain text. The BBS Folder property
+page reads the same tag through `GetProperty` (`+0x40`, cb=2) and shows 0 the
+same way.
+
+### What actually enables rich-text composition
+
+`CBbsMsgWnd_OnInitMenuPopup` (`0x7F5FF42C`) greys **Font** (`0x547`),
+**Paragraph** (`0x54E`), **Insert File** (`0x579`), **Insert Object** (`0x57A`)
+and **Paste Special** (`0x486`) unless all three hold:
+
+1. `GetFocus()`'s control id is `0x3ED`, the body RichEdit. The header fields
+   are `0x3E9`..`0x3EC`; with the caret in Subject or To, every formatting verb
+   is greyed regardless of the folder's format.
+2. `*(*(win+0x8c) + 0x98) == 0` — the article object is idle. The streaming
+   worker (`0x7F5FB15F`) sets it to 1 for its duration and `0x7F5FB6B4` sets it
+   to 2 at fetch start, so an article fetch that never completes greys
+   formatting permanently.
+3. `CBbs_FIsPlainTextFormat` is FALSE, i.e. `_F` bits 0..2 are non-zero.
+
+Only the **View > Formatting toolbar** item (`0x4E6`, popup `0x4E2`) is gated on
+the format field alone. The bar it creates (`CBbsMsgWnd_CreateBar`
+`0x7F5FFD1E`) enables its buttons (`0x54A`..`0x554`) on conditions 1 and 2 only,
+so a correctly-marked rich-text board still shows a dead formatting bar until
+the caret enters the body.
+
+ROT13 (`0x5AD`) is the inverse of condition 3 — enabled only on a plain-text
+folder.
 
 ### Internet / email gateway (call-sites only)
 

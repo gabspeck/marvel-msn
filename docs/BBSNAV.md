@@ -160,8 +160,8 @@ exists, delegate to its slot 28; else `RgmdsFromRcdata(g_BbsHInstance, 0x177B,
 `HKCU\SOFTWARE\Microsoft\MOS\BBS Viewer`, four 24-byte values `{MSN,Net}
 {Comp,Read} Wnd`. `CBbs_LoadWindowPlacement` (`0x7F600DB2`, `RegQueryValueExA`),
 `CBbs_SaveWindowPlacement` (`0x7F600EC5`, `RegCreateKeyExA`+`RegSetValueExA`).
-The `MSN` vs `Net` prefix comes from `CBbs_FIsMsnBbs` (`0x7F600D21`):
-`(FUN_7F6017B3(obj+0x88) & 7) == 0`. **No message read-state in the registry** —
+The `MSN` vs `Net` prefix comes from `CBbs_FIsPlainTextFormat` (`0x7F600D21`):
+`(CBbs_GetFolderFlags(obj+0x88) & 7) == 0`. **No message read-state in the registry** —
 unread tracking is server-side (a node flag bit).
 
 ## 8. View window + body (`CBbsViewWnd`)
@@ -211,7 +211,7 @@ selector table in `docs/bbs-service-contract.md` §Write selectors.
 
 ## 10. MSN BBS vs Internet Newsgroups + MAPI gateway
 
-One binary, two app ids. `CBbs_FIsMsnBbs` (`0x7F600D21`) branches MSN vs Net for
+One binary, two app ids. `CBbs_FIsPlainTextFormat` (`0x7F600D21`) branches MSN vs Net for
 the registry prefix and command gating ("…not available in Internet
 Newsgroups." / "…available only in Internet Newsgroups."; `Newsgroups: ` header
 at `0x7F610CD8`).
@@ -254,7 +254,7 @@ Session `4041a548ca854bd19596d689d4fc5d66` (`/BBSNAV.NAV`). Functions renamed:
 overrides, `CBbsNavTreeNode_GetThreadParent`, `CBbsViewWnd_Construct`,
 `CBbsTreeEdit_NewObject`, `CBbsTreeEdit_FillSPForNewNode`,
 `CBbs_FillPropertiesDialogPage`, `CBbs_LoadWindowPlacement`,
-`CBbs_SaveWindowPlacement`, `CBbs_FIsMsnBbs`, `CBbs_MapiForwardOrReply`. Labels:
+`CBbs_SaveWindowPlacement`, `CBbs_FIsPlainTextFormat`, `CBbs_MapiForwardOrReply`. Labels:
 `vtbl_CBbsNavTreeNode`, `vtbl_CBbsTreeEdit`, `g_BbsNtniGroup`, `g_BbsEcig`,
 `g_BbsRefreshCS`, `g_BbsHInstance`, `g_BbsAccelerators`, `g_BbsLiveInstanceCount`,
 `g_BbsExtraPropTags`, `g_BbsCachedColumns`. Plate comments on `GETPMTN`,

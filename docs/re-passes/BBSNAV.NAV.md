@@ -38,7 +38,7 @@ are dynamic loads.
 | Write path | deep | `HrGetPMte` `0x7F5F1593`, `CBbsTreeEdit` vtbl `0x7F60E9E8`, `NewObject` `0x7F5F1D17`, `FillSPForNewNode` `0x7F5F1DCF` |
 | TREEEDCL selectors | deep | `CTreeEditClient` Private* sel 0–12 (Lock/Unlock/AddNode/DeleteNode/SetProperties/LinkNode/UnlinkNode/AddShabby/DeleteShabby/OrderChildren/GetDataSets/GetTicket) |
 | Read-state / prefs | deep | `HKCU\…\BBS Viewer` window-placement only; `CBbs_Load/SaveWindowPlacement` `0x7F600DB2`/`0x7F600EC5`; read-state server-side |
-| MSN vs Net + MAPI gw | deep (call-sites) | `CBbs_FIsMsnBbs` `0x7F600D21`; `CBbs_MapiForwardOrReply` `0x7F6044CB` (dynamic MAPI32); MOSABP32 deferred |
+| MSN vs Net + MAPI gw | deep (call-sites) | `CBbs_FIsPlainTextFormat` `0x7F600D21`; `CBbs_MapiForwardOrReply` `0x7F6044CB` (dynamic MAPI32); MOSABP32 deferred |
 | Properties dialog | medium | `CBbs_FillPropertiesDialogPage` `0x7F5F385E` |
 
 ## Annotations shipped

@@ -451,14 +451,23 @@ def _folder_flags(bbs):
 
     Every board served here is a native MSN bulletin board, so the format field
     reads "Rich text (MSN formatted text)" and the MSN-vs-Usenet radio reads
-    MSN. The format field is what unlocks composition: CBbs_FIsMsnBbs @
-    0x7F600D21 computes `(_F & 7) == 0`, and OnInitMenuPopup @ 0x7F5FF42C greys
-    Font (1351), Paragraph (1358), Insert File (1401), Insert Object (1402),
-    Paste Special (1158) and the formatting toolbar (1254) whenever that holds.
-    The status bar then reads STRINGTABLE 1741 "This command is not available
-    in Internet Newsgroups." Format 0 also enables ROT13 (1453) and stops
-    FUN_7F5FDC68 @ 0x7F5FDC68 truncating PR_SENDER_NAME at its '@', which is
-    how a Usenet author keeps a full internet address in the reader header.
+    MSN. The format field is the only one of the two that gates composition:
+    CBbs_FIsPlainTextFormat @ 0x7F600D21 computes `(_F & 7) == 0`, and
+    OnInitMenuPopup @ 0x7F5FF42C greys Font (1351), Paragraph (1358), Insert
+    File (1401), Insert Object (1402), Paste Special (1158) and the formatting
+    toolbar (1254) whenever that holds. The status bar then reads STRINGTABLE
+    1741 "This command is not available in Internet Newsgroups." Format 0 also
+    enables ROT13 (1453) and stops FUN_7F5FDC68 @ 0x7F5FDC68 truncating
+    PR_SENDER_NAME at its '@', which is how a Usenet author keeps a full
+    internet address in the reader header. Bit 0x800 drives the MSN-vs-Usenet
+    radio and nothing else — it does not reach the compose window.
+
+    A non-zero format field is necessary but not sufficient: the same handler
+    also requires the caret to be in the body RichEdit (control 0x3ED, not the
+    0x3E9..0x3EC header fields) and the article object at window+0x8c to be
+    idle (+0x98 == 0). Neither is server-visible. See
+    docs/bbs-service-contract.md §"What actually enables rich-text
+    composition".
 
     Read-only (0x2000) and no-attachments (0x4000) stay CLEAR so the board takes
     posts and accepts attachments on them.
