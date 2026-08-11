@@ -119,7 +119,15 @@ def bbs_node(
             name=name,
             go_word="",
             category="",
-            type_str="",
+            # `tp` is free server text — the client keeps it as an opaque cache
+            # slot for the Type column and the General page's item 1011. Only
+            # the board is a DIRSRV row, and DSNED names app_id 2 "Bulletin
+            # Board Folder" (STRINGTABLE 124, GETPMTE table in docs/DSNED.md
+            # §2.1), so use the client's own vocabulary. Messages are never
+            # asked for `tp` — it is neither a BBS extra tag nor one of the
+            # shared MOS tree tags — and an empty string there stays honest.
+            # Blank on the board rendered as "<unknown type>" (string 0xBF).
+            type_str="Bulletin Board Folder" if is_container else "",
             price_dword=0,
             rating_dword=0,
             description="",

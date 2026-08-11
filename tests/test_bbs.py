@@ -490,6 +490,30 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
         for record in (r for r in records if r["e"] != "Climbing BBS"):
             self.assertEqual(record["b"] & 0x04, 0)
 
+    def test_board_row_carries_a_type_string(self):
+        # `tp` feeds the Type column and the General page's item 1011. An empty
+        # value is a received-but-blank cache slot, which the page renders as
+        # string 0xBF "<unknown type>". DSNED's GETPMTE table names app_id 2
+        # "Bulletin Board Folder" (docs/DSNED.md §2.1).
+        request = DirsrvRequest(node_id=_SPORTS_CATEGORY, prop_group="e\x00tp")
+        records = _walk_records(dirsrv.build_get_children_reply_payload(request))
+        board = next(r for r in records if r["e"] == "Climbing BBS")
+        self.assertEqual(board["tp"], "Bulletin Board Folder")
+
+    def test_board_properties_dialog_gets_the_type_string_as_utf16(self):
+        # The Properties sheet is is_children=False, where `tp` ships 0x0B for
+        # GetPropSz. Serving 0x0A here truncates the cached value to "B".
+        request = DirsrvRequest(
+            node_id=_BOARD,
+            node_id_raw=struct.pack("<II", 0, 1),
+            dword_0=0,
+            dword_1=1,
+            prop_group="e\x00j\x00k\x00ca\x00tp\x00z\x00o",
+            recv_descriptors=[0x83, 0x83, 0x85],
+        )
+        payload = dirsrv.build_get_properties_reply_payload(request)
+        self.assertIn(b"\x0btp\x00\x01Bulletin Board Folder\x00", payload)
+
 
 class TestEveryRequestedTagIsReturned(unittest.TestCase):
     """A record must carry one entry per requested tag — no exceptions.
