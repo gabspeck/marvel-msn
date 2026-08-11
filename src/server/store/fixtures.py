@@ -42,9 +42,14 @@ _FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
 def _date_string_to_wire_filetime(s):
     """Parse a fixture `%B %d, %Y` date into a Windows FILETIME (UTC midnight).
 
-    Returns 0 for empty input — callers use 0 as the "no date" sentinel so
-    the server skips emitting the `w` property and the listview cell stays
-    blank instead of rendering 1601-01-01.
+    UTC, so the client's `FileTimeToLocalFileTime` shifts it by the member's
+    offset — a date-only fixture therefore displays at that offset past
+    midnight, not at 00:00.
+
+    Returns 0 for empty input, the "no date" sentinel: DIRSRV then ships `w` as
+    an empty string for the details view's blank cell. Find has no blank branch
+    and renders that node as the 1601 epoch, so every indexed node should carry
+    a real date.
     """
     if not s:
         return 0
@@ -80,7 +85,17 @@ _LCID_EN_US = 0x0409
 _LCID_PT_BR = 0x0416
 
 
-def _container_content(name, type_str="Directory", language=_LCID_EN_US):
+# Every directory row carries a last-changed date. MOSFIND's Find results
+# window has no blank-cell branch for `w` — CFindNav_FillResultRow hands the
+# value straight to FileTimeToLocalFileTime — so a node with no timestamp shows
+# as the 1601 epoch there. The beta content drop these fixtures reproduce is
+# dated to the kiosk articles in docs/KNOWN-CONTENT.md.
+_CONTENT_DROP_DATE = "July 19, 1995"
+
+
+def _container_content(
+    name, type_str="Directory", language=_LCID_EN_US, modified=_CONTENT_DROP_DATE
+):
     return NodeContent(
         name=name,
         go_word="",
@@ -98,8 +113,9 @@ def _container_content(name, type_str="Directory", language=_LCID_EN_US):
         vendor_id=0,
         owner="",
         created="",
-        modified="",
+        modified=modified,
         size_bytes=0,
+        modified_filetime=_date_string_to_wire_filetime(modified),
     )
 
 
@@ -142,9 +158,7 @@ ROOT_CONTENT = _container_content("Root")
 # Localized wrappers. `language=0` on the Worldwide hubs marks them as
 # locale-neutral so a `filter_on=1` request with any LCID still accepts them.
 CATEGORIES_US_CONTENT = _container_content("Categories (US)", language=_LCID_EN_US)
-MEMBER_ASSISTANCE_US_CONTENT = _container_content(
-    "Member Assistance (US)", language=_LCID_EN_US
-)
+MEMBER_ASSISTANCE_US_CONTENT = _container_content("Member Assistance (US)", language=_LCID_EN_US)
 CATEGORIES_BR_CONTENT = _container_content("Categorias (BR)", language=_LCID_PT_BR)
 MEMBER_ASSISTANCE_BR_CONTENT = _container_content(
     "Assistencia ao Associado (BR)", language=_LCID_PT_BR
@@ -153,9 +167,7 @@ MEMBER_ASSISTANCE_BR_CONTENT = _container_content(
 # 0x8E / 0x8F. Kept matching the resource text so server logs read the same as
 # the client UI.
 WORLDWIDE_CATEGORIES_CONTENT = _container_content("Worldwide Categories", language=0)
-WORLDWIDE_MEMBER_ASSISTANCE_CONTENT = _container_content(
-    "Worldwide Member Assistance", language=0
-)
+WORLDWIDE_MEMBER_ASSISTANCE_CONTENT = _container_content("Worldwide Member Assistance", language=0)
 
 
 # Categories (US) — KNOWN-CONTENT.md §"Categories (US)". `tp` is "Folder" for
@@ -325,8 +337,9 @@ def _medview_sample_leaf(f0, name, size_bytes):
             vendor_id=0,
             owner="",
             created="",
-            modified="",
+            modified=_CONTENT_DROP_DATE,
             size_bytes=size_bytes,
+            modified_filetime=_date_string_to_wire_filetime(_CONTENT_DROP_DATE),
         ),
     )
 
@@ -346,8 +359,7 @@ DNR_TEST_LINE_COUNT = 4096
 
 def _build_dnr_test_payload():
     lines = [
-        f"line {n:06d} offset {n * 48:08d} "
-        f"{'.' * 9}{(n % 10)}{'.' * 8}\r\n".encode("ascii")
+        f"line {n:06d} offset {n * 48:08d} {'.' * 9}{(n % 10)}{'.' * 8}\r\n".encode("ascii")
         for n in range(DNR_TEST_LINE_COUNT)
     ]
     assert all(len(line) == 48 for line in lines), "payload lines must be fixed width"
@@ -429,7 +441,9 @@ _DNR_MOS2B_NODE = DirectoryNode(
 # 7.4.6); a MOS2 chunk is plain raw DEFLATE behind a "CK" marker, so a correct
 # one can be produced server-side. Downloading this should yield a byte-exact
 # WINDIFF.EXE that runs.
-DNR_MOS2OK_PATH = pathlib.Path(__file__).resolve().parent.parent / "data" / "dnr" / "windiff_ok.mos2"
+DNR_MOS2OK_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent / "data" / "dnr" / "windiff_ok.mos2"
+)
 DNR_MOS2OK_SHABBY_ID = 0x00FF0004
 DNR_MOS2OK_FILE_NAME = "WINDIFF.EXE"
 DNR_MOS2OK_COMPRESSED_SIZE = 51759
@@ -497,7 +511,7 @@ _YOSEMITE_BODY = (
     "It was a bit frustrating to gaze up to those incredible cliffs and not "
     "be able to climb. The constant rain kept the rock wet. If it stopped "
     "raining, the saturated mountains kept the water seeping from the cracks. "
-    "Most major cracks have turned into \"spring of '95\" springs feeding the "
+    'Most major cracks have turned into "spring of \'95" springs feeding the '
     "Merced River.\n\n"
     "We actually climbed two pitches, dodging the wet spots on the rock "
     "before it started to rain again."
@@ -527,6 +541,9 @@ _CLIMBING_BBS = bbs_node(
     is_container=True,
     has_children=True,
     delegate=True,
+    # The board is a DIRSRV row, so it needs a `w` like any other directory
+    # entry — Find has no blank-cell branch. Dated to its newest message.
+    date="May 18, 1995 9:41 AM",
 )
 # Authors and the Yosemite timestamp are transcribed from
 # reference/screenshots/bbs.png (list pane + reader header "Date: 10:12 AM
@@ -761,15 +778,15 @@ DIRECTORY_CHILDREN = {
         _DEFAULT_CHAT_ROOM.node_id,
     ],
     _MEMBER_ASSISTANCE_US_KEY: [
-        f"1:{0x300}",        # The MSN Member Lobby
-        f"1:{0x301}",        # MSN Beta Center
-        "4:0",               # MSN Today — reuse existing MOSVIEW leaf
-        f"1:{0x303}",        # Member Assistance Kiosk - July 19
-        f"1:{0x304}",        # First-Time-User Experience
-        f"1:{0x305}",        # Member Guidelines (MOSVIEW)
-        f"1:{0x306}",        # MSN Beta News Flash - July 19
-        f"1:{0x307}",        # Member Guidelines (document?)
-        f"1:{0x308}",        # Member Agreement (document?)
+        f"1:{0x300}",  # The MSN Member Lobby
+        f"1:{0x301}",  # MSN Beta Center
+        "4:0",  # MSN Today — reuse existing MOSVIEW leaf
+        f"1:{0x303}",  # Member Assistance Kiosk - July 19
+        f"1:{0x304}",  # First-Time-User Experience
+        f"1:{0x305}",  # Member Guidelines (MOSVIEW)
+        f"1:{0x306}",  # MSN Beta News Flash - July 19
+        f"1:{0x307}",  # Member Guidelines (document?)
+        f"1:{0x308}",  # Member Agreement (document?)
     ],
     _CATEGORIES_BR_KEY: [f"1:{f8}" for f8, _, _ in CATEGORY_BR_DEFS],
     _MEMBER_ASSISTANCE_BR_KEY: [f"1:{f8}" for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS],
@@ -821,24 +838,13 @@ DIRECTORY_CHILDREN = {
     # Entertainment), 0x10A (Sports, Health and Fitness → Climbing BBS) and
     # 0x10E (Media View samples) are skipped because they have their own subtrees
     # wired above.
-    **{
-        f"1:{f8}": []
-        for f8, _, _ in CATEGORY_DEFS
-        if f8 not in (0x100, 0x10A, 0x10E)
-    },
+    **{f"1:{f8}": [] for f8, _, _ in CATEGORY_DEFS if f8 not in (0x100, 0x10A, 0x10E)},
     **{f"1:{f8}": [] for f8, _ in A_AND_E_CHILD_DEFS},
     **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_LEAF_DEFS},
-    **{
-        f"1:{f8}": []
-        for f8, _, _ in CATEGORY_BR_DEFS
-        if f8 != 0x180
-    },
+    **{f"1:{f8}": [] for f8, _, _ in CATEGORY_BR_DEFS if f8 != 0x180},
     **{f"1:{f8}": [] for f8, _ in MEMBER_ASSISTANCE_BR_LEAF_DEFS},
     **{f"1:{f8}": [] for f8, _ in A_AND_E_BR_CHILD_DEFS},
-    **{
-        f"{f0}:0": []
-        for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS
-    },
+    **{f"{f0}:0": [] for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS},
 }
 
 

@@ -57,6 +57,16 @@ def bbs_date_to_unix(s):
     return int((naive - offset).replace(tzinfo=datetime.UTC).timestamp())
 
 
+def unix_to_wire_filetime(seconds):
+    """Unix time_t → Windows FILETIME, the wire form of `w`.
+
+    Zero in stays zero out: it is the "no date" sentinel both directions.
+    """
+    if not seconds:
+        return 0
+    return (seconds + 11644473600) * 10_000_000
+
+
 def bbs_node(
     f0,
     f8,
@@ -146,6 +156,10 @@ def bbs_node(
             # listview Date column still comes from `_D`.
             created=date,
             modified=date,
+            # `w` for the board's DIRSRV row — the Find results window formats
+            # it as a FILETIME and has no blank branch, so mirror `_D` here
+            # rather than leaving the Date Modified column on the 1601 epoch.
+            modified_filetime=unix_to_wire_filetime(bbs_date_to_unix(date)),
             # A posted message carries its own plain-text length in X-MOS-Size;
             # `body` is empty there because the upload is already encoded.
             size_bytes=len(body) if size_bytes is None else size_bytes,

@@ -488,7 +488,10 @@ def _join_room(handler, room_id, request_id=7, msg_class=0x01):
 def _joined_handler(pipe_idx, session, room_id, content_store=None, request_id=7):
     """A CONFSRV handler bound to a recording connection and already joined."""
     handler = CONFSRVHandler(
-        pipe_idx, "CONFSRV", session, content_store=content_store,
+        pipe_idx,
+        "CONFSRV",
+        session,
+        content_store=content_store,
     )
     connection = RecordingConnection(pipe_idx)
     handler.bind_connection(connection)
@@ -535,7 +538,9 @@ def _parse_participants(payload):
     offset = 9
     while offset < len(payload):
         participant_id, role, name_len, reserved_1, reserved_2 = struct.unpack_from(
-            "<IHIHH", payload, offset,
+            "<IHIHH",
+            payload,
+            offset,
         )
         assert (reserved_1, reserved_2) == (0, 0)
         name = payload[offset + 14 : offset + 14 + name_len].decode("cp1252")
@@ -615,9 +620,7 @@ class TestConferenceStartup(unittest.TestCase):
         )
 
         handler = CONFLOCHandler(10, "CONFLOC")
-        reply = handler.build_locate_reply_payload(
-            b"\x03" + struct.pack("<I", 1) + b"\x82\x82"
-        )
+        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 1) + b"\x82\x82")
 
         self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 1)
         self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_FOUND)
@@ -641,11 +644,14 @@ class TestConferenceStartup(unittest.TestCase):
         record_id = struct.pack("<II", 1, 275)
         properties = struct.pack("<IH", 6, 0)
         request = (
-            b"\x04\x82" + ticket
+            b"\x04\x82"
+            + ticket
             + b"\x03\x04\x00\x00\x00"
-            + b"\x04\x88" + record_id
+            + b"\x04\x88"
+            + record_id
             + b"\x02\xff\xff"
-            + b"\x04\x86" + properties
+            + b"\x04\x86"
+            + properties
             + b"\x83\x83"
         )
 
@@ -710,17 +716,22 @@ class TestConferenceStartup(unittest.TestCase):
             ]
         )
         add_request = (
-            b"\x04\x82" + ticket
+            b"\x04\x82"
+            + ticket
             + b"\x03\x04\x00\x00\x00"
-            + b"\x04\x88" + record_id
+            + b"\x04\x88"
+            + record_id
             + b"\x02\xff\xff"
-            + b"\x04" + bytes([0x80 | len(properties)]) + properties
+            + b"\x04"
+            + bytes([0x80 | len(properties)])
+            + properties
             + b"\x83\x83"
         )
         handler.build_data_edit_add_reply_payload(1, add_request)
         get_request = (
             b"\x03\x01\x00\x00\x00"
-            + b"\x04\x88" + record_id
+            + b"\x04\x88"
+            + record_id
             + b"\x02\x00\x00"
             + b"\x03\x03\x00\x00\x00"
             + b"\x04\x89ds\x00ml\x00mm\x00"
@@ -755,7 +766,8 @@ class TestConferenceStartup(unittest.TestCase):
         record_id = struct.pack("<II", 1, 0x10F)
         request = (
             b"\x03\x01\x00\x00\x00"
-            + b"\x04\x88" + record_id
+            + b"\x04\x88"
+            + record_id
             + b"\x02\x00\x00"
             + b"\x03\x03\x00\x00\x00"
             + b"\x04\x89mm\x00ml\x00ds\x00"
@@ -806,11 +818,15 @@ class TestConferenceStartup(unittest.TestCase):
             ]
         )
         request = (
-            b"\x04\x82" + ticket
+            b"\x04\x82"
+            + ticket
             + b"\x03\x01\x00\x00\x00"
-            + b"\x04\x88" + record_id
+            + b"\x04\x88"
+            + record_id
             + b"\x02\x00\x00"
-            + b"\x04" + bytes([0x80 | len(properties)]) + properties
+            + b"\x04"
+            + bytes([0x80 | len(properties)])
+            + properties
             + b"\x83\x83"
         )
 
@@ -835,25 +851,33 @@ class TestConferenceStartup(unittest.TestCase):
         self.assertFalse(conference.join_as_participants)
 
         _joined, joined_connection = _joined_handler(
-            11, signed_in(SUBSCRIBER), 1, content_store=store,
+            11,
+            signed_in(SUBSCRIBER),
+            1,
+            content_store=store,
         )
         join_reply = _pushed_payloads(joined_connection)[0]
         self.assertEqual(struct.unpack_from("<H", join_reply, 10)[0], CONFSRV_ROLE_SPECTATOR)
         self.assertEqual(struct.unpack_from("<I", join_reply, 12)[0], 500)
 
         fresh_handler = CONFLOCHandler(
-            10, "CONFLOC", signed_in(), content_store=store,
+            10,
+            "CONFLOC",
+            signed_in(),
+            content_store=store,
         )
         get_request = (
             b"\x03\x01\x00\x00\x00"
-            + b"\x04\x88" + record_id
+            + b"\x04\x88"
+            + record_id
             + b"\x02\x00\x00"
             + b"\x03\x03\x00\x00\x00"
             + b"\x04\x89mm\x00ml\x00ds\x00"
             + b"\x83\x83\x85"
         )
         fresh_reply = fresh_handler.build_data_edit_get_properties_reply_payload(
-            4, get_request,
+            4,
+            get_request,
         )
         selected = build_property_record(
             [
@@ -871,11 +895,14 @@ class TestConferenceStartup(unittest.TestCase):
         handler = CONFLOCHandler(10, "CONFLOC")
         ticket = b"\x02\x00"
         request = (
-            b"\x04\x82" + ticket
+            b"\x04\x82"
+            + ticket
             + b"\x03\x04\x00\x00\x00"
-            + b"\x04\x88" + struct.pack("<II", 1, 275)
+            + b"\x04\x88"
+            + struct.pack("<II", 1, 275)
             + b"\x02\xff\xff"
-            + b"\x04\x86" + struct.pack("<IH", 6, 0)
+            + b"\x04\x86"
+            + struct.pack("<IH", 6, 0)
             + b"\x83\x83"
         )
         reply = handler.build_data_edit_add_reply_payload(1, request)
@@ -962,7 +989,10 @@ class TestConferenceStartup(unittest.TestCase):
         roles = []
         for session in (signed_in(SUBSCRIBER), signed_in(ADMIN), Session()):
             _handler, connection = _joined_handler(
-                11, session, 275, content_store=store,
+                11,
+                session,
+                275,
+                content_store=store,
             )
             join_reply = _pushed_payloads(connection)[0]
             roles.append(struct.unpack_from("<H", join_reply, 10)[0])
@@ -991,13 +1021,22 @@ class TestConferenceStartup(unittest.TestCase):
         )
         store.add_child("1:16", chat)
         first, first_connection = _joined_handler(
-            11, signed_in(ADMIN), 275, content_store=store,
+            11,
+            signed_in(ADMIN),
+            275,
+            content_store=store,
         )
         second, second_connection = _joined_handler(
-            12, signed_in(SUBSCRIBER), 275, content_store=store,
+            12,
+            signed_in(SUBSCRIBER),
+            275,
+            content_store=store,
         )
         refused, refused_connection = _joined_handler(
-            13, signed_in(ADMIN), 275, content_store=store,
+            13,
+            signed_in(ADMIN),
+            275,
+            content_store=store,
         )
 
         self.assertEqual(
@@ -1055,7 +1094,8 @@ class TestConferenceStartup(unittest.TestCase):
         listener_copy = _pushed_payloads(listener_connection)[0]
         self.assertEqual(speaker_copy, listener_copy)
         self.assertEqual(
-            struct.unpack_from("<I", listener_copy, 5)[0], speaker._participant_id,
+            struct.unpack_from("<I", listener_copy, 5)[0],
+            speaker._participant_id,
         )
         self.assertEqual(listener_copy[9:].decode("utf-16le").rstrip("\x00"), "hello")
         listener.close()
@@ -1956,13 +1996,10 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"\x0atp\x00\x01Directory\x00", payload)
         # Category containers have size_bytes=0 → inline 0x03 DWORD 0.
         self.assertIn(b"\x03p\x00\x00\x00\x00\x00", payload)
-        # Category containers have empty modified → `w` ships as an EMPTY 0x0A
-        # string (flag byte 0x02). The column formatter @ 0x7F3FBC12 case 0x0A
-        # copies the ASCIIZ through, so the cell renders blank, and the cache
-        # element is marked received. Omitting the tag instead would poison it
-        # permanently — see build_props' PROP_LAST_CHANGED comment.
-        self.assertIn(b"\x0aw\x00\x01\x00", payload)
-        for type_byte in (0x03, 0x0C, 0x0E, 0x0B):
+        # Every seeded container carries the content-drop date, so `w` ships as
+        # a 0x0C FILETIME.
+        self.assertIn(b"\x0cw\x00", payload)
+        for type_byte in (0x03, 0x0A, 0x0E, 0x0B):
             self.assertNotIn(bytes([type_byte]) + b"w\x00", payload)
         # `l` still emits as DWORD 0 (§12 safe default for unresolved tags).
         self.assertIn(b"\x03l\x00\x00\x00\x00\x00", payload)
@@ -1970,6 +2007,24 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertNotIn(b"\x0etp\x00", payload)
         self.assertNotIn(b"\x0ep\x00", payload)
         self.assertNotIn(b"\x0el\x00", payload)
+
+    def test_undated_node_still_ships_w_as_an_empty_string(self):
+        # A node with no timestamp must still emit `w`, as an EMPTY 0x0A string
+        # (flag byte 0x01, zero-length). The column formatter @ 0x7F3FBC12 case
+        # 0x0A copies the ASCIIZ through, so the cell renders blank and the
+        # cache element is marked received. Omitting the tag instead poisons it
+        # permanently — see build_props' PROP_LAST_CHANGED comment. No seeded
+        # node takes this path any more, so build the undated node here.
+        node = replace(
+            app_store.content.get_node("1:256"),
+            content=replace(
+                app_store.content.get_node("1:256").content,
+                modified="",
+                modified_filetime=0,
+            ),
+        )
+        props = build_props(["w"], node, is_children=True)
+        self.assertEqual(props, [(0x0A, "w", b"\x01\x00")])
 
     def test_msn_today_leaf_emits_nonzero_size_dword(self):
         # The MSN Today fixture carries size_bytes=5*1024*1024; `p` must land
@@ -2238,9 +2293,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
 class TestDIRSRVAddShabby(unittest.TestCase):
     """Class 0x04 selector 0x07 — icon and banner upload."""
 
-    TRACE_HEAD = bytes.fromhex(
-        "04 82 02 00 01 00 05 01 36 04 00 00 03 36 04 00 00 83 83 83"
-    )
+    TRACE_HEAD = bytes.fromhex("04 82 02 00 01 00 05 01 36 04 00 00 03 36 04 00 00 83 83 83")
 
     def setUp(self):
         from server.services import shabby as shabby_mod
@@ -2272,22 +2325,14 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         expected_id = max(shabby_mod.PICKABLE_ICONS) + 1
         handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
 
+        self.assertIsNone(handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0))
         self.assertIsNone(
-            handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
-        )
-        self.assertIsNone(
-            handler.handle_request(
-                MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[:463], 0, 0
-            )
+            handler.handle_request(MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[:463], 0, 0)
         )
         self.assertIsNone(
-            handler.handle_request(
-                MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[463:926], 0, 0
-            )
+            handler.handle_request(MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[463:926], 0, 0)
         )
-        packets = handler.handle_request(
-            MPC_CLASS_CONTINUATION_LAST, 1, 0, blob[926:], 0, 0
-        )
+        packets = handler.handle_request(MPC_CLASS_CONTINUATION_LAST, 1, 0, blob[926:], 0, 0)
 
         host_block = self._reply_host_block(packets)
         self.assertEqual(host_block.msg_class, 0x04)
@@ -2342,9 +2387,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
         handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
 
-        packets = handler.handle_request(
-            MPC_CLASS_CONTINUATION_LAST, 1, 0, b"short", 0, 0
-        )
+        packets = handler.handle_request(MPC_CLASS_CONTINUATION_LAST, 1, 0, b"short", 0, 0)
 
         host_block = self._reply_host_block(packets)
         self.assertEqual(struct.unpack_from("<I", host_block.payload, 1)[0], 0x101)
@@ -2370,9 +2413,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         self.assertIsNone(
             handler.handle_request(MPC_CLASS_CONTINUATION_MORE, 1, 0, blob[:900], 0, 0)
         )
-        packets = handler.handle_request(
-            MPC_CLASS_CONTINUATION_LAST, 1, 0, blob[900:], 0, 0
-        )
+        packets = handler.handle_request(MPC_CLASS_CONTINUATION_LAST, 1, 0, blob[900:], 0, 0)
 
         host_block = self._reply_host_block(packets)
         self.assertEqual(struct.unpack_from("<I", host_block.payload, 1)[0], 0)
@@ -2454,10 +2495,7 @@ class _AddNodeContentStore:
 
     def find_app_instance(self, app_id, instance_id):
         for node in self.nodes.values():
-            if (
-                node.app_id == app_id
-                and struct.unpack_from("<I", node.mnid_a)[0] == instance_id
-            ):
+            if node.app_id == app_id and struct.unpack_from("<I", node.mnid_a)[0] == instance_id:
                 return node
         return None
 
@@ -2573,9 +2611,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
             + b"\x83\x83\x84"
         )
         store = _AddNodeContentStore()
-        built_in = next(
-            node for node in default_seed().directory_nodes if node.app_id == 4
-        )
+        built_in = next(node for node in default_seed().directory_nodes if node.app_id == 4)
         store.add_child("1:16", built_in)
 
         reply = build_add_node_reply_payload(request, store, session=signed_in(ADMIN))
@@ -2618,10 +2654,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         self.assertTrue(node.delegate)
         self.assertEqual(node.delegate_mnid_a, inner_mnid)
         properties = {
-            name: value
-            for _ptype, name, value in build_props(
-                ["a", "l"], node, is_children=False
-            )
+            name: value for _ptype, name, value in build_props(["a", "l"], node, is_children=False)
         }
         self.assertEqual(properties["a"], struct.pack("<I", 8) + node.mnid_a)
         self.assertEqual(properties["l"], inner_mnid)
@@ -2747,9 +2780,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
     def test_change_icon_shabby_id_survives_the_next_property_read(self):
         store = _SetPropertiesContentStore()
         selected_id = 0x059B
-        request = self._request(
-            [(0x0F, "h", struct.pack("<I", selected_id))]
-        )
+        request = self._request([(0x0F, "h", struct.pack("<I", selected_id))])
 
         reply = build_set_properties_reply_payload(request, store)
 
@@ -3359,9 +3390,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
             + b"\x00" * 8
         )
         self.blob = header + bytes(range(256)) * 160
-        self.shabby_id = shabby_mod.add_shabby_bytes(
-            shabby_mod.FORMAT_MOS_COMPRESSED, self.blob
-        )
+        self.shabby_id = shabby_mod.add_shabby_bytes(shabby_mod.FORMAT_MOS_COMPRESSED, self.blob)
         node = app_store.content.get_node("1:256")
         app_store.content.add_node(
             replace(
@@ -3379,16 +3408,12 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         )
 
     def test_fri_resolves_the_uploaded_payload(self):
-        source, content = _resolve_ftm_target(
-            _make_dirsrv_file_request(self.NODE_ID)
-        )
+        source, content = _resolve_ftm_target(_make_dirsrv_file_request(self.NODE_ID))
         self.assertEqual(source, FTM_DIRSRV_SOURCE)
         self.assertEqual(content, self.blob)
 
     def test_unknown_property_resolves_to_nothing(self):
-        _, content = _resolve_ftm_target(
-            _make_dirsrv_file_request(self.NODE_ID, prop="mf")
-        )
+        _, content = _resolve_ftm_target(_make_dirsrv_file_request(self.NODE_ID, prop="mf"))
         self.assertEqual(content, b"")
 
     def test_request_download_clears_fast_path_and_keeps_the_local_name(self):
@@ -3408,9 +3433,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<I", reply, 0x0C)[0], len(self.blob))
         # bit 0 only: no HrBillClient shortcut, no filename override.
         self.assertEqual(struct.unpack_from("<I", reply, 0x10)[0], 0x01)
-        self.assertEqual(
-            struct.unpack_from("<I", reply, 0x14)[0], FTM_MOS2_UNPACK_METHOD
-        )
+        self.assertEqual(struct.unpack_from("<I", reply, 0x14)[0], FTM_MOS2_UNPACK_METHOD)
         self.assertEqual(reply[0x28:], b"\x00" * 32)
         self.assertIsNotNone(pkts)
 
@@ -3462,9 +3485,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         for block in data_blocks[1:]:
             self.assertLessEqual(len(block) - 1, 0x4000)
         # Every byte, in order.
-        rebuilt = data_blocks[0][12:] + b"".join(
-            block[1:] for block in data_blocks[1:]
-        )
+        rebuilt = data_blocks[0][12:] + b"".join(block[1:] for block in data_blocks[1:])
         self.assertEqual(rebuilt, self.blob)
 
     def test_reply_sizes_both_state_the_transferred_length(self):
@@ -3572,9 +3593,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
 
         # Digest rather than a second copy of the binary.
         self.assertEqual(len(out), total)
-        self.assertEqual(
-            hashlib.md5(out).hexdigest(), "2591b2b19f3edfba8180aac8df673a65"
-        )
+        self.assertEqual(hashlib.md5(out).hexdigest(), "2591b2b19f3edfba8180aac8df673a65")
 
     def test_mos2_header_is_validated_before_its_size_is_trusted(self):
         self.assertEqual(mos2_original_size(self.blob), self.ORIGINAL_SIZE)
@@ -4116,11 +4135,17 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
         record_id = struct.pack("<II", 1, 271)
         properties = struct.pack("<IH", 6, 0)
         return (
-            b"\x04" + bytes([0x80 | len(ticket)]) + ticket
+            b"\x04"
+            + bytes([0x80 | len(ticket)])
+            + ticket
             + b"\x03\x06\x00\x00\x00"
-            + b"\x04" + bytes([0x80 | len(record_id)]) + record_id
+            + b"\x04"
+            + bytes([0x80 | len(record_id)])
+            + record_id
             + b"\x02\xff\xff"
-            + b"\x04" + bytes([0x80 | len(properties)]) + properties
+            + b"\x04"
+            + bytes([0x80 | len(properties)])
+            + properties
             + b"\x83\x83"
         )
 
