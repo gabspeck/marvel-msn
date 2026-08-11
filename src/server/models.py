@@ -130,6 +130,10 @@ class UnknownParam:
 @dataclass
 class DirsrvRequest:
     node_id: str = "0:0"
+    # Every id in the request's node array, in wire order. Left empty by
+    # callers that address a single node; `__post_init__` then fills it from
+    # `node_id` so a reply builder can always walk the list.
+    node_ids: list[str] = field(default_factory=list)
     prop_group: str = ""
     flags: int = 0
     dword_0: int = 0
@@ -138,3 +142,7 @@ class DirsrvRequest:
     node_id_raw: bytes = b""
     locale_raw: bytes = b""
     locale_lcid: int | None = None
+
+    def __post_init__(self):
+        if not self.node_ids:
+            self.node_ids = [self.node_id]

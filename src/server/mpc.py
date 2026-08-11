@@ -234,12 +234,20 @@ def decode_dirsrv_request(payload):
                 # field_0 = service/class index (selects shell extension DLL),
                 # field_8 = within-service node sub-id.  Children inherit field_0
                 # from parent and get (field_8, field_c) from wire property 'a'.
+                #
+                # The field holds an ARRAY of them, `dword_0` ids long.
+                # MOSFIND's result-row filler resolves 20 search hits per call
+                # (CFindResultSet_GetNextRow @ 0x7E9B182B), so `node_ids` is
+                # what a reply has to answer for; `node_id` stays the first
+                # entry because every other caller sends exactly one.
                 d = p.data
-                if len(d) >= 8:
-                    f0, f8 = struct.unpack("<II", d[:8])
-                    req.node_id = f"{f0}:{f8}"
-                else:
-                    req.node_id = d.hex()
+                req.node_ids = [
+                    f"{f0}:{f8}"
+                    for f0, f8 in struct.iter_unpack("<II", d[: len(d) - len(d) % 8])
+                ]
+                if not req.node_ids:
+                    req.node_ids = [d.hex()]
+                req.node_id = req.node_ids[0]
                 req.node_id_raw = d
             elif var_idx == 1:
                 req.prop_group = p.data.rstrip(b"\x00").decode("ascii", errors="replace")

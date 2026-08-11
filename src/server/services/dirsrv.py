@@ -43,8 +43,8 @@ from ._dispatch import log_unhandled_selector
 # advertised in build_discovery_packet. Names mirror TREENVCL.DLL vtable
 # methods (IID table 0x7F633270..0x7F6332EC).
 DIRSRV_SELECTOR_GET_PROPERTIES = 0x00  # self record (with dword_0=1 override = children)
-DIRSRV_SELECTOR_GET_PARENTS = 0x01     # TODO: unhandled; warn when observed
-DIRSRV_SELECTOR_GET_CHILDREN = 0x02    # GetRelatives dir=0
+DIRSRV_SELECTOR_GET_PARENTS = 0x01  # TODO: unhandled; warn when observed
+DIRSRV_SELECTOR_GET_CHILDREN = 0x02  # GetRelatives dir=0
 DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD = 0x03  # CTreeNavClient::GetDeidFromGoWord
 # Slot 4 (IID 00028B28) is GetShabby — CTreeNavClient::GetShabby
 # (TREENVCL.DLL 0x7f631bab) calls proxy->method_at_offset_0xc(proxy, 4, ...).
@@ -114,9 +114,11 @@ PROP_CHILD_COUNT = "nc"
 PROP_PARENT_COUNT = "np"
 PROP_RATING = "o"
 PROP_OWNER = "on"
-# Byte count, always inline DWORD. Two independent writers confirm it: the
-# DSNED Banner page stores the banner's file size and the DLRed page stores the
-# compressed payload's. MOSSHELL reads it through FormatSizeString.
+# Always an inline DWORD, but the unit is the node app's: a byte count for the
+# DSNED Banner page and the DLRed payload, an article count on a bulletin
+# board, an occupancy on a chat room. MOSSHELL reads it through
+# FormatSizeString regardless; MSNFIND picks the unit from `c`. See
+# `_size_value`.
 PROP_SIZE = "p"
 PROP_LANGUAGE = "q"
 PROP_TOPICS = "r"
@@ -249,17 +251,12 @@ class DIRSRVHandler:
             return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
 
         ticket, fmt_param, image_param, size_param = send_params
-        if (
-            len(ticket.data) < 2
-            or struct.unpack_from("<H", ticket.data)[0] != len(ticket.data)
-        ):
+        if len(ticket.data) < 2 or struct.unpack_from("<H", ticket.data)[0] != len(ticket.data):
             log.warning("add_shabby invalid ticket=%s", ticket.data.hex())
             return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
 
         if isinstance(image_param, VarParam):
-            return _add_shabby_result(
-                fmt_param.value, image_param.data, size_param.value
-            )
+            return _add_shabby_result(fmt_param.value, image_param.data, size_param.value)
 
         if image_param.total_length != size_param.value or size_param.value == 0:
             log.warning(
@@ -285,9 +282,7 @@ class DIRSRVHandler:
         )
         return None
 
-    def _take_shabby_continuation(
-        self, msg_class, stream_id, payload, server_seq, client_ack
-    ):
+    def _take_shabby_continuation(self, msg_class, stream_id, payload, server_seq, client_ack):
         """Collect an AddShabby chunk and answer the original call on 0xE7."""
         upload = self._shabby_uploads.get(stream_id)
         if upload is None:
@@ -316,18 +311,14 @@ class DIRSRVHandler:
         )
 
         del self._shabby_uploads[stream_id]
-        reply_payload = _add_shabby_result(
-            upload["format"], bytes(upload["data"]), upload["size"]
-        )
+        reply_payload = _add_shabby_result(upload["format"], bytes(upload["data"]), upload["size"])
         host_block = build_host_block(
             TREEEDCL_CLASS_EDIT,
             TREEEDCL_SELECTOR_ADD_SHABBY,
             upload["request_id"],
             reply_payload,
         )
-        return build_service_packet(
-            self.pipe_idx, host_block, server_seq, client_ack
-        )
+        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
 
 def build_property_record(properties):
@@ -429,6 +420,34 @@ def _sz(s):
     return b"\x01" + data + b"\x00"
 
 
+def _size_value(node):
+    """The DWORD `p` carries for one node.
+
+    `p` is not a byte count everywhere — it is whatever the node's app counts,
+    and the reader decides the unit from `c`. MSNFIND's Size-cell formatter
+    @ 0x7F37318B is explicit about it:
+
+        c == 2   "%d message" / "%d messages"   (STRINGTABLE 0x458 / 0x459)
+        c == 4   "%d person"  / "%d people"     (0x456 / 0x457)
+        c == 7   HrSzForByteCount               ("192KB")
+        else     cell left empty
+        p == 0   cell left empty, whatever c is
+
+    So a bulletin board reports how many messages it holds, counted live rather
+    than stored — a post has to move the number the next time the board is
+    listed. Everything else reports `size_bytes`, which for the DnR leaf is the
+    compressed payload's length and for a plain container is 0 (blank cell).
+
+    MOSSHELL formats the same tag through FormatSizeString unconditionally, so
+    the board's row in Explorer renders the message count as a byte size. That
+    is the client's own inconsistency: one tag, two readers, and MSNFIND is the
+    one with the per-app rule in it.
+    """
+    if node.content.bbs is not None and node.is_container:
+        return _default_store.content.count_children(node.node_id)
+    return node.content.size_bytes
+
+
 def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
     """Serialize `node` into (type, name, value) property tuples.
 
@@ -465,7 +484,9 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             flag = (
                 node.browse_flags
                 if node.browse_flags is not None
-                else (DIRSRV_BROWSE_FLAGS_CONTAINER if node.is_container else DIRSRV_BROWSE_FLAGS_LEAF)
+                else (
+                    DIRSRV_BROWSE_FLAGS_CONTAINER if node.is_container else DIRSRV_BROWSE_FLAGS_LEAF
+                )
             )
             if node.delegate:
                 flag |= DIRSRV_BROWSE_FLAGS_DELEGATE
@@ -494,6 +515,13 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # (PropertySheetA raw memcpy) and the nav icon label expect ANSI.
             # 0x0B would store UTF-16 and truncate at the first wide NUL.
             out.append((0x0A, PROP_NAME, _sz(content.name)))
+        elif name == PROP_NAME_EDIT:
+            # Read side of the name tag. Only MOSFIND's result-row filler asks
+            # for it, and it narrows the value itself with WideCharToMultiByte
+            # (0x7E9B1E68), so the cache has to hold UTF-16 — wire type 0x0B.
+            # The 0x0A that `e` uses would leave it reading ANSI bytes as wide
+            # characters and the Name column would come out as CJK noise.
+            out.append((0x0B, PROP_NAME_EDIT, _sz(content.name)))
         elif name == PROP_SECONDARY_ICON:
             # 'h' = shabby_id for the listview per-item icon. MOSSHELL
             # FUN_7f404786 reads it as DWORD → vtable[0x74] GetShabbyToFile →
@@ -538,16 +566,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
                 )
             )
         elif name == PROP_SIZE:
-            # `p` = byte count, read inline as DWORD. Feeds MOSSHELL
-            # FormatSizeString (listview Size column + Properties dialog Size
-            # field — same vtable slot 0x140 either way).
-            out.append(
-                (
-                    0x03,
-                    PROP_SIZE,
-                    struct.pack("<I", content.size_bytes & 0xFFFFFFFF),
-                )
-            )
+            out.append((0x03, PROP_SIZE, struct.pack("<I", _size_value(node) & 0xFFFFFFFF)))
         elif name == PROP_GENERATION:
             # The node's change stamp. `CMosTreeNode::QueryOutOfDate` @ MOSSHELL
             # 0x7F3FDB3F asks for {g, a} on every refresh and compares the value
@@ -586,9 +605,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # 'wv'/'mf'). Non-delegate nodes emit DWORD 0.
             if node.delegate:
                 inner_mnid = (
-                    node.delegate_mnid_a
-                    if node.delegate_mnid_a is not None
-                    else node.mnid_a
+                    node.delegate_mnid_a if node.delegate_mnid_a is not None else node.mnid_a
                 )
                 out.append((0x0C, PROP_DELEGATE_MNID, inner_mnid))
             else:
@@ -660,9 +677,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # CServiceProperties::FSet requires `length == count * 4 + 4`;
             # count 0 with one trailing LCID makes it reject the value and
             # DSNED reports the rejection as E_OUTOFMEMORY.
-            out.append(
-                (0x04, PROP_LANGUAGE, struct.pack("<II", 1, content.language))
-            )
+            out.append((0x04, PROP_LANGUAGE, struct.pack("<II", 1, content.language)))
         elif name == PROP_VENDOR_ID:
             out.append((0x03, PROP_VENDOR_ID, struct.pack("<I", content.vendor_id)))
         elif name == PROP_PRICE:
@@ -680,23 +695,26 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # SetDlgItemTextA, so the cache has to hold ANSI.
             out.append((0x0A, PROP_FILE_NAME, _sz(content.dnr_file_name)))
         elif name == PROP_FILE_COMPRESSION:
-            out.append(
-                (0x03, PROP_FILE_COMPRESSION, struct.pack("<I", content.dnr_compression))
-            )
+            out.append((0x03, PROP_FILE_COMPRESSION, struct.pack("<I", content.dnr_compression)))
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
 
 
 def build_get_properties_reply_payload(request=None, rights=RIGHTS_NONE):
-    """Build a DIRSRV GetProperties (selector 0x00) reply: one self record.
+    """Build a DIRSRV GetProperties (selector 0x00) reply: one record per id.
 
-    The client always wants exactly one record back — the requested node's own
-    properties. CMosTreeNode::GetPropertyGroupRaw → CTreeNavClient::GetProperties
-    expects a single-record stream and feeds it to SetPropertyGroupFromPsp on
-    the receiving CMosTreeNode. Returning multi-record (children) causes the
-    receiver to be populated with its FIRST CHILD's record — observed live as
-    Cats US.e = 'Arts and Entertainment' (mnid (1,0x100), not (1,0x10)).
+    One record per id in the request's node array, in request order. Almost
+    every caller sends a single id and wants the addressed node's own
+    properties — CMosTreeNode::GetPropertyGroupRaw → CTreeNavClient::GetProperties
+    feeds the stream straight to SetPropertyGroupFromPsp on the receiving
+    CMosTreeNode, so an extra record there populates the receiver with the
+    wrong node (observed live as Cats US.e = 'Arts and Entertainment', mnid
+    (1,0x100) instead of (1,0x10)).
+
+    MOSFIND is the exception: its result-row filler batches 20 search hits into
+    one call and walks the reply with GetNthNode, so it needs all 20 records
+    back and would fail every row past the first without them.
     """
     if request is None:
         request = DirsrvRequest()
@@ -704,13 +722,40 @@ def build_get_properties_reply_payload(request=None, rights=RIGHTS_NONE):
     requested_props = _parse_prop_group(request.prop_group)
     _log_request("get_properties", request, requested_props)
 
-    node = _default_store.content.get_node(request.node_id)
-    records_with_ids = [
-        (node.node_id, build_props(requested_props, node, is_children=False, rights=rights))
-    ]
+    # MOSFIND's rows read `tp` with lstrcpynA and `w` with FileTimeToLocalFileTime
+    # (CFindNav_FillResultRow @ 0x7E9B1D6A), the same wire types the details
+    # view takes — so a Find batch is a list of rows, not a properties sheet.
+    # `f` is only ever asked for by that filler, which makes it the marker.
+    is_row = PROP_NAME_EDIT in requested_props
+    content_store = _default_store.content
+    records_with_ids = []
+    for node_id in request.node_ids:
+        node = content_store.get_node(node_id)
+        props = build_props(requested_props, node, is_children=is_row, rights=rights)
+        if is_row:
+            props = _as_find_row(props)
+        records_with_ids.append((node.node_id, props))
 
     _log_reply("get_properties_reply", records_with_ids)
     return build_tree_reply_wire(records_with_ids)
+
+
+def _as_find_row(props):
+    """Force `w` to a FILETIME for a Find result row.
+
+    The details view has a blank-cell branch for a node with no timestamp, and
+    build_props uses it: an empty 0x0A string. MOSFIND has no such branch —
+    CFindNav_FillResultRow hands whatever `w` resolves to straight to
+    FileTimeToLocalFileTime, so a 2-byte string value is read as eight bytes of
+    date. Send an explicit zero FILETIME instead; the row then shows the 1601
+    epoch, which is what "no date recorded" looks like there.
+    """
+    return [
+        (0x0C, name, struct.pack("<Q", 0))
+        if name == PROP_LAST_CHANGED and ptype != 0x0C
+        else (ptype, name, value)
+        for ptype, name, value in props
+    ]
 
 
 def build_get_children_reply_payload(request=None, rights=RIGHTS_NONE):
@@ -757,9 +802,7 @@ def _collect_children_records(request, requested_props, rights):
     content_store = _default_store.content
     node = content_store.get_node(request.node_id)
     if node.node_id == "4:0":
-        return [
-            (node.node_id, build_props(requested_props, node, is_children=True, rights=rights))
-        ]
+        return [(node.node_id, build_props(requested_props, node, is_children=True, rights=rights))]
 
     records = [
         (child.node_id, build_props(requested_props, child, is_children=True, rights=rights))
@@ -779,9 +822,10 @@ def _parse_prop_group(prop_group):
 
 def _log_request(kind, request, requested_props):
     log.info(
-        "%s node=%s raw=%s props=%s flags=%d dwords=%d,%d locale_lcid=%s locale_raw=%s",
+        "%s node=%s nodes=%d raw=%s props=%s flags=%d dwords=%d,%d locale_lcid=%s locale_raw=%s",
         kind,
         request.node_id,
+        len(request.node_ids),
         request.node_id_raw.hex(),
         ",".join(requested_props) or "-",
         request.flags,
@@ -864,7 +908,9 @@ def build_get_deid_from_go_word_reply_payload(payload):
         status = DS_E_NOT_FOUND
     log.info(
         "get_deid_from_go_word go_word=%r match=%s status=0x%x",
-        go_word, node.node_id if node else "-", status,
+        go_word,
+        node.node_id if node else "-",
+        status,
     )
 
     return (
@@ -909,11 +955,7 @@ def build_get_shabby_reply_payload(payload):
     )
     log.info("get_shabby_reply status=0 blob_len=%d", len(blob))
 
-    return (
-        build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + blob
-    )
+    return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + blob
 
 
 def build_enum_shn_reply_payload(payload):
@@ -1062,9 +1104,7 @@ def build_get_ticket_reply_payload(session=None, *, require_admin=True):
 
     ticket = struct.pack("<H", 2)
     return (
-        build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + ticket
+        build_tagged_reply_dword(0) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + ticket
     )
 
 
@@ -1084,9 +1124,7 @@ def build_get_datasets_reply_payload():
     )
 
 
-def build_add_node_reply_payload(
-    payload, content_store=None, session=None, node_factory=None
-):
+def build_add_node_reply_payload(payload, content_store=None, session=None, node_factory=None):
     """Create one child for a TREEEDCL AddNode request.
 
     CTreeEditClient::PrivateAddNode sends three variable fields: the capability
@@ -1144,11 +1182,7 @@ def build_add_node_reply_payload(
         if node_factory is None:
             node_factory = _build_dirsrv_child_node
         node = node_factory(content_store, parent, properties)
-        if (
-            session is not None
-            and session.is_authenticated
-            and node.app_id == APP_TEXT_CONFERENCE
-        ):
+        if session is not None and session.is_authenticated and node.app_id == APP_TEXT_CONFERENCE:
             node = replace(node, host_usernames=(session.user.username,))
     except ValueError as exc:
         log.warning("add_node invalid properties parent=%s error=%s", parent_id, exc)
@@ -1211,9 +1245,7 @@ def _build_dirsrv_child_node(content_store, parent, properties):
         ),
         browse_flags=browse_flags,
         delegate=delegate,
-        delegate_mnid_a=(
-            _property_mnid(properties, PROP_DELEGATE_MNID) if delegate else None
-        ),
+        delegate_mnid_a=(_property_mnid(properties, PROP_DELEGATE_MNID) if delegate else None),
         secondary_icon_shabby_id=_property_int(
             properties, PROP_SECONDARY_ICON, shabby.DEFAULT_NODE_ICON_ID
         ),
