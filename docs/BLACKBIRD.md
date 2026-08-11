@@ -331,6 +331,31 @@ The four `MSNSite*` properties are what a published title advertises on MSN's Di
 
 All four values are written to the `CReleaseData`-local `CPropertyTable` during wizard edit (round-tripped by `CReleaseData_Serialize`) and consumed together by `CPublisher_PublishToMSN` — either as the `0x54`-byte `CTreeEditClient::SetProperties` record (site metadata) or as properties inside the published compound file (content side).
 
+### 6.1 The `bbix` property — observed on the wire
+
+The `SetProperties` leg sends a single property in the standard DIRSRV record
+frame (`docs/DIRSRV_GETCHILDREN_CLIENT_PATH.md`): `[u32 size=0x64][u16 count=1]`
+then `[u8 type=0x0E]["bbix"\0][u32 len=0x54][84 bytes]`. The property name is
+**`bbix`**. Captured 2026-08-12 from a live publish of a title authored as
+"All Controls Showcase":
+
+| Offset | Size | Value observed | Meaning |
+|---:|---:|---|---|
+| `+0x00` | 4 | `1` | version or record kind |
+| `+0x04` | 16 | `{D439EF41-51F5-11F1-B405-000C875355C8}` | root object GUID — byte-identical to the `\x03ref_1` moniker in the compound file shipped on Bbird_OB method 5, so this is what ties the directory node to the uploaded title |
+| `+0x14` | 8 | FILETIME `2026-08-11 22:25:20` | publish time; `GetSystemTime`/`SystemTimeToFileTime` immediately after the upload closes |
+| `+0x1c` | 4 | `0` | unknown |
+| `+0x20` | 17 | `"bbview.exe"`, NUL-padded | viewer to launch — the Blackbird viewer, not `mosview.exe` |
+| `+0x31` | 28 | `"x2qrj4anuhas42kd2117sgjalgs"` | title name, the same string every Bbird_OB call carries |
+| `+0x4d` | 7 | `05 00 A0 B9 01 01 A0` | unknown tail |
+
+A node that does not exist refuses this write, which makes
+`CPublisher_PublishToMSN` throw `0x13`; its handler zeroes the publish version
+at `+0x3c` and rolls the whole publish back over Bbird_OB method 1 (§4.5). The
+target node therefore has to be created in the directory *before* the author
+drags it onto the Release Wizard — the wizard never creates it, and no
+`AddNode` appears anywhere in a publish trace.
+
 ---
 
 ## 7. Authored fixture inventory — `tests/assets/captions_test.ttl`

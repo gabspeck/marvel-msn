@@ -15,6 +15,7 @@ import struct
 from dataclasses import dataclass, replace
 
 from ..mos_apps import (
+    APP_BLACKBIRD_TITLE,
     APP_DIRECTORY_SERVICE,
     APP_DOWNLOAD_AND_RUN,
     APP_MEDIA_VIEWER,
@@ -345,6 +346,62 @@ def _medview_sample_leaf(f0, name, size_bytes):
 
 
 _MEDVIEW_SAMPLES_KEY = f"1:{0x10E}"
+
+
+# Publish target for the Blackbird authoring suite. The Release Wizard does not
+# create its own node: the author drags an existing directory icon onto the
+# wizard, which stores that node's 8-byte mnid as `CReleaseData.MSNSiteNodeID`
+# and writes the site record back with `CTreeEditClient::SetProperties` at the
+# end of every publish (docs/BLACKBIRD.md §4.4). A node that has been deleted
+# since leaves the wizard pointing at an id the tree no longer holds, and the
+# registration leg is refused — which makes `CPublisher_PublishToMSN` throw
+# 0x13 and roll the whole publish back over Bbird_OB method 1.
+#
+# So this id has to stay put. 0x400 sits clear of every authored range in this
+# file (which ends at 0x387), leaving that space free to grow without ever
+# colliding with a wizard that already recorded this node.
+BLACKBIRD_PUBLISH_TARGET_F8 = 0x400
+
+
+def _blackbird_publish_target():
+    """The node an author drags onto the Blackbird Release Wizard.
+
+    Shaped to match what the MSN node editor produces for this node type:
+    creating a "Blackbird Title" sends `c=33` and `tp='Blackbird Title'` in the
+    TREEEDCL AddNode property record. Serving the published content still needs
+    the COSCL readers, so opening this node does not yet show the title.
+    """
+    key, mnid = mnid_key(1, BLACKBIRD_PUBLISH_TARGET_F8)
+    return DirectoryNode(
+        node_id=key,
+        is_container=False,
+        app_id=APP_BLACKBIRD_TITLE,
+        mnid_a=mnid,
+        content=NodeContent(
+            name="Blackbird Publish Target",
+            go_word="",
+            category="Media View samples",
+            type_str="Blackbird Title",
+            price_dword=0,
+            rating_dword=0,
+            description="",
+            language=_LCID_EN_US,
+            topics="",
+            people="",
+            place="",
+            u_value="",
+            forum_mgr="",
+            vendor_id=0,
+            owner="",
+            created="",
+            modified=_CONTENT_DROP_DATE,
+            size_bytes=0,
+            modified_filetime=_date_string_to_wire_filetime(_CONTENT_DROP_DATE),
+        ),
+    )
+
+
+_BLACKBIRD_PUBLISH_TARGET = _blackbird_publish_target()
 
 # A Download-and-Run leaf whose payload the server generates, so a transfer can
 # be checked without the client's compressor in the way. The body is plain text
@@ -745,6 +802,7 @@ DIRECTORY_NODES = [
         for f0, name, size_bytes in MEDVIEW_SAMPLE_LEAF_DEFS
     ],
     _DEFAULT_CHAT_ROOM,
+    _BLACKBIRD_PUBLISH_TARGET,
     _DNR_TEST_NODE,
     _DNR_MOS2_NODE,
     _DNR_MOS2B_NODE,
@@ -794,11 +852,13 @@ DIRECTORY_CHILDREN = {
     _ARTES_E_ENTRETENIMENTO_KEY: [f"1:{f8}" for f8, _ in A_AND_E_BR_CHILD_DEFS],
     _MEDVIEW_SAMPLES_KEY: [
         *[f"{f0}:0" for f0, _name, _size in MEDVIEW_SAMPLE_LEAF_DEFS],
+        _BLACKBIRD_PUBLISH_TARGET.node_id,
         _DNR_TEST_NODE.node_id,
         _DNR_MOS2_NODE.node_id,
         _DNR_MOS2B_NODE.node_id,
         _DNR_MOS2OK_NODE.node_id,
     ],
+    _BLACKBIRD_PUBLISH_TARGET.node_id: [],
     _DNR_TEST_NODE.node_id: [],
     _DNR_MOS2_NODE.node_id: [],
     _DNR_MOS2B_NODE.node_id: [],

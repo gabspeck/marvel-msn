@@ -1944,6 +1944,7 @@ class TestDIRSRVReply(unittest.TestCase):
                     ((0x1000, 0), "Employee Handbook Example"),
                     ((0x1001, 0), "France Magazine"),
                     ((0x1002, 0), "MediaView Online Documentation"),
+                    ((1, 0x400), "Blackbird Publish Target"),
                     ((1, 0x111), "DnR Transfer Test"),
                     ((1, 0x112), "DnR Compressed Test"),
                     ((1, 0x113), "DnR Compressed Test B"),
@@ -2164,13 +2165,7 @@ class TestDIRSRVGetParents(unittest.TestCase):
     """Selector 0x01 used when MSNFIND activates a result row."""
 
     REQUEST = bytes.fromhex(
-        "04880400000000000000"
-        "0100"
-        "0300000000"
-        "0302000000"
-        "048463006100"
-        "048400000000"
-        "838385"
+        "04880400000000000000010003000000000302000000048463006100048400000000838385"
     )
 
     def test_exact_msn_today_request_returns_member_assistance_parent(self):
@@ -2840,6 +2835,44 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         self.assertEqual(
             build_props(["h"], node, is_children=False),
             [(0x03, "h", struct.pack("<I", selected_id))],
+        )
+
+    def test_blackbird_site_record_survives_the_next_property_read(self):
+        """The `bbix` record Blackbird's Release Wizard writes, byte for byte.
+
+        Captured from a live publish (server log 2026-08-12): 84 opaque bytes
+        carrying the title's root object GUID, publish FILETIME, `bbview.exe`
+        and the title name. The wizard reads this back before its next publish
+        to tell a first publish from a re-publish, so the round trip has to be
+        exact — see docs/BLACKBIRD.md §6.1.
+        """
+        store = _SetPropertiesContentStore()
+        site = bytes.fromhex(
+            "0100000041ef39d4f551f111b405000c875355c880ca7b4be029dd0100000000"
+            "6262766965772e65786500000000000000783271726a34616e7568617334326b"
+            "643231313773676a616c6773000500a0b90101a0"
+        )
+        self.assertEqual(len(site), 0x54)
+        request = self._request([(0x0E, "bbix", struct.pack("<I", len(site)) + site)])
+
+        reply = build_set_properties_reply_payload(request, store)
+
+        self.assertEqual(reply, self.OK)
+        node = store.get_node(store.NODE_ID)
+        self.assertEqual(node.content.blackbird_site, site)
+        self.assertEqual(
+            build_props(["bbix"], node, is_children=False),
+            [(0x0E, "bbix", struct.pack("<I", len(site)) + site)],
+        )
+
+    def test_unpublished_node_reports_no_blackbird_site(self):
+        """A node with nothing published answers the DWORD 0 the wizard saw
+        before any publish — never an empty 0x0E blob."""
+        store = _SetPropertiesContentStore()
+        node = store.get_node(store.NODE_ID)
+        self.assertEqual(
+            build_props(["bbix"], node, is_children=False),
+            [(0x03, "bbix", struct.pack("<I", 0))],
         )
 
     def test_download_and_run_page_writes_survive_the_next_property_read(self):

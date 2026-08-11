@@ -27,6 +27,7 @@ from ..mpc import (
     build_discovery_payload,
     build_host_block,
     build_service_packet,
+    build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_var,
     build_tagged_reply_word,
@@ -72,6 +73,7 @@ TREEEDCL_SELECTOR_SET_PROPERTIES = 0x04
 TREEEDCL_SELECTOR_ADD_SHABBY = 0x07
 TREEEDCL_SELECTOR_GET_DATASETS = 0x0B
 TREEEDCL_SELECTOR_GET_TICKET = 0x0C
+TREEEDCL_SELECTOR_INVALIDATE_TICKET = 0x0D
 
 # The failure status every TREEEDCL write answers with, whether the request was
 # malformed or the account may not make it. `CTreeEditClient` retries only on
@@ -137,6 +139,10 @@ PROP_PRICE = "z"
 # Compression code for the `fi` payload. DLRed hardcodes 3 — the algorithm
 # FTMAPI!HrMos2CompFile just ran over the authored file.
 PROP_FILE_COMPRESSION = "zc"
+# Blackbird's site record, written by the Release Wizard's SetProperties leg and
+# read back by it before the next publish. Wire type 0x0E, 0x54 bytes; the
+# server keeps it opaque (docs/BLACKBIRD.md §6.1).
+PROP_BLACKBIRD_SITE = "bbix"
 
 # Browse-language LCIDs advertised in GetChildren replies with propList=["q"].
 # Each value becomes a row in the View > Options > General "Content view"
@@ -209,6 +215,8 @@ class DIRSRVHandler:
                 return None
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
             reply_payload = build_get_ticket_reply_payload(self.session)
+        elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_INVALIDATE_TICKET:
+            reply_payload = build_invalidate_ticket_reply_payload(payload)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
             reply_payload = build_get_datasets_reply_payload()
         elif msg_class == DIRSRV_CLASS_TREE and selector == DIRSRV_SELECTOR_GET_PARENTS:
@@ -705,6 +713,21 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             out.append((0x0A, PROP_FILE_NAME, _sz(content.dnr_file_name)))
         elif name == PROP_FILE_COMPRESSION:
             out.append((0x03, PROP_FILE_COMPRESSION, struct.pack("<I", content.dnr_compression)))
+        elif name == PROP_BLACKBIRD_SITE:
+            # Type 0x0E, the type the wizard wrote. A node with nothing
+            # published falls through to the catch-all DWORD 0 below rather
+            # than shipping an empty blob, which is what the wizard reads as
+            # "never published" — the same shape it saw before any publish.
+            if content.blackbird_site:
+                out.append(
+                    (
+                        0x0E,
+                        PROP_BLACKBIRD_SITE,
+                        struct.pack("<I", len(content.blackbird_site)) + content.blackbird_site,
+                    )
+                )
+            else:
+                out.append((0x03, PROP_BLACKBIRD_SITE, struct.pack("<I", 0)))
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
@@ -1135,6 +1158,44 @@ def build_get_ticket_reply_payload(session=None, *, require_admin=True):
     )
 
 
+def build_invalidate_ticket_reply_payload(payload):
+    """Release the ticket the client is handing back.
+
+    `CTreeEditClient::InvalidateTicket` @ 0x7F2C2718 closes an edit session:
+    it sends the held ticket as its only parameter — `AddParam(ticket,
+    ticket[0])`, so the blob's own u16 self-length doubles as the byte count —
+    and declares a single status dword.
+
+    The dword's value does not matter. The client registers it, then discards
+    whatever arrived: on a transport-level success it unconditionally runs
+    `HrFreeTicket` and zeroes `this+0x54`, returning 0 regardless. Only the
+    presence of the dword matters, because without it the reply parse
+    desynchronises and the caller waits forever — which is what left Blackbird
+    hung after a completed publish, its last call unanswered.
+
+    A client holding no ticket returns early without reaching the wire, so
+    every request that gets here quotes one.
+    """
+    send_params, recv_descriptors = parse_request_params(payload)
+    fields = [param.data for param in send_params if isinstance(param, VarParam)]
+    if len(fields) != 1 or recv_descriptors != [0x83]:
+        log.warning(
+            "invalidate_ticket invalid request fields=%d recv=%s payload=%s",
+            len(fields),
+            [f"0x{tag:02x}" for tag in recv_descriptors],
+            payload.hex(),
+        )
+        return build_static_reply(build_tagged_reply_dword(TREEEDCL_STATUS_REFUSED))
+
+    ticket = fields[0]
+    if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket):
+        log.warning("invalidate_ticket invalid ticket=%s", ticket.hex())
+        return build_static_reply(build_tagged_reply_dword(TREEEDCL_STATUS_REFUSED))
+
+    log.info("invalidate_ticket ticket_len=%d status=0", len(ticket))
+    return build_static_reply(build_tagged_reply_dword(0))
+
+
 def build_get_datasets_reply_payload():
     """Return an empty TREEEDCL dataset property bag.
 
@@ -1329,6 +1390,9 @@ _EDITABLE_PROPERTIES = {
     # as a type-0x0E inline blob, which this server does not store.
     PROP_FILE_ID: ("dnr_shabby_id", lambda v: v if isinstance(v, int) else 0),
     PROP_FILE_NAME: ("dnr_file_name", lambda v: v if isinstance(v, str) else ""),
+    # Stored verbatim: the wizard reads back exactly what it wrote, and nothing
+    # here interprets the 84 bytes.
+    PROP_BLACKBIRD_SITE: ("blackbird_site", lambda v: v if isinstance(v, bytes) else b""),
     PROP_FILE_COMPRESSION: ("dnr_compression", lambda v: v if isinstance(v, int) else 0),
 }
 
@@ -1378,7 +1442,15 @@ def build_set_properties_reply_payload(payload, content_store=None, session=None
     node_id = f"{field_0}:{field_8}"
     node = content_store.get_node(node_id)
     if node is None or node.node_id != node_id:
-        log.warning("set_properties unknown node=%s", node_id)
+        # Log the record too: a write to a node the tree does not hold is how
+        # a client tells us what it believes exists, and the property bag names
+        # what it wanted to put there.
+        log.warning(
+            "set_properties unknown node=%s record_len=%d record=%s",
+            node_id,
+            len(property_record),
+            property_record.hex(),
+        )
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     try:

@@ -108,6 +108,13 @@ class NodeContent:
     dnr_shabby_id: int = 0
     dnr_file_name: str = ""
     dnr_compression: int = 0
+    # The `bbix` site record Blackbird's Release Wizard writes at the end of a
+    # publish, held verbatim. 84 opaque bytes carrying the published title's
+    # root object GUID, its publish FILETIME, the viewer to launch and the
+    # title name — see docs/BLACKBIRD.md §6.1. The wizard reads it back before
+    # publishing to tell a first publish from a re-publish, so it has to
+    # survive the round trip byte for byte. Empty = nothing published here.
+    blackbird_site: bytes = b""
     # Optional BBS-only sub-struct. None for DIRSRV/MEDVIEW nodes; set on BBS
     # board/conversation/reply nodes so build_bbs_props can read BBS-only tags.
     bbs: BbsFields | None = None

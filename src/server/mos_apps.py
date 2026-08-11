@@ -50,3 +50,9 @@ APP_BBSINETED = 25
 APP_ENCARTAED = 26
 APP_BSHELFED = 27
 APP_GUIDEED = 28
+# Blackbird title. Beyond the App #1..28 range `ftp/mos.reg` covers, so its
+# registered Filename is unknown here — the id is what the client itself put on
+# the wire: creating a "Blackbird Title" node in the MSN node editor sent
+# `c=33` in the TREEEDCL AddNode property record (observed 2026-08-12,
+# `add_node parent=1:16 node=1:272 type='Blackbird Title' app_id=33`).
+APP_BLACKBIRD_TITLE = 33
