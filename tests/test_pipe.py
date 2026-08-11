@@ -94,6 +94,59 @@ class TestParseMultipleFrames(unittest.TestCase):
         self.assertEqual(frames[1].content, b"second")
 
 
+class TestFrameCompletionBoundary(unittest.TestCase):
+    """A pipe message ends on its declared length, not on `last_data`.
+
+    Replays the four frames Blackbird's compound-file upload produced at the
+    packet boundary that corrupted it (server log 2026-08-11 23:40:50): two
+    467-byte messages, each split across two packets, where only the very last
+    fragment carried `last_data`.
+    """
+
+    def _split(self, pipe_idx, body, first_len):
+        frame = build_pipe_frame(pipe_idx, body, last=False)
+        return frame[:first_len], bytes([frame[0]]) + frame[first_len:]
+
+    def test_a_completed_frame_dispatches_without_last_data(self):
+        pending = {}
+        body_a = struct.pack("<H", 4) + b"\xe6\x02" + b"A" * 463
+        head, tail = self._split(0, body_a, 238)
+
+        first = parse_pipe_frames(head, pending)[0]
+        self.assertFalse(first.last_data)
+        self.assertEqual(pending[0], 467 - len(first.content))
+
+        second = parse_pipe_frames(tail, pending)[0]
+        self.assertFalse(second.last_data)
+        self.assertEqual(pending[0], 0, "the message is complete though last_data is clear")
+        self.assertEqual(len(first.content) + len(second.content), 467)
+
+    def test_two_split_messages_do_not_merge(self):
+        pending = {}
+        assembled = []
+        buffer = bytearray()
+        bodies = [
+            struct.pack("<H", 4) + b"\xe6\x02" + b"A" * 463,
+            struct.pack("<H", 4) + b"\xe6\x02" + b"B" * 463,
+        ]
+        packets = []
+        for body in bodies:
+            head, tail = self._split(0, body, 238)
+            packets += [head, tail]
+
+        for packet in packets:
+            for pf in parse_pipe_frames(packet, pending):
+                buffer.extend(pf.content)
+                if pending.get(pf.pipe_idx, 0) == 0:
+                    assembled.append(bytes(buffer))
+                    buffer.clear()
+
+        self.assertEqual([len(m) for m in assembled], [467, 467])
+        self.assertEqual(
+            [parse_pipe0_content(m).data[2:] for m in assembled], [b"A" * 463, b"B" * 463]
+        )
+
+
 class TestParsePipe0Content(unittest.TestCase):
     def test_control_frame(self):
         content = b"\xff\xff\x03" + b"\x00" * 20

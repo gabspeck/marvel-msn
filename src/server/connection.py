@@ -159,7 +159,10 @@ class ConnectionState:
         """
         with self.send_lock, server_log.connection_scope(self.conn_id):
             pkts = build_service_packet(
-                pipe_idx, host_block, self.server_seq, self.client_ack,
+                pipe_idx,
+                host_block,
+                self.server_seq,
+                self.client_ack,
             )
             total = len(pkts)
             for i, pkt in enumerate(pkts, 1):
@@ -252,7 +255,9 @@ class ConnectionState:
         with self.send_lock:
             self.client_ack = (pkt.seq + 1) & 0x7F
             ack_pkt = build_ack_packet(self.client_ack)
-            self._send(ack_pkt, logging.DEBUG, "tx_ack n=%d seq=%d ack=%d", pkt.seq, self.client_ack)
+            self._send(
+                ack_pkt, logging.DEBUG, "tx_ack n=%d seq=%d ack=%d", pkt.seq, self.client_ack
+            )
 
         # CRC covers the still-stuffed bytes. Decode only after validation,
         # carrying a trailing escape into the next DATA packet when needed.
@@ -261,8 +266,30 @@ class ConnectionState:
             frames = parse_pipe_frames(payload, self.pipe_pending)
             for pf in frames:
                 self.pipe_buffers[pf.pipe_idx].extend(pf.content)
+                self.debug(
+                    "rx_frame pipe=%d last=%d cont=%d declared=%d got=%d owed=%d buffered=%d"
+                    " frames_in_payload=%d",
+                    pf.pipe_idx,
+                    pf.last_data,
+                    pf.continuation,
+                    pf.content_length,
+                    len(pf.content),
+                    self.pipe_pending.get(pf.pipe_idx, 0),
+                    len(self.pipe_buffers[pf.pipe_idx]),
+                    len(frames),
+                )
 
-                if pf.last_data:
+                # A message ends where its declared content length is
+                # satisfied, not where `last_data` is set. Those are different
+                # flags: during Blackbird's compound-file upload the fragment
+                # that completed a 467-byte frame arrived with `last_data`
+                # clear, so keying off it glued the next frame onto the same
+                # buffer and handed the service one 934-byte payload with the
+                # second frame's `[routing][class][stream]` header embedded 467
+                # bytes in. Those 4 stray bytes desynchronised the compound
+                # file — it landed 33796 bytes instead of 33792 and no longer
+                # parsed as OLE2.
+                if self.pipe_pending.get(pf.pipe_idx, 0) == 0:
                     assembled = bytes(self.pipe_buffers[pf.pipe_idx])
                     self.pipe_buffers[pf.pipe_idx].clear()
 
@@ -397,8 +424,12 @@ class ConnectionState:
         time.sleep(DELAY_BEFORE_REPLY)
         with self.send_lock:
             reply_pkts = handler.handle_request(
-                hb.msg_class, hb.selector, hb.request_id, hb.payload,
-                self.server_seq, self.client_ack,
+                hb.msg_class,
+                hb.selector,
+                hb.request_id,
+                hb.payload,
+                self.server_seq,
+                self.client_ack,
             )
 
             if reply_pkts is not None:
@@ -440,26 +471,43 @@ class ConnectionState:
         """
         self.info(
             "svc_iterator_cancel pipe=%d svc=%s class=0x%02x selector=0x%02x req_id=%d",
-            pipe_idx, handler.svc_name, hb.msg_class, hb.selector, hb.request_id,
+            pipe_idx,
+            handler.svc_name,
+            hb.msg_class,
+            hb.selector,
+            hb.request_id,
         )
         cancel_hook = getattr(handler, "handle_iterator_cancel", None)
         if cancel_hook is not None:
             cancel_hook(hb.msg_class, hb.selector, hb.request_id)
         host_block = build_host_block(
-            hb.msg_class, hb.selector, hb.request_id, ITERATOR_CANCEL_ACK,
+            hb.msg_class,
+            hb.selector,
+            hb.request_id,
+            ITERATOR_CANCEL_ACK,
         )
         with self.send_lock:
             pkts = build_service_packet(
-                pipe_idx, host_block, self.server_seq, self.client_ack,
+                pipe_idx,
+                host_block,
+                self.server_seq,
+                self.client_ack,
             )
             total = len(pkts)
             for i, pkt in enumerate(pkts, 1):
                 self._send(
-                    pkt, logging.INFO,
+                    pkt,
+                    logging.INFO,
                     "tx_iterator_cancel_ack n=%d pipe=%d svc=%s class=0x%02x "
                     "selector=0x%02x req_id=%d frag=%d/%d len=%d",
-                    pipe_idx, handler.svc_name, hb.msg_class, hb.selector,
-                    hb.request_id, i, total, len(pkt),
+                    pipe_idx,
+                    handler.svc_name,
+                    hb.msg_class,
+                    hb.selector,
+                    hb.request_id,
+                    i,
+                    total,
+                    len(pkt),
                 )
                 self.advance_seq()
 
