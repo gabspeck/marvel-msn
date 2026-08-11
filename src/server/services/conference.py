@@ -2,7 +2,6 @@
 
 import logging
 import struct
-import threading
 from dataclasses import replace
 
 from ..config import (
@@ -33,6 +32,7 @@ from .dirsrv import (
     build_get_ticket_reply_payload,
     build_property_record,
 )
+from .rooms import room_for
 
 log = logging.getLogger(__name__)
 
@@ -71,59 +71,6 @@ CONFSRV_EVENT_ROLE = 7
 # Fallback for an incomplete authored room record. Seeded rooms carry their
 # CONFLOC settings in the content store.
 DEFAULT_MESSAGE_LENGTH = 1000
-
-
-class _Room:
-    """Live roster for one conference instance, shared by every connection.
-
-    The lock covers the roster and the pushes that report a change to it, so
-    every member reads joins, leaves and text in one order. It is always taken
-    before a connection's send lock and never after, which is why the CONFSRV
-    handler answers from `flush_pending_events` instead of `handle_request`.
-    """
-
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.members = []
-        self.next_participant_id = 1
-
-
-# Keyed by room id. Rooms are authored directory nodes, so the registry stays
-# bounded, and a retained room keeps its participant ids monotonic.
-_rooms = {}
-_rooms_lock = threading.Lock()
-
-
-def _room_for(room_id):
-    with _rooms_lock:
-        room = _rooms.get(room_id)
-        if room is None:
-            room = _Room()
-            _rooms[room_id] = room
-        return room
-
-
-def room_population(room_id):
-    """How many members are in one room right now.
-
-    Backs the chat node's `p`: MSNFIND's Size cell renders that DWORD as
-    "%d people" when `c` is 4, so a room reports occupancy where a file reports
-    bytes. Read by `dirsrv._size_value`.
-
-    Never creates the room — a Find result listing every chat node would
-    otherwise register a `_Room` for each one. An unvisited room is 0, which is
-    also the value that leaves the cell blank.
-
-    Takes the two locks in sequence rather than nested: the registry lock only
-    guards the dict, and holding it while waiting on a room's lock would invert
-    the order the push path relies on.
-    """
-    with _rooms_lock:
-        room = _rooms.get(room_id)
-    if room is None:
-        return 0
-    with room.lock:
-        return len(room.members)
 
 
 class CONFLOCHandler:
@@ -592,7 +539,7 @@ class CONFSRVHandler:
         )
 
         self._leave_room()
-        room = _room_for(room_id)
+        room = room_for(room_id)
         with room.lock:
             if 0 < room_capacity <= len(room.members):
                 log.info(

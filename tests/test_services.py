@@ -72,7 +72,7 @@ from server.services.conference import (
     CONFLOCHandler,
     CONFSRVHandler,
 )
-from server.services.conference import _rooms as conference_rooms
+from server.services.rooms import _rooms as conference_rooms
 from server.services.dirsrv import (
     DS_E_NOT_FOUND,
     ENUM_SHN_KEY_ICONS,

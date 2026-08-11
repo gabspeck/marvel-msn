@@ -12,8 +12,6 @@ import unittest
 
 from server.config import FINDSVC_INTERFACE_GUIDS
 from server.mpc import decode_dirsrv_request
-from server.services.conference import _room_for
-from server.services.conference import _rooms as conference_rooms
 from server.services.dirsrv import _size_value, build_get_properties_reply_payload
 from server.services.findquery import QueryError, parse_query
 from server.services.findsvc import (
@@ -22,6 +20,8 @@ from server.services.findsvc import (
     FindSvcHandler,
     build_search_reply_blocks,
 )
+from server.services.rooms import _rooms as conference_rooms
+from server.services.rooms import room_for
 from server.store import app_store
 from server.transport import parse_packet
 
@@ -282,7 +282,7 @@ class TestChatRoomOccupancy(unittest.TestCase):
         self.assertEqual(conference_rooms, {})
 
     def test_occupancy_is_counted_live(self):
-        room = _room_for(self.room_id)
+        room = room_for(self.room_id)
         room.members.extend([object(), object(), object()])
         self.assertEqual(_size_value(self.node), 3)
         room.members.pop()

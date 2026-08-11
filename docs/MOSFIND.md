@@ -292,10 +292,10 @@ are registered by mnid but deliberately off the board's child list, so they do
 not inflate the article count.
 
 Occupancy comes from the CONFSRV roster, not the content store:
-`conference.room_population` reads the room registry without creating an entry,
-so listing every chat node in a search does not register a room per result. A
-room nobody has joined is 0, which is also the value that leaves the cell
-blank.
+`services.rooms.room_population` reads the room registry without creating an
+entry, so listing every chat node in a search does not register a room per
+result. A room nobody has joined is 0, which is also the value that leaves the
+cell blank.
 
 MOSSHELL runs the same tag through `FormatSizeString` unconditionally, so the
 board's row in Explorer renders the message count as a byte size. That is the

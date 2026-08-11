@@ -38,7 +38,6 @@ from server.services.conference import (
     CONFSRV_SELECTOR_JOIN,
     CONFSRV_SELECTOR_SEND,
 )
-from server.services.conference import _rooms as conference_rooms
 from server.services.logsrv import (
     LOGIN_BLOB_LEN,
     LOGIN_BLOB_MEMBER_ID_OFFSET,
@@ -46,6 +45,7 @@ from server.services.logsrv import (
     LOGIN_RESULT_BAD_MEMBER_ID,
     LOGIN_RESULT_BAD_PASSWORD,
 )
+from server.services.rooms import _rooms as conference_rooms
 from server.store import reset_app_store
 from server.transport import build_packet, parse_packet
 
@@ -209,8 +209,8 @@ def _login_blob(member_id, password):
     blob[LOGIN_BLOB_MEMBER_ID_OFFSET : LOGIN_BLOB_MEMBER_ID_OFFSET + len(member_id)] = (
         member_id.encode("ascii")
     )
-    blob[LOGIN_BLOB_PASSWORD_OFFSET : LOGIN_BLOB_PASSWORD_OFFSET + len(password)] = (
-        password.encode("ascii")
+    blob[LOGIN_BLOB_PASSWORD_OFFSET : LOGIN_BLOB_PASSWORD_OFFSET + len(password)] = password.encode(
+        "ascii"
     )
     return bytes(blob)
 
@@ -712,7 +712,8 @@ class TestChatBroadcast(unittest.TestCase):
 
     def _call(self, state, selector, payload, req_id):
         state._handle_service_data(
-            self.PIPE, build_host_block(0x01, selector, req_id, payload),
+            self.PIPE,
+            build_host_block(0x01, selector, req_id, payload),
         )
 
     def _join(self, state):
@@ -725,9 +726,7 @@ class TestChatBroadcast(unittest.TestCase):
 
     def _send_text(self, state, text):
         record = (
-            struct.pack("<HHI", CONFSRV_EVENT_TEXT, 0, 0)
-            + text.encode("utf-16le")
-            + b"\x00\x00"
+            struct.pack("<HHI", CONFSRV_EVENT_TEXT, 0, 0) + text.encode("utf-16le") + b"\x00\x00"
         )
         self._call(
             state,
@@ -756,7 +755,8 @@ class TestChatBroadcast(unittest.TestCase):
 
         announced = self._events(alice_sock)[0]
         self.assertEqual(
-            struct.unpack_from("<H", announced, 1)[0], CONFSRV_EVENT_PARTICIPANT_JOINED,
+            struct.unpack_from("<H", announced, 1)[0],
+            CONFSRV_EVENT_PARTICIPANT_JOINED,
         )
         self.assertIn(b"Steve Jobs", announced)
         self.assertNotIn(b"Bill Gates", announced)
@@ -779,7 +779,8 @@ class TestChatBroadcast(unittest.TestCase):
 
         left = self._events(alice_sock)[0]
         self.assertEqual(
-            struct.unpack_from("<H", left, 1)[0], CONFSRV_EVENT_PARTICIPANT_LEFT,
+            struct.unpack_from("<H", left, 1)[0],
+            CONFSRV_EVENT_PARTICIPANT_LEFT,
         )
         self.assertEqual(struct.unpack_from("<I", left, 5)[0], 2)
         self.assertEqual(len(left), 9)

@@ -38,6 +38,7 @@ from ..store import RIGHTS_NONE, DirectoryNode, NodeContent
 from ..store import app_store as _default_store
 from . import shabby
 from ._dispatch import log_unhandled_selector
+from .rooms import room_population
 
 # DIRSRV wire selectors. Slot indices resolve to IIDs via the discovery table
 # advertised in build_discovery_packet. Names mirror TREENVCL.DLL vtable
@@ -446,13 +447,8 @@ def _size_value(node):
     if node.content.bbs is not None and node.is_container:
         return _default_store.content.count_children(node.node_id)
     if node.app_id == APP_TEXT_CONFERENCE:
-        # Imported here, not at module scope: services.conference imports this
-        # module for its DIRSRV serialisation, so the dependency can only be
-        # declared one way at import time.
-        from .conference import room_population
-
-        # Rooms are keyed by the mnid's first dword — the same value
-        # CONFSRV joins on and find_app_instance resolves back to this node.
+        # Rooms are keyed by the mnid's first dword — the same value CONFSRV
+        # joins on and find_app_instance resolves back to this node.
         return room_population(struct.unpack_from("<I", node.mnid_a)[0])
     return node.content.size_bytes
 
