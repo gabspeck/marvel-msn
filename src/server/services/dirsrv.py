@@ -433,9 +433,9 @@ def _size_value(node):
         else     cell left empty
         p == 0   cell left empty, whatever c is
 
-    So a bulletin board reports how many messages it holds, counted live rather
-    than stored — a post has to move the number the next time the board is
-    listed. Everything else reports `size_bytes`, which for the DnR leaf is the
+    Both counts are live rather than stored: a post has to move the board's
+    number and a join has to move the room's the next time either is listed.
+    Everything else reports `size_bytes`, which for the DnR leaf is the
     compressed payload's length and for a plain container is 0 (blank cell).
 
     MOSSHELL formats the same tag through FormatSizeString unconditionally, so
@@ -445,6 +445,15 @@ def _size_value(node):
     """
     if node.content.bbs is not None and node.is_container:
         return _default_store.content.count_children(node.node_id)
+    if node.app_id == APP_TEXT_CONFERENCE:
+        # Imported here, not at module scope: services.conference imports this
+        # module for its DIRSRV serialisation, so the dependency can only be
+        # declared one way at import time.
+        from .conference import room_population
+
+        # Rooms are keyed by the mnid's first dword — the same value
+        # CONFSRV joins on and find_app_instance resolves back to this node.
+        return room_population(struct.unpack_from("<I", node.mnid_a)[0])
     return node.content.size_bytes
 
 

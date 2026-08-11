@@ -285,14 +285,17 @@ MSNFIND's Size-cell formatter @ `0x7F37318B` picks the unit from `c`:
 `p == 0` leaves the cell empty whatever `c` is, which is why plain containers
 show nothing there.
 
-So a bulletin board's `p` is its article count, and the server counts it live
-off the child list rather than storing it — a post has to move the number the
-next time the board is listed. Attachment nodes are registered by mnid but
-deliberately off the board's child list, so they do not inflate it.
+So a bulletin board's `p` is its article count and a chat room's is its current
+occupancy. Both are counted live rather than stored — a post has to move one
+number and a join the other by the next time either is listed. Attachment nodes
+are registered by mnid but deliberately off the board's child list, so they do
+not inflate the article count.
 
-A chat room's `p` should likewise be its current occupancy. That number lives
-in the conference service, not the content store, so rooms still report 0 and
-show a blank cell.
+Occupancy comes from the CONFSRV roster, not the content store:
+`conference.room_population` reads the room registry without creating an entry,
+so listing every chat node in a search does not register a room per result. A
+room nobody has joined is 0, which is also the value that leaves the cell
+blank.
 
 MOSSHELL runs the same tag through `FormatSizeString` unconditionally, so the
 board's row in Explorer renders the message count as a byte size. That is the

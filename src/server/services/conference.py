@@ -103,6 +103,29 @@ def _room_for(room_id):
         return room
 
 
+def room_population(room_id):
+    """How many members are in one room right now.
+
+    Backs the chat node's `p`: MSNFIND's Size cell renders that DWORD as
+    "%d people" when `c` is 4, so a room reports occupancy where a file reports
+    bytes. Read by `dirsrv._size_value`.
+
+    Never creates the room — a Find result listing every chat node would
+    otherwise register a `_Room` for each one. An unvisited room is 0, which is
+    also the value that leaves the cell blank.
+
+    Takes the two locks in sequence rather than nested: the registry lock only
+    guards the dict, and holding it while waiting on a room's lock would invert
+    the order the push path relies on.
+    """
+    with _rooms_lock:
+        room = _rooms.get(room_id)
+    if room is None:
+        return 0
+    with room.lock:
+        return len(room.members)
+
+
 class CONFLOCHandler:
     """Resolve a DIRSRV chat node to a CONFSRV instance."""
 
@@ -125,20 +148,10 @@ class CONFLOCHandler:
             reply_payload = self.build_data_edit_add_reply_payload(request_id, payload)
         elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_DELETE:
             reply_payload = self.build_data_edit_delete_reply_payload(request_id, payload)
-        elif (
-            msg_class == CONFLOC_DATA_EDIT_CLASS
-            and selector == CONFLOC_DATA_EDIT_SET_PROPERTIES
-        ):
-            reply_payload = self.build_data_edit_set_properties_reply_payload(
-                request_id, payload
-            )
-        elif (
-            msg_class == CONFLOC_DATA_EDIT_CLASS
-            and selector == CONFLOC_DATA_EDIT_GET_PROPERTIES
-        ):
-            reply_payload = self.build_data_edit_get_properties_reply_payload(
-                request_id, payload
-            )
+        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_SET_PROPERTIES:
+            reply_payload = self.build_data_edit_set_properties_reply_payload(request_id, payload)
+        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_GET_PROPERTIES:
+            reply_payload = self.build_data_edit_get_properties_reply_payload(request_id, payload)
         elif selector == CONFLOC_SELECTOR_LOCATE:
             reply_payload = self.build_locate_reply_payload(payload)
         else:
@@ -199,7 +212,9 @@ class CONFLOCHandler:
         try:
             decoded = _decode_property_record(properties)
             stored = _apply_conference_properties(
-                self.content_store, record_id, decoded,
+                self.content_store,
+                record_id,
+                decoded,
             )
         except ValueError as exc:
             log.warning(
@@ -211,8 +226,7 @@ class CONFLOCHandler:
             return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
 
         log.info(
-            "data_edit_add status=0 req_id=%d table=%d record_id=%s "
-            "dataset=0x%04x props=%s",
+            "data_edit_add status=0 req_id=%d table=%d record_id=%s dataset=0x%04x props=%s",
             request_id,
             send_params[1].value,
             record_id.hex(),
@@ -260,8 +274,7 @@ class CONFLOCHandler:
             and len(record_id) == 8
         ):
             log.warning(
-                "data_edit_delete refused req_id=%d user=%s ticket_len=%d "
-                "record_id_len=%d",
+                "data_edit_delete refused req_id=%d user=%s ticket_len=%d record_id_len=%d",
                 request_id,
                 self.session.user.username or "-",
                 len(ticket),
@@ -271,8 +284,7 @@ class CONFLOCHandler:
 
         self._records.pop(record_id, None)
         log.info(
-            "data_edit_delete status=0 req_id=%d table=%d record_id=%s "
-            "dataset=0x%04x",
+            "data_edit_delete status=0 req_id=%d table=%d record_id=%s dataset=0x%04x",
             request_id,
             send_params[1].value,
             record_id.hex(),
@@ -313,9 +325,7 @@ class CONFLOCHandler:
         if len(record_id) == 8:
             field_0, field_8 = struct.unpack("<II", record_id)
             node = self.content_store.get_node(f"{field_0}:{field_8}")
-            known_record = known_record or (
-                node is not None and node.app_id == APP_TEXT_CONFERENCE
-            )
+            known_record = known_record or (node is not None and node.app_id == APP_TEXT_CONFERENCE)
         valid_payload = (
             self.session.is_admin
             and len(ticket) >= 2
@@ -347,7 +357,9 @@ class CONFLOCHandler:
 
         try:
             stored = _apply_conference_properties(
-                self.content_store, record_id, decoded,
+                self.content_store,
+                record_id,
+                decoded,
             )
         except ValueError as exc:
             log.warning(
@@ -404,7 +416,8 @@ class CONFLOCHandler:
         properties = self._records.get(record_id)
         if properties is None:
             properties = _build_stored_conference_properties(
-                self.content_store, record_id,
+                self.content_store,
+                record_id,
             )
         if properties is None:
             log.warning(
@@ -423,8 +436,7 @@ class CONFLOCHandler:
             selected = _select_dword_properties(properties, names)
         except ValueError as exc:
             log.warning(
-                "data_edit_get_properties invalid stored record req_id=%d "
-                "record_id=%s error=%s",
+                "data_edit_get_properties invalid stored record req_id=%d record_id=%s error=%s",
                 request_id,
                 record_id.hex(),
                 exc,
@@ -576,9 +588,7 @@ class CONFSRVHandler:
         room_name = node.content.name if node is not None else ""
         room_capacity = conference.room_capacity if conference is not None else 0
         message_length = (
-            conference.message_length
-            if conference is not None
-            else DEFAULT_MESSAGE_LENGTH
+            conference.message_length if conference is not None else DEFAULT_MESSAGE_LENGTH
         )
 
         self._leave_room()
@@ -605,9 +615,7 @@ class CONFSRVHandler:
             self._room_id = room_id
             self._participant_id = room.next_participant_id
             self._participant_role = _participant_role(node, conference, self.session.user)
-            self._display_name = (
-                self.session.user.display_name or self.session.user.username
-            )
+            self._display_name = self.session.user.display_name or self.session.user.username
             room.next_participant_id += 1
             room.members.append(self)
 
@@ -752,8 +760,7 @@ class CONFSRVHandler:
             refusal = self._role_change_refusal(room, target_id, role)
             if refusal is not None:
                 log.warning(
-                    "set_role refused req_id=%d participant=%s target=%d role=%d "
-                    "reason=%s",
+                    "set_role refused req_id=%d participant=%s target=%d role=%d reason=%s",
                     request_id,
                     self._participant_id,
                     target_id,
@@ -821,14 +828,17 @@ class CONFSRVHandler:
         and adds the NUL itself.
         """
         name = self._display_name.encode("cp1252", errors="replace")
-        return struct.pack(
-            "<IHIHH",
-            self._participant_id,
-            self._participant_role,
-            len(name),
-            0,
-            0,
-        ) + name
+        return (
+            struct.pack(
+                "<IHIHH",
+                self._participant_id,
+                self._participant_role,
+                len(name),
+                0,
+                0,
+            )
+            + name
+        )
 
     def _parse_record(self, request_id, payload):
         """The one variable parameter selector 2 carries, header checked."""
@@ -869,7 +879,9 @@ class CONFSRVHandler:
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         try:
             self.connection.push_service_data(
-                self.pipe_idx, host_block, f"svc={self.svc_name} {label}",
+                self.pipe_idx,
+                host_block,
+                f"svc={self.svc_name} {label}",
             )
         except OSError as exc:
             log.warning(
@@ -892,11 +904,7 @@ def _build_event(event_type, sender_id, payload=b""):
 
 def _member(room, participant_id):
     return next(
-        (
-            member
-            for member in room.members
-            if member._participant_id == participant_id
-        ),
+        (member for member in room.members if member._participant_id == participant_id),
         None,
     )
 
@@ -944,11 +952,7 @@ def _apply_conference_properties(content_store, record_id, properties):
     field_0, field_8 = struct.unpack("<II", record_id)
     node_id = f"{field_0}:{field_8}"
     node = content_store.get_node(node_id)
-    if (
-        node is None
-        or node.node_id != node_id
-        or node.app_id != APP_TEXT_CONFERENCE
-    ):
+    if node is None or node.node_id != node_id or node.app_id != APP_TEXT_CONFERENCE:
         return False
 
     values = {}
@@ -978,25 +982,17 @@ def _apply_conference_properties(content_store, record_id, properties):
             "join_as_participants",
         } - values.keys()
         if missing:
-            raise ValueError(
-                "new conference record is missing " + ", ".join(sorted(missing))
-            )
+            raise ValueError("new conference record is missing " + ", ".join(sorted(missing)))
         conference = ConferenceFields(**values)
     else:
         conference = replace(conference, **values)
 
-    content_store.add_node(
-        replace(node, content=replace(node.content, conference=conference))
-    )
+    content_store.add_node(replace(node, content=replace(node.content, conference=conference)))
     return True
 
 
 def _build_data_edit_result(status):
-    return (
-        build_tagged_reply_dword(status)
-        + build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC])
-    )
+    return build_tagged_reply_dword(status) + build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
 
 
 def _build_data_edit_properties_result(status, records):

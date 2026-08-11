@@ -12,6 +12,8 @@ import unittest
 
 from server.config import FINDSVC_INTERFACE_GUIDS
 from server.mpc import decode_dirsrv_request
+from server.services.conference import _room_for
+from server.services.conference import _rooms as conference_rooms
 from server.services.dirsrv import _size_value, build_get_properties_reply_payload
 from server.services.findquery import QueryError, parse_query
 from server.services.findsvc import (
@@ -258,6 +260,33 @@ class TestIndexScope(unittest.TestCase):
         # length.
         dnr = next(node for node in app_store.content.all_nodes() if node.app_id == 7)
         self.assertEqual(_size_value(dnr), dnr.content.size_bytes)
+
+
+class TestChatRoomOccupancy(unittest.TestCase):
+    """`p` on a chat node is its roster size — MSNFIND renders it "%d people"."""
+
+    def setUp(self):
+        self.node = next(node for node in app_store.content.all_nodes() if node.app_id == 4)
+        self.room_id = struct.unpack_from("<I", self.node.mnid_a)[0]
+        conference_rooms.clear()
+        self.addCleanup(conference_rooms.clear)
+
+    def test_a_room_nobody_joined_reports_zero(self):
+        # 0 leaves the Size cell empty, which is what an idle room should look
+        # like.
+        self.assertEqual(_size_value(self.node), 0)
+
+    def test_reading_p_does_not_register_the_room(self):
+        # A search over every chat node must not create a _Room per result.
+        _size_value(self.node)
+        self.assertEqual(conference_rooms, {})
+
+    def test_occupancy_is_counted_live(self):
+        room = _room_for(self.room_id)
+        room.members.extend([object(), object(), object()])
+        self.assertEqual(_size_value(self.node), 3)
+        room.members.pop()
+        self.assertEqual(_size_value(self.node), 2)
 
     def test_every_indexed_node_carries_a_date(self):
         # CFindNav_FillResultRow has no blank branch for `w`; a node with no
