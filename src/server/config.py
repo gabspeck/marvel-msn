@@ -342,6 +342,18 @@ SASRV_INTERFACE_GUIDS = [
     )
 ]
 
+# Bbird_OB (Blackbird Object Broker) — the release channel the Blackbird
+# authoring suite publishes titles on.  Unlike every other service, it
+# negotiates a single interface: PUBLISH.DLL:0x40f01243 calls
+# `CMPCConnection::Init("Bbird_OB", {EC76D50B-BAD7-11CE-B21F-00AA004A33DB}, 1, NULL)`
+# and COSCL's `CMPCConnection::DoOpenMOSService` (COSCL.DLL:0x4021e4e9) passes
+# that one GUID straight to the MOS proxy's OpenService slot — there is no
+# client-side IID table to mirror.  Selector 0x01 therefore becomes the wire
+# msg_class for every Bbird_OB call.
+BBIRD_OB_INTERFACE_GUIDS = [
+    (_guid_le("EC76D50B-BAD7-11CE-B21F-00AA004A33DB"), 0x01),
+]
+
 # MEDVIEW (MedView title loader — MOSVIEW.EXE).  Client-side IID array at
 # MVTTL14C.DLL:0x7E84C1B0 — 42 IIDs consulted by hrAttachToService when
 # the factory resolves the service's interface table.  Selectors assigned

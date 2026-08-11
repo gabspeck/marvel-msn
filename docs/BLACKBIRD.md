@@ -216,7 +216,7 @@ The monster publish function at `0x40f01c7c` drives the full MSN release on a si
 
 1. **Temp compound file** — `GetTempFileNameA` then `CObjectStoreFactory::Create(tempPath, 0x12, 0)` allocates a fresh COSCL compound file that will hold the delta to ship.
 2. **DirSrv lookup** — `CTreeNavClient("DirSrv", 7, 0xffff, …).GetProperties / GetNextNode` resolves the site node this title publishes under.
-3. **Incremental query** — `CMPCMethod(&gBbirdConnection, method=4)` executes against the Object Broker, returning three arrays of `{GUID, FILETIME}` pairs (what the server already has, what the client thinks it has, what has changed) and a `BYTE` mode flag (`0` = no-op, `1` = incremental).
+3. **Incremental query** — `CMPCMethod(&gBbirdConnection, method=4)` executes against the Object Broker. See §4.4.1 for the pinned wire shape.
 4. **Per-object decision** — walks the client `CDPORefMgr` iterator; for each moniker consults flags `0x0B` / `0x0C` / `0x0E` / `0x13` and the corresponding GUID→FILETIME hashtable built from step 3's output:
    - flag `0x13` set → `CObjectStore::AddFiatMoniker(dst, 2, typename, guid, 0x80000, 1, ...)` (external reference, bytes not shipped)
    - flags `0x0B`+`0x0E` both newer than server → `extract_object(..., kind=8)` (object + tree)
@@ -224,7 +224,7 @@ The monster publish function at `0x40f01c7c` drives the full MSN release on a si
    - flag `0x0E` only → `extract_object(..., kind=4)` (tree bytes)
 5. **Title-level stamping** — `CObjectStore::AccessTitlePropertiesTable` followed by `CPropertyTable::SetAt("\x03Publish Version", titleGuid, 0x14)` writes a 20-byte stamp into the title properties table.
 6. **Commit** — `CObjectStore::Commit(0)` finalises the temp compound file.
-7. **Ship the blob** — `CMPCFileWrite(&gBbirdConnection, method=5, 0)` opens an MPC file-write stream on the Object-Broker service, then `stream_copy_to_mpc_filewrite(writer, paramAdder, -1, 0x2000)` at `0x40f051a5` copies the compound file out in **8 KB chunks**. Close.
+7. **Ship the blob** — `CMPCFileWrite(&gBbirdConnection, method=5, 0)` opens an MPC file-write stream on the Object-Broker service, then `stream_copy_to_mpc_filewrite(writer, paramAdder, -1, 0x2000)` at `0x40f051a5` copies the compound file out in **8 KB chunks**. Close. See §4.4.2.
 8. **Site-metadata push** — `CTreeEditClient("DirSrv", 7, 0xffff, …).SetProperties(locid_lo, locid_hi, props)` on service 7, where `props` contains a single `FSet` entry of type `0x0E` and length `0x54` carrying the `CReleaseData.siteNodeID` (24 bytes) plus the companion registration fields from the struct.
 
 So the publish splits cleanly into two wire legs:
@@ -232,6 +232,65 @@ So the publish splits cleanly into two wire legs:
 - **Site registration** → `CTreeEditClient::SetProperties` on DirSrv (service 7) with a 0x54-byte property record.
 
 PUBLISH.DLL imports **no** IStorage-family ole32 APIs directly; the only `ole32` entry point it links is `CoCreateGuid`. Compound-file byte-layout responsibility lives entirely inside COSCL.
+
+### 4.4.0 Service negotiation
+
+`Bbird_OB` negotiates a **single** interface, unlike every other MSN service. `PUBLISH.DLL:0x40f01243` calls `CMPCConnection::Init("Bbird_OB", {EC76D50B-BAD7-11CE-B21F-00AA004A33DB}, 1, NULL)`, and `COSCL!CMPCConnection::DoOpenMOSService` (`0x4021e4e9`) hands that one GUID straight to the MOS proxy's OpenService slot — there is no client-side IID array. The pipe opens with `version=1`, `ver_param="U"`. Every call on the pipe therefore rides one `msg_class`, and the method number is the wire selector.
+
+Calls are assembled through `CMPCMethodExecution`, whose operator overloads are one-instruction thunks into the execution vtable (`COSCL.DLL:0x4021dda2`…`0x4021de74`):
+
+| Slot | Method | Wire role |
+|---|---|---|
+| `0x24` | `AddParam(const void*, ulong)` | send variable field |
+| `0x28` | `operator<<(ulong)` | send dword |
+| `0x2c` / `0x30` | `operator<<(ushort/uchar)` | send word / byte |
+| `0x14` | `operator>>(IMosBuffer*&)` | receive variable field |
+| `0x18` | `operator>>(ulong&)` | receive dword |
+| `0x1c` / `0x20` | `operator>>(ushort&/uchar&)` | receive word / byte |
+
+#### 4.4.1 Method 4 — incremental-publish query
+
+Request as observed on the wire (2026-08-11, first live publish of a title named `x2qrj4anuhas42kd2117sgjalgs`):
+
+```
+03 00000000                    u32  0
+04 9b <27 bytes>               var  title name (CString data + its length)
+03 01000000                    u32  client's publish version, from CReleaseData +0x3c
+84 84 84 81 83                 receive descriptors
+```
+
+The reply mirrors those five descriptors in order. What `CPublisher_PublishToMSN` does with each is pinned by the code following the wait:
+
+| Field | Meaning |
+|---|---|
+| var #1 | GUID array; element count = `size >> 4` |
+| var #2 | FILETIME array, **tree** timestamps; count = `size >> 3` |
+| var #3 | FILETIME array, **object** timestamps; count = `size >> 3` |
+| byte | mode: `0` clears `+0x38`; `1` builds both GUID→FILETIME hashtables |
+| dword | publish version, stored back into `+0x3c` |
+
+All three arrays must report the same count or the publisher throws `0x11`.
+
+Mode `0` is the full-publish answer. It clears `+0x38`, and every branch of the `CDPORefMgr` moniker walk that tests `+0x38 == 0` marks its object new — so each moniker ships through `extract_object` and the three arrays are never dereferenced. Under mode `0` the arrays are unreadable by construction, so empty ones are correct rather than merely tolerated.
+
+The returned dword is what the client stamps: `local_324 = *(+0x3c)` followed by `CoCreateGuid`, then `CPropertyTable::SetAt("\x03Publish Version", &stamp, 0x14)`. The 20-byte stamp is `[u32 publish version][GUID]`.
+
+#### 4.4.2 Method 5 — file write
+
+`stream_copy_to_mpc_filewrite` (`0x40f051a5`) is a bare `read 0x2000 / write` loop that terminates on the first short read, so the publisher issues one method-5 call per 8 KB slice and the final slice is partial. Request head for the first slice:
+
+```
+03 00000000                    u32  0
+03 01000000                    u32  slice sequence, 1-based
+04 9b <27 bytes>               var  title name
+03 01000000                    u32  publish version  (absent from slice 2 onward)
+05 01 00200000                 chunked ref: stream id 1, 0x2000 bytes
+83                             receive descriptor: status dword
+```
+
+The head carries no file bytes. The slice follows on class-`0xE6`/`0xE7` continuation frames quoting the stream id, ~463 bytes per frame, `0xE7` closing. Stream ids increment per slice (1, 2, 3, …) and match the slice sequence dword. The reply is a single status dword; the copy loop blocks on it, so a slice is not acked until its frames have drained. `CMPCFileWrite::Close` presents as a head with no chunked field.
+
+Reassembled, the byte stream is an OLE2 compound file — it opens with `D0 CF 11 E0 A1 B1 1A E1` — i.e. the COSCL output described in §3, shipped verbatim.
 
 ### 4.5 Delete
 
