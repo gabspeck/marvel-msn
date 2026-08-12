@@ -342,16 +342,23 @@ SASRV_INTERFACE_GUIDS = [
     )
 ]
 
-# Bbird_OB (Blackbird Object Broker) — the release channel the Blackbird
-# authoring suite publishes titles on.  Unlike every other service, it
-# negotiates a single interface: PUBLISH.DLL:0x40f01243 calls
-# `CMPCConnection::Init("Bbird_OB", {EC76D50B-BAD7-11CE-B21F-00AA004A33DB}, 1, NULL)`
-# and COSCL's `CMPCConnection::DoOpenMOSService` (COSCL.DLL:0x4021e4e9) passes
-# that one GUID straight to the MOS proxy's OpenService slot — there is no
-# client-side IID table to mirror.  Selector 0x01 therefore becomes the wire
-# msg_class for every Bbird_OB call.
+# Bbird_OB (Blackbird Object Broker).  Unlike every other service there is no
+# client-side IID table to mirror: COSCL's `CMPCConnection::Init(name, guid,
+# version, param)` takes one GUID and `DoOpenMOSService` (COSCL.DLL:0x4021e4e9)
+# passes it straight to the MOS proxy's OpenService slot.  Two callers open the
+# service with two different GUIDs, so both have to be advertised or whichever
+# is missing gets E_NOINTERFACE and drops the pipe right after discovery.
+#
+#   ...50B  write side.  PUBLISH.DLL:0x40f01243, the Release Wizard's publish.
+#   ...50A  read side.   OBCL.EXE (the object broker), which is what BBVIEW
+#           goes through to fetch a title — it imports CMPCFileRead, the
+#           counterpart to the CMPCFileWrite the publish leg streams with.
+#
+# The selector byte becomes the wire msg_class, and the server assigns it, so
+# the write side keeps 0x01 to leave the verified publish path untouched.
 BBIRD_OB_INTERFACE_GUIDS = [
     (_guid_le("EC76D50B-BAD7-11CE-B21F-00AA004A33DB"), 0x01),
+    (_guid_le("EC76D50A-BAD7-11CE-B21F-00AA004A33DB"), 0x02),
 ]
 
 # MEDVIEW (MedView title loader — MOSVIEW.EXE).  Client-side IID array at

@@ -100,19 +100,28 @@ from ..session import Session
 
 log = logging.getLogger(__name__)
 
-# Wire msg_class for the one interface Bbird_OB negotiates. See
-# BBIRD_OB_INTERFACE_GUIDS.
-BBIRD_OB_CLASS = 0x01
+# Wire msg_class per negotiated interface. See BBIRD_OB_INTERFACE_GUIDS: the
+# write side is PUBLISH.DLL's, the read side is OBCL.EXE's.
+BBIRD_OB_CLASS_PUBLISH = 0x01
+BBIRD_OB_CLASS_RETRIEVE = 0x02
 
-# Method selectors named by PUBLISH.DLL's call sites.
+_CLASS_NAMES = {
+    BBIRD_OB_CLASS_PUBLISH: "publish",
+    BBIRD_OB_CLASS_RETRIEVE: "retrieve",
+}
+
+# Method selectors named by PUBLISH.DLL's call sites. Retrieval-side selectors
+# are not named yet — nothing has been seen on that class.
 BBIRD_OB_SELECTOR_DELETE_NODE = 0x01
 BBIRD_OB_SELECTOR_INCREMENTAL_QUERY = 0x04
 BBIRD_OB_SELECTOR_FILE_WRITE = 0x05
 
 _SELECTOR_NAMES = {
-    BBIRD_OB_SELECTOR_DELETE_NODE: "delete_node",
-    BBIRD_OB_SELECTOR_INCREMENTAL_QUERY: "incremental_query",
-    BBIRD_OB_SELECTOR_FILE_WRITE: "file_write",
+    BBIRD_OB_CLASS_PUBLISH: {
+        BBIRD_OB_SELECTOR_DELETE_NODE: "delete_node",
+        BBIRD_OB_SELECTOR_INCREMENTAL_QUERY: "incremental_query",
+        BBIRD_OB_SELECTOR_FILE_WRITE: "file_write",
+    },
 }
 
 # Receive-descriptor sequence the method-4 request declares: three var fields
@@ -161,30 +170,34 @@ class BbirdOBHandler:
         if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
             return self._take_continuation(msg_class, selector, payload, server_seq, client_ack)
 
-        name = _SELECTOR_NAMES.get(selector, "unknown")
+        cls_name = _CLASS_NAMES.get(msg_class, "unknown")
+        name = _SELECTOR_NAMES.get(msg_class, {}).get(selector, "unknown")
         log.info(
-            "bbird_request class=0x%02x selector=0x%02x (%s) req_id=%d payload_len=%d",
+            "bbird_request class=0x%02x (%s) selector=0x%02x (%s) req_id=%d payload_len=%d",
             msg_class,
+            cls_name,
             selector,
             name,
             request_id,
             len(payload),
         )
-        send_params, recv_descs = self._log_payload(f"sel{selector:02x}_req{request_id}", payload)
+        send_params, recv_descs = self._log_payload(
+            f"cls{msg_class:02x}_sel{selector:02x}_req{request_id}", payload
+        )
 
-        if msg_class == BBIRD_OB_CLASS and selector == BBIRD_OB_SELECTOR_INCREMENTAL_QUERY:
+        if msg_class == BBIRD_OB_CLASS_PUBLISH and selector == BBIRD_OB_SELECTOR_INCREMENTAL_QUERY:
             reply_payload = self._build_incremental_query_reply(send_params, recv_descs)
             if reply_payload is None:
                 return None
             host_block = build_host_block(msg_class, selector, request_id, reply_payload)
             return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
-        if msg_class == BBIRD_OB_CLASS and selector == BBIRD_OB_SELECTOR_FILE_WRITE:
+        if msg_class == BBIRD_OB_CLASS_PUBLISH and selector == BBIRD_OB_SELECTOR_FILE_WRITE:
             return self._handle_file_write(
                 send_params, recv_descs, request_id, server_seq, client_ack
             )
 
-        if msg_class == BBIRD_OB_CLASS and selector == BBIRD_OB_SELECTOR_DELETE_NODE:
+        if msg_class == BBIRD_OB_CLASS_PUBLISH and selector == BBIRD_OB_SELECTOR_DELETE_NODE:
             reply_payload = self._build_delete_node_reply(send_params, recv_descs)
             if reply_payload is None:
                 return None
@@ -262,7 +275,7 @@ class BbirdOBHandler:
             *(build_tagged_reply_dword(_STATUS_OK) for _ in descriptors)
         )
         host_block = build_host_block(
-            BBIRD_OB_CLASS, BBIRD_OB_SELECTOR_FILE_WRITE, request_id, reply_payload
+            BBIRD_OB_CLASS_PUBLISH, BBIRD_OB_SELECTOR_FILE_WRITE, request_id, reply_payload
         )
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
