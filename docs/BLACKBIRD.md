@@ -292,6 +292,62 @@ The head carries no file bytes. The slice follows on class-`0xE6`/`0xE7` continu
 
 Reassembled, the byte stream is an OLE2 compound file — it opens with `D0 CF 11 E0 A1 B1 1A E1` — i.e. the COSCL output described in §3, shipped verbatim.
 
+#### 4.4.3 Retrieval — the read side of Bbird_OB
+
+Opening a published title runs the same service in the other direction, and
+through a different interface. `NODEEXEC.EXE` (App #33) reads `bbix`, launches
+the viewer named at `+0x20`, and BBVIEW reaches the data centre through
+`OBCL.EXE`, which opens `Bbird_OB` with `{EC76D50A-…}` — not the `{EC76D50B-…}`
+the publisher uses. A server advertising only one of the two answers the other
+with `E_NOINTERFACE`, and the caller drops the pipe immediately after
+discovery without sending a request.
+
+**Method 3 — `CMPCFileRead`.** Built on a worker thread at `OBCL:0x0040C211`,
+the mirror of the publisher's `CMPCFileWrite` on method 5:
+
+```
+send  u32   count
+send  var   count × 16-byte object GUIDs
+recv  0x83  u32   number of objects in the stream
+recv  0x84  var   that many 16-byte GUIDs
+recv  0x85  the object stream
+```
+
+Observed request (2026-08-12), asking for the title's root object — the same
+GUID `bbix +0x04` carries and `\x03ref_1` holds in the uploaded compound file:
+
+```
+03 00000000  03 01000000  04 90 41ef39d4f551f111b405000c875355c8  83 84 85
+```
+
+`OBCL:0x0040CD64` consumes the reply: it drains the `0x85` stream into a temp
+file, then loops `0x83` times reading `[u32 name_len][name]` — a SubCOS name
+for `AddSubCOSToSuperCOS` — followed by one `paste_object` record.
+
+**The record**, from the `CFile` overload of `extract_object` at
+`COSCL:0x40216AB4` (`CFile::Write` is the callee held in `local_18`):
+
+| Field | Size | Present when |
+|---|---|---|
+| artifact kind | 4 | always |
+| status flags | 4 | always |
+| object GUID | 16 | `CDPORef` flag `3` set |
+| typename length | 4 | always |
+| typename | var | always |
+| object length | 4 | always (`0` = stream omitted) |
+| object bytes | var | length non-zero |
+| props length + props | var | flag `0x0E` set and `kind & 4` |
+| swizzle table | var | status-flags byte 1 bit `0x20` and `kind & 2` |
+| entry count + `count × 24` | var | same condition |
+| emitted count | 4 | same condition |
+| child records | var | same condition — recursive, depth `param_5 - 1` |
+
+The swizzle section is gated on flags the *writer* chooses, so a record that
+leaves that bit clear omits it entirely and `paste_object` reads it the same
+way. Everything the records need is present in the uploaded compound file:
+per-storage `\x03object` and `\x03properties`, `\x03ref_N` for the monikers,
+and `\x03type_names_map` for the typenames.
+
 ### 4.5 Delete
 
 `PUBLISH.DLL!DELETENODE` at `0x40f01210` runs the symmetric teardown: open a `CMPCConnection("Bbird_OB", guid={EC76D50B-BAD7-11CE-B21F-00AA004A33DB})`, navigate DirSrv to locate the node, confirm the property at offset `0x31` of the 0x54-byte site record, and invoke `CMPCMethod(&conn, method=1)` with the node ID. Returns `0x8b0b001b` on cancellation and `0` on success.
@@ -383,12 +439,13 @@ Decoded by `server.blackbird.ttl_inspect.inspect_blackbird_title`:
 The `CVForm` at `6/0` carries a Word 95 binary document. It is part of the
 Blackbird display layer.
 
-- **`extract_object` @ COSCL.DLL `0x40216AB4`** writes the
-  PUBLISH.DLL output blob: `[u32 kind][u32 status_flags]
-  [optional u128 GUID][u32 typename_len + name][u32 obj_len + obj
-  bytes][optional prop stream][optional swizzle table + recursive
-  embedded objects]`. This is what the server receives via
-  `Bbird_OB` method 5.
+- **`extract_object`** exists twice, and the pair matters. The
+  store-to-store overload at `0x402169BF` is what the publish path uses:
+  it copies objects between two `CObjectStore`s, and what reaches the
+  server on `Bbird_OB` method 5 is the resulting *compound file*, not a
+  record stream. The `CFile` overload at `0x40216AB4` writes the flat
+  record `paste_object` (`0x402178A4`) reads, which is the retrieval
+  direction — see §4.4.3.
 - **Per-class `Serialize` in VIEWDLL.DLL** defines the on-disk byte
   layout for every authored class. Sample (CSection, ~50 lines):
   writes byte `3`, then calls the typed-pointer-list `Serialize` at
