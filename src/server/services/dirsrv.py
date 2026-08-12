@@ -35,7 +35,7 @@ from ..mpc import (
     parse_request_params,
 )
 from ..session import Session
-from ..store import RIGHTS_NONE, DirectoryNode, NodeContent
+from ..store import RIGHTS_NONE, DirectoryNode, NodeContent, blackbird_state
 from ..store import app_store as _default_store
 from . import shabby
 from ._dispatch import log_unhandled_selector
@@ -1492,6 +1492,11 @@ def build_set_properties_reply_payload(payload, content_store=None, session=None
                 **node_changes,
             )
         )
+    if "blackbird_site" in content_changes:
+        # A publish is the one edit worth surviving the process: the wizard
+        # reads it back to tell a first publish from a re-publish, and redoing
+        # one means driving the wizard by hand.
+        blackbird_state.save_site_record(node_id, content_changes["blackbird_site"])
     applied = {**content_changes, **node_changes}
     log.info(
         "set_properties status=0 node=%s applied=%s ignored=%s",

@@ -5,9 +5,12 @@ ends. Nothing reaches back into `store.fixtures`, and `reset_app_store` puts the
 process back to the state it booted with.
 """
 
+import pathlib
+import shutil
+import tempfile
 import unittest
 
-from server.store import app_store, default_seed, reset_app_store
+from server.store import app_store, blackbird_state, default_seed, reset_app_store
 from server.store.records import bbs_node
 
 # The sample board, and a message id no fixture uses.
@@ -228,6 +231,54 @@ class TestReset(unittest.TestCase):
             app_store.member.get_member(seed.member_profiles[0].member_id),
             seed.member_profiles[0],
         )
+
+
+class TestBlackbirdSiteRecordPersistence(unittest.TestCase):
+    """A publish outlives the process.
+
+    The Release Wizard reads `bbix` back to tell a first publish from a
+    re-publish, and NODEEXEC.EXE will not launch the viewer without it — so a
+    server restart must not drop it. See `server.store.blackbird_state`.
+    """
+
+    NODE_ID = "1:1024"
+    RECORD = bytes(range(0x54))
+
+    def setUp(self):
+        self._dir = tempfile.mkdtemp()
+        self._saved_dir = blackbird_state.STATE_DIR
+        blackbird_state.STATE_DIR = pathlib.Path(self._dir)
+
+    def tearDown(self):
+        blackbird_state.STATE_DIR = self._saved_dir
+        shutil.rmtree(self._dir, ignore_errors=True)
+        reset_app_store()
+
+    def test_a_saved_record_reloads_byte_for_byte(self):
+        blackbird_state.save_site_record(self.NODE_ID, self.RECORD)
+        self.assertEqual(blackbird_state.load_site_records(), {self.NODE_ID: self.RECORD})
+
+    def test_reset_restores_the_record_onto_its_node(self):
+        blackbird_state.save_site_record(self.NODE_ID, self.RECORD)
+        reset_app_store()
+        node = app_store.content.get_node(self.NODE_ID)
+        self.assertEqual(node.content.blackbird_site, self.RECORD)
+
+    def test_an_empty_record_drops_the_file(self):
+        blackbird_state.save_site_record(self.NODE_ID, self.RECORD)
+        blackbird_state.save_site_record(self.NODE_ID, b"")
+        self.assertEqual(blackbird_state.load_site_records(), {})
+
+    def test_no_state_directory_is_not_an_error(self):
+        shutil.rmtree(self._dir, ignore_errors=True)
+        self.assertEqual(blackbird_state.load_site_records(), {})
+
+    def test_a_record_for_an_unknown_node_is_left_on_disk(self):
+        """Its node may come back from a fixture edit; a publish is expensive
+        to redo, so an orphan is reported rather than deleted."""
+        blackbird_state.save_site_record("9999:9999", self.RECORD)
+        reset_app_store()
+        self.assertEqual(blackbird_state.load_site_records(), {"9999:9999": self.RECORD})
 
 
 if __name__ == "__main__":

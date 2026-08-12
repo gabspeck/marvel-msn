@@ -1,7 +1,10 @@
 """Tests for LOGSRV and DIRSRV service payload builders."""
 
 import hashlib
+import pathlib
+import shutil
 import struct
+import tempfile
 import unittest
 from dataclasses import replace
 from unittest.mock import patch
@@ -139,6 +142,7 @@ from server.store import (
     RIGHTS_AUTHORING,
     ConferenceFields,
     app_store,
+    blackbird_state,
     default_seed,
     reset_app_store,
 )
@@ -2749,6 +2753,17 @@ class TestDIRSRVSetProperties(unittest.TestCase):
     """
 
     OK = b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87"
+
+    def setUp(self):
+        # A bbix write persists to disk. Point it somewhere disposable so the
+        # suite does not publish a title into the server's real state.
+        self._state_dir = tempfile.mkdtemp()
+        self._saved_state_dir = blackbird_state.STATE_DIR
+        blackbird_state.STATE_DIR = pathlib.Path(self._state_dir)
+
+    def tearDown(self):
+        blackbird_state.STATE_DIR = self._saved_state_dir
+        shutil.rmtree(self._state_dir, ignore_errors=True)
 
     @staticmethod
     def _tagged_var(value):
