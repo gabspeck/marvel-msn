@@ -2865,14 +2865,20 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             [(0x0E, "bbix", struct.pack("<I", len(site)) + site)],
         )
 
-    def test_unpublished_node_reports_no_blackbird_site(self):
-        """A node with nothing published answers the DWORD 0 the wizard saw
-        before any publish — never an empty 0x0E blob."""
+    def test_unpublished_node_reports_an_empty_blackbird_site(self):
+        """Nothing published answers a zero-length 0x0E blob.
+
+        NODEEXEC.EXE reads the length FGet reports: 0x54 launches the viewer,
+        any other non-zero length is its return 5 ("The version of this
+        Blackbird title is incorrect"), and only 0 is return 10 ("This
+        Blackbird node has not yet been initialized"). A 4-byte DWORD would
+        make an unpublished node look like a corrupt record.
+        """
         store = _SetPropertiesContentStore()
         node = store.get_node(store.NODE_ID)
         self.assertEqual(
             build_props(["bbix"], node, is_children=False),
-            [(0x03, "bbix", struct.pack("<I", 0))],
+            [(0x0E, "bbix", struct.pack("<I", 0))],
         )
 
     def test_download_and_run_page_writes_survive_the_next_property_read(self):

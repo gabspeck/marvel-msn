@@ -727,7 +727,14 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
                     )
                 )
             else:
-                out.append((0x03, PROP_BLACKBIRD_SITE, struct.pack("<I", 0)))
+                # Nothing published: a zero-length blob, still typed 0x0E.
+                # NODEEXEC.EXE branches on what FGet reports — a length of
+                # 0x54 with type 0x0E launches the viewer, any other non-zero
+                # length is "The version of this Blackbird title is incorrect"
+                # (its return 5), and only length 0 is "This Blackbird node has
+                # not yet been initialized" (return 10). A 4-byte DWORD here
+                # therefore reads as a corrupt record rather than an empty one.
+                out.append((0x0E, PROP_BLACKBIRD_SITE, struct.pack("<I", 0)))
         else:
             out.append((0x03, name, struct.pack("<I", 0)))
     return out
