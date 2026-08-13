@@ -87,7 +87,7 @@ from ..config import (
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
-from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
+from ..models import ChunkedParam, DwordParam, VarParam
 from ..mpc import (
     build_discovery_host_block,
     build_discovery_payload,
@@ -102,6 +102,7 @@ from ..mpc import (
 )
 from ..session import Session
 from ..store import blackbird_state
+from ._dispatch import describe_param
 
 log = logging.getLogger(__name__)
 
@@ -726,7 +727,7 @@ class BbirdOBHandler:
         log.info(
             "bbird_params %s send=%s recv=%s",
             tag,
-            " ".join(_describe(p) for p in send_params) or "-",
+            " ".join(describe_param(p) for p in send_params) or "-",
             ",".join(f"0x{d:02x}" for d in recv_descs) or "-",
         )
         log.info("bbird_payload %s len=%d hex=%s", tag, len(payload), payload[:256].hex())
@@ -739,17 +740,3 @@ class BbirdOBHandler:
         except OSError as exc:
             log.warning("bbird_capture_failed tag=%s err=%s", tag, exc)
         return send_params, recv_descs
-
-
-def _describe(param):
-    if isinstance(param, ByteParam):
-        return f"u8=0x{param.value:02x}"
-    if isinstance(param, WordParam):
-        return f"u16=0x{param.value:04x}"
-    if isinstance(param, DwordParam):
-        return f"u32=0x{param.value:08x}"
-    if isinstance(param, ChunkedParam):
-        return f"chunk[id={param.stream_id},len={param.total_length}]"
-    if isinstance(param, VarParam):
-        return f"var[{len(param.data)}]={param.data[:32].hex()}"
-    return f"tag0x{param.tag:02x}"

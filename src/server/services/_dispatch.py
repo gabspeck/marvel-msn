@@ -7,6 +7,8 @@ that lets a reader eyeball wire shapes (e.g. UTF-16LE text in a node-id field)
 without pulling a pcap.
 """
 
+from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
+
 _UNHANDLED_PAYLOAD_PREFIX = 32
 
 
@@ -28,3 +30,18 @@ def log_unhandled_selector(logger, msg_class, selector, request_id, payload):
         prefix,
         ellipsis,
     )
+
+
+def describe_param(param):
+    """One-token rendering of a decoded send-side parameter, for log lines."""
+    if isinstance(param, ByteParam):
+        return f"u8=0x{param.value:02x}"
+    if isinstance(param, WordParam):
+        return f"u16=0x{param.value:04x}"
+    if isinstance(param, DwordParam):
+        return f"u32=0x{param.value:08x}"
+    if isinstance(param, ChunkedParam):
+        return f"chunk[id={param.stream_id},len={param.total_length}]"
+    if isinstance(param, VarParam):
+        return f"var[{len(param.data)}]={param.data[:32].hex()}"
+    return f"tag0x{param.tag:02x}"
