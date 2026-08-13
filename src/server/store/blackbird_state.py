@@ -28,7 +28,14 @@ log = logging.getLogger(__name__)
 # up as a working-tree change.
 STATE_DIR = pathlib.Path(__file__).resolve().parents[3] / "captures" / "blackbird" / "sites"
 
+# Published compound files, one per title, kept so the retrieval leg can serve
+# objects out of them. Separate from the timestamped copies the Bbird_OB
+# handler writes for inspection: those accumulate one per publish, this holds
+# the current one.
+TITLE_DIR = STATE_DIR.parent / "titles"
+
 _SUFFIX = ".bbix"
+_TITLE_SUFFIX = ".ttl"
 
 
 def _path_for(node_id):
@@ -78,3 +85,32 @@ def save_site_record(node_id, blob):
         tmp.replace(path)
     except OSError as exc:
         log.warning("blackbird_site_save_failed node=%s path=%s err=%s", node_id, path, exc)
+
+
+def save_title(name, data):
+    """Persist the compound file a publish just delivered.
+
+    Named after the title so a re-publish replaces its predecessor instead of
+    piling up — the retrieval leg wants the current objects, and a stale copy
+    holding the same GUIDs would be ambiguous.
+    """
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name) or "title"
+    path = TITLE_DIR / f"{safe}{_TITLE_SUFFIX}"
+    try:
+        TITLE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f"{_TITLE_SUFFIX}.tmp")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+        return path
+    except OSError as exc:
+        log.warning("blackbird_title_save_failed name=%s path=%s err=%s", name, path, exc)
+        return None
+
+
+def iter_titles():
+    """Every stored compound file, newest first."""
+    if not TITLE_DIR.is_dir():
+        return []
+    return sorted(
+        TITLE_DIR.glob(f"*{_TITLE_SUFFIX}"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
