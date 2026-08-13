@@ -153,20 +153,33 @@ def _schema_for(spec):
     ]
 
 
-def _row_values(doc, columns):
-    """Fill each column from what an indexed document offers.
+# What the Find UI's result list reads out of each column, from the
+# LVN_GETDISPINFO handler at IRFIND.DLL:0x1000e2b0. The column indices are
+# hardwired there, so the fill is positional:
+#
+#   subitem 0  results->vt[0x34](row, 2, ...)   column 2, as text
+#   subitem 1  the row's context resolved to a source name
+#              (FUN_1000e20c), falling back to column 1 as text on a miss
+#   subitem 2  row->vt[0x20](3, ...)            column 3, the date
+#
+# Column 0 is never displayed. The source column reads column 1 only because
+# no contexts record is sent for the name lookup to hit — serving one would
+# put a friendly name there instead.
+_COLUMN_FILL = {
+    1: lambda doc: doc.title,
+    2: lambda doc: doc.heading,
+}
 
-    Date columns carry the document's timestamp packed as BBIR time; the
-    string columns cycle through the readable fields in a fixed order, so
-    whatever the Find UI renders identifies each column by what shows up.
-    """
-    strings = [doc.heading, doc.snippet, doc.title, doc.storage_path]
+
+def _row_values(doc, columns):
+    """Fill each column from what an indexed document offers."""
     values = []
     for index, column in enumerate(columns):
         if column.type == PROP_TYPE_TIME:
             values.append(encode_bbir_time(doc.modified))
         else:
-            values.append(strings[index] if index < len(strings) else "")
+            fill = _COLUMN_FILL.get(index)
+            values.append(fill(doc) if fill else "")
     return values
 
 

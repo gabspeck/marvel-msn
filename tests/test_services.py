@@ -5778,8 +5778,17 @@ class TestBBIRService(unittest.TestCase):
         self.assertEqual(rank, 4)  # "ackbir" once, "yadda" three times
         array = row[12:]
         self.assertEqual(len(array), array_len)
-        first = struct.unpack_from("<I", array)[0]
-        self.assertEqual(array[first : array.index(b"\0", first)], b"Blackbird title")
+
+        def column(index):
+            offset = struct.unpack_from("<I", array, index * 4)[0]
+            return array[offset : array.index(b"\0", offset)]
+
+        # The result list hardwires which column each subitem reads
+        # (IRFIND.DLL:0x1000e2b0): subitem 0 takes column 2, subitem 1 falls
+        # back to column 1, subitem 2 takes column 3. Column 0 is never shown.
+        self.assertEqual(column(0), b"")
+        self.assertEqual(column(1), b"x2qrj4anuhas42kd2117sgjalgs")
+        self.assertEqual(column(2), b"Blackbird title")
 
     def test_date_column_is_typed_and_carries_a_real_date(self):
         """Regression for the IRFIND.DLL:0x1000e425 null dereference.
