@@ -324,29 +324,46 @@ GUID `bbix +0x04` carries and `\x03ref_1` holds in the uploaded compound file:
 file, then loops `0x83` times reading `[u32 name_len][name]` — a SubCOS name
 for `AddSubCOSToSuperCOS` — followed by one `paste_object` record.
 
-**The record**, from the `CFile` overload of `extract_object` at
-`COSCL:0x40216AB4` (`CFile::Write` is the callee held in `local_18`):
+**The record.** Written by the `CFile` overload of `extract_object`
+(`COSCL:0x40216AB4`, where `CFile::Write` is the callee held in `local_18`) and
+read back by `paste_object` (`0x402178A4`). Both agree on:
 
 | Field | Size | Present when |
 |---|---|---|
 | artifact kind | 4 | always |
 | status flags | 4 | always |
-| object GUID | 16 | `CDPORef` flag `3` set |
+| object GUID | 16 | `status_flags & 8` |
 | typename length | 4 | always |
-| typename | var | always |
-| object length | 4 | always (`0` = stream omitted) |
-| object bytes | var | length non-zero |
-| props length + props | var | flag `0x0E` set and `kind & 4` |
-| swizzle table | var | status-flags byte 1 bit `0x20` and `kind & 2` |
-| entry count + `count × 24` | var | same condition |
-| emitted count | 4 | same condition |
-| child records | var | same condition — recursive, depth `param_5 - 1` |
+| typename | var | always — no trailing NUL |
+| object length | 4 | always (`0` when the stream is omitted) |
+| object bytes | var | `kind & 1` |
+| props length + props | var | `kind & 4` |
+| swizzle table len + bytes | var | `kind & 2` |
+| entry count + `count × 24` | var | `kind & 2` |
+| child count | 4 | `kind & 2` |
+| child records | var | `kind & 2` — recursive |
 
-The swizzle section is gated on flags the *writer* chooses, so a record that
-leaves that bit clear omits it entirely and `paste_object` reads it the same
-way. Everything the records need is present in the uploaded compound file:
-per-storage `\x03object` and `\x03properties`, `\x03ref_N` for the monikers,
-and `\x03type_names_map` for the typenames.
+Every conditional is driven by a word the *writer* chooses, so a record can
+omit the swizzle section entirely and the reader follows.
+
+Status-flag bits are `CDPORef` flag numbers. `extract_object` sets `0x800`
+when it leaves the object stream out and `0x1000` when it leaves properties
+out — bits 11 and 12, the flags `0x0B` and `0x0C` that `FUN_0040CD64` tests
+after the paste to decide whether the object landed complete. Bit 3 (`8`)
+means the GUID is inline; the top nibble is passed to `AddFiatMoniker` as its
+moniker kind.
+
+Two consequences of OBCL calling `paste_object(store, file, 1, …)` — note the
+third argument:
+
+- The "all of object, swizzle and properties must be present" throw is
+  skipped, so a partial `kind` is legal.
+- The GUID-remapping block is skipped, so the GUIDs in the record are kept
+  as-is. That is what lets the caller match them against what it asked for.
+
+Everything a record needs is in the uploaded compound file: per-storage
+`\x03object` and `\x03properties`, `\x03ref_N` for the monikers and their
+GUIDs, and `\x03type_names_map` for the typenames.
 
 ### 4.5 Delete
 
