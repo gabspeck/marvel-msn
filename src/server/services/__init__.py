@@ -1,4 +1,5 @@
 from ._dispatch import log_unhandled_selector
+from .bbir import BBIRServiceHandler
 from .bbird_ob import BbirdOBHandler
 from .bbs import BBSHandler
 from .conference import CONFLOCHandler, CONFSRVHandler
@@ -26,6 +27,7 @@ SERVICE_HANDLERS = {
     "mosabp": MOSABPHandler,
     "sasrv": SASRVHandler,
     "bbird_ob": BbirdOBHandler,
+    "bbirservice": BBIRServiceHandler,
 }
 
 __all__ = ["SERVICE_HANDLERS", "log_unhandled_selector"]

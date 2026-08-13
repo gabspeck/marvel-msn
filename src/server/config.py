@@ -361,6 +361,17 @@ BBIRD_OB_INTERFACE_GUIDS = [
     (_guid_le("EC76D50A-BAD7-11CE-B21F-00AA004A33DB"), 0x02),
 ]
 
+# BBIRService (Blackbird information retrieval — the Find/search back end).
+# Same single-GUID shape as Bbird_OB.  `IRMpcConnection::DoConnect`
+# (IRCS.DLL:0x10005fda) calls `CMPCConnection(name, guid, version, NULL)` with
+# the GUID at IRCS.DLL:0x10009008 and the version dword at 0x10009000 (= 1,
+# matching the `version=1` the pipe-open carries).  IRCS.DLL is the only module
+# in the shipped tree that names the service, so there is one caller and one
+# IID; the server assigns the msg_class.
+BBIR_INTERFACE_GUIDS = [
+    (_guid_le("27916FC1-7F7F-11CE-A366-00AA0051EA9C"), 0x01),
+]
+
 # MEDVIEW (MedView title loader — MOSVIEW.EXE).  Client-side IID array at
 # MVTTL14C.DLL:0x7E84C1B0 — 42 IIDs consulted by hrAttachToService when
 # the factory resolves the service's interface table.  Selectors assigned
