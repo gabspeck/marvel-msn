@@ -15,16 +15,16 @@ ordinal 101 `HrUserDetailsDlg(hwnd, name)`. That builds a `_usr_entryid` with
 (dialogs 100 "General", 101 "Personal", 102 "Professional") whose WM_INITDIALOG
 fills every field out of one `GetUserDetails` reply.
 
-Four methods are served: `GetAbContainers` (0), which the address book asks
+Five methods are served: `GetAbContainers` (0), which the address book asks
 for first and which lists the containers it can open; `QueryWWRows` (12), the
 member list behind a container; `QueryRestrictRows` (13), which resolves a name
-typed into a To: field; and `GetUserDetails` (2).
+typed into a To: field; `CloseTable` (9); and `GetUserDetails` (2).
 
 `GetValidationList` (1) is the gap with a visible symptom — without it the
 sheet's Country, Language and Marital status fields render blank, because
 `FUN_7F4D1400` resolves those four catalogue codes through validation lists
-only that method fills. `UpdateUserDetails` (11), `CloseTable` (9),
-`EnumDistList` (14) and `QueryRowsMore` (15) fall into the unhandled bucket.
+only that method fills. `UpdateUserDetails` (11), `EnumDistList` (14) and
+`QueryRowsMore` (15) fall into the unhandled bucket.
 """
 
 import logging
@@ -232,6 +232,8 @@ class MOSABPHandler:
             reply_payload = build_query_ww_rows_reply_payload(payload)
         elif selector == MOSABP_QUERY_RESTRICT_ROWS:
             reply_payload = build_query_restrict_rows_reply_payload(payload)
+        elif selector == MOSABP_CLOSE_TABLE:
+            reply_payload = build_close_table_reply_payload(payload)
         elif selector == MOSABP_GET_USER_DETAILS:
             reply_payload = build_get_user_details_reply_payload(payload)
         else:
@@ -366,6 +368,28 @@ def build_query_ww_rows_reply_payload(payload):
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + blob
     )
+
+
+def build_close_table_reply_payload(payload):
+    """Method 9: release a table the row queries opened.
+
+    ```
+    request:  03 <handle:u32> 83
+    reply:    83 [status:u32] 87
+    ```
+
+    `HrCloseTable` (`0x7F4D4576`) returns the status verbatim as its HRESULT, so
+    a non-zero one surfaces in the address book.
+
+    Nothing is held to release: methods 12 and 13 answer in one page and hand
+    back handle 0, so the client is closing a table this server never opened.
+    The acknowledgement still has to come.
+    """
+    send_params, _recv = parse_request_params(payload)
+    dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+    handle = dwords[0] if dwords else 0
+    log.info("mosabp_close_table handle=%d", handle)
+    return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
 
 
 def build_query_restrict_rows_reply_payload(payload):

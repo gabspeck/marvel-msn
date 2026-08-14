@@ -26,6 +26,7 @@ from server.services.mosabp import (
     AbContainer,
     MOSABPHandler,
     build_ab_container,
+    build_close_table_reply_payload,
     build_cont_entryid,
     build_get_ab_containers_reply_payload,
     build_get_user_details_reply_payload,
@@ -463,6 +464,20 @@ class TestQueryRestrictRows(unittest.TestCase):
         handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
         packets = handler.handle_request(
             MOSABP_CLASS_AB, 0x0D, 0, _restrict_request(_res_property(PR_ANR, "b"), _WW_TAGS), 1, 1
+        )
+        self.assertIsNotNone(packets)
+
+
+class TestCloseTable(unittest.TestCase):
+    def test_acknowledges_with_a_zero_status(self):
+        # The client returns this status verbatim as its HRESULT.
+        payload = build_close_table_reply_payload(b"\x03" + struct.pack("<I", 0) + b"\x83")
+        self.assertEqual(payload, b"\x83" + struct.pack("<I", 0) + b"\x87")
+
+    def test_handler_answers_class_1_method_9(self):
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        packets = handler.handle_request(
+            MOSABP_CLASS_AB, 0x09, 0, b"\x03" + struct.pack("<I", 7) + b"\x83", 1, 1
         )
         self.assertIsNotNone(packets)
 

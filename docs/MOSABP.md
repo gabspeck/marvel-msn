@@ -492,3 +492,13 @@ browse/lookup surface, reached through `ABProviderInit` rather than this sheet.
 `HrQueryRowsMore` (15) pages an open table and `HrEnumDistList` (14) expands a
 distribution list; both share `QueryWWRows`' compressed row blob (§5.5) and are
 unserved.
+
+`HrCloseTable` (9) releases a table a row query opened:
+
+```
+request:  03 <handle:u32> 83
+reply:    83 [status:u32] 87
+```
+
+It returns the status verbatim as its HRESULT. Observed live right after a
+method 13 resolution.
