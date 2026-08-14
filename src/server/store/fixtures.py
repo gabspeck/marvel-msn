@@ -1141,22 +1141,30 @@ PLANS = [
 ]
 
 
-# Member Properties fixtures, keyed by the string BBSNAV hands MOSABP32.
+# Member Properties fixtures. `member_id` is the account name and `display_name`
+# is what the member is called; the two are distinct, and both are lookup keys.
 #
-# `FUN_7F604316` (the id-0x5B0 "Member Properties..." handler) reads the reader
-# window's From box (control 0x3E9), cuts at '@', rejects anything whose domain
-# is not "msn.com", and passes the local part to `HrUserDetailsDlg`. The From
-# header this server writes carries `BbsFields.author` verbatim, so the lookup
-# key is the author string as authored — not a separate account name.
+# The address book asks by member id: it is what `PR_EMAIL_ADDRESS` carries, and
+# the sheet labels that field "Member ID:" (docs/MOSABP.md §6). It is also what
+# a mail recipient resolved out of the address book arrives as, so delivery
+# keys on it.
 #
-# The signed-in accounts appear here too, under their `display_name`, so a
-# member who opens Properties on their own post gets a filled sheet.
+# The BBS reader asks by display name. `FUN_7F604316` (the id-0x5B0 "Member
+# Properties..." handler) reads the reader window's From box (control 0x3E9),
+# cuts at '@', rejects anything whose domain is not "msn.com", and passes the
+# local part to `HrUserDetailsDlg`. The From header this server writes carries
+# `BbsFields.author` verbatim, so that key is the author string as authored.
+# `InMemoryMemberStore.get_member` accepts either.
+#
+# The signed-in accounts appear here too, so a member who opens Properties on
+# their own post gets a filled sheet. The three authors without accounts are
+# BBS-only members and have no mailbox.
 #
 # Details are invented. reference/screenshots/bbs.png shows the three authors in
 # the list pane and nothing about them, and no MSN member directory survives.
 MEMBER_PROFILES = [
     MemberProfile(
-        member_id=BILL_GATES.display_name,
+        member_id=BILL_GATES.username,
         display_name=BILL_GATES.display_name,
         first_name="Bill",
         last_name="Gates",
@@ -1175,7 +1183,7 @@ MEMBER_PROFILES = [
         work_country_code=1,
     ),
     MemberProfile(
-        member_id=STEVE_JOBS.display_name,
+        member_id=STEVE_JOBS.username,
         display_name=STEVE_JOBS.display_name,
         first_name="Steve",
         last_name="Jobs",
@@ -1194,7 +1202,7 @@ MEMBER_PROFILES = [
         work_country_code=1,
     ),
     MemberProfile(
-        member_id="Chris Hahn",
+        member_id="chahn",
         display_name="Chris Hahn",
         first_name="Chris",
         last_name="Hahn",
@@ -1213,7 +1221,7 @@ MEMBER_PROFILES = [
         work_country_code=1,
     ),
     MemberProfile(
-        member_id="KEITH SUTTON",
+        member_id="ksutton",
         display_name="KEITH SUTTON",
         first_name="Keith",
         last_name="Sutton",
@@ -1231,7 +1239,7 @@ MEMBER_PROFILES = [
         work_country_code=44,
     ),
     MemberProfile(
-        member_id="Chris Shannon",
+        member_id="cshannon",
         display_name="Chris Shannon",
         first_name="Chris",
         last_name="Shannon",

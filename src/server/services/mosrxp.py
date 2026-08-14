@@ -559,20 +559,17 @@ class MOSRXPHandler:
 def resolve_mailbox(recipient):
     """The account whose inbox a recipient names, or None.
 
-    A recipient picked out of the address book carries the member record's
-    display name in PR_EMAIL_ADDRESS — MOSABP keys members on the display name,
-    so an AB row's address *is* "Steve Jobs" — while a member id typed straight
-    into the To: box arrives as "sjobs". Both have to land, and the display
-    name is checked on PR_DISPLAY_NAME too because an unresolved recipient
-    carries only that.
+    A resolved recipient carries the member id in PR_EMAIL_ADDRESS, which is
+    the account name. A recipient the user typed and never resolved carries a
+    display name and no address, so that is tried second — against display
+    names, not as an account name.
     """
-    for candidate in (recipient.address, recipient.display_name):
-        if not candidate:
-            continue
-        user = _default_store.users.get_user(candidate)
+    if recipient.address:
+        user = _default_store.users.get_user(recipient.address)
         if user is not None:
             return user.username
-        user = _default_store.users.find_by_display_name(candidate)
+    if recipient.display_name:
+        user = _default_store.users.find_by_display_name(recipient.display_name)
         if user is not None:
             return user.username
     return None

@@ -248,14 +248,23 @@ class InMemoryMemberStore:
 
     def load(self, profiles):
         self._profiles = {p.member_id.casefold(): p for p in profiles}
+        self._by_display_name = {p.display_name.casefold(): p for p in profiles}
 
     def get_member(self, member_id):
-        # Case-insensitive: the key travels through the reader's From box and a
-        # member id is not case-sensitive on MSN. An unknown member still gets a
-        # profile — the sheet then shows the id with empty pages, which is what a
-        # member who published nothing looks like. Failing the request instead
+        # Two callers key this differently and both are legitimate. The address
+        # book asks by member id, which is what PR_EMAIL_ADDRESS carries — the
+        # sheet labels that field "Member ID:". The BBS reader asks by the From
+        # box author string, which is the display name (docs/MOSABP.md §3), so
+        # the display name is tried second rather than being the key.
+        #
+        # Case-insensitive: a member id is not case-sensitive on MSN and the
+        # From box is not corrected as authored. An unknown member still gets a
+        # profile — the sheet then shows the id with empty pages, which is what
+        # a member who published nothing looks like. Failing the request instead
         # would put a MosError box in front of the user.
         profile = self._profiles.get(member_id.casefold())
+        if profile is None:
+            profile = self._by_display_name.get(member_id.casefold())
         if profile is None:
             return MemberProfile(member_id=member_id, display_name=member_id)
         return profile

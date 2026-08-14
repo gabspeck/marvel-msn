@@ -313,6 +313,29 @@ class TestQueryWWRows(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_ww_row_blob(huge, _WW_TAGS)
 
+    def test_row_address_is_the_member_id_not_the_display_name(self):
+        # PR_EMAIL_ADDRESS is the field the sheet labels "Member ID:", and it is
+        # what a mail recipient resolved out of the address book carries — so a
+        # display name here is undeliverable mail, not a cosmetic slip.
+        payload = build_query_ww_rows_reply_payload(_ww_request("Bill", _WW_TAGS))
+        _dwords, blob = _split_ww_reply(payload)
+        raw = zlib.decompress(blob[2:], -15)
+        _count, values, _consumed = _parse_blob(raw, _WW_TAGS)
+        self.assertEqual(values[0x3001001E], "Bill Gates")
+        self.assertEqual(values[0x3003001E], "billg")
+
+    def test_every_row_address_names_a_real_account_or_none(self):
+        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        dwords, blob = _split_ww_reply(payload)
+        raw = zlib.decompress(blob[2:], -15)
+        pos = 0
+        for _ in range(dwords[3]):
+            _count, values, consumed = _parse_blob(raw[pos:], _WW_TAGS)
+            pos += consumed
+            address = values[0x3003001E]
+            self.assertNotEqual(address, values[0x3001001E], "address is a display name")
+            self.assertNotIn(" ", address)
+
     def test_handler_answers_class_1_method_12(self):
         handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
         packets = handler.handle_request(
@@ -450,6 +473,14 @@ class TestMemberLookup(unittest.TestCase):
         _count, values, _pos = _parse_blob(blob, _SHEET_TAGS)
         self.assertEqual(values[0x3003001E], "Nobody At All")
         self.assertEqual(values[0x600D001E], "")
+
+    def test_display_name_still_resolves_for_the_bbs_reader(self):
+        # BBSNAV keys on the From box author string, which is the display name.
+        # Re-keying the store on the member id must not break that path.
+        by_id = app_store.member.get_member("billg")
+        by_name = app_store.member.get_member("Bill Gates")
+        self.assertEqual(by_id.member_id, "billg")
+        self.assertEqual(by_id, by_name)
 
     def test_every_bbs_author_has_a_profile(self):
         # The From box is the only key into this store, and BBSNAV puts
