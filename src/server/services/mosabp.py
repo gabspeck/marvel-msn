@@ -15,13 +15,22 @@ ordinal 101 `HrUserDetailsDlg(hwnd, name)`. That builds a `_usr_entryid` with
 (dialogs 100 "General", 101 "Personal", 102 "Professional") whose WM_INITDIALOG
 fills every field out of one `GetUserDetails` reply.
 
-Only that one method is served. `GetValidationList` (1), `UpdateUserDetails`
-(11), the table/query methods (9, 12–15) and `EnumDistList` (14) fall into the
-unhandled bucket.
+Three methods are served: `GetAbContainers` (0), which the address book asks
+for first and which lists the containers it can open; `QueryWWRows` (12), the
+member list behind a container; and `GetUserDetails` (2).
+
+`GetValidationList` (1) is the gap with a visible symptom — without it the
+sheet's Country, Language and Marital status fields render blank, because
+`FUN_7F4D1400` resolves those four catalogue codes through validation lists
+only that method fills. `UpdateUserDetails` (11), `CloseTable` (9),
+`QueryRestrictRows` (13), `EnumDistList` (14) and `QueryRowsMore` (15) fall
+into the unhandled bucket.
 """
 
 import logging
 import struct
+import zlib
+from dataclasses import dataclass
 
 from ..config import (
     MOSABP_INTERFACE_GUIDS,
@@ -51,6 +60,7 @@ MOSABP_CLASS_AB = 0x01
 # operation reached two ways: 2 keys on the member name at `ueid+0x77`, 10 on
 # the account handle at `ueid+0x1C`, chosen by `ueid+0x18 == 4`. BBSNAV always
 # builds EIDTYPE 1, so the reader's sheet takes method 2.
+MOSABP_GET_AB_CONTAINERS = 0x00
 MOSABP_GET_VALIDATION_LIST = 0x01
 MOSABP_GET_USER_DETAILS = 0x02
 MOSABP_CLOSE_TABLE = 0x09
@@ -130,6 +140,55 @@ DT_MAILUSER = 0
 # provider prefix.
 MOSABP_ADDRTYPE = "MOS"
 
+# ABCONTAINER, the 0xDC-byte record method 0 answers with. Offsets are the ones
+# MOSABP32 reads; see build_ab_container. The two strings are bounded by the
+# gap to the next field read: the name at +0x08 runs to +0x49, the second to
+# +0xD0.
+ABCONTAINER_LEN = 0xDC
+AB_NAME_OFFSET = 0x08
+AB_NAME_MAX = 0x41
+AB_ALT_NAME_OFFSET = 0x49
+AB_ALT_NAME_MAX = 0x87
+AB_CONTENT_COUNT_OFFSET = 0xD0
+AB_DISPLAY_TYPE_OFFSET = 0xD8
+
+# `_cont_entryid` — the container entry id, built client-side by
+# `MOSMUTIL!HrBuildCeid` from the record's id field. Same provider MAPIUID as
+# `_usr_entryid`, version 2, type 0, container id at +0x1C.
+CONT_ENTRYID_LEN = 0x20
+CONT_ENTRYID_VERSION = 2
+UEID_PROVIDER_UID = bytes.fromhex("1becba6c5f92101bb93d00000b70346a")
+
+# PR_DISPLAY_TYPE for a server-side global list.
+DT_GLOBAL = 0x00020000
+
+# MSZIP envelope on the row blob: the two magic bytes MOSMUTIL checks at
+# 0x7E994D10, then a raw deflate stream.
+CK_MAGIC = b"CK"
+
+# Output buffer `HrUncompressWWData` allocates before decompressing. The rows
+# have to fit it — the decompressor writes into that buffer and nothing bounds
+# it beyond this size.
+WW_MAX_UNCOMPRESSED = 27000
+
+# The one container this server publishes.
+MOSABP_MEMBER_DIRECTORY_ID = 1
+MOSABP_MEMBER_DIRECTORY_NAME = "The Microsoft Network"
+
+
+@dataclass(frozen=True)
+class AbContainer:
+    """One address book container, as method 0 serialises it."""
+
+    container_id: int
+    display_name: str
+    # Served back as tag 0x6013001E by the container's own GetProps
+    # (`FUN_7F4D39CB`). What MSN put here is unidentified — nothing in
+    # MOSABP32 reads it beyond handing it to the caller.
+    alt_name: str
+    content_count: int
+    display_type: int
+
 
 class MOSABPHandler:
     """Handles MSN address-book requests on a logical pipe."""
@@ -152,12 +211,207 @@ class MOSABPHandler:
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch by (interface class, ServiceMethod)."""
-        if msg_class != MOSABP_CLASS_AB or selector != MOSABP_GET_USER_DETAILS:
+        if msg_class != MOSABP_CLASS_AB:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
-        reply_payload = build_get_user_details_reply_payload(payload)
+
+        if selector == MOSABP_GET_AB_CONTAINERS:
+            reply_payload = build_get_ab_containers_reply_payload()
+        elif selector == MOSABP_QUERY_WW_ROWS:
+            reply_payload = build_query_ww_rows_reply_payload(payload)
+        elif selector == MOSABP_GET_USER_DETAILS:
+            reply_payload = build_get_user_details_reply_payload(payload)
+        else:
+            log_unhandled_selector(log, msg_class, selector, request_id, payload)
+            return None
+
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+
+
+def build_get_ab_containers_reply_payload():
+    """Method 0: the address book's container list.
+
+    Request carries no send params — `83 83 85`, two receive dwords and the
+    `+0x40` stream flag. Reply is
+    `0x83 [status=0] 0x83 [cContainers] 0x87 0x86 [cContainers × ABCONTAINER]`.
+
+    `CAbConnection::HrGetAbContainers` (`0x7F4D4423`) allocates
+    `cContainers * 0xDC` and memcpys the blob in whole, so the count dword and
+    the blob length have to agree — a short blob leaves the tail of the last
+    record reading uninitialised heap.
+
+    This is the first call the address book makes on the pipe; until it is
+    answered the AB has no container to open and nothing else follows.
+    """
+    containers = _ab_containers()
+    blob = b"".join(build_ab_container(c) for c in containers)
+    log.info("mosabp_get_ab_containers count=%d blob_bytes=%d", len(containers), len(blob))
+    return (
+        build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(len(containers))
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+        + blob
+    )
+
+
+def _ab_containers():
+    """The containers this server publishes.
+
+    One: the member directory. MSN's address book had no per-user containers —
+    a member's personal list lived in the local .pab — so a single global
+    container is the whole tree.
+    """
+    return [
+        AbContainer(
+            container_id=MOSABP_MEMBER_DIRECTORY_ID,
+            display_name=MOSABP_MEMBER_DIRECTORY_NAME,
+            alt_name="",
+            content_count=len(_default_store.member.list_members()),
+            display_type=DT_GLOBAL,
+        )
+    ]
+
+
+def build_ab_container(container):
+    """One 0xDC-byte ABCONTAINER record.
+
+    Field offsets come from the three sites that read the array:
+    `FUN_7F4DA2E6` builds a container table row out of `+0x00`, `+0x08`,
+    `+0xD0` and `+0xD8`; `FUN_7F4DA4E6` and `FUN_7F4DA522` look a container up
+    by its id and return the strings at `+0x08` and `+0x49`.
+
+    `+0x04` and `+0xD4` are never read by MOSABP32 and ship zeroed.
+    """
+    blob = bytearray(ABCONTAINER_LEN)
+    struct.pack_into("<I", blob, 0x00, container.container_id)
+    for offset, limit, text in (
+        (AB_NAME_OFFSET, AB_NAME_MAX, container.display_name),
+        (AB_ALT_NAME_OFFSET, AB_ALT_NAME_MAX, container.alt_name),
+    ):
+        encoded = text.encode("cp1252", errors="replace")[: limit - 1]
+        blob[offset : offset + len(encoded)] = encoded
+    struct.pack_into("<I", blob, AB_CONTENT_COUNT_OFFSET, container.content_count)
+    struct.pack_into("<I", blob, AB_DISPLAY_TYPE_OFFSET, container.display_type)
+    return bytes(blob)
+
+
+def build_cont_entryid(container_id):
+    """The 0x20-byte `_cont_entryid` for a container.
+
+    Built client-side by `MOSMUTIL!HrBuildCeid` (`0x7E99108C`) from the id at
+    `+0x00` of the record, so this server never puts one on the wire. It is
+    here because `FUN_7F4D39CB` keys the container's own GetProps on it and
+    reads the id back from `+0x1C` — the shape a future method has to match.
+    """
+    blob = bytearray(CONT_ENTRYID_LEN)
+    blob[0x04:0x14] = UEID_PROVIDER_UID
+    struct.pack_into("<III", blob, 0x14, CONT_ENTRYID_VERSION, 0, container_id)
+    return bytes(blob)
+
+
+def build_query_ww_rows_reply_payload(payload):
+    """Method 12: a page of member rows for the address book list.
+
+    Request, from `CAbConnection::HrQueryWWRows` @ 0x7F4D4A18:
+
+        03 <handle:u32>             +0x28  table handle, 0 to open one
+        04 <cb> <name + NUL>        +0x24  prefix to match, empty for all
+        03 <u32>                    +0x28  unidentified
+        03 <cRows:u32>              +0x28  rows wanted (the client asks 45)
+        03 <cValues:u32>            +0x28  requested tag count
+        04 <cb> <cValues × u32>     +0x24  the tags
+        83 83 83 83 83 85           five out dwords + the stream flag
+
+    Reply is `83 [status] 83 [p6] 83 [p9] 83 [cRows] 83 [p8] 0x87 0x86 [blob]`,
+    in that order — read off the five `+0x18` call sites. Slot 1 is the status
+    (`CMP [ESP+0x28], 0` right after the wait, returned verbatim on a mismatch)
+    and slot 4 is the row count that sizes the rowset. The remaining three are
+    the caller's `param_6`, `param_9` and `param_8` out-params; nothing this
+    server has seen reads them, and 0 is the consistent answer for a result
+    delivered in one page with no table left open.
+
+    The blob is every row's property blob concatenated and compressed — see
+    build_ww_row_blob.
+    """
+    name, tags, row_limit = _decode_query_ww_rows_request(payload)
+    members = _match_members(name, row_limit)
+    blob = build_ww_row_blob(members, tags)
+    log.info(
+        "mosabp_query_ww_rows name=%r tag_count=%d rows=%d blob_bytes=%d",
+        name,
+        len(tags),
+        len(members),
+        len(blob),
+    )
+    return (
+        build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(len(members))
+        + build_tagged_reply_dword(0)
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+        + blob
+    )
+
+
+def _decode_query_ww_rows_request(payload):
+    """Pull the name prefix, the requested tags and the row limit out."""
+    send_params, _recv = parse_request_params(payload)
+    var_params = [p.data for p in send_params if isinstance(p, VarParam)]
+    dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+
+    name = ""
+    if var_params:
+        name = var_params[0].split(b"\x00", 1)[0].decode("cp1252", errors="replace")
+
+    tag_bytes = var_params[1] if len(var_params) > 1 else b""
+    # dwords: handle, unidentified, cRows, cValues
+    row_limit = dwords[2] if len(dwords) > 2 else 0
+    count = dwords[3] if len(dwords) > 3 else len(tag_bytes) // 4
+    count = min(count, len(tag_bytes) // 4)
+    tags = list(struct.unpack_from(f"<{count}I", tag_bytes)) if count else []
+    return name, tags, row_limit
+
+
+def _match_members(name, row_limit):
+    """Members whose display name starts with `name`, capped at `row_limit`.
+
+    An empty prefix lists the directory — that is what the address book sends
+    when it opens the container rather than resolving a typed name.
+    """
+    members = _default_store.member.list_members()
+    if name:
+        prefix = name.casefold()
+        members = [m for m in members if m.display_name.casefold().startswith(prefix)]
+    if row_limit:
+        members = members[:row_limit]
+    return members
+
+
+def build_ww_row_blob(members, tags):
+    """One property blob per row, concatenated and MSZIP-compressed.
+
+    `HrBuildWWSrowset` (`0x7F4D52F8`) walks the decompressed buffer with
+    `ParsePropValueBlob` (`0x7F4DD770`) once per row — the same parser and the
+    same per-row format method 2 answers with, so the no-gaps rule in
+    build_member_blob applies to every row.
+
+    `HrUncompressWWData` (`0x7F4D53A9`) hands the blob to
+    `MOSMUTIL!HrDecompress` unconditionally; there is no uncompressed path, so
+    even one row has to be compressed. That codec is MSZIP: the stream is
+    checked for the `CK` magic at `0x7E994D10`, and MOSMUTIL carries the three
+    deflate tables (code-length order at 0x7E99C4C70, length and distance bases
+    at 0x7E99C4CE8 / 0x7E99C4D68), so `CK` + a raw deflate stream is what it
+    decodes.
+    """
+    rows = b"".join(build_member_blob(m, tags) for m in members)
+    if len(rows) > WW_MAX_UNCOMPRESSED:
+        raise ValueError(
+            f"row blob {len(rows)} exceeds the client's {WW_MAX_UNCOMPRESSED}-byte buffer"
+        )
+    deflate = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    return CK_MAGIC + deflate.compress(rows) + deflate.flush()
 
 
 def build_get_user_details_reply_payload(payload):

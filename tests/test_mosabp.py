@@ -9,15 +9,26 @@ fields sliding one row up.
 
 import struct
 import unittest
+import zlib
 
 from server.config import MOSABP_INTERFACE_GUIDS
 from server.services.mosabp import (
+    ABCONTAINER_LEN,
+    CONT_ENTRYID_LEN,
+    DT_GLOBAL,
     MOSABP_CLASS_AB,
     MOSABP_GET_USER_DETAILS,
     MOSABP_UPDATE_USER_DETAILS,
+    UEID_PROVIDER_UID,
+    AbContainer,
     MOSABPHandler,
+    build_ab_container,
+    build_cont_entryid,
+    build_get_ab_containers_reply_payload,
     build_get_user_details_reply_payload,
     build_member_blob,
+    build_query_ww_rows_reply_payload,
+    build_ww_row_blob,
 )
 from server.store import app_store
 from server.store.base import MemberProfile
@@ -120,6 +131,194 @@ class TestMOSABPDiscovery(unittest.TestCase):
         self.assertEqual(len(packets), 1)
         payload = parse_packet(packets[0]).payload
         self.assertIn(struct.pack("<I", 0x00028B22), payload)
+
+
+class TestGetAbContainers(unittest.TestCase):
+    """Method 0 — the first call the address book makes on the pipe.
+
+    The decoder mirrors `CAbConnection::HrGetAbContainers` @ 0x7F4D4423, which
+    allocates `count * 0xDC` and memcpys the blob whole, and the three sites
+    that read the record: `FUN_7F4DA2E6`, `FUN_7F4DA4E6`, `FUN_7F4DA522`.
+    """
+
+    def test_reply_framing(self):
+        payload = build_get_ab_containers_reply_payload()
+        self.assertEqual(payload[:5], b"\x83" + struct.pack("<I", 0))
+        self.assertEqual(payload[5], 0x83)
+        (count,) = struct.unpack_from("<I", payload, 6)
+        self.assertEqual(payload[10:12], b"\x87\x86")
+        self.assertEqual(count, 1)
+
+    def test_blob_length_matches_the_count(self):
+        # HrGetAbContainers sizes its buffer from the count and memcpys the
+        # blob whole; a short blob leaves the last record part uninitialised.
+        payload = build_get_ab_containers_reply_payload()
+        (count,) = struct.unpack_from("<I", payload, 6)
+        self.assertEqual(len(payload) - 12, count * ABCONTAINER_LEN)
+
+    def test_record_fields_land_where_the_client_reads_them(self):
+        blob = build_ab_container(
+            AbContainer(
+                container_id=7,
+                display_name="The Microsoft Network",
+                alt_name="alt",
+                content_count=42,
+                display_type=DT_GLOBAL,
+            )
+        )
+        self.assertEqual(len(blob), ABCONTAINER_LEN)
+        self.assertEqual(struct.unpack_from("<I", blob, 0)[0], 7)
+        self.assertEqual(blob[0x08:].split(b"\x00", 1)[0], b"The Microsoft Network")
+        self.assertEqual(blob[0x49:].split(b"\x00", 1)[0], b"alt")
+        self.assertEqual(struct.unpack_from("<I", blob, 0xD0)[0], 42)
+        self.assertEqual(struct.unpack_from("<I", blob, 0xD8)[0], DT_GLOBAL)
+        # Never read by MOSABP32; must not carry stray bytes.
+        self.assertEqual(blob[0x04:0x08], b"\x00\x00\x00\x00")
+        self.assertEqual(blob[0xD4:0xD8], b"\x00\x00\x00\x00")
+
+    def test_names_are_truncated_with_room_for_a_terminator(self):
+        blob = build_ab_container(
+            AbContainer(
+                container_id=1,
+                display_name="D" * 200,
+                alt_name="A" * 300,
+                content_count=0,
+                display_type=DT_GLOBAL,
+            )
+        )
+        self.assertEqual(len(blob), ABCONTAINER_LEN)
+        self.assertEqual(blob[0x08:0x49].count(b"D"), 0x40)
+        self.assertEqual(blob[0x48], 0)
+        self.assertEqual(blob[0x49:0xD0].count(b"A"), 0x86)
+        self.assertEqual(blob[0xCF], 0)
+
+    def test_content_count_tracks_the_member_directory(self):
+        payload = build_get_ab_containers_reply_payload()
+        blob = payload[12:]
+        self.assertEqual(
+            struct.unpack_from("<I", blob, 0xD0)[0],
+            len(app_store.member.list_members()),
+        )
+
+    def test_container_entryid_layout(self):
+        # HrBuildCeid @ 0x7E99108C: abFlags, provider MAPIUID, version 2,
+        # type 0, container id at +0x1C.
+        ceid = build_cont_entryid(9)
+        self.assertEqual(len(ceid), CONT_ENTRYID_LEN)
+        self.assertEqual(ceid[:4], b"\x00\x00\x00\x00")
+        self.assertEqual(ceid[0x04:0x14], UEID_PROVIDER_UID)
+        self.assertEqual(struct.unpack_from("<III", ceid, 0x14), (2, 0, 9))
+
+    def test_handler_answers_class_1_method_0(self):
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        packets = handler.handle_request(MOSABP_CLASS_AB, 0x00, 0, b"\x83\x83\x85", 1, 1)
+        self.assertIsNotNone(packets)
+        self.assertIn(b"The Microsoft Network", parse_packet(packets[0][:-1]).payload)
+
+
+_WW_TAGS = [0x3001001E, 0x3003001E, 0x3002001E, 0x0FFE0003, 0x39000003]
+
+
+def _ww_request(name, tags, row_limit=45, handle=0):
+    """Method 12's request, in the order HrQueryWWRows @ 0x7F4D4A18 packs it."""
+    tag_bytes = b"".join(struct.pack("<I", t) for t in tags)
+    encoded = name.encode("cp1252") + b"\x00"
+    return (
+        b"\x03"
+        + struct.pack("<I", handle)
+        + b"\x04"
+        + bytes([0x80 | len(encoded)])
+        + encoded
+        + b"\x03"
+        + struct.pack("<I", 0)
+        + b"\x03"
+        + struct.pack("<I", row_limit)
+        + b"\x03"
+        + struct.pack("<I", len(tags))
+        + b"\x04"
+        + bytes([0x80 | len(tag_bytes)])
+        + tag_bytes
+        + b"\x83\x83\x83\x83\x83\x85"
+    )
+
+
+def _split_ww_reply(payload):
+    """Split the five out dwords from the compressed row blob."""
+    dwords = []
+    pos = 0
+    for _ in range(5):
+        assert payload[pos] == 0x83, payload[:16].hex()
+        dwords.append(struct.unpack_from("<I", payload, pos + 1)[0])
+        pos += 5
+    assert payload[pos : pos + 2] == b"\x87\x86", payload[:16].hex()
+    return dwords, payload[pos + 2 :]
+
+
+class TestQueryWWRows(unittest.TestCase):
+    """Method 12 — the member list behind the address book container."""
+
+    def test_reply_carries_five_dwords_with_the_row_count_fourth(self):
+        # Order is the five +0x18 call sites: status, param_6, param_9,
+        # row count, param_8. Slot 1 is the one the client tests against 0.
+        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        dwords, _blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[0], 0)
+        self.assertEqual(dwords[3], len(app_store.member.list_members()))
+
+    def test_blob_is_ck_wrapped_raw_deflate(self):
+        # HrUncompressWWData has no uncompressed path: MOSMUTIL checks the CK
+        # magic at 0x7E994D10 and inflates what follows.
+        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        _dwords, blob = _split_ww_reply(payload)
+        self.assertEqual(blob[:2], b"CK")
+        zlib.decompress(blob[2:], -15)
+
+    def test_rows_decode_in_requested_tag_order(self):
+        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        dwords, blob = _split_ww_reply(payload)
+        raw = zlib.decompress(blob[2:], -15)
+        pos = 0
+        names = []
+        for _ in range(dwords[3]):
+            _count, values, consumed = _parse_blob(raw[pos:], _WW_TAGS)
+            names.append(values[0x3001001E])
+            pos += consumed
+        self.assertEqual(pos, len(raw))
+        self.assertIn("Bill Gates", names)
+        self.assertEqual(len(names), len(app_store.member.list_members()))
+
+    def test_name_prefix_filters_the_directory(self):
+        payload = build_query_ww_rows_reply_payload(_ww_request("Bill", _WW_TAGS))
+        dwords, blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 1)
+        raw = zlib.decompress(blob[2:], -15)
+        _count, values, _consumed = _parse_blob(raw, _WW_TAGS)
+        self.assertEqual(values[0x3001001E], "Bill Gates")
+
+    def test_no_match_is_an_empty_rowset(self):
+        # HrBuildWWSrowset allocates count*0xC+4 and writes nothing more at 0,
+        # and the decompression step is skipped, so an empty blob is valid.
+        payload = build_query_ww_rows_reply_payload(_ww_request("Nobody", _WW_TAGS))
+        dwords, _blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 0)
+
+    def test_row_limit_is_honoured(self):
+        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS, row_limit=2))
+        dwords, _blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 2)
+
+    def test_oversized_rowset_is_refused(self):
+        # The client decompresses into a fixed 27000-byte buffer.
+        huge = [MemberProfile(member_id=f"m{i}", display_name="x" * 200) for i in range(400)]
+        with self.assertRaises(ValueError):
+            build_ww_row_blob(huge, _WW_TAGS)
+
+    def test_handler_answers_class_1_method_12(self):
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        packets = handler.handle_request(
+            MOSABP_CLASS_AB, 0x0C, 0, _ww_request("", _WW_TAGS), 1, 1
+        )
+        self.assertIsNotNone(packets)
 
 
 class TestGetUserDetailsFraming(unittest.TestCase):

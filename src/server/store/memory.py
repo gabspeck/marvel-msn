@@ -246,6 +246,10 @@ class InMemoryMemberStore:
             return MemberProfile(member_id=member_id, display_name=member_id)
         return profile
 
+    def list_members(self):
+        """Every published profile, in seed order — the member directory."""
+        return list(self._profiles.values())
+
 
 class InMemoryCatalogStore:
     def __init__(self, plans):
