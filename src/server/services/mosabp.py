@@ -15,16 +15,16 @@ ordinal 101 `HrUserDetailsDlg(hwnd, name)`. That builds a `_usr_entryid` with
 (dialogs 100 "General", 101 "Personal", 102 "Professional") whose WM_INITDIALOG
 fills every field out of one `GetUserDetails` reply.
 
-Three methods are served: `GetAbContainers` (0), which the address book asks
+Four methods are served: `GetAbContainers` (0), which the address book asks
 for first and which lists the containers it can open; `QueryWWRows` (12), the
-member list behind a container; and `GetUserDetails` (2).
+member list behind a container; `QueryRestrictRows` (13), which resolves a name
+typed into a To: field; and `GetUserDetails` (2).
 
 `GetValidationList` (1) is the gap with a visible symptom — without it the
 sheet's Country, Language and Marital status fields render blank, because
 `FUN_7F4D1400` resolves those four catalogue codes through validation lists
 only that method fills. `UpdateUserDetails` (11), `CloseTable` (9),
-`QueryRestrictRows` (13), `EnumDistList` (14) and `QueryRowsMore` (15) fall
-into the unhandled bucket.
+`EnumDistList` (14) and `QueryRowsMore` (15) fall into the unhandled bucket.
 """
 
 import logging
@@ -166,6 +166,17 @@ DT_GLOBAL = 0x00020000
 # 0x7E994D10, then a raw deflate stream.
 CK_MAGIC = b"CK"
 
+# Serialised CSRestriction. `FUN_7F4DDB9B` writes only these two types and
+# rejects the rest with E_INVALIDARG. The SPropValue rides as its 16 raw struct
+# bytes, so the length is the struct's, not the value's.
+RES_AND = 0
+RES_PROPERTY = 4
+SPROPVALUE_LEN = 0x10
+
+# PR_ANR — MAPI's ambiguous name resolution property. The only thing the client
+# restricts on when it resolves a name typed into a To: field.
+PR_ANR = 0x360C001E
+
 # Output buffer `HrUncompressWWData` allocates before decompressing. The rows
 # have to fit it — the decompressor writes into that buffer and nothing bounds
 # it beyond this size.
@@ -219,6 +230,8 @@ class MOSABPHandler:
             reply_payload = build_get_ab_containers_reply_payload()
         elif selector == MOSABP_QUERY_WW_ROWS:
             reply_payload = build_query_ww_rows_reply_payload(payload)
+        elif selector == MOSABP_QUERY_RESTRICT_ROWS:
+            reply_payload = build_query_restrict_rows_reply_payload(payload)
         elif selector == MOSABP_GET_USER_DETAILS:
             reply_payload = build_get_user_details_reply_payload(payload)
         else:
@@ -353,6 +366,132 @@ def build_query_ww_rows_reply_payload(payload):
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + blob
     )
+
+
+def build_query_restrict_rows_reply_payload(payload):
+    """Method 13: rows matching a restriction — the name resolution path.
+
+    Same request as method 12 with a serialised `CSRestriction` in front of the
+    name (`HrQueryRestrictRows` @ 0x7F4D4C33 packs it first, straight after the
+    handle), and the same five-dword-plus-compressed-rowset reply.
+
+    The client sends this when it resolves a name typed into a To: field: the
+    restriction is `RES_PROPERTY RELOP_EQ` on `PR_ANR`, MAPI's ambiguous-name
+    property, carrying what was typed.
+    """
+    restriction, tags, row_limit = _decode_query_restrict_rows_request(payload)
+    members = _match_restriction(restriction, row_limit)
+    blob = build_ww_row_blob(members, tags)
+    log.info(
+        "mosabp_query_restrict_rows terms=%s tag_count=%d rows=%d blob_bytes=%d",
+        [(f"0x{tag:08X}", value) for _relop, tag, value in restriction],
+        len(tags),
+        len(members),
+        len(blob),
+    )
+    return (
+        build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(len(members))
+        + build_tagged_reply_dword(0)
+        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
+        + blob
+    )
+
+
+def _decode_query_restrict_rows_request(payload):
+    """Pull the restriction, the requested tags and the row limit out."""
+    send_params, _recv = parse_request_params(payload)
+    var_params = [p.data for p in send_params if isinstance(p, VarParam)]
+    dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+
+    restriction = parse_restriction(var_params[0]) if var_params else []
+    tag_bytes = var_params[2] if len(var_params) > 2 else b""
+    row_limit = dwords[2] if len(dwords) > 2 else 0
+    count = dwords[3] if len(dwords) > 3 else len(tag_bytes) // 4
+    count = min(count, len(tag_bytes) // 4)
+    tags = list(struct.unpack_from(f"<{count}I", tag_bytes)) if count else []
+    return restriction, tags, row_limit
+
+
+def parse_restriction(raw):
+    """Decode a serialised `CSRestriction` into `[(relop, prop_tag, value)]`.
+
+    `FUN_7F4DDB9B` (`0x7F4DDB9B`) writes only two shapes and rejects everything
+    else with `E_INVALIDARG`: a bare `RES_PROPERTY` node, or a `RES_AND` header
+    `[0][cSubRestrictions]` followed by that many nodes.
+
+    Each node is `[rt][relop][ulPropTag]` then the `SPropValue`, which
+    `FUN_7F4DDEBB` writes as its **16 raw struct bytes** — pointers and
+    alignment padding included, all meaningless off the client's heap —
+    followed by `[cb:u32][cb bytes]` for the string and binary types. A
+    fixed-width value has no trailing bytes and lives in the struct's union at
+    `+8`.
+    """
+    if len(raw) < 4:
+        return []
+    (rt,) = struct.unpack_from("<I", raw, 0)
+    if rt == RES_AND:
+        (count,) = struct.unpack_from("<I", raw, 4)
+        pos = 8
+        terms = []
+        for _ in range(count):
+            term, pos = _parse_restriction_node(raw, pos)
+            terms.append(term)
+        return terms
+    term, _pos = _parse_restriction_node(raw, 0)
+    return [term]
+
+
+def _parse_restriction_node(raw, pos):
+    _rt, relop, prop_tag = struct.unpack_from("<III", raw, pos)
+    pos += 12
+    (value_tag,) = struct.unpack_from("<I", raw, pos)
+    union = raw[pos + 8 : pos + SPROPVALUE_LEN]
+    pos += SPROPVALUE_LEN
+
+    prop_type = value_tag & 0xFFFF
+    if prop_type in _LENGTH_PREFIXED:
+        (cb,) = struct.unpack_from("<I", raw, pos)
+        pos += 4
+        data = raw[pos : pos + cb]
+        pos += cb
+        if prop_type == PT_STRING8:
+            value = data.decode("cp1252", errors="replace")
+        elif prop_type == PT_UNICODE:
+            value = data.decode("utf-16le", errors="replace")
+        else:
+            value = data
+    else:
+        value = int.from_bytes(union, "little")
+    return (relop, prop_tag, value), pos
+
+
+def _match_restriction(restriction, row_limit):
+    """Members satisfying every term of the restriction.
+
+    Only `PR_ANR` is matched. It is MAPI's ambiguous-name property — there is no
+    such field on a member record, it stands for "whatever a person is called" —
+    so it is tested against both the member id and the display name, as a
+    prefix. A term on any other property matches nothing rather than everything:
+    silently ignoring it would resolve a name the client did not ask for.
+    """
+    members = _default_store.member.list_members()
+    for _relop, prop_tag, value in restriction:
+        if prop_tag != PR_ANR or not isinstance(value, str):
+            log.warning("mosabp_restriction_unmatched tag=0x%08X value=%r", prop_tag, value)
+            return []
+        needle = value.casefold()
+        members = [
+            m
+            for m in members
+            if m.member_id.casefold().startswith(needle)
+            or m.display_name.casefold().startswith(needle)
+        ]
+    if row_limit:
+        members = members[:row_limit]
+    return members
 
 
 def _decode_query_ww_rows_request(payload):

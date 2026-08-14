@@ -351,6 +351,54 @@ result needs no blob at all.
 The same codec sits under MOSRXP's compressed streams (docs/MOSRXP.md §5),
 which is what attachment bodies ride.
 
+## 5.6 `QueryRestrictRows` (method 13)
+
+Name resolution — what the client sends when a name typed into a To: field has
+to become a recipient. `HrQueryRestrictRows` (`0x7F4D4C33`) packs the same
+request as method 12 with a serialised restriction in front of the name, and
+answers with the same five dwords and compressed rowset:
+
+```
+request:  03 <handle:u32>
+          04 <cb> <CSRestriction>
+          04 <cb> <name + NUL>
+          03 <u32>  03 <cRows:u32>  03 <cValues:u32>
+          04 <cb> <cValues × u32>
+          83 83 83 83 83 85
+```
+
+### Serialised `CSRestriction`
+
+`FUN_7F4DDB9B` (`0x7F4DDB9B`) writes two shapes and rejects everything else
+with `E_INVALIDARG`:
+
+```
+RES_PROPERTY (4):  <node>
+RES_AND (0):       [0:u32][cSubRestrictions:u32] <node> × cSubRestrictions
+```
+
+A node (`FUN_7F4DDC29`) is:
+
+```
+[rt:u32][relop:u32][ulPropTag:u32][SPropValue][value data]
+```
+
+`FUN_7F4DDEBB` writes the `SPropValue` as its **16 raw struct bytes** — the tag,
+the alignment padding and the union, so the client's own heap and stack pointers
+travel on the wire and mean nothing on this side. A `PT_STRING8`, `PT_UNICODE`
+or `PT_BINARY` value then appends `[cb:u32][cb bytes]`, `cb` from `lstrlenA`
+with **no terminator**; a fixed-width value has no trailing bytes and sits in
+the union at `+8`.
+
+A 5-character name therefore serialises to 37 bytes — 12 + 16 + 4 + 5 — which
+is what the client sent live 2026-08-14.
+
+The restriction is `RES_PROPERTY RELOP_EQ` on **`PR_ANR`** (`0x360C001E`),
+MAPI's ambiguous-name property. No member record has such a field: it stands
+for "whatever a person is called", so both the member id and the display name
+have to answer to it, and an ambiguous prefix returns every candidate for the
+client to disambiguate.
+
 ## 6. The Member Properties sheet
 
 `FUN_7F4D1170` runs `PropertySheetA` with caption string `0x468` and three
@@ -441,6 +489,6 @@ so nothing sends it. `HrQueryWWRows`, `HrQueryRestrictRows`, `HrQueryRowsMore`,
 `HrEnumDistList` and `HrCloseTable` belong to the MAPI address-book
 browse/lookup surface, reached through `ABProviderInit` rather than this sheet.
 
-`HrQueryRestrictRows` (13), `HrQueryRowsMore` (15) and `HrEnumDistList` (14)
-share `QueryWWRows`' compressed row blob (§5.5) and are unserved; 13 adds a
-`CSRestriction` to the request, 15 pages an open table.
+`HrQueryRowsMore` (15) pages an open table and `HrEnumDistList` (14) expands a
+distribution list; both share `QueryWWRows`' compressed row blob (§5.5) and are
+unserved.

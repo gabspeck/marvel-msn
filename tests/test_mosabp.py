@@ -19,6 +19,9 @@ from server.services.mosabp import (
     MOSABP_CLASS_AB,
     MOSABP_GET_USER_DETAILS,
     MOSABP_UPDATE_USER_DETAILS,
+    PR_ANR,
+    RES_AND,
+    RES_PROPERTY,
     UEID_PROVIDER_UID,
     AbContainer,
     MOSABPHandler,
@@ -27,8 +30,10 @@ from server.services.mosabp import (
     build_get_ab_containers_reply_payload,
     build_get_user_details_reply_payload,
     build_member_blob,
+    build_query_restrict_rows_reply_payload,
     build_query_ww_rows_reply_payload,
     build_ww_row_blob,
+    parse_restriction,
 )
 from server.store import app_store
 from server.store.base import MemberProfile
@@ -340,6 +345,124 @@ class TestQueryWWRows(unittest.TestCase):
         handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
         packets = handler.handle_request(
             MOSABP_CLASS_AB, 0x0C, 0, _ww_request("", _WW_TAGS), 1, 1
+        )
+        self.assertIsNotNone(packets)
+
+
+def _spv_string(tag, text):
+    """An SPropValue as FUN_7F4DDEBB writes it: 16 raw struct bytes, then cb+data.
+
+    The two dwords after the tag are the client's own heap and stack pointers —
+    they ride the wire verbatim and mean nothing here, which is exactly why the
+    parser has to skip a fixed 16 bytes rather than read them.
+    """
+    data = text.encode("cp1252")
+    return (
+        struct.pack("<II", tag, 0x0062F640)
+        + struct.pack("<II", 0x00F816C8, 0)
+        + struct.pack("<I", len(data))
+        + data
+    )
+
+
+def _res_property(tag, text, relop=4):
+    return struct.pack("<III", RES_PROPERTY, relop, tag) + _spv_string(tag, text)
+
+
+def _restrict_request(restriction, tags, row_limit=45):
+    """Method 13's request — method 12's with the restriction packed first."""
+    tag_bytes = b"".join(struct.pack("<I", t) for t in tags)
+    return (
+        b"\x03"
+        + struct.pack("<I", 0)
+        + b"\x04"
+        + bytes([0x80 | len(restriction)])
+        + restriction
+        + b"\x04\x81\x00"
+        + b"\x03"
+        + struct.pack("<I", 0)
+        + b"\x03"
+        + struct.pack("<I", row_limit)
+        + b"\x03"
+        + struct.pack("<I", len(tags))
+        + b"\x04"
+        + bytes([0x80 | len(tag_bytes)])
+        + tag_bytes
+        + b"\x83\x83\x83\x83\x83\x85"
+    )
+
+
+class TestRestrictionParsing(unittest.TestCase):
+    def test_node_length_matches_the_observed_request(self):
+        # The client sent a 37-byte restriction for a 5-character name:
+        # 12 header + 16 raw SPropValue + 4 length + 5 data.
+        self.assertEqual(len(_res_property(PR_ANR, "billg")), 37)
+
+    def test_bare_property_node(self):
+        terms = parse_restriction(_res_property(PR_ANR, "billg"))
+        self.assertEqual(terms, [(4, PR_ANR, "billg")])
+
+    def test_res_and_wraps_a_counted_list(self):
+        raw = struct.pack("<II", RES_AND, 2) + _res_property(PR_ANR, "bill") + _res_property(
+            PR_ANR, "b"
+        )
+        terms = parse_restriction(raw)
+        self.assertEqual([t[2] for t in terms], ["bill", "b"])
+
+    def test_empty_restriction_is_no_terms(self):
+        self.assertEqual(parse_restriction(b""), [])
+
+
+class TestQueryRestrictRows(unittest.TestCase):
+    def test_anr_resolves_on_the_member_id(self):
+        payload = build_query_restrict_rows_reply_payload(
+            _restrict_request(_res_property(PR_ANR, "billg"), _WW_TAGS)
+        )
+        dwords, blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 1)
+        raw = zlib.decompress(blob[2:], -15)
+        _count, values, _consumed = _parse_blob(raw, _WW_TAGS)
+        self.assertEqual(values[0x3003001E], "billg")
+
+    def test_anr_resolves_on_the_display_name(self):
+        # PR_ANR stands for "whatever a person is called" — there is no such
+        # field on a member, so both names have to answer to it.
+        payload = build_query_restrict_rows_reply_payload(
+            _restrict_request(_res_property(PR_ANR, "Steve"), _WW_TAGS)
+        )
+        dwords, blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 1)
+        raw = zlib.decompress(blob[2:], -15)
+        _count, values, _consumed = _parse_blob(raw, _WW_TAGS)
+        self.assertEqual(values[0x3001001E], "Steve Jobs")
+
+    def test_ambiguous_name_returns_every_candidate(self):
+        # Two "Chris" profiles. Resolution is the client's to disambiguate.
+        payload = build_query_restrict_rows_reply_payload(
+            _restrict_request(_res_property(PR_ANR, "Chris"), _WW_TAGS)
+        )
+        dwords, _blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 2)
+
+    def test_no_match_is_an_empty_rowset(self):
+        payload = build_query_restrict_rows_reply_payload(
+            _restrict_request(_res_property(PR_ANR, "zzz"), _WW_TAGS)
+        )
+        dwords, _blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 0)
+
+    def test_a_term_on_another_property_matches_nothing(self):
+        # Matching everything would resolve a name the client did not ask for.
+        payload = build_query_restrict_rows_reply_payload(
+            _restrict_request(_res_property(0x3001001E, "Bill Gates"), _WW_TAGS)
+        )
+        dwords, _blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 0)
+
+    def test_handler_answers_class_1_method_13(self):
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        packets = handler.handle_request(
+            MOSABP_CLASS_AB, 0x0D, 0, _restrict_request(_res_property(PR_ANR, "b"), _WW_TAGS), 1, 1
         )
         self.assertIsNotNone(packets)
 

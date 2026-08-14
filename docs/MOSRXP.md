@@ -440,3 +440,21 @@ OpenInbox (1) → GetMessage (7) → GetConnInfo (0)
 `GetConnInfo` follows the body fetch rather than preceding it: the transport
 asks for the blob the first time it needs a sender identity, then caches it for
 the life of the connection.
+
+## 8.1 Whole-message download
+
+A second, distinct flow — retrieve-and-delete rather than headers-first —
+observed the same day:
+
+```
+OpenInbox (1) → 1 waiting
+GetFirstMessage (8) → GetConnInfo (0) → DelMessages (6)
+GetFirstMessage (8) → MAPI_E_NOT_FOUND
+CloseInbox (2)
+```
+
+Method 8 is the loop's cursor: each pass takes whatever is next, deletes it by
+the entry id the reply prefixed, and asks again. **`0x8004010F`
+(MAPI_E_NOT_FOUND) is how the loop ends** — served it on an empty mailbox the
+client closes the inbox instead of retrying. Any other error status, or a
+success with no blob, would leave it spinning or fail the download.
