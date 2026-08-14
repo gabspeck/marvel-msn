@@ -23,9 +23,11 @@ from server.blackbird.irresults import (
     PROP_TYPE_STRING,
     PROP_TYPE_TIME,
     TAG_CMD_COMPLETED,
+    TAG_CONTEXT_INFO,
     TAG_PROP_INFOS,
     TAG_RESULT_ROW,
     TAG_SORT_INFOS,
+    Context,
     IRResultError,
     PropInfo,
     ResultRow,
@@ -33,6 +35,7 @@ from server.blackbird.irresults import (
     decode_bbir_time,
     encode_bbir_time,
     encode_cmd_completed,
+    encode_context,
     encode_prop_infos,
     encode_result_row,
     encode_result_stream,
@@ -253,6 +256,44 @@ class TestBBIRTime(unittest.TestCase):
         self.assertEqual(encode_bbir_time(base), encode_bbir_time(base.replace(second=59)))
 
 
+class TestContexts(unittest.TestCase):
+    """CContexts::Serialize 0x10013123 / CContext::Serialize 0x10012751."""
+
+    def test_body_is_one_context_with_no_count_prefix(self):
+        # Tag 4 builds a single CContext (CLSID {AE97A530-...}), not the
+        # CContexts collection. A count prefix desyncs the whole stream.
+        record = encode_context(Context(guid_04=_GUID_A, value=7))
+        tag, body = _split_records(record)[0]
+        self.assertEqual(tag, TAG_CONTEXT_INFO)
+        self.assertEqual(
+            body, struct.pack("<H", 0x4) + struct.pack("<I", 7) + _GUID_A.bytes_le
+        )
+
+    def test_flags_report_which_guids_are_present(self):
+        self.assertEqual(Context().flags, 0)
+        self.assertEqual(Context(guid_24=_GUID_A).flags, 0x1)
+        self.assertEqual(Context(guid_14=_GUID_A).flags, 0x2)
+        self.assertEqual(Context(guid_04=_GUID_A).flags, 0x4)
+        self.assertEqual(Context(_GUID_A, _GUID_B, _GUID_A).flags, 0x7)
+
+    def test_guids_are_written_in_serialize_order(self):
+        # CContext::Serialize reads +0x24, then +0x14, then +0x04.
+        ctx = Context(guid_04=_GUID_A, guid_14=_GUID_B, guid_24=_GUID_A)
+        _tag, body = _split_records(encode_context(ctx))[0]
+        guids = body[6:]
+        self.assertEqual(guids[0:16], _GUID_A.bytes_le)   # +0x24
+        self.assertEqual(guids[16:32], _GUID_B.bytes_le)  # +0x14
+        self.assertEqual(guids[32:48], _GUID_A.bytes_le)  # +0x04
+
+    def test_absent_guids_are_omitted_entirely(self):
+        _tag, body = _split_records(encode_context(Context(guid_14=_GUID_B)))[0]
+        self.assertEqual(len(body), 2 + 4 + 16)
+
+    def test_context_with_no_guids_is_just_flags_and_value(self):
+        _tag, body = _split_records(encode_context(Context()))[0]
+        self.assertEqual(body, struct.pack("<H", 0) + struct.pack("<I", 0))
+
+
 class TestCmdCompleted(unittest.TestCase):
     def test_layout(self):
         tag, body = _split_records(encode_cmd_completed(11, 22))[0]
@@ -265,6 +306,32 @@ class TestResultStream(unittest.TestCase):
         PropInfo(_GUID_A, "heading", PROP_TYPE_STRING),
         PropInfo(_GUID_B, "rank", PROP_TYPE_DWORD),
     ]
+
+    def test_contexts_precede_every_row_one_record_each(self):
+        # Contexts are appended as their records arrive, so they all have to
+        # land before the first row or row->vt[0x34] indexes nothing.
+        stream = encode_result_stream(
+            self._COLUMNS,
+            [ResultRow(0, 5, ["a", 5]), ResultRow(1, 3, ["b", 3])],
+            contexts=[Context(guid_04=_GUID_A), Context(guid_04=_GUID_B)],
+        )
+        tags = [tag for tag, _b in _split_records(stream)]
+        self.assertEqual(
+            tags,
+            [
+                TAG_PROP_INFOS,
+                TAG_SORT_INFOS,
+                TAG_CONTEXT_INFO,
+                TAG_CONTEXT_INFO,
+                TAG_RESULT_ROW,
+                TAG_RESULT_ROW,
+                TAG_CMD_COMPLETED,
+            ],
+        )
+
+    def test_no_contexts_record_when_there_are_none(self):
+        tags = [tag for tag, _b in _split_records(encode_result_stream(self._COLUMNS, []))]
+        self.assertNotIn(TAG_CONTEXT_INFO, tags)
 
     def test_schema_precedes_every_row(self):
         # A row resolves its column types through the schema, so PropInfos has

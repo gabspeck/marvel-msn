@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from server.blackbird.irindex import Document
 from server.blackbird.irresults import (
+    TAG_CONTEXT_INFO,
     TAG_PROP_INFOS,
     TAG_RESULT_ROW,
     TAG_SORT_INFOS,
@@ -5765,16 +5766,27 @@ class TestBBIRService(unittest.TestCase):
             pos += 6 + length
         self.assertEqual(pos, len(stream), "records must consume the stream exactly")
 
-        # Schema, sort keys, one row, completion.
+        # Schema, sort keys, one context, one row, completion. Tag 4 carries a
+        # single CContext with no count prefix — a body the client's Load does
+        # not consume byte-for-byte desyncs the stream and costs every record
+        # after it.
         self.assertEqual(
-            [tag for tag, _b in records], [TAG_PROP_INFOS, TAG_SORT_INFOS, TAG_RESULT_ROW, 0x23]
+            [tag for tag, _b in records],
+            [TAG_PROP_INFOS, TAG_SORT_INFOS, TAG_CONTEXT_INFO, TAG_RESULT_ROW, 0x23],
         )
+        context = records[2][1]
+        flags = struct.unpack_from("<H", context)[0]
+        self.assertEqual(flags, 0x7)
+        self.assertEqual(len(context), 2 + 4 + 3 * 16)
+        # The row indexes the contexts in arrival order; CContexts::GetAt
+        # bounds-checks it, and a miss costs the source column and the open.
+        self.assertLess(struct.unpack_from("<I", records[3][1])[0], 1)
         # The schema declares one column per property the query asked for.
         self.assertEqual(struct.unpack_from("<I", records[0][1])[0], 4)
 
-        row = records[2][1]
+        row = records[3][1]
         doc_id, rank, array_len = struct.unpack_from("<III", row)
-        self.assertEqual(doc_id, 1)
+        self.assertEqual(doc_id, 0)
         self.assertEqual(rank, 4)  # "ackbir" once, "yadda" three times
         array = row[12:]
         self.assertEqual(len(array), array_len)
@@ -5845,7 +5857,7 @@ class TestBBIRService(unittest.TestCase):
             offset += 6
         self.assertEqual(types, [0x08, 0x08, 0x08, 0x17])
 
-        row = records[2][1]
+        row = records[3][1]
         array = row[12:]
         # The slot is an offset; the packed DWORD lives where it points. An
         # inline value gets dereferenced as an offset and aborts the client.

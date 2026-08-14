@@ -69,13 +69,11 @@ the whole reply in the dynamic body — `0x87 0x88 <stream>` followed by a bare
 
 ## Scope
 
-This serves the empty answer: every method replies with a lone tag-0x23
-record, which ends the command with no sources, no search objects, and no
-result rows.  The streamed IQuerySpec is decoded (`blackbird.irquery`) and
-logged, so the terms and scope a search asks for are visible, but nothing
-matches against them yet: that needs the IIRPersistStream layouts of the
-result classes (`CDocSource` behind tag 0x0A, `IResultRow`, `IPropInfos`,
-`ISortInfos`, `IContextInfo`) and an index over the published title.
+A query is decoded (`blackbird.irquery`), matched against the published
+titles (`blackbird.irindex`) and answered with a real result set
+(`blackbird.irresults`): schema, sort keys, contexts, one row per hit, then
+the completion record.  GetSrcs and GetSearchObjs still answer empty — the
+Find UI reaches neither on a search.
 
 Every request is logged in full and written to `captures/blackbird/`, the
 reassembled query spec included.
@@ -84,12 +82,14 @@ reassembled query spec included.
 import logging
 import pathlib
 import time
+import uuid
 
 from ..blackbird import irindex
 from ..blackbird.irquery import IRQueryError, parse_query_spec
 from ..blackbird.irresults import (
     PROP_TYPE_STRING,
     PROP_TYPE_TIME,
+    Context,
     PropInfo,
     ResultRow,
     encode_bbir_time,
@@ -169,6 +169,20 @@ _COLUMN_FILL = {
     1: lambda doc: doc.title,
     2: lambda doc: doc.heading,
 }
+
+
+def _context_for(doc, source):
+    """Build the context a row resolves to when the Find UI opens it.
+
+    Which GUID belongs in which slot is not pinned — the three getters copy
+    their field and always report success, so nothing in the client rejects a
+    wrong assignment, and the open path only traces them before calling
+    FUN_1000ae7c. The object's own GUID and the title the query scoped to are
+    the two identities available, so they go in and the roles get settled the
+    next time this path is walked live.
+    """
+    obj = uuid.UUID(bytes_le=doc.guid)
+    return Context(guid_04=obj, guid_14=source or obj, guid_24=obj)
 
 
 def _row_values(doc, columns):
@@ -305,17 +319,25 @@ class BBIRServiceHandler:
 
         columns = _schema_for(spec)
         hits = irindex.search(terms, limit=spec.max_results or None)
+        source = next((s.guid for c in spec.criteria for s in c.sources), None)
+
+        # One tag-0x04 record per hit, each appended to the collection in
+        # arrival order, so a row's index into it is just its own position.
+        # Rows carry that index, not a document id — `row->vt[0x34]` hands it
+        # to CContexts::GetAt, which bounds-checks it.
+        contexts = [_context_for(doc, source) for _score, doc in hits]
         rows = [
-            ResultRow(doc_id=index + 1, rank=score, values=_row_values(doc, columns))
+            ResultRow(doc_id=index, rank=score, values=_row_values(doc, columns))
             for index, (score, doc) in enumerate(hits)
         ]
         log.info(
-            "bbir_query_results rows=%d columns=%d headings=%s",
+            "bbir_query_results rows=%d columns=%d contexts=%d headings=%s",
             len(rows),
             len(columns),
+            len(contexts),
             ",".join(repr(doc.heading) for _score, doc in hits) or "-",
         )
-        return encode_result_stream(columns, rows)
+        return encode_result_stream(columns, rows, contexts=contexts)
 
     def _empty_result(self, msg_class, selector, request_id, server_seq, client_ack):
         """End the command with no results.

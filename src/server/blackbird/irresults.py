@@ -192,8 +192,51 @@ class SortInfo:
 
 
 @dataclass
+class Context:
+    """One entry of the contexts collection a row resolves against.
+
+    `CContext::Serialize` (IRUT.DLL:0x10012751) writes `WORD flags`, a DWORD,
+    then up to three GUIDs gated by the flag bits — in wire order +0x24 (bit
+    1), +0x14 (bit 2), +0x04 (bit 4).  The fields are named for those offsets
+    because their meaning is not pinned; what is pinned is which getter reads
+    each, since the Find UI calls all three when opening a hit:
+
+        vt[0x18] → +0x04    vt[0x1c] → +0x14    vt[0x20] → +0x24
+
+    All three are plain 16-byte copies that zero EAX before returning
+    (0x100125a9/0x100125c1/0x100125d9), so they succeed whatever the flags
+    said — a context only has to exist for the open to proceed.
+    """
+
+    guid_04: uuid.UUID | None = None
+    guid_14: uuid.UUID | None = None
+    guid_24: uuid.UUID | None = None
+    value: int = 0
+
+    @property
+    def flags(self):
+        return (
+            (0x1 if self.guid_24 is not None else 0)
+            | (0x2 if self.guid_14 is not None else 0)
+            | (0x4 if self.guid_04 is not None else 0)
+        )
+
+    def encode(self):
+        body = _put_ushort(self.flags) + _put_ulong(self.value)
+        for guid in (self.guid_24, self.guid_14, self.guid_04):
+            if guid is not None:
+                body += _put_guid(guid)
+        return body
+
+
+@dataclass
 class ResultRow:
-    """One hit. `values` runs parallel to the schema's columns."""
+    """One hit.
+
+    `doc_id` is not a document identifier — `row->vt[0x34]`
+    (IRUT.DLL:0x1001a29d) passes it to `CContexts::GetAt`, so it is a 0-based
+    index into the contexts record.  `values` runs parallel to the schema.
+    """
 
     doc_id: int = 0
     rank: int = 0
@@ -210,6 +253,31 @@ def encode_prop_infos(columns):
 def encode_sort_infos(keys):
     """Tag 0x02 — the sort keys, empty list included."""
     return ir_record(TAG_SORT_INFOS, _put_ulong(len(keys)) + b"".join(k.encode() for k in keys))
+
+
+def encode_context(context):
+    """Tag 0x04 — one context, appended to the collection rows index into.
+
+    The record carries a single `CContext`, not the `CContexts` collection:
+    the CCFRecord `GetObj` builds tag 4 through (IRUT.DLL:0x10036ea0) is
+    constructed at 0x1001239c with CLSID {AE97A530-7BF7-11CE-B577-
+    00AA0060FA9A}, which is CContext's — it sits at 0x100255c0, beside that
+    class's own data and vtable. So the body is `CContext::Serialize`
+    (0x10012751) exactly, with no count prefix, and N contexts means N
+    records.
+
+    Getting this wrong is expensive rather than merely ineffective. `GetObj`
+    advances the receive buffer by what Load consumed, not by the length in
+    the record header, so a body the class does not read byte-for-byte
+    desyncs the stream and every record after it — including all the rows —
+    is lost.
+
+    Without any context record a row's context pointer stays NULL,
+    `row->vt[0x34]` returns 0xF00000CE, and the Find UI drops the source
+    column and the double-click open. Both are checked, so that degrades
+    rather than breaks.
+    """
+    return ir_record(TAG_CONTEXT_INFO, context.encode())
 
 
 def encode_result_row(row, columns):
@@ -257,9 +325,18 @@ def encode_cmd_completed(time_waited=0, time_processed=0):
     return ir_record(TAG_CMD_COMPLETED, _put_ulong(time_waited) + _put_ulong(time_processed))
 
 
-def encode_result_stream(columns, rows, sort_keys=(), time_waited=0, time_processed=0):
-    """The whole reply body: schema, sort keys, rows, then the completion."""
+def encode_result_stream(
+    columns, rows, sort_keys=(), contexts=(), time_waited=0, time_processed=0
+):
+    """The whole reply body: schema, sort keys, contexts, rows, completion.
+
+    Order is load-bearing. A row resolves its column types through the schema
+    and its context through the contexts collection, and both are attached to
+    the results object as their records arrive, so each has to land before the
+    first row does.
+    """
     parts = [encode_prop_infos(columns), encode_sort_infos(list(sort_keys))]
+    parts += [encode_context(context) for context in contexts]
     parts += [encode_result_row(row, columns) for row in rows]
     parts.append(encode_cmd_completed(time_waited, time_processed))
     return b"".join(parts)
