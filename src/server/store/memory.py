@@ -200,6 +200,20 @@ class InMemoryUserStore:
         # lookup here would let anyone sign in.
         return self._users.get(username.casefold())
 
+    def find_by_display_name(self, display_name):
+        """The account whose display name matches, or None.
+
+        A mail recipient resolved through the address book carries the member
+        record's display name, not the sign-in name — MOSABP keys its records
+        on the display name — so delivery has to be able to come back the
+        other way.
+        """
+        folded = display_name.casefold()
+        for user in self._users.values():
+            if user.display_name.casefold() == folded:
+                return user
+        return None
+
     def authenticate(self, username, password):
         """Return the account when the password matches, None otherwise.
 

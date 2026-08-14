@@ -532,13 +532,18 @@ class MOSRXPHandler:
                     recipient.address,
                 )
                 continue
-            if _default_store.users.get_user(recipient.address) is None:
-                log.warning("mosrxp_recipient_unknown address=%r", recipient.address)
+            mailbox = resolve_mailbox(recipient)
+            if mailbox is None:
+                log.warning(
+                    "mosrxp_recipient_unknown address=%r name=%r",
+                    recipient.address,
+                    recipient.display_name,
+                )
                 continue
             _default_store.mail.deliver(
                 MailMessage(
                     message_id=0,  # assigned by the store
-                    mailbox=recipient.address,
+                    mailbox=mailbox,
                     sender_name=sender.display_name,
                     sender_address=sender.username,
                     subject=subject,
@@ -549,6 +554,28 @@ class MOSRXPHandler:
             )
             delivered += 1
         return delivered
+
+
+def resolve_mailbox(recipient):
+    """The account whose inbox a recipient names, or None.
+
+    A recipient picked out of the address book carries the member record's
+    display name in PR_EMAIL_ADDRESS — MOSABP keys members on the display name,
+    so an AB row's address *is* "Steve Jobs" — while a member id typed straight
+    into the To: box arrives as "sjobs". Both have to land, and the display
+    name is checked on PR_DISPLAY_NAME too because an unresolved recipient
+    carries only that.
+    """
+    for candidate in (recipient.address, recipient.display_name):
+        if not candidate:
+            continue
+        user = _default_store.users.get_user(candidate)
+        if user is not None:
+            return user.username
+        user = _default_store.users.find_by_display_name(candidate)
+        if user is not None:
+            return user.username
+    return None
 
 
 def _status_reply(status):

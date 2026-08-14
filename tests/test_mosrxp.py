@@ -465,6 +465,30 @@ class SubmitTest(unittest.TestCase):
         self.handler.handle_request(0xE7, 1, 0, blob[half:], 1, 1)
         self.assertEqual(app_store.mail.list_messages("sjobs")[-1].subject, "Chunked")
 
+    def test_recipient_addressed_by_display_name_is_delivered(self):
+        # What the client actually sends. MOSABP keys members on the display
+        # name, so a recipient picked out of the address book arrives with
+        # PR_EMAIL_ADDRESS = "Steve Jobs", not "sjobs".
+        blob = self.submitted_message(
+            "From the address book",
+            "hello\r\n",
+            [MailRecipient(display_name="Steve Jobs", address="Steve Jobs")],
+        )
+        self.send(blob)
+        self.assertEqual(
+            [m.subject for m in app_store.mail.list_messages("sjobs")],
+            ["Lunch?", "From the address book"],
+        )
+
+    def test_recipient_with_only_a_display_name_is_delivered(self):
+        blob = self.submitted_message(
+            "Unresolved",
+            "hello\r\n",
+            [MailRecipient(display_name="Steve Jobs", address="")],
+        )
+        self.send(blob)
+        self.assertEqual(app_store.mail.list_messages("sjobs")[-1].subject, "Unresolved")
+
     def test_unknown_recipient_is_dropped(self):
         blob = self.submitted_message(
             "Nowhere", "hello", [MailRecipient(display_name="Nobody", address="nobody")]
