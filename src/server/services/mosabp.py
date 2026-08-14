@@ -423,20 +423,20 @@ def build_row_reply(row_count, blob):
     |---:|---|---|---|
     | 1 | local | status, tested against 0 right after the wait | 0 |
     | 2 | `param_6` / `param_7` | table handle, kept in the caller's `this+8` | 0 |
-    | 3 | `param_9` / `param_10` | more-rows flag; non-zero makes the client page with QueryRowsMore | 0 |
+    | 3 | `param_9` / `param_10` | row bound, copied through table data `+0x838` to table `+0xAC` | `row_count` |
     | 4 | local | row count — sizes the rowset and gates decompression | `row_count` |
     | 5 | `param_8` / `param_9` | **the count the provider reports upward** (`*param_2 = local_10`) | `row_count` |
 
-    Slots 4 and 5 both carry the count and are not interchangeable: 4 builds the
-    rowset, 5 is what the caller believes it got. Serving 0 in slot 5 delivers
-    every row correctly and then announces that nothing matched — which is
-    Check Names reporting the name as unrecognised over a rowset that parsed
-    fine.
+    All three count slots are required. Slot 4 builds the rowset, slot 5 is what
+    the caller believes it got, and slot 3 is the exclusive bound QueryRows
+    checks before reading the cached row. Live SoftICE tracing showed that a
+    zero slot 3 leaves the cursor and bound at zero, so QueryRows returns an
+    empty rowset without consulting the successfully parsed cache entry.
     """
     return (
         build_tagged_reply_dword(0)
         + build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(row_count)
         + build_tagged_reply_dword(row_count)
         + build_tagged_reply_dword(row_count)
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
