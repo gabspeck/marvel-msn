@@ -191,6 +191,47 @@ the container's own GetProps on it and reads the id back from `+0x1C`.
 | `0x18` | 4 | `0` — type |
 | `0x1C` | 4 | container id |
 
+### How a row becomes a recipient
+
+Nothing on the wire carries a recipient's entry id — the provider synthesises
+it. `FUN_7F4D312E` (`0x7F4D312E`) converts a fetched row into a property set,
+and when the requested tags include `PR_ENTRYID` or `PR_INSTANCE_KEY` it builds
+one from three of the row's own columns:
+
+```c
+AVar3 = AbtypeFromSz(row[PR_ADDRTYPE].Value.lpszA);   // string → ABTYPE
+EVar4 = EidtypeFromAbtype(AVar3);                     // ABTYPE → EIDTYPE
+FUN_7F4D2E97(&ueid, &cb, EVar4,
+             row[PR_DISPLAY_NAME], row[PR_EMAIL_ADDRESS], …);  // HrBuildUeid
+```
+
+`MOSMUTIL!AbtypeFromSz` (`0x7E9910F6`) maps the address type string, and
+`EidtypeFromAbtype` (`0x7E9911C3`) maps that to the entry-id type:
+
+| `PR_ADDRTYPE` | ABTYPE | EIDTYPE |
+|---|---:|---:|
+| `MSN` | 1 | 1 |
+| `MSNLIST` | 2 | 2 |
+| `MSNINET` / `INTERNET` / `SMTP` | 3 | 5 |
+| anything else | 0 | 1 |
+
+So the addrtype a row carries decides what kind of entry id the client builds
+for it — a member has to be `MSN`.
+
+`IABLogon::OpenEntry` (`0x7F4D594C`) then validates what comes back:
+
+- bytes 4..20 of the entry id must equal the provider MAPIUID at `0x7F4E8048`,
+  or it fails `0x80040107` MAPI_E_INVALID_ENTRYID
+- it switches on the EIDTYPE at `+0x18`: 0 opens the container (`MAPI_ABCONT`),
+  1/4/5/6 a mail user (`MAPI_MAILUSER`), 2 a distribution list, 3 a one-off
+- for every type but the container the entry id must be **exactly 0xB8 bytes**,
+  and a wrong size returns `S_OK` with the object pointer left untouched rather
+  than an error
+
+Verified live 2026-08-14 with SoftICE: resolving `sjobs` reaches
+`FUN_7F4D2E97` with EIDTYPE 1, display name `Steve Jobs` and member name
+`sjobs`, built from a row this server served.
+
 ## 4. `GetUserDetails` (method 2)
 
 ### Request
