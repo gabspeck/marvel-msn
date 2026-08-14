@@ -266,13 +266,16 @@ def _split_ww_reply(payload):
 class TestQueryWWRows(unittest.TestCase):
     """Method 12 — the member list behind the address book container."""
 
-    def test_reply_carries_five_dwords_with_the_row_count_fourth(self):
-        # Order is the five +0x18 call sites: status, param_6, param_9,
-        # row count, param_8. Slot 1 is the one the client tests against 0.
+    def test_reply_carries_the_row_count_in_both_count_slots(self):
+        # Five +0x18 call sites: status, table handle, more-rows flag, the row
+        # count that sizes the rowset, and the count the provider reports
+        # upward. Slot 5 is the one Check Names reads — 0 there announces "no
+        # match" over rows that parsed fine. Slot 3 must stay 0 or the client
+        # pages with QueryRowsMore.
         payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
         dwords, _blob = _split_ww_reply(payload)
-        self.assertEqual(dwords[0], 0)
-        self.assertEqual(dwords[3], len(app_store.member.list_members()))
+        expected = len(app_store.member.list_members())
+        self.assertEqual(dwords, [0, 0, 0, expected, expected])
 
     def test_blob_is_ck_wrapped_raw_deflate(self):
         # HrUncompressWWData has no uncompressed path: MOSMUTIL checks the CK
@@ -444,6 +447,7 @@ class TestQueryRestrictRows(unittest.TestCase):
         )
         dwords, blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 1)
+        self.assertEqual(dwords[4], 1)
         raw = zlib.decompress(blob[2:], -15)
         _count, values, _consumed = _parse_blob(raw, _WW_TAGS)
         self.assertEqual(values[0x3003001E], "billg")
@@ -474,6 +478,17 @@ class TestQueryRestrictRows(unittest.TestCase):
         )
         dwords, _blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 0)
+        self.assertEqual(dwords[4], 0)
+
+    def test_more_rows_flag_stays_clear(self):
+        # Slot 3 non-zero sets the caller's continue state and makes it page
+        # with QueryRowsMore, which is unserved.
+        payload = build_query_restrict_rows_reply_payload(
+            _restrict_request(_res_property(PR_ANR, "Chris"), _WW_TAGS)
+        )
+        dwords, _blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[1], 0)
+        self.assertEqual(dwords[2], 0)
 
     def test_a_term_on_another_property_matches_nothing(self):
         # Matching everything would resolve a name the client did not ask for.

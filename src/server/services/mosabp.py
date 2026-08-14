@@ -409,12 +409,36 @@ def build_query_ww_rows_reply_payload(payload):
         len(members),
         len(blob),
     )
+    return build_row_reply(len(members), blob)
+
+
+def build_row_reply(row_count, blob):
+    """The five out dwords methods 12 and 13 share, then the compressed rows.
+
+    Slot order is the five `+0x18` call sites; both methods pass the same kinds
+    of pointer in the same positions, and `FUN_7F4DAC28` — the table fill that
+    calls them — shows what each one is for:
+
+    | Slot | 12 / 13 | Meaning | Served |
+    |---:|---|---|---|
+    | 1 | local | status, tested against 0 right after the wait | 0 |
+    | 2 | `param_6` / `param_7` | table handle, kept in the caller's `this+8` | 0 |
+    | 3 | `param_9` / `param_10` | more-rows flag; non-zero makes the client page with QueryRowsMore | 0 |
+    | 4 | local | row count — sizes the rowset and gates decompression | `row_count` |
+    | 5 | `param_8` / `param_9` | **the count the provider reports upward** (`*param_2 = local_10`) | `row_count` |
+
+    Slots 4 and 5 both carry the count and are not interchangeable: 4 builds the
+    rowset, 5 is what the caller believes it got. Serving 0 in slot 5 delivers
+    every row correctly and then announces that nothing matched — which is
+    Check Names reporting the name as unrecognised over a rowset that parsed
+    fine.
+    """
     return (
         build_tagged_reply_dword(0)
         + build_tagged_reply_dword(0)
         + build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(len(members))
-        + build_tagged_reply_dword(0)
+        + build_tagged_reply_dword(row_count)
+        + build_tagged_reply_dword(row_count)
         + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
         + blob
     )
@@ -463,15 +487,7 @@ def build_query_restrict_rows_reply_payload(payload):
         len(members),
         len(blob),
     )
-    return (
-        build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(len(members))
-        + build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + blob
-    )
+    return build_row_reply(len(members), blob)
 
 
 def _decode_query_restrict_rows_request(payload):
