@@ -81,12 +81,16 @@ def pre_notify_title() -> bytes:
 def open_title(
     body: bytes = TITLE_OPEN_BODY,
     metadata: TitleOpenMetadata = TITLE_OPEN_METADATA,
+    *,
+    osr2: bool = False,
 ) -> bytes:
-    """`0x01` — TitleOpen. Static fields per spec §0x01 then `0x86` +
-    9-section title body. Caller may inject a per-session body and a
-    per-title `TitleOpenMetadata` (PR3 wires per-page `topic_count` +
-    deterministic cache header derivation per
-    `payload.derive_title_open_metadata`)."""
+    """`0x01` — TitleOpen static fields followed by the title body.
+
+    RTM binds five DWORD outputs. OSR2 binds three more: the two cache
+    validators that control consumption of the dynamic streams and an
+    error status. The earlier cache-header fields stay populated to keep
+    the common prefix unchanged.
+    """
     static = (
         build_tagged_reply_byte(metadata.title_slot)
         + build_tagged_reply_byte(metadata.file_system_mode)
@@ -96,6 +100,12 @@ def open_title(
         + build_tagged_reply_dword(metadata.cache_header0)
         + build_tagged_reply_dword(metadata.cache_header1)
     )
+    if osr2:
+        static += (
+            build_tagged_reply_dword(metadata.cache_header0)
+            + build_tagged_reply_dword(metadata.cache_header1)
+            + build_tagged_reply_dword(0)
+        )
     return _dynamic_complete(static, body)
 
 

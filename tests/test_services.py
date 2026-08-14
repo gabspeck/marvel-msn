@@ -4223,6 +4223,110 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
             self.assertEqual(handler.loaded_m14.title, title_name)
 
 
+class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
+    _OPEN = (
+        b"\x04\x8a:2[1000]0\x00"
+        b"\x03\x00\x00\x00\x00"
+        b"\x03\x00\x00\x00\x00"
+        b"\x81\x81"
+        + b"\x83" * 8
+        + b"\x84\x85"
+    )
+
+    @staticmethod
+    def _attach(handler, capabilities_size):
+        request = (
+            b"\x01\x01\x04"
+            + bytes([0x80 | capabilities_size])
+            + b"\x00" * capabilities_size
+            + b"\x83"
+        )
+        handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_HANDSHAKE,
+            0,
+            request,
+            5,
+            5,
+        )
+
+    def test_rtm_attach_keeps_the_existing_reply_byte_for_byte(self):
+        default_handler = MEDVIEWHandler(5, "MEDVIEW")
+        default_reply = default_handler._handle_open_title(1, self._OPEN)
+
+        rtm_handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._attach(rtm_handler, 12)
+        rtm_reply = rtm_handler._handle_open_title(1, self._OPEN)
+
+        self.assertEqual(rtm_reply, default_reply)
+
+    def test_osr2_attach_selects_eight_dwords_and_osr2_body(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._attach(handler, 92)
+        reply = handler._handle_open_title(1, self._OPEN)
+
+        self.assertEqual(reply[:4], b"\x81\x01\x81\x01")
+        pos = 4
+        dwords = []
+        for _ in range(8):
+            self.assertEqual(reply[pos], 0x83)
+            dwords.append(struct.unpack_from("<I", reply, pos + 1)[0])
+            pos += 5
+        self.assertEqual(
+            dwords[-3:],
+            [
+                handler.title_metadata.cache_header0,
+                handler.title_metadata.cache_header1,
+                0,
+            ],
+        )
+        self.assertEqual(reply[pos : pos + 2], b"\x87\x86")
+        self.assertEqual(reply[pos + 2 :], handler.title_body)
+
+        font_size = struct.unpack_from("<H", handler.title_body)[0]
+        title_data = handler.title_body[font_size + 2 :]
+        self.assertTrue(title_data.startswith(b"1000\x00"))
+        self.assertIn(b"Employee Handbook Example\x00", title_data)
+
+    def test_osr2_cache_hit_omits_only_the_matching_stream(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        self._attach(handler, 92)
+        handler._handle_open_title(1, self._OPEN)
+        font_end = 2 + struct.unpack_from("<H", handler.title_body)[0]
+        request = (
+            b"\x04\x8a:2[1000]0\x00"
+            + b"\x03"
+            + struct.pack("<I", handler.title_metadata.cache_header0)
+            + b"\x03\x00\x00\x00\x00"
+            + b"\x81\x81"
+            + b"\x83" * 8
+            + b"\x84\x85"
+        )
+
+        reply = handler._handle_open_title(2, request)
+
+        self.assertEqual(reply[46:], handler.title_body[font_end:])
+
+    def test_osr2_pipe_mvpfile_opens_while_rtm_rejects_it(self):
+        open_mvpfile = b"\x01\x01\x04\x89|MVPFILE\x00\x01\x02\x81\x83"
+
+        osr2 = MEDVIEWHandler(5, "MEDVIEW")
+        self._attach(osr2, 92)
+        osr2._handle_open_title(1, self._OPEN)
+        reply = osr2._handle_open_remote_hfs_file(2, open_mvpfile)
+        self.assertNotEqual(reply[2], 0)
+        self.assertEqual(
+            struct.unpack_from("<I", reply, 4)[0],
+            len(osr2.baggage_map["mvpfile"]),
+        )
+        self.assertIn(b"[WINDOWS]\r\n", osr2.baggage_map["mvpfile"])
+
+        rtm = MEDVIEWHandler(5, "MEDVIEW")
+        self._attach(rtm, 12)
+        rtm._handle_open_title(1, self._OPEN)
+        self.assertEqual(rtm._handle_open_remote_hfs_file(2, open_mvpfile)[2], 0)
+
+
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
     def test_get_info_reply_size_zero(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")

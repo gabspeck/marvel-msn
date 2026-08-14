@@ -1,6 +1,6 @@
 """Hardcoded MEDVIEW payloads for the empty MSN Today render.
 
-Two module-level `bytes` constants assembled at import time:
+The module-level payload constants are assembled at import time:
 
 - `TITLE_OPEN_BODY` — 9-section title body shipped on TitleOpen 0x86
   dynamic. Single window scaffold, single font descriptor, single
@@ -9,6 +9,8 @@ Two module-level `bytes` constants assembled at import time:
 - `BM0_BAGGAGE` — 38445 B kind=5 raster (640×480 1bpp white, empty
   trailer) wrapped in the multi-bitmap container preamble. Returned by
   selector 0x1A `bm0` and chunked out via 0x1B reads.
+- `OSR2_TITLE_OPEN_BODY` — OSR2's two cache streams: font data followed
+  by title metadata. Window layout moved to `OSR2_MVPFILE`.
 
 `TITLE_OPEN_METADATA` carries the static-section dwords that pin the
 TitleOpen reply (slot, va, addr, topic_count, two cache header dwords).
@@ -227,6 +229,29 @@ def _build_title_open_body() -> bytes:
 
 TITLE_OPEN_BODY = _build_title_open_body()
 TITLE_CAPTION = _TITLE_CAPTION.rstrip(b"\x00").decode("ascii")
+
+
+def _build_osr2_title_open_body() -> bytes:
+    return b"".join(
+        [
+            _length_prefixed(_build_section0()),
+            _TITLE_DEID,
+            _length_prefixed(_TITLE_CAPTION),
+            b"\x00\x00",  # empty copyright
+            b"\x00\x00",  # empty DLL map
+        ]
+    )
+
+
+OSR2_TITLE_OPEN_BODY = _build_osr2_title_open_body()
+OSR2_MVPFILE = (
+    b"[CONFIG]\r\n\r\n"
+    b"[PANES]\r\n\r\n"
+    b"[POPUPS]\r\n\r\n"
+    b"[WINDOWS]\r\n"
+    b'main="MSN Today",(0,0,640,480,1),(0),,,,'
+    b"(0,0,1000,1000,1),(1,0,0),(0),(0)\r\n"
+)
 
 
 # --------------------------------------------------------------------------

@@ -11,7 +11,12 @@ from server.blackbird.wire import (
     encode_case1_preamble,
     encode_text_item_tlv,
 )
-from server.services.medview.m14_loader import load_m14, lower_m14_to_payload
+from server.services.medview.m14_loader import (
+    build_m14_mvpfile,
+    load_m14,
+    lower_m14_to_osr2_payload,
+    lower_m14_to_payload,
+)
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 _HANDBOOK = _REPO_ROOT / "resources" / "titles" / "HANDBOOK.M14"
@@ -194,6 +199,35 @@ class TestM14Loader(unittest.TestCase):
             entries,
         )
         self.assertEqual(payload[offset:], b"\x00\x00")
+
+    def test_osr2_title_payload_moves_layout_to_mvpfile(self):
+        title = load_m14(_HANDBOOK)
+        self.assertIsNotNone(title)
+        payload = lower_m14_to_osr2_payload(title, "4")
+
+        font_blob, offset = _read_blob(payload, 0)
+        self.assertIn(b"Times New Roman\x00", font_blob)
+        self.assertEqual(payload[offset : offset + 2], b"4\x00")
+        offset += 2
+
+        title_text, offset = _read_blob(payload, offset)
+        copyright_text, offset = _read_blob(payload, offset)
+        self.assertEqual(title_text, b"Employee Handbook Example\x00")
+        self.assertEqual(
+            copyright_text,
+            "© 1996 Centric Development, Inc.\x00".encode("cp1252"),
+        )
+        entry_bytes, entry_count = struct.unpack_from("<HH", payload, offset)
+        self.assertEqual(entry_count, 6)
+        self.assertEqual(offset + 4 + entry_bytes, len(payload))
+
+        mvpfile = build_m14_mvpfile(title)
+        self.assertEqual(
+            mvpfile.splitlines()[:7],
+            [b"[CONFIG]", b"", b"[PANES]", b"", b"[POPUPS]", b"", b"[WINDOWS]"],
+        )
+        self.assertIn(b'main="Employee Handbook Example"', mvpfile)
+        self.assertIn(b"(255,255,192),(255,255,255),(255,255,255)", mvpfile)
 
     def test_native_display_stream_is_preserved_in_case1_cache_record(self):
         title = load_m14(_HANDBOOK)

@@ -93,9 +93,17 @@ from ...session import Session
 from .._dispatch import log_unhandled_selector
 from ..dirsrv import TREEEDCL_STATUS_REFUSED, build_get_ticket_reply_payload
 from . import replies
-from .m14_loader import LoadedM14, load_m14, lower_m14_to_payload
+from .m14_loader import (
+    LoadedM14,
+    build_m14_mvpfile,
+    load_m14,
+    lower_m14_to_osr2_payload,
+    lower_m14_to_payload,
+)
 from .payload import (
     BM0_BAGGAGE,
+    OSR2_MVPFILE,
+    OSR2_TITLE_OPEN_BODY,
     TITLE_OPEN_BODY,
     TITLE_OPEN_METADATA,
     TitleOpenMetadata,
@@ -138,6 +146,10 @@ _BAGGAGE_HANDLE_BM0 = 0x42
 # allocate sequentially (`0x43` = bm1, `0x44` = bm2, …) up to the
 # byte range — practical limit << wire spec.
 _BAGGAGE_HANDLE_BASE = _BAGGAGE_HANDLE_BM0
+_DIALECT_RTM = "rtm"
+_DIALECT_OSR2 = "osr2"
+_RTM_ATTACH_CAPABILITIES_SIZE = 12
+_OSR2_ATTACH_CAPABILITIES_SIZE = 92
 
 # Bound for the hex preview of dynamic payloads in trace logs. Keeps the
 # line bounded for big bodies (TitleOpen ~6 KB, baggage chunks up to
@@ -231,6 +243,7 @@ _REPLY_FIELD_NAMES: dict[int, list[str]] = {
     MEDVIEW_OPEN_TITLE: [
         "titleSlot", "fileSystemMode", "contentsVa", "contentsAddr",
         "topicUpperBound", "cacheHeader0", "cacheHeader1",
+        "fontCacheHeader", "titleCacheHeader", "status",
     ],
     MEDVIEW_CLOSE_TITLE: [],
     MEDVIEW_GET_TITLE_INFO_REMOTE: ["lengthOrScalar"],
@@ -599,6 +612,43 @@ def _extract_title_token(payload: bytes) -> str:
     return ""
 
 
+def _extract_attach_capabilities(payload: bytes) -> bytes:
+    """Pull the capability blob used to distinguish RTM from OSR2."""
+    send_params, _ = parse_request_params(payload)
+    return next(
+        (p.data for p in send_params if isinstance(p, VarParam)),
+        b"",
+    )
+
+
+def _extract_open_title_cache_hints(payload: bytes) -> tuple[int, int]:
+    send_params, _ = parse_request_params(payload)
+    hints = [p.value for p in send_params if isinstance(p, DwordParam)]
+    return (
+        hints[0] if len(hints) >= 1 else 0,
+        hints[1] if len(hints) >= 2 else 0,
+    )
+
+
+def _select_osr2_title_body(
+    body: bytes,
+    metadata: TitleOpenMetadata,
+    cache_hints: tuple[int, int],
+) -> bytes:
+    """Return only the OSR2 cache streams whose validators changed."""
+    if len(body) < 2:
+        return body
+    font_end = 2 + struct.unpack_from("<H", body)[0]
+    if font_end > len(body):
+        return body
+    selected = bytearray()
+    if cache_hints[0] != metadata.cache_header0:
+        selected += body[:font_end]
+    if cache_hints[1] != metadata.cache_header1:
+        selected += body[font_end:]
+    return bytes(selected)
+
+
 def _deid_from_title_token(token: str) -> str:
     """Extract `<deid>` from a `:<svcid>[<deid>]<serial>` title token."""
     lb = token.find("[")
@@ -722,6 +772,9 @@ class MEDVIEWHandler:
         # u8 handle per open HFS name. bm0 remains available before
         # OpenTitle for the empty-title fallback.
         self._baggage_handles: dict[int, str] = {_BAGGAGE_HANDLE_BM0: "bm0"}
+        # The 12-byte RTM capability blob remains the safe default for
+        # callers that exercise selectors without the attach handshake.
+        self._client_dialect = _DIALECT_RTM
         self.loaded_m14: LoadedM14 | None = None
         self.title_body: bytes = TITLE_OPEN_BODY
         self.baggage_map: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
@@ -993,8 +1046,7 @@ class MEDVIEWHandler:
     def _dispatch(self, msg_class, selector, request_id, payload) -> bytes | None:
         # SessionService
         if selector == MEDVIEW_ATTACH_SESSION:
-            log.info("attach_session req_id=%d", request_id)
-            return replies.attach_session()
+            return self._handle_attach_session(request_id, payload)
         if selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS:
             return self._handle_subscribe(msg_class, request_id, payload)
         if selector == MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS:
@@ -1054,6 +1106,22 @@ class MEDVIEWHandler:
         return None
 
     # --- SessionService --------------------------------------------
+
+    def _handle_attach_session(self, request_id, payload) -> bytes:
+        capabilities = _extract_attach_capabilities(payload)
+        if len(capabilities) == _OSR2_ATTACH_CAPABILITIES_SIZE:
+            self._client_dialect = _DIALECT_OSR2
+        elif len(capabilities) == _RTM_ATTACH_CAPABILITIES_SIZE:
+            self._client_dialect = _DIALECT_RTM
+        else:
+            self._client_dialect = _DIALECT_RTM
+        log.info(
+            "attach_session req_id=%d capabilities_len=%d dialect=%s",
+            request_id,
+            len(capabilities),
+            self._client_dialect,
+        )
+        return replies.attach_session()
 
     def _handle_subscribe(self, msg_class, request_id, payload) -> bytes:
         notification_type = payload[1] if len(payload) >= 2 else None
@@ -1125,9 +1193,14 @@ class MEDVIEWHandler:
         title = load_m14(_TITLES_DIR / title_file) if deid else None
         if title is not None:
             self.loaded_m14 = title
-            self.title_body = lower_m14_to_payload(title, deid)
+            if self._client_dialect == _DIALECT_OSR2:
+                self.title_body = lower_m14_to_osr2_payload(title, deid)
+            else:
+                self.title_body = lower_m14_to_payload(title, deid)
             cache0, cache1 = title.cache_tuple(self.title_body)
             self.baggage_map = title.baggage_map()
+            if self._client_dialect == _DIALECT_OSR2:
+                self.baggage_map["mvpfile"] = build_m14_mvpfile(title)
             self.title_metadata = TitleOpenMetadata(
                 title_slot=TITLE_OPEN_METADATA.title_slot,
                 file_system_mode=0x01,
@@ -1141,22 +1214,39 @@ class MEDVIEWHandler:
             source = "m14"
         else:
             self.loaded_m14 = None
-            self.title_body = TITLE_OPEN_BODY
-            self.baggage_map = {"bm0": BM0_BAGGAGE}
+            if self._client_dialect == _DIALECT_OSR2:
+                self.title_body = OSR2_TITLE_OPEN_BODY
+                self.baggage_map = {"mvpfile": OSR2_MVPFILE}
+            else:
+                self.title_body = TITLE_OPEN_BODY
+                self.baggage_map = {"bm0": BM0_BAGGAGE}
             self.title_metadata = TITLE_OPEN_METADATA
             caption = None
             source = "empty"
 
+        reply_body = self.title_body
+        if self._client_dialect == _DIALECT_OSR2:
+            reply_body = _select_osr2_title_body(
+                self.title_body,
+                self.title_metadata,
+                _extract_open_title_cache_hints(payload),
+            )
+
         log.info(
             "open_title req_id=%d slot=0x%02x token=%r deid=%r source=%s "
-            "caption=%r body_len=%d topics=%d topic_count=%d baggage=%s",
-            request_id, slot, token, deid, source, caption,
-            len(self.title_body),
+            "dialect=%s caption=%r body_len=%d reply_body_len=%d topics=%d "
+            "topic_count=%d baggage=%s",
+            request_id, slot, token, deid, source, self._client_dialect, caption,
+            len(self.title_body), len(reply_body),
             title.topic_count if title is not None else 0,
             self.title_metadata.topic_count,
             ",".join(f"{k}={len(v)}" for k, v in self.baggage_map.items()),
         )
-        return replies.open_title(self.title_body, metadata=self.title_metadata)
+        return replies.open_title(
+            reply_body,
+            metadata=self.title_metadata,
+            osr2=self._client_dialect == _DIALECT_OSR2,
+        )
 
     def _handle_close_title(self, request_id, payload) -> bytes:
         send_params, _ = parse_request_params(payload)
@@ -1169,8 +1259,12 @@ class MEDVIEWHandler:
             self._open_title_slots.discard(slot)
             if not self._open_title_slots:
                 self.loaded_m14 = None
-                self.title_body = TITLE_OPEN_BODY
-                self.baggage_map = {"bm0": BM0_BAGGAGE}
+                if self._client_dialect == _DIALECT_OSR2:
+                    self.title_body = OSR2_TITLE_OPEN_BODY
+                    self.baggage_map = {"mvpfile": OSR2_MVPFILE}
+                else:
+                    self.title_body = TITLE_OPEN_BODY
+                    self.baggage_map = {"bm0": BM0_BAGGAGE}
                 self.title_metadata = TITLE_OPEN_METADATA
                 self._baggage_handles = {_BAGGAGE_HANDLE_BM0: "bm0"}
                 self._pending_picture_transfers.clear()
@@ -1467,8 +1561,13 @@ class MEDVIEWHandler:
             "open_remote_hfs_file req_id=%d name=%r canonical=%r accept=%r",
             request_id, name, canonical, size is not None,
         )
-        # Reject the engine's `|bm%d` first probe and any unknown name.
-        if size is None or name.startswith("|"):
+        # RTM retries `|bm%d` without the pipe. OSR2 directly requests
+        # its authored layout as `|MVPFILE`, which is a real HFS name.
+        pipe_name_allowed = (
+            self._client_dialect == _DIALECT_OSR2
+            and name.lower() == "|mvpfile"
+        )
+        if size is None or (name.startswith("|") and not pipe_name_allowed):
             return replies.open_remote_hfs_file_reject()
         # Allocate (or reuse) a stable handle per name. bm0 keeps the
         # legacy `0x42` for log continuity; subsequent pages allocate

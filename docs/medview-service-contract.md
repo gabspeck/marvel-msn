@@ -108,8 +108,9 @@ Purpose: start the MEDVIEW protocol session and validate client capabilities.
 Parameters:
 - `clientVersion: u8`. Stock client emits the literal `1` at
   `hrAttachToService @ 0x7E844114`. No other value is observed.
-- `capabilities: bytes[12]`. Layout: `clientFlags0:u32`, `clientFlags1:u32`,
-  `browseLcid:u32`.
+- `capabilities`. RTM sends 12 bytes. OSR2 sends 92 bytes; the server uses
+  this observed size difference to select the per-session title dialect.
+  The RTM layout is `clientFlags0:u32`, `clientFlags1:u32`, `browseLcid:u32`.
   - `clientFlags0`: literal `0x00002000`. Client never inspects after
     send. `client-opaque (verified at hrAttachToService @ 0x7E844114)`.
   - `clientFlags1`: literal `0x00004006`. Client never inspects after
@@ -221,6 +222,24 @@ Returns:
   treatment.
 - `payloadBlob: dynbytes`. Flat MediaView 9-section title body — see
   `docs/MEDVIEW.md §4.4`.
+
+OSR2 binds three DWORD outputs after the RTM common prefix:
+
+- `fontCacheHeader: u32`. Compared with request `cacheHint0`.
+- `titleCacheHeader: u32`. Compared with request `cacheHint1`.
+- `status: u32`. Zero means success.
+
+OSR2 consumes only the dynamic stream whose returned header differs from
+the matching request hint. The font stream is `[u16 size][font bytes]`.
+The title stream is `titleId ASCIIZ`, length-prefixed caption,
+length-prefixed copyright, then the section-13 DLL map. Window, pane, and
+popup records are no longer in this body. MOSVIEW reads their MVP text from
+HFS baggage name `|MVPFILE`; the relevant sections are `[CONFIG]`,
+`[PANES]`, `[POPUPS]`, and `[WINDOWS]`.
+
+The server selects this shape only after the 92-byte OSR2 attach. A 12-byte
+RTM attach, an unknown attach shape, or no attach retains the five-DWORD
+reply and nine-section body.
 
 ### `0x02` `CloseTitle`
 

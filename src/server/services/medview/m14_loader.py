@@ -1155,3 +1155,53 @@ def lower_m14_to_payload(m14: LoadedM14, deid: str) -> bytes:
             b"\x00\x00",  # sec04: no MOSVIEW host strings
         ]
     )
+
+
+def lower_m14_to_osr2_payload(m14: LoadedM14, deid: str) -> bytes:
+    """Build the OSR2 TitleOpen cache streams from an M14 title.
+
+    OSR2 MVTTL14C splits the dynamic body into a length-prefixed font
+    table and a second cache stream. The second stream starts with the
+    ASCIIZ title id, followed by the caption, copyright, and DLL map.
+    MOSVIEW obtains window, pane, and popup records from ``|MVPFILE``.
+    """
+    title = m14.title.encode("cp1252", errors="replace") + b"\x00"
+    copyright_text = (
+        m14.copyright.encode("cp1252", errors="replace") + b"\x00"
+        if m14.copyright
+        else b""
+    )
+    title_id = deid.encode("ascii", errors="replace") + b"\x00"
+    return b"".join(
+        [
+            _length_prefixed(_build_section0(m14)),
+            title_id,
+            _length_prefixed(title),
+            _length_prefixed(copyright_text),
+            _build_sec13(m14),
+        ]
+    )
+
+
+def build_m14_mvpfile(m14: LoadedM14) -> bytes:
+    """Project the M14 main-window properties into OSR2 MVP text."""
+
+    def color(value: int) -> str:
+        if value == _COLOR_INHERIT:
+            return ""
+        return f"({value & 0xff},{value >> 8 & 0xff},{value >> 16 & 0xff})"
+
+    caption = m14.title.replace('"', "'")
+    non_scroll, scroll = m14.pane_backgrounds
+    popup = m14.popup_pane[0] if m14.popup_pane is not None else _COLOR_INHERIT
+    window = (
+        f'main="{caption}",(0,0,640,480,1),(0),'
+        f"{color(non_scroll)},{color(scroll)},{color(popup)},"
+        "(0,0,1000,1000,1),(1,0,0),(0),(0)"
+    )
+    return (
+        "[CONFIG]\r\n\r\n"
+        "[PANES]\r\n\r\n"
+        "[POPUPS]\r\n\r\n"
+        f"[WINDOWS]\r\n{window}\r\n"
+    ).encode("cp1252", errors="replace")
