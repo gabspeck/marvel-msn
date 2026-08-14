@@ -6,9 +6,11 @@ a full inverted index with ranking, stemming and the AIR term language the
 query spec describes — but it answers a query with real hits from real
 published content, which is what the client needs to display a result list.
 
-Only the `TextTree` bodies carry readable text; `TextRuns` bodies in the
-observed titles hold picture data whose decode is byte noise, so they are
-skipped rather than indexed as garbage (`docs/MEDVIEW-TEXT-ENCODING.md`).
+Bodies may arrive CK-wrapped and titles differ on whether they are, so the
+envelope comes off before anything looks at the payload.  Only the `TextTree`
+bodies carry readable text; `TextRuns` bodies in the observed titles hold
+picture data whose decode is byte noise, so they are skipped rather than
+indexed as garbage (`docs/MEDVIEW-TEXT-ENCODING.md`).
 
 The AIR query tree is flattened to its string terms and joined with AND.  The
 combiner ops and the time term the client sends are read but not applied:
@@ -24,6 +26,7 @@ import pathlib
 from dataclasses import dataclass
 
 from ..services.medview import ccontent
+from ..services.medview.ole_helpers import maybe_decompress_ck
 from ..store import blackbird_state
 from . import cos
 
@@ -100,10 +103,25 @@ def _modified_at(path):
 
 
 def _extract_text(obj):
-    if obj.typename != "CContent" or not ccontent.is_texttree(obj.object_bytes):
+    """Readable text out of one published object, or "" when it has none.
+
+    The body may be CK-wrapped — `ccontent` expects that stripped before it
+    sees the payload, and titles differ on whether they wrap. Only TextTree
+    bodies carry text; the TextRuns bodies in observed titles hold picture
+    data whose decode is byte noise, so they are skipped rather than indexed
+    as garbage (`docs/MEDVIEW-TEXT-ENCODING.md`).
+    """
+    if obj.typename != "CContent":
         return ""
     try:
-        return ccontent.decode_texttree(obj.object_bytes).text
+        body = maybe_decompress_ck(obj.object_bytes)
+    except Exception as exc:  # noqa: BLE001 - one bad body must not kill the query
+        log.warning("irindex_ck_undecodable path=%s err=%s", obj.storage_path, exc)
+        return ""
+    if not ccontent.is_texttree(body):
+        return ""
+    try:
+        return ccontent.decode_texttree(body).text
     except Exception as exc:  # noqa: BLE001 - one bad body must not kill the query
         log.warning("irindex_content_undecodable path=%s err=%s", obj.storage_path, exc)
         return ""
