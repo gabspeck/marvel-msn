@@ -494,6 +494,23 @@ Windows 95 companion to `MOSABP32.DLL`, also from `WINDOWS\SYSTEM\`. Holds the `
 
 **Ghidra status**: Imported; `HrBuildUeid` decompiled for the entry-id layout, rest untouched.
 
+Also holds the header property-tag array (`PSptaHdr` [22] → `0x7E99C438`, 12 tags) and the stream compressor MOSRXP32 runs attachment bodies through (`HrCreateCompression` / `HrCompress` / `HrDecompress` and their reset/destroy pairs).
+
+### MOSRXP32.DLL — *MOS Remote Transport DLL* (DLL, 56 KB)
+
+MAPI **transport** provider (`XPProviderInit`, ordinal 100) — the remote-mail path behind the Windows Messaging inbox. Also from `WINDOWS\SYSTEM\`, not the MSN client update. Downloads message headers over the Marvel connection, fetches bodies on demand, and submits outgoing mail.
+
+Wire client is the C++ class `CConn`; all 84 members carry decorated names. It opens a pipe on service `"MOSRXP"` version 2, resolves **one** IID (`00028B20`), and turns each operation into `GetMethod(<ServiceMethod>)` — the same idiom as `CAbConnection`. Ten methods: GetConnInfo (0), OpenInbox (1), CloseInbox (2), InitTransmit (3), SendBlock (4), GetHeaders (5), DelMessages (6), GetMessage (7), GetFirstMessage (8), FlagServerMessage (9).
+
+The download worker is `FUN_7F437831`: delete what the user flagged, `GetHeaders`, spool the blob to a temp file, hand each record to the MAPI spooler.
+
+**Key exports**
+- `XPProviderInit` [100]
+- `CConn::HrConnect`, `HrOpenInbox`, `HrCloseInbox`, `HrGetHeaders`, `HrGetMessage`, `HrGetFirstMessage`, `HrDelMessages`, `HrFlagServerMessage`, `HrSendMessage`, `HrSetLogonInfo`, `Disconnect`
+- `CConn::HrDSrl*` / `HrTransmit*` — the message serialiser, both directions
+
+**Ghidra status**: Annotated — see `docs/MOSRXP.md` for the full wire contract, the property serialisation and the header blob. **Imports**: `MOSMUTIL.DLL` (compression + header tag array), `MOSCFG32.DLL` (`CCfg::HrConfigure`), `MAPI32`, `mcm.dll`, `ole32`.
+
 ---
 
 ## 5. MedView / Multimedia
