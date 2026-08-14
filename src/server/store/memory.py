@@ -258,6 +258,62 @@ class InMemoryCatalogStore:
         return self._plans
 
 
+class InMemoryMailStore:
+    """Server-side inboxes, keyed by member id.
+
+    Message ids are unique across every mailbox, not per mailbox: the client
+    keys on the 12-byte `MOS_ENTRYID` alone and never pairs it with a member.
+    """
+
+    def __init__(self, messages):
+        self.load(messages)
+
+    def load(self, messages):
+        self._mailboxes = {}
+        self._next_id = 1
+        for message in messages:
+            self._mailboxes.setdefault(message.mailbox.casefold(), []).append(message)
+            self._next_id = max(self._next_id, message.message_id + 1)
+
+    def list_messages(self, mailbox):
+        # Delivery order, which is the order the header list ships in — the
+        # client sorts the Inbox itself.
+        return list(self._mailboxes.get(mailbox.casefold(), ()))
+
+    def get_message(self, mailbox, message_id):
+        for message in self._mailboxes.get(mailbox.casefold(), ()):
+            if message.message_id == message_id:
+                return message
+        return None
+
+    def delete_messages(self, mailbox, message_ids):
+        key = mailbox.casefold()
+        kept = []
+        removed = 0
+        wanted = set(message_ids)
+        for message in self._mailboxes.get(key, ()):
+            if message.message_id in wanted:
+                removed += 1
+            else:
+                kept.append(message)
+        self._mailboxes[key] = kept
+        return removed
+
+    def set_status(self, mailbox, message_id, status):
+        key = mailbox.casefold()
+        for i, message in enumerate(self._mailboxes.get(key, ())):
+            if message.message_id == message_id:
+                self._mailboxes[key][i] = replace(message, status=status)
+                return True
+        return False
+
+    def deliver(self, message):
+        stored = replace(message, message_id=self._next_id)
+        self._next_id += 1
+        self._mailboxes.setdefault(message.mailbox.casefold(), []).append(stored)
+        return stored
+
+
 def build_app_store(seed):
     return AppStore(
         content=InMemoryContentStore(
@@ -268,4 +324,5 @@ def build_app_store(seed):
         users=InMemoryUserStore(users=seed.users),
         catalog=InMemoryCatalogStore(plans=seed.plans),
         member=InMemoryMemberStore(profiles=seed.member_profiles),
+        mail=InMemoryMailStore(messages=seed.mail_messages),
     )

@@ -9,6 +9,7 @@ from .ftm import FTMHandler
 from .logsrv import LOGSRVHandler
 from .medview import MEDVIEWHandler
 from .mosabp import MOSABPHandler
+from .mosrxp import MOSRXPHandler
 from .olregsrv import OLREGSRVHandler
 from .onlstmt import OnlStmtHandler
 from .sasrv import SASRVHandler
@@ -25,6 +26,7 @@ SERVICE_HANDLERS = {
     "confloc": CONFLOCHandler,
     "confsrv": CONFSRVHandler,
     "mosabp": MOSABPHandler,
+    "mosrxp": MOSRXPHandler,
     "sasrv": SASRVHandler,
     "bbird_ob": BbirdOBHandler,
     "bbirservice": BBIRServiceHandler,

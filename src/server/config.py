@@ -314,6 +314,14 @@ MOSABP_INTERFACE_GUIDS = [
     (_guid_le("00028B22-0000-0000-C000-000000000046"), 0x01),
 ]
 
+# MOSRXP (remote mail — MOSRXP32.DLL, the MAPI transport provider behind the
+# Exchange inbox).  `CConn::HrGetMethod` @ 0x7F431967 is the single call site
+# that opens this service and resolves exactly one IID: the pointer it hands
+# the marshaller's slot 0x24 is `&DAT_7F43C950` = 00028B20.  See docs/MOSRXP.md.
+MOSRXP_INTERFACE_GUIDS = [
+    (_guid_le("00028B20-0000-0000-C000-000000000046"), 0x01),
+]
+
 # FindSvc (directory search — MOSFIND.DLL, the COM server behind the
 # Find > MSN Service dialog).  `CFindConnection::HrSearch` @ 0x7E9B136A hands
 # the marshaller's slot 0x24 the IID array based at 0x7E9B45E8, which opens on

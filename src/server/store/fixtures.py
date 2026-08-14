@@ -27,6 +27,8 @@ from .base import (
     BillingProfile,
     ConferenceFields,
     DirectoryNode,
+    MailMessage,
+    MailRecipient,
     MemberProfile,
     NodeContent,
     Plan,
@@ -1250,6 +1252,46 @@ MEMBER_PROFILES = [
 ]
 
 
+# Inbox fixtures for the MOSRXP remote-mail transport. One message per signed-in
+# account, so a fresh profile that runs "check for new mail" gets a header list
+# with something in it instead of an empty inbox that proves nothing.
+#
+# Invented content: no MSN mail corpus survives. The shape is what matters —
+# docs/MOSRXP.md §6 for the header record, §5 for the full message.
+MAIL_MESSAGES = [
+    MailMessage(
+        message_id=1,
+        mailbox=BILL_GATES.username,
+        sender_name="The Microsoft Network",
+        sender_address="msn",
+        subject="Welcome to The Microsoft Network",
+        body=(
+            "Welcome to MSN.\r\n\r\n"
+            "Your inbox is delivered over the same connection as the rest of "
+            "the service. Choose Tools > Deliver Now to check for new mail, or "
+            "mark a message for downloading and pick it up the next time you "
+            "sign in.\r\n"
+        ),
+        delivered=datetime.datetime(1995, 8, 24, 9, 0, tzinfo=datetime.UTC),
+        recipients=(
+            MailRecipient(display_name=BILL_GATES.display_name, address=BILL_GATES.username),
+        ),
+    ),
+    MailMessage(
+        message_id=2,
+        mailbox=STEVE_JOBS.username,
+        sender_name=BILL_GATES.display_name,
+        sender_address=BILL_GATES.username,
+        subject="Lunch?",
+        body="Thursday, one o'clock. My treat.\r\n",
+        delivered=datetime.datetime(1995, 8, 25, 16, 30, tzinfo=datetime.UTC),
+        recipients=(
+            MailRecipient(display_name=STEVE_JOBS.display_name, address=STEVE_JOBS.username),
+        ),
+    ),
+]
+
+
 @dataclass
 class DefaultSeed:
     directory_nodes: list
@@ -1258,6 +1300,7 @@ class DefaultSeed:
     users: list
     plans: list
     member_profiles: list
+    mail_messages: list
 
 
 def default_seed():
@@ -1275,4 +1318,5 @@ def default_seed():
         users=list(USERS),
         plans=list(PLANS),
         member_profiles=list(MEMBER_PROFILES),
+        mail_messages=list(MAIL_MESSAGES),
     )

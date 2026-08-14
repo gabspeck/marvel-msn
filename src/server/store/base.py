@@ -206,6 +206,43 @@ class MemberProfile:
 
 
 @dataclass(frozen=True)
+class MailRecipient:
+    """One entry of a message's recipient table.
+
+    `addrtype` decides delivery: MOSRXP32 marks a recipient `PR_RESPONSIBILITY`
+    only for MSN / MSNLIST / MSNINET / INTERNET / SMTP (docs/MOSRXP.md §7), so
+    anything else never reaches this transport.
+    """
+
+    display_name: str
+    address: str
+    addrtype: str = "MSN"
+    recipient_type: int = 1  # MAPI_TO
+
+
+@dataclass(frozen=True)
+class MailMessage:
+    """One message in a member's server-side inbox.
+
+    `status` is the `PR_MSG_STATUS` the client last pushed with
+    `FlagServerMessage`; the download flow deletes rows carrying 0x2000
+    (MSGSTATUS_REMOTE_DELETE) before it asks for headers, so the flag is the
+    client's way of queueing a delete for the next connection.
+    """
+
+    message_id: int
+    mailbox: str  # member id whose inbox holds it
+    sender_name: str
+    sender_address: str
+    subject: str
+    body: str
+    delivered: datetime.datetime
+    recipients: tuple = ()
+    status: int = 0
+    message_class: str = "IPM.Note"
+
+
+@dataclass(frozen=True)
 class StatementSummary:
     balance_cents: int
     currency_iso: int
@@ -341,12 +378,22 @@ class CatalogStore(Protocol):
     def get_plans(self) -> list: ...
 
 
+class MailStore(Protocol):
+    def load(self, messages: list) -> None: ...
+    def list_messages(self, mailbox: str) -> list: ...
+    def get_message(self, mailbox: str, message_id: int) -> MailMessage | None: ...
+    def delete_messages(self, mailbox: str, message_ids) -> int: ...
+    def set_status(self, mailbox: str, message_id: int, status: int) -> bool: ...
+    def deliver(self, message: MailMessage) -> MailMessage: ...
+
+
 @dataclass
 class AppStore:
     content: ContentStore
     users: UserStore
     catalog: CatalogStore
     member: MemberStore
+    mail: MailStore
 
     def reset(self, seed) -> None:
         """Re-seed every store in place, dropping all runtime changes.
@@ -362,3 +409,4 @@ class AppStore:
         self.users.load(seed.users)
         self.catalog.load(seed.plans)
         self.member.load(seed.member_profiles)
+        self.mail.load(seed.mail_messages)
