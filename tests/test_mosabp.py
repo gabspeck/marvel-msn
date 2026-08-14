@@ -20,9 +20,12 @@ from server.services.mosabp import (
     MOSABP_GET_USER_DETAILS,
     MOSABP_UPDATE_USER_DETAILS,
     PR_ANR,
+    PR_ENTRYID,
+    PR_SEARCH_KEY,
     RES_AND,
     RES_PROPERTY,
     UEID_PROVIDER_UID,
+    USR_ENTRYID_LEN,
     AbContainer,
     MOSABPHandler,
     build_ab_container,
@@ -319,6 +322,26 @@ class TestQueryWWRows(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_ww_row_blob(huge, _WW_TAGS)
 
+    def test_row_carries_an_entryid_a_recipient_can_be_built_from(self):
+        # PR_ENTRYID is what MAPI hands back to open the member. An empty one
+        # resolves to nothing and Check Names reports the name as unrecognised.
+        tags = [0x3001001E, 0x3003001E, 0x3002001E, PR_ENTRYID, PR_SEARCH_KEY]
+        payload = build_query_restrict_rows_reply_payload(
+            _restrict_request(_res_property(PR_ANR, "sjobs"), tags)
+        )
+        dwords, blob = _split_ww_reply(payload)
+        self.assertEqual(dwords[3], 1)
+        raw = zlib.decompress(blob[2:], -15)
+        _count, values, _consumed = _parse_blob(raw, tags)
+        eid = values[PR_ENTRYID]
+        self.assertEqual(len(eid), USR_ENTRYID_LEN)
+        self.assertEqual(eid[0x04:0x14], UEID_PROVIDER_UID)
+        self.assertEqual(struct.unpack_from("<II", eid, 0x14), (2, 1))
+        self.assertEqual(eid[0x1C:].split(b"\x00", 1)[0], b"Steve Jobs")
+        self.assertEqual(eid[0x77:].split(b"\x00", 1)[0], b"sjobs")
+        self.assertEqual(values[0x3002001E], "MSN")
+        self.assertEqual(values[PR_SEARCH_KEY], b"MSN:SJOBS\x00")
+
     def test_row_address_is_the_member_id_not_the_display_name(self):
         # PR_EMAIL_ADDRESS is the field the sheet labels "Member ID:", and it is
         # what a mail recipient resolved out of the address book carries — so a
@@ -596,7 +619,10 @@ class TestMemberLookup(unittest.TestCase):
         _count, values, _pos = _parse_blob(blob, _SHEET_TAGS)
         self.assertEqual(values[0x0FFE0003], 6)  # MAPI_MAILUSER
         self.assertEqual(values[0x39000003], 0)  # DT_MAILUSER
-        self.assertEqual(values[0x3002001E], "MOS")
+        # The address types MOSABP32 knows are in one block at 0x7F4E8010:
+        # UNKNOWN, MSNINET, MSNLIST, MSN. There is no "MOS" string in the DLL,
+        # and MSN is the one MOSRXP32's transport claims delivery for.
+        self.assertEqual(values[0x3002001E], "MSN")
 
     def test_lookup_is_case_insensitive(self):
         self.assertEqual(

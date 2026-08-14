@@ -136,9 +136,30 @@ MOS_WORK_COUNTRY = 0x60120003  # "Country:" (ctrl 316)
 MAPI_MAILUSER = 6
 DT_MAILUSER = 0
 
-# PR_ADDRTYPE for an MSN member, the address type MOSABP32 registers as its AB
-# provider prefix.
-MOSABP_ADDRTYPE = "MOS"
+# PR_ADDRTYPE for an MSN member. The address types MOSABP32 knows sit in one
+# block at 0x7F4E8010 — `UNKNOWN`, `MSNINET`, `MSNLIST`, `MSN` — alongside the
+# `':'` search-key separator and the provider MAPIUID. A member is `MSN`, which
+# is also what MOSRXP32 stamps as its own sender addrtype and one of the five
+# types its transport claims delivery for (docs/MOSRXP.md §7).
+MOSABP_ADDRTYPE = "MSN"
+
+# `_usr_entryid` — a member's address book entry id, the structure
+# `MOSMUTIL!HrBuildUeid` (0x7E991036) builds. 184 bytes; same shape MOSRXP
+# answers GetConnInfo with.
+USR_ENTRYID_LEN = 0xB8
+USR_ENTRYID_VERSION = 2
+UEID_DISPLAY_NAME_OFFSET = 0x1C
+UEID_DISPLAY_NAME_MAX = 0x5B
+UEID_MEMBER_NAME_OFFSET = 0x77
+UEID_MEMBER_NAME_MAX = 0x41
+# EIDTYPE 1 keys the id on the member name at +0x77 — the form
+# `HrGetUserDetails` routes to method 2. Type 4 is the account-handle form.
+EIDTYPE_MEMBER_NAME = 1
+
+# PR_SEARCH_KEY is `ADDRTYPE:ADDRESS`, separator from 0x7F4E8014, uppercased by
+# MAPI convention.
+PR_ENTRYID = 0x0FFF0102
+PR_SEARCH_KEY = 0x300B0102
 
 # ABCONTAINER, the 0xDC-byte record method 0 answers with. Offsets are the ones
 # MOSABP32 reads; see build_ab_container. The two strings are bounded by the
@@ -311,6 +332,35 @@ def build_ab_container(container):
     return bytes(blob)
 
 
+def build_usr_entryid(display_name, member_name, eidtype=EIDTYPE_MEMBER_NAME):
+    """One member's `_usr_entryid`, as `MOSMUTIL!HrBuildUeid` builds it.
+
+    A resolved recipient is addressed by this: `PR_ENTRYID` is what MAPI hands
+    back to the provider to open the member, so a row that answers it with an
+    empty value resolves to nothing and Check Names reports the name as
+    unrecognised.
+
+    Both names are truncated one short of their field so the terminator always
+    fits — `HrBuildUeid` uses `strncpy`, which writes no NUL when the source
+    fills the field exactly.
+    """
+    blob = bytearray(USR_ENTRYID_LEN)
+    blob[0x04:0x14] = UEID_PROVIDER_UID
+    struct.pack_into("<II", blob, 0x14, USR_ENTRYID_VERSION, eidtype)
+    for offset, limit, text in (
+        (UEID_DISPLAY_NAME_OFFSET, UEID_DISPLAY_NAME_MAX, display_name),
+        (UEID_MEMBER_NAME_OFFSET, UEID_MEMBER_NAME_MAX, member_name),
+    ):
+        encoded = text.encode("cp1252", errors="replace")[: limit - 1]
+        blob[offset : offset + len(encoded)] = encoded
+    return bytes(blob)
+
+
+def build_search_key(member_id):
+    """`MSN:<MEMBER ID>` — the `ADDRTYPE:ADDRESS` form, uppercased."""
+    return f"{MOSABP_ADDRTYPE}:{member_id}".upper().encode("cp1252", errors="replace") + b"\x00"
+
+
 def build_cont_entryid(container_id):
     """The 0x20-byte `_cont_entryid` for a container.
 
@@ -353,9 +403,9 @@ def build_query_ww_rows_reply_payload(payload):
     members = _match_members(name, row_limit)
     blob = build_ww_row_blob(members, tags)
     log.info(
-        "mosabp_query_ww_rows name=%r tag_count=%d rows=%d blob_bytes=%d",
+        "mosabp_query_ww_rows name=%r tags=%s rows=%d blob_bytes=%d",
         name,
-        len(tags),
+        [f"0x{t:08X}" for t in tags],
         len(members),
         len(blob),
     )
@@ -407,9 +457,9 @@ def build_query_restrict_rows_reply_payload(payload):
     members = _match_restriction(restriction, row_limit)
     blob = build_ww_row_blob(members, tags)
     log.info(
-        "mosabp_query_restrict_rows terms=%s tag_count=%d rows=%d blob_bytes=%d",
+        "mosabp_query_restrict_rows terms=%s tags=%s rows=%d blob_bytes=%d",
         [(f"0x{tag:08X}", value) for _relop, tag, value in restriction],
-        len(tags),
+        [f"0x{t:08X}" for t in tags],
         len(members),
         len(blob),
     )
@@ -703,6 +753,11 @@ _TAG_VALUES = {
     PR_OBJECT_TYPE: lambda _p: MAPI_MAILUSER,
     PR_DISPLAY_TYPE: lambda _p: DT_MAILUSER,
     PR_ADDRTYPE: lambda _p: MOSABP_ADDRTYPE,
+    # An address book row is what a recipient is built from, so these two carry
+    # real values rather than the empty default: without an entry id there is
+    # nothing to address, and Check Names rejects the name.
+    PR_ENTRYID: lambda p: build_usr_entryid(p.display_name, p.member_id),
+    PR_SEARCH_KEY: lambda p: build_search_key(p.member_id),
     PR_DISPLAY_NAME: lambda p: p.display_name,
     PR_EMAIL_ADDRESS: lambda p: p.member_id,
     MOS_FIRST_NAME: lambda p: p.first_name,

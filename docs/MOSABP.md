@@ -399,6 +399,29 @@ for "whatever a person is called", so both the member id and the display name
 have to answer to it, and an ambiguous prefix returns every candidate for the
 client to disambiguate.
 
+### Requested tags
+
+Seven, observed live 2026-08-14:
+
+```
+0x3001001E  PR_DISPLAY_NAME
+0x3003001E  PR_EMAIL_ADDRESS
+0x6000001E  city
+0x6001001E  state
+0x0FFE0003  PR_OBJECT_TYPE
+0x39000003  PR_DISPLAY_TYPE
+0x3002001E  PR_ADDRTYPE
+```
+
+**`PR_ENTRYID` is not among them.** The provider builds the recipient's entry
+id itself from the row, the same `HrBuildUeid(ueid, EIDTYPE=1, …)` call the BBS
+path uses — so a resolution turns on the display name, the address and the
+addrtype being right, not on the server supplying an entry id.
+
+`PR_ADDRTYPE` must be **`MSN`**. It is the type MOSRXP32's transport claims
+delivery for (docs/MOSRXP.md §7); a recipient carrying anything else resolves
+to no transport.
+
 ## 6. The Member Properties sheet
 
 `FUN_7F4D1170` runs `PropertySheetA` with caption string `0x468` and three
