@@ -342,6 +342,9 @@ chunk := [cbCompressed:u32] [compressed bytes]
 Each chunk decompresses to at most `cbChunkMax` bytes through
 `MOSMUTIL!HrDecompress`, and the decompressor is reset between chunks.
 
+That codec is **MSZIP** — `CK` followed by a raw deflate stream. See
+docs/MOSABP.md §5.5 for the identification.
+
 ---
 
 ## 6. Header blob (method 5)

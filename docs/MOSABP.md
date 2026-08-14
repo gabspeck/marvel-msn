@@ -63,6 +63,7 @@ Read off the immediate each member pushes before `HrGetMethod`:
 
 | # | `CAbConnection` member |
 |---:|---|
+| 0 | `HrGetAbContainers` |
 | 1 | `HrGetValidationList` |
 | 2 | `HrGetUserDetails` — member-name form |
 | 9 | `HrCloseTable` |
@@ -73,8 +74,11 @@ Read off the immediate each member pushes before `HrGetMethod`:
 | 14 | `HrEnumDistList` |
 | 15 | `HrQueryRowsMore` |
 
-`HrGetAbContainers` (`0x7F4D4423`) also calls `HrGetMethod`, with a method number
-that is not a `push imm8`; not enumerated here.
+`HrGetAbContainers` (`0x7F4D4423`) pushes its method number as a `push 0`
+folded into the call setup rather than a `push imm8`, which is why it reads as
+absent from the list above. It is method **0**, confirmed live 2026-08-14: the
+address book's first request on the pipe is `class=0x01 selector=0x00` with
+payload `83 83 85`.
 
 ---
 
@@ -132,6 +136,61 @@ FUN_7F4D1AE5();   // new CAbConnection(MAPIAllocateBuffer, MAPIAllocateMore,
 
 ---
 
+## 3.5 `GetAbContainers` (method 0)
+
+The address book's first request on the pipe. No send params.
+
+```
+request:  83 83 85
+reply:    83 [status:u32] 83 [cContainers:u32] 87 86 [cContainers × ABCONTAINER]
+```
+
+`HrGetAbContainers` (`0x7F4D4423`) allocates `cContainers * 0xDC` from the
+count dword and memcpys the blob whole, so the count and the blob length have
+to agree — a short blob leaves the tail of the last record reading
+uninitialised heap.
+
+### `ABCONTAINER`
+
+0xDC (220) bytes. Offsets are the ones MOSABP32 reads:
+
+| Offset | Size | Contents | Read by |
+|---:|---:|---|---|
+| `0x00` | 4 | container id | all three sites, as the lookup key |
+| `0x04` | 4 | never read | — |
+| `0x08` | 0x41 | display name | `FUN_7F4DA4E6`, → `PR_DISPLAY_NAME` |
+| `0x49` | 0x87 | second string | `FUN_7F4DA522`, → tag `0x6013001E` |
+| `0xD0` | 4 | content count | `FUN_7F4DA2E6`, → `PR_CONTENT_COUNT` |
+| `0xD4` | 4 | never read | — |
+| `0xD8` | 4 | display type | `FUN_7F4DA2E6`, → `PR_DISPLAY_TYPE` |
+
+The string field widths are bounded by the gap to the next field the client
+reads, not by anything that states a length.
+
+What the `0x6013001E` string is meant to hold is unidentified — nothing in
+MOSABP32 reads it beyond handing it to the caller, and `FUN_7F4D39CB`
+substitutes an empty string when the lookup misses.
+
+`FUN_7F4DA2E6` turns each record into one container-table row of seven
+properties: `PR_DISPLAY_NAME`, `PR_ENTRYID` (a `_cont_entryid`, cb 0x20),
+`PR_CONTENT_COUNT`, `PR_OBJECT_TYPE` = 4 `MAPI_ABCONT`, `PR_DISPLAY_TYPE`,
+`PR_CONTAINER_FLAGS` = `0x29` (`AB_RECIPIENTS | AB_UNMODIFIABLE |
+AB_NOT_DEFAULT`) and `PR_INSTANCE_KEY`.
+
+### `_cont_entryid`
+
+0x20 bytes, built client-side by `MOSMUTIL!HrBuildCeid` (`0x7E99108C`) from the
+record's id — this server never puts one on the wire, but `FUN_7F4D39CB` keys
+the container's own GetProps on it and reads the id back from `+0x1C`.
+
+| Offset | Size | Contents |
+|---:|---:|---|
+| `0x00` | 4 | `abFlags`, zeroed |
+| `0x04` | 16 | provider MAPIUID, the same one `_usr_entryid` carries |
+| `0x14` | 4 | `2` — version |
+| `0x18` | 4 | `0` — type |
+| `0x1C` | 4 | container id |
+
 ## 4. `GetUserDetails` (method 2)
 
 ### Request
@@ -145,8 +204,8 @@ object:
 | `+0x28 PackSendDword(tags->cValues)` | `03 <cValues:u32>` |
 | `+0x24 PackSendBytes(tags->aulPropTag, cValues*4)` | `04 <cb> <cValues × u32>` |
 | `+0x18 PackReceiveDword(&status)` | `83` |
-| `+0x40` (set stream flag) | — |
-| `+0x48 Dispatch(&iterator)` | `85` |
+| `+0x40` (set stream flag) | `85` |
+| `+0x48 Dispatch(&iterator)` | — |
 
 ```
 class=<selector of 00028B22> selector=0x02
@@ -244,6 +303,54 @@ never exercised.
 
 ---
 
+## 5.5 `QueryWWRows` (method 12)
+
+The member list behind a container. `HrQueryWWRows` (`0x7F4D4A18`):
+
+```
+request:  03 <handle:u32>          table handle, 0 to open one
+          04 <cb> <name + NUL>     prefix to match, empty lists the container
+          03 <u32>                 unidentified
+          03 <cRows:u32>           rows wanted — the client asks 45
+          03 <cValues:u32>
+          04 <cb> <cValues × u32>  requested tags
+          83 83 83 83 83 85
+
+reply:    83 [status] 83 [p6] 83 [p9] 83 [cRows] 83 [p8] 87 86 [blob]
+```
+
+Reply dword order is the five `+0x18` call sites in sequence. Slot 1 is the
+status — `CMP [ESP+0x28], 0` right after the wait, returned verbatim as the
+HRESULT on a mismatch — and slot 4 is the row count that sizes the rowset and
+gates decompression. Slots 2, 3 and 5 are the caller's `param_6`, `param_9` and
+`param_8` out-params, in that order; what they carry is unidentified. Serving 0
+for all three is consistent with a result delivered in one page with no table
+left open, and the client accepts it.
+
+### The row blob is MSZIP
+
+`HrUncompressWWData` (`0x7F4D53A9`) hands the blob straight to
+`MOSMUTIL!HrDecompress` with no uncompressed path, so even one row has to be
+compressed. The codec is **MSZIP**: `0x7E994D10` rejects anything whose first
+two bytes are not `CK`, and MOSMUTIL carries all three deflate tables — the
+code-length order at `0x7E99C4C70`, the length and distance bases at
+`0x7E99C4CE8` and `0x7E99C4D68`. `CK` followed by a raw deflate stream is what
+it decodes, which `zlib` produces directly.
+
+The decompressed buffer is a fixed **27000** bytes (`HrUncompressWWData`
+allocates it before inflating), so the uncompressed rows have to fit it.
+`FUN_7E993620` also rejects the call outright when the *compressed* length
+exceeds that buffer by more than 7.
+
+Decompressed, the blob is one §5 property blob per row, concatenated —
+`HrBuildWWSrowset` (`0x7F4D52F8`) walks it with the same `ParsePropValueBlob`
+(`0x7F4DD770`) method 2 uses, so the no-gaps rule applies to every row. At a
+row count of 0 it allocates an empty rowset and reads nothing, so an empty
+result needs no blob at all.
+
+The same codec sits under MOSRXP's compressed streams (docs/MOSRXP.md §5),
+which is what attachment bodies ride.
+
 ## 6. The Member Properties sheet
 
 `FUN_7F4D1170` runs `PropertySheetA` with caption string `0x468` and three
@@ -330,7 +437,10 @@ status text. Its request and reply shapes are RE'd only as far as
 `VALLIST` enum and the per-row layout for each `kind` are not pinned.
 
 `UpdateUserDetails` (11) backs an editable sheet — the pages here are read-only
-so nothing sends it. `HrGetAbContainers`, `HrQueryWWRows`,
-`HrQueryRestrictRows`, `HrQueryRowsMore`, `HrEnumDistList` and `HrCloseTable`
-belong to the MAPI address-book browse/lookup surface, reached through
-`ABProviderInit` rather than this sheet.
+so nothing sends it. `HrQueryWWRows`, `HrQueryRestrictRows`, `HrQueryRowsMore`,
+`HrEnumDistList` and `HrCloseTable` belong to the MAPI address-book
+browse/lookup surface, reached through `ABProviderInit` rather than this sheet.
+
+`HrQueryRestrictRows` (13), `HrQueryRowsMore` (15) and `HrEnumDistList` (14)
+share `QueryWWRows`' compressed row blob (§5.5) and are unserved; 13 adds a
+`CSRestriction` to the request, 15 pages an open table.
