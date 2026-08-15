@@ -25,6 +25,18 @@ _FRANCE = _REPO_ROOT / "resources" / "titles" / "FRANCE.M14"
 _MVDOC = _REPO_ROOT / "resources" / "titles" / "MVDOC.M14"
 
 
+def _mvp_sections(mvpfile: bytes) -> dict[str, list[str]]:
+    """Split MVP text into `{section: [line, ...]}`, as ParseMvpText does."""
+    sections: dict[str, list[str]] = {}
+    current: list[str] = []
+    for line in mvpfile.decode("cp1252").splitlines():
+        if line.startswith("[") and line.endswith("]"):
+            current = sections.setdefault(line[1:-1], [])
+        elif line:
+            current.append(line)
+    return sections
+
+
 def _read_blob(payload: bytes, offset: int) -> tuple[bytes, int]:
     size = struct.unpack_from("<H", payload, offset)[0]
     offset += 2
@@ -222,42 +234,59 @@ class TestM14Loader(unittest.TestCase):
         self.assertEqual(entry_count, 6)
         self.assertEqual(offset + 4 + entry_bytes, len(payload))
 
-        mvpfile = build_m14_mvpfile(title)
+        sections = _mvp_sections(build_m14_mvpfile(title))
+        self.assertEqual(list(sections), ["CONFIG", "PANES", "POPUPS", "WINDOWS"])
+        self.assertEqual(sections["CONFIG"], [])
+        self.assertEqual(sections["PANES"], [])
         self.assertEqual(
-            mvpfile.splitlines()[:7],
-            [b"[CONFIG]", b"", b"[PANES]", b"", b"[POPUPS]", b"", b"[WINDOWS]"],
-        )
-        self.assertEqual(
-            mvpfile.splitlines()[7],
-            b'main="Employee Handbook Example",(0,0,640,480,1),,,'
-            b"(255,255,255),(255,255,192)",
+            sections["WINDOWS"],
+            [
+                'main="Employee Handbook Example",(0,0,640,480,1),,,'
+                "(255,255,255),(255,255,192)"
+            ],
         )
 
-    def test_mvpfile_colour_order_matches_the_rtm_window_record(self):
-        """The last two `[WINDOWS]` colours are SR then NSR.
+    def test_mvpfile_carries_the_same_records_as_the_rtm_body(self):
+        """`[WINDOWS]` and `[POPUPS]` restate sections 6 and 8.
 
-        `MOSVIEW!ParseMvpWindowLine @ 0x7F3C8B6C` stores them at
-        WindowScaffoldRecord `+0x7C` and `+0x78`, the reverse of the
-        `+0x78`/`+0x7C` order `_build_sec06` writes for RTM.
+        The two window colours are authored scrolling-first — the reverse
+        of the `+0x78`/`+0x7C` order `_build_sec06` writes — because
+        `MOSVIEW!ParseMvpWindowLine @ 0x7F3C8B6C` stores field 5 at
+        `+0x7C` and field 6 at `+0x78`.
         """
         title = load_m14(_FRANCE)
         non_scroll, scroll = title.pane_backgrounds
-
-        window = build_m14_mvpfile(title).splitlines()[7].decode()
-        groups = re.findall(r"\(([^)]*)\)", window)
+        popup_background, popup_window = title.popup_pane
 
         def rgb(value: int) -> str:
             return f"{value & 0xff},{value >> 8 & 0xff},{value >> 16 & 0xff}"
 
-        self.assertEqual(groups[-2:], [rgb(scroll), rgb(non_scroll)])
+        sections = _mvp_sections(build_m14_mvpfile(title))
+        window = sections["WINDOWS"][0]
+        self.assertEqual(
+            re.findall(r"\(([^)]*)\)", window)[-2:],
+            [rgb(scroll), rgb(non_scroll)],
+        )
+        self.assertEqual(
+            sections["POPUPS"],
+            [f"{popup_window}=,({rgb(popup_background)})"],
+        )
 
-        record = lower_m14_to_payload(title, "4")
-        offset = 2 + struct.unpack_from("<H", record, 0)[0] + 2
-        offset += 2 + struct.unpack_from("<H", record, offset)[0]
-        sec06, _ = _read_blob(record, offset)
+        body = lower_m14_to_payload(title, "4")
+        offset = 2 + struct.unpack_from("<H", body, 0)[0] + 2
+        sec08, offset = _read_blob(body, offset)
+        sec06, _ = _read_blob(body, offset)
         self.assertEqual(
             struct.unpack_from("<II", sec06, 0x78),
             (non_scroll, scroll),
+        )
+        self.assertEqual(
+            sec08[0x02:0x0B].rstrip(b"\x00").decode(),
+            popup_window,
+        )
+        self.assertEqual(
+            struct.unpack_from("<I", sec08, 0x1B)[0],
+            popup_background,
         )
 
     def test_native_display_stream_is_preserved_in_case1_cache_record(self):

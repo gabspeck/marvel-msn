@@ -1059,6 +1059,18 @@ def _build_section0(m14: LoadedM14) -> bytes:
     return bytes(header) + face_table + descriptors + b"\x00" * (4 * len(m14.font_faces))
 
 
+def _popup_pane_name(window: str) -> str:
+    """The `PopupPaneRecord` name, capped to what its 9-byte field holds.
+
+    An unprefixed property names the title's main window, authored as
+    window 0. The name must stay non-empty — see `_parse_topic_properties`.
+    `ParseMvpPopupLine @ 0x7F3C8A08` enforces the same cap on the MVP
+    side, discarding any line whose name reaches 9 characters. cp1252 is
+    single-byte, so capping characters caps bytes.
+    """
+    return (window or "0")[: _SEC08_NAME_SIZE - 1]
+
+
 def _build_sec08(m14: LoadedM14) -> bytes:
     """Project the authored `BackColorPopup` into one PopupPaneRecord.
 
@@ -1082,10 +1094,7 @@ def _build_sec08(m14: LoadedM14) -> bytes:
         return b""
     background, window = popup
     record = bytearray(_SEC08_RECORD_SIZE)
-    # An unprefixed property names the title's main window, authored as
-    # window 0. The name must stay non-empty — see _parse_topic_properties.
-    name = (window or "0").encode("cp1252", errors="replace")
-    name = name[:_SEC08_NAME_SIZE - 1]
+    name = _popup_pane_name(window).encode("cp1252", errors="replace")
     record[0x02 : 0x02 + len(name)] = name
     struct.pack_into("<iiii", record, 0x0B, -1, -1, -1, -1)
     struct.pack_into("<I", record, 0x1B, background)
@@ -1184,18 +1193,24 @@ def lower_m14_to_osr2_payload(m14: LoadedM14, deid: str) -> bytes:
 
 
 def build_m14_mvpfile(m14: LoadedM14) -> bytes:
-    """Project the M14 main-window properties into OSR2 MVP text.
+    """Project the M14 window and popup properties into OSR2 MVP text.
+
+    Carries the same two records the RTM body carries in sections 6 and
+    8. `ParseMvpText @ 0x7F3C8075` turns each section back into the byte
+    layout `_build_sec06` and `_build_sec08` write directly.
 
     `[WINDOWS]` field order is pinned at `MOSVIEW!ParseMvpWindowLine @
-    0x7F3C8B6C` (OSR2 build): caption, outer rect, window aspect, window
-    background, scrolling-pane colour, non-scrolling-pane colour. The
-    last two land on WindowScaffoldRecord `+0x7C` and `+0x78`, the same
-    slots `_build_sec06` fills on the RTM path.
+    0x7F3C8B6C`: caption, outer rect, window aspect, window background,
+    scrolling-pane colour, non-scrolling-pane colour. The last two land
+    on WindowScaffoldRecord `+0x7C` and `+0x78`.
 
-    An omitted field leaves the `-1` that `InitMvpWindowRecord @
-    0x7F3C835C` wrote, which `CreateMosViewWindowHierarchy` renders as
-    `GetSysColor(COLOR_WINDOW)`. Only the fields the title authors are
-    emitted.
+    `[POPUPS]` is `name=rect,colour` per `ParseMvpPopupLine @
+    0x7F3C8A08`; an empty rect defaults the popup to the container's
+    client area, as `_build_sec08`'s `-1` quad does.
+
+    An omitted field leaves the `-1` the record initialiser wrote, which
+    `CreateMosViewWindowHierarchy` renders as `GetSysColor(COLOR_WINDOW)`.
+    Only the fields the title authors are emitted.
     """
 
     def color(value: int) -> str:
@@ -1209,9 +1224,19 @@ def build_m14_mvpfile(m14: LoadedM14) -> bytes:
         f'main="{caption}",(0,0,640,480,1),,,'
         f"{color(scroll)},{color(non_scroll)}"
     ).rstrip(",")
+
+    popups = ""
+    if m14.popup_pane is not None:
+        background, popup_window = m14.popup_pane
+        # A popup authored as inherit carries nothing the record does not
+        # already default to, and `name=` with an empty value half is a
+        # line ParseMvpPopupLine discards. Emit neither.
+        if colour := color(background):
+            popups = f"{_popup_pane_name(popup_window)}=,{colour}\r\n"
+
     return (
         "[CONFIG]\r\n\r\n"
         "[PANES]\r\n\r\n"
-        "[POPUPS]\r\n\r\n"
+        f"[POPUPS]\r\n{popups}\r\n"
         f"[WINDOWS]\r\n{window}\r\n"
     ).encode("cp1252", errors="replace")

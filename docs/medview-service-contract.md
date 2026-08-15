@@ -297,8 +297,10 @@ The two pane colours are therefore authored **scrolling first**, the
 reverse of their `+0x78`/`+0x7C` order in the record.
 
 `[POPUPS]`: `name=rect,color` → `PopupPaneRecord` name `+0x02`, rect
-`+0x0B`, colour `+0x1B`. Both fields are optional. A popup named `MAIN`
-is discarded.
+`+0x0B`, colour `+0x1B`. Either field may be empty, but not both:
+`SplitMvpAssignment @ 0x7F3C82F4` discards a line whose value half is
+empty, so `name=,(r,g,b)` is the shortest colour-only form. A popup named
+`MAIN` is discarded, and so is one whose name reaches 9 characters.
 
 `[PANES]`: `name=rect,color,(flag),(scrollMode)` → name `+0x0C`, rect
 `+0x15`, colour `+0x25`, scroll mode `+0x29`, rect mode flag `0x08` at
