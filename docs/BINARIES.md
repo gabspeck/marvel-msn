@@ -10,6 +10,23 @@ Legend:
 - **Ghidra status** — *Annotated* (imported to `MSN95.gpr` with RE notes), *Imported* (raw, no notes), *Not imported*.
 - **Exports** — selective; max ~12 per entry, prioritising named entries invoked from other modules, framework hooks (`DllGetClassObject`, `DllMain`), and anything already reverse-engineered.
 
+## The second client build
+
+A later MSN client — build `5900`, shipped with Windows 95 OSR2 — is in
+`MSN95.gpr` under the `osr2/` folder, 44 PE modules imported from
+`/var/share/drop/osr2/The Microsoft Network/`. Every entry below describes
+the build at the project root; nothing in `osr2/` is byte-identical to its
+root counterpart, so a finding pinned against one build has to be re-checked
+against the other before it is treated as shared. Divergences found so far:
+
+- `MOSVIEW.EXE` (80 KB vs 54 KB) reads window, pane, and popup layout from
+  the `|MVPFILE` HFS baggage instead of the title body's sections 6/7/8 —
+  see `docs/medview-service-contract.md` "The OSR2 MVP file".
+- `MVTTL14C.DLL` (100 KB vs 76 KB) splits the `TitleOpen` reply into two
+  independently cached dynamic streams.
+- OSR2 sends 92 attach capability bytes where the root build sends 12; the
+  server uses that to pick the per-session title dialect.
+
 ---
 
 ## 1. Protocol & Transport Core
