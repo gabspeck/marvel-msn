@@ -609,9 +609,10 @@ server locates the display whose character range contains the offset
 and returns its TOPICPOS as the selector-`0x06` va. For example,
 France hash `0x6348` maps to `va=0x4696, addr=0x8338`.
 
-Each selector-`0x15` reply carries the matching M14 display record. The
-server re-encodes its paragraph fields as a cache TLV and copies its
-native control and text streams. The widened item prefix preserves
+Each selector-`0x15` reply carries the matching M14 record, of which
+two types paint: display records (type `0x20`) and table records (type
+`0x23`). The server re-encodes their paragraph fields as a cache TLV
+and copies their native control and text streams. The widened item prefix preserves
 `TopicLength` at the parsed slot's `+0x1E`; `MVFindSlotForY` requires a
 nonzero value before mouse hit-testing the slot. Companion offsets
 `+0x14` and `+0x18`
@@ -623,6 +624,42 @@ M14 paragraph flag `0x0001` gates the metric-mode value encoded at
 cache TLV offset `+0x12`. Both sample titles set it to `1`, selecting
 the client's 1440-unit twips scale. Omitting this value selects the
 144-unit scale and expands paragraph spacing and indents by 10.
+
+A table record holds one row. Its LinkData1 is `TopicSize`,
+`TopicLength`, `NumberOfColumns`, `TableType`, a `MinTableWidth` short
+for the variable-width types `0` and `2`, then a width/gap short pair
+per column. Cells follow: `short column`, a byte that is `1` in every
+sampled cell, a compressed long holding the cell's byte size, then the
+Paragraphinfo and control run a display record carries. A `column` of
+`-1` closes the record; the size resyncs the walk on every cell
+boundary, which is what pins the layout — across the three sample
+titles every cell lands exactly on the next header and every record
+ends exactly on the terminator.
+
+`POPUPS.RTF` in the Magazine sample sources is the authoring side of
+the France popup topics. Its `\trowd \trgaph108\trleft90 \cellx3870`
+compiles to the pair `(3618, 198)` and the caves popup's `\trgaph108
+\cellx3960` to `(3798, 108)`: the second short is `\trleft + \trgaph`,
+the first the column width left of `\cellx`. Its cell paragraphs carry
+`\fi-360\li432\ri72\sb120`, which the record repeats verbatim, so
+paragraph metrics are RTF twips. Each bulleted list in the samples is a
+one-column type-`3` table whose cells hold a Wingdings bullet, a `0x83`
+tab and the item text. The France rows declare no tab stop and leave
+the tab to the engine's default; the HANDBOOK.M14 rows declare one at
+their own left indent.
+
+One chunk carries one `MVDecodeTopicItemPrefix` tag, so a row's cells
+lower into a single widened text item: each non-final cell's `0xFF`
+becomes `0x82`, which ends that paragraph while consuming the one text
+run the `0xFF` it replaces consumed. Rows after a table's first open
+with a cell whose control run is a bare `0xFF` over an empty text run.
+Standalone Media Viewer paints nothing for it — the France "Other
+Castles" popup holds a uniform row pitch across all seven rows and only
+the first row lacks the cell — so the server drops it along with the
+run it consumed; carrying it as a `0x82` would insert a blank line per
+row. The table's column geometry has no counterpart in the packed text
+header and is dropped: the cell paragraphs' hanging indent and tab
+carry the bullet layout.
 Prev/next cache tokens name neighboring display records in the topic;
 selector `0x16` returns those records. A topic edge names the token one
 below (or above) its own TOPICPOS. TOPICLINK records are at least 21

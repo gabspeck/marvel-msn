@@ -434,3 +434,64 @@ class TestM14Loader(unittest.TestCase):
         self.assertEqual(fields[0x18], 60)
         self.assertEqual(fields[0x1C], 72)
         self.assertEqual(fields[0x1E], 72)
+
+    def test_other_castles_popup_serves_its_table_rows(self):
+        """The popup's bullet list is seven table records, not displays.
+
+        Media View compiles each bullet as a one-column table whose cell
+        holds the Wingdings bullet, a tab and the castle name. Skipping
+        record type 0x23 leaves the popup with only its heading and lead
+        sentence, which is what MOSVIEW painted.
+        """
+        title = load_m14(_FRANCE)
+        self.assertIsNotNone(title)
+        popup = [
+            title.display_at(topic_pos)
+            for topic_pos in (0x3E1, 0x41D, 0x487, 0x4D3, 0x537, 0x599, 0x5FA, 0x65F, 0x6C1)
+        ]
+        self.assertNotIn(None, popup)
+        self.assertEqual(
+            [row.text_data for row in popup[2:]],
+            [
+                b"\x00n\x00\x00Queribus\x00\x00",
+                b"\x00n\x00\x00Monts\xe9gur\x00\x00",
+                b"\x00n\x00\x00Aguilar\x00\x00",
+                b"\x00n\x00\x00Termes\x00\x00",
+                b"\x00n\x00\x00Puylaurens\x00\x00",
+                b"\x00n\x00\x00Puivert\x00\x00",
+                b"\x00n\x00\x00Carcassonne\x00\x00",
+            ],
+        )
+
+        # Bullet font, tab, body font, end of paragraph. The row after
+        # the first drops the leading do-nothing cell instead of ending
+        # its empty paragraph, so both rows reach the wire identically.
+        for row in popup[2:]:
+            self.assertEqual(row.control_stream, bytes.fromhex("8004008380020082ff"))
+            self.assertEqual(
+                row.fields_dict(),
+                {0x12: 1, 0x16: 120, 0x1C: 432, 0x1E: 72, 0x20: -360},
+            )
+
+        # The rows join the topic's chain between the lead sentence and
+        # the trailing display, so HfcNextPrevHfc walks the whole popup.
+        self.assertEqual(title.display_neighbors(0x41D), (0x3E1, 0x487))
+        self.assertEqual(title.display_neighbors(0x487), (0x41D, 0x4D3))
+        self.assertEqual(title.display_neighbors(0x6C1), (0x65F, 0x727))
+
+    def test_table_cells_join_as_paragraphs_of_one_item(self):
+        """A row's later cells become paragraphs of the same text item.
+
+        One chunk carries one `MVDecodeTopicItemPrefix` tag, so a row's
+        cells share it. Each non-final cell's `0xFF` becomes `0x82`,
+        which ends the paragraph and consumes the one text run the
+        `0xFF` it replaces consumed — this record's two cells (`80 06 00
+        81 82 ff` and `82 ff`) still spend all six of its runs.
+        """
+        title = load_m14(_HANDBOOK)
+        self.assertIsNotNone(title)
+        row = title.display_at(0x8E1B)
+        self.assertIsNotNone(row)
+        self.assertEqual(row.control_stream, bytes.fromhex("800600818282" "82ff"))
+        self.assertEqual(row.text_data.count(b"\x00"), 6)
+        self.assertEqual(row.fields_dict(), {0x12: 1})

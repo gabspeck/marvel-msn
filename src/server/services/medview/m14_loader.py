@@ -34,6 +34,11 @@ _TOPIC_HEADER = 0x02
 _TOPIC_DISPLAY = 0x20
 _TOPIC_TABLE = 0x23
 
+_TABLE_VARIABLE_WIDTH = (0, 2)
+_TABLE_END_OF_CELLS = -1
+_CONTROL_END = 0xFF
+_CONTROL_END_PARAGRAPH = 0x82
+
 _PARA_METRIC_MODE = 0x0001
 _PARA_SPACE_ABOVE = 0x0002
 _PARA_SPACE_BELOW = 0x0004
@@ -55,7 +60,7 @@ _PHRASE_COUNT_OFFSET = 2
 _PHRASE_TEXT_SIZE_OFFSET = 6
 _PHRASE_TABLE_OFFSET = 0x28
 _COLOR_INHERIT = 0xFFFFFFFF
-_CACHE_PROJECTION_VERSION = 2
+_CACHE_PROJECTION_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -841,6 +846,116 @@ def _parse_display(
     )
 
 
+def _parse_table_cells(
+    data1: bytes,
+    pos: int,
+) -> list[tuple[dict[int, int], tuple[tuple[int, int], ...], bytes]]:
+    """Split a table record's cells into (fields, tab stops, control run).
+
+    Each cell is `short column`, a byte that is `1` in every cell of the
+    sample titles, a compressed long holding the cell's byte size, then
+    the same Paragraphinfo + control run a display record carries. A
+    `column` of `-1` closes the record. The size lets the walk resync on
+    every cell boundary, which is what proves the layout: across
+    FRANCE.M14, HANDBOOK.M14 and MVDOC.M14 every cell lands exactly on
+    the next header and every record ends exactly on the terminator.
+    """
+    cells: list[tuple[dict[int, int], tuple[tuple[int, int], ...], bytes]] = []
+    while True:
+        if pos + 2 > len(data1):
+            raise ValueError("M14 table record ends without a cell terminator")
+        column = struct.unpack_from("<h", data1, pos)[0]
+        pos += 2
+        if column == _TABLE_END_OF_CELLS:
+            break
+        pos += 1
+        size, pos = _compressed_long(data1, pos)
+        body = data1[pos : pos + size]
+        if len(body) != size:
+            raise ValueError(f"M14 table cell of {size} bytes overruns the record")
+        pos += size
+        fields, tab_stops, body_pos = _parse_paragraph(body, 0)
+        control = body[body_pos:]
+        if not control or control[-1] != _CONTROL_END:
+            raise ValueError("M14 table cell lacks a control terminator")
+        cells.append((fields, tab_stops, control))
+    if pos != len(data1):
+        raise ValueError("M14 table record has trailing bytes after its terminator")
+    return cells
+
+
+def _parse_table(
+    topic_pos: int,
+    address: int,
+    data1: bytes,
+    data2: bytes,
+    non_scroll: int,
+    scroll: int,
+) -> M14DisplayRecord:
+    """Lower one table record into a single online display record.
+
+    A table record holds the cells of one row, each its own paragraph.
+    The online cache keys one item per TOPICPOS and `MVWalkLayoutSlots`
+    dispatches one `MVDecodeTopicItemPrefix` tag per chunk, so the row
+    becomes one widened text item: cell controls concatenate with each
+    non-final `0xFF` rewritten to `0x82`, which ends the paragraph and
+    consumes one text run exactly as the `0xFF` it replaces did, keeping
+    the control and text walkers in step.
+
+    Every row after a table's first opens with a cell whose control run
+    is a bare `0xFF` over an empty text run. Media View paints nothing
+    for it — the reference render of the France "Other Castles" popup
+    holds a uniform row pitch across all seven rows, and only the first
+    lacks the cell. Dropping it, with the empty run it consumed, keeps
+    that pitch; carrying it as a `0x82` would insert a blank line per
+    row.
+
+    The row's paragraph metrics come from its first painting cell. The
+    table's own column width and gap have no counterpart in the packed
+    text header and are dropped; the hanging indent and tab in the cell
+    paragraphs carry the bullet layout.
+    """
+    _topic_size, pos = _compressed_long(data1, 0)
+    topic_length, pos = _compressed_ushort(data1, pos)
+    if pos + 2 > len(data1):
+        raise ValueError("M14 table record is shorter than its column header")
+    columns = data1[pos]
+    table_type = data1[pos + 1]
+    pos += 2
+    if table_type in _TABLE_VARIABLE_WIDTH:
+        pos += 2  # MinTableWidth
+    pos += 4 * columns  # width / gap per column
+
+    cells = _parse_table_cells(data1, pos)
+    text_data = data2
+    while len(cells) > 1 and cells[0][2] == bytes([_CONTROL_END]):
+        if not text_data.startswith(b"\x00"):
+            break
+        cells.pop(0)
+        text_data = text_data[1:]
+
+    if cells:
+        fields, tab_stops, _control = cells[0]
+        control_stream = b"".join(
+            cell[2][:-1] + bytes([_CONTROL_END_PARAGRAPH]) for cell in cells[:-1]
+        ) + cells[-1][2]
+    else:
+        fields, tab_stops = {}, ()
+        control_stream = bytes([_CONTROL_END])
+
+    return M14DisplayRecord(
+        topic_pos=topic_pos,
+        topic_length=topic_length,
+        address=address,
+        control_stream=control_stream,
+        text_data=text_data or b"\x00",
+        tlv_fields=tuple(sorted(fields.items())),
+        tab_stops=tab_stops,
+        non_scroll=non_scroll,
+        scroll=scroll,
+    )
+
+
 def _parse_topics(
     data: bytes,
     system: _SystemInfo,
@@ -884,8 +999,9 @@ def _parse_topics(
             builders.append(current_topic)
         elif record_type in (_TOPIC_DISPLAY, _TOPIC_TABLE):
             topic_length = _display_topic_length(data1)
-            if current_topic is not None and record_type == _TOPIC_DISPLAY:
-                display = _parse_display(
+            if current_topic is not None:
+                lower = _parse_display if record_type == _TOPIC_DISPLAY else _parse_table
+                display = lower(
                     current_pos,
                     (block_index << 15) | character_count,
                     data1,
@@ -959,13 +1075,10 @@ def _resolve_context_map(
             None,
         )
         if target is None:
-            # The address lands in a record that carries no display, which
-            # in MVDOC.M14 is always a table (type 0x23). Tables consume
-            # character space but never become an M14DisplayRecord, so
-            # there is no TOPICPOS to hand back. Drop the entry: the miss
-            # then reaches `context_at` as `None`, the same answer an
-            # absent hash gets. Which TOPICPOS MOSVIEW expects for a
-            # table-hosted target is untested.
+            # The address lands outside every record that carries a
+            # display. Drop the entry: the miss then reaches `context_at`
+            # as `None`, the same answer an absent hash gets. No record
+            # of the three sample titles takes this path.
             unresolved += 1
             continue
         resolved.append((context_hash, target.topic_pos, address))
