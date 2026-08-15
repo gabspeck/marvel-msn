@@ -625,8 +625,8 @@ def _extract_open_title_cache_hints(payload: bytes) -> tuple[int, int]:
     send_params, _ = parse_request_params(payload)
     hints = [p.value for p in send_params if isinstance(p, DwordParam)]
     return (
-        hints[0] if len(hints) >= 1 else 0,
-        hints[1] if len(hints) >= 2 else 0,
+        hints[-2] if len(hints) >= 2 else 0,
+        hints[-1] if len(hints) >= 1 else 0,
     )
 
 
@@ -1246,6 +1246,7 @@ class MEDVIEWHandler:
             reply_body,
             metadata=self.title_metadata,
             osr2=self._client_dialect == _DIALECT_OSR2,
+            title_id=(deid.encode("ascii", errors="replace") + b"\x00"),
         )
 
     def _handle_close_title(self, request_id, payload) -> bytes:

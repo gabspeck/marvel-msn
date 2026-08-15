@@ -17,6 +17,7 @@ from ...mpc import (
     build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
+    build_tagged_reply_var,
     build_tagged_reply_word,
 )
 from .payload import (
@@ -69,8 +70,8 @@ def attach_session() -> bytes:
 
 
 def pre_notify_title() -> bytes:
-    """`0x1E` — `status : i32`. `0` = queued+acked."""
-    return build_static_reply(build_tagged_reply_dword(0))
+    """`0x1E` — bare acknowledgement; the client binds no reply fields."""
+    return ack()
 
 
 # --------------------------------------------------------------------------
@@ -83,12 +84,14 @@ def open_title(
     metadata: TitleOpenMetadata = TITLE_OPEN_METADATA,
     *,
     osr2: bool = False,
+    title_id: bytes = b"\x00",
 ) -> bytes:
     """`0x01` — TitleOpen static fields followed by the title body.
 
     RTM binds five DWORD outputs. OSR2 binds three more: the two cache
     validators that control consumption of the dynamic streams and an
-    error status. The earlier cache-header fields stay populated to keep
+    error status. It also binds a variable title identifier used by
+    ``fMVSetTitle``. The earlier cache-header fields stay populated to keep
     the common prefix unchanged.
     """
     static = (
@@ -105,6 +108,7 @@ def open_title(
             build_tagged_reply_dword(metadata.cache_header0)
             + build_tagged_reply_dword(metadata.cache_header1)
             + build_tagged_reply_dword(0)
+            + build_tagged_reply_var(0x84, title_id)
         )
     return _dynamic_complete(static, body)
 

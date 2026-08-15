@@ -4228,6 +4228,8 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         b"\x04\x8a:2[1000]0\x00"
         b"\x03\x00\x00\x00\x00"
         b"\x03\x00\x00\x00\x00"
+        b"\x03\x00\x00\x00\x00"
+        b"\x03\x00\x00\x00\x00"
         b"\x81\x81"
         + b"\x83" * 8
         + b"\x84\x85"
@@ -4280,6 +4282,10 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
                 0,
             ],
         )
+        self.assertEqual(reply[pos], 0x84)
+        title_id_size = reply[pos + 1] & 0x7f
+        self.assertEqual(reply[pos + 2 : pos + 2 + title_id_size], b"1000\x00")
+        pos += 2 + title_id_size
         self.assertEqual(reply[pos : pos + 2], b"\x87\x86")
         self.assertEqual(reply[pos + 2 :], handler.title_body)
 
@@ -4295,6 +4301,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         font_end = 2 + struct.unpack_from("<H", handler.title_body)[0]
         request = (
             b"\x04\x8a:2[1000]0\x00"
+            + b"\x03\x00\x00\x00\x00" * 2
             + b"\x03"
             + struct.pack("<I", handler.title_metadata.cache_header0)
             + b"\x03\x00\x00\x00\x00"
@@ -4305,7 +4312,11 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
 
         reply = handler._handle_open_title(2, request)
 
-        self.assertEqual(reply[46:], handler.title_body[font_end:])
+        pos = 4 + 8 * 5
+        self.assertEqual(reply[pos], 0x84)
+        pos += 2 + (reply[pos + 1] & 0x7f)
+        self.assertEqual(reply[pos : pos + 2], b"\x87\x86")
+        self.assertEqual(reply[pos + 2 :], handler.title_body[font_end:])
 
     def test_osr2_pipe_mvpfile_opens_while_rtm_rejects_it(self):
         open_mvpfile = b"\x01\x01\x04\x89|MVPFILE\x00\x01\x02\x81\x83"
@@ -4789,10 +4800,9 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
             b"\x04" + bytes([0x80 | len(start_payload)]) + start_payload + b"\x83"
         )
 
-    def test_pre_notify_reply_ships_status_dword(self):
-        # Spec §0x1E (post-update): `PreNotifyTitle` returns
-        # `status:i32` = 0 for queued+acked. Wire bytes:
-        # 0x83 <dword=0> 0x87.
+    def test_pre_notify_reply_is_end_static_only(self):
+        # TitlePreNotify binds no receive-side fields. The synchronous
+        # response is only the end-of-static acknowledgement.
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Request: 0x01 0x00, 0x02 0x0a 0x00 (opcode=10), 0x04 with 6 bytes.
         req_payload = bytes.fromhex("01 00 02 0a 00 04 86 00 00 00 00 00 00")
@@ -4801,14 +4811,12 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
         reply = parsed.payload[8:]
-        self.assertEqual(reply[0], 0x83)
-        self.assertEqual(struct.unpack("<I", reply[1:5])[0], 0)
-        self.assertEqual(reply[5], TAG_END_STATIC)
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
-    def test_opcode_8_heartbeat_returns_status_zero(self):
+    def test_opcode_8_heartbeat_returns_bare_ack(self):
         # Opcode 0x08 SendClientStatus per spec is the keepalive pulse
         # MVTTL14C fires every >5s while async wait loops are active.
-        # Same i32 status reply as any other wire-bound opcode.
+        # It declares no receive fields and uses the same bare ack.
         # (Use a small req_id so the VLI-encoded request_id fits in 1
         # byte — the `[8:]` slice assumes that.)
         handler = MEDVIEWHandler(5, "MEDVIEW")
@@ -4817,9 +4825,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY, 7, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
-        self.assertEqual(reply[0], 0x83)
-        self.assertEqual(struct.unpack("<I", reply[1:5])[0], 0)
-        self.assertEqual(reply[5], TAG_END_STATIC)
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_picture_start_pushes_status_then_file_bytes(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
@@ -4839,7 +4845,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         self.assertEqual(len(pkts), 3)
 
         reply = parse_packet(pkts[0][:-1]).payload[8:]
-        self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x87")
+        self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
         status_push = parse_packet(pkts[1][:-1]).payload[8:]
         self.assertEqual(status_push[0], TAG_DYNAMIC_PARTIAL)
