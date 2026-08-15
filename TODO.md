@@ -21,3 +21,15 @@
   the AUTHENTICATE can be rubber-stamped — no real LM/NT hash
   verification needed.
 
+- Sub-8bpp DIBs still fault the client. `_picture_chunk_limit` ends the
+  first transfer chunk on `bfOffBits`, which keeps
+  `MVPR14N!MVPicture_PlainBmpDecodeIncremental @ 0x7E866953` from running
+  its 4-byte-short palette build. A 1bpp or 4bpp image has `bfOffBits`
+  below the 400 bytes `MVPicture_SelectDecoderByMagic` wants before it
+  creates the decoder, so the first decode pass always sees more than
+  `bfOffBits` and overflows anyway. `HANDBOOK.M14` `mail.bmp` (4bpp, 382 B)
+  and `smokes.bmp` (4bpp, 614 B) will GPF the client if a topic displays
+  them. The route out is serving pictures as `lP` segmented hypergraphics
+  the way `MVDOC.M14` does — that reaches `Shed_*` over selector `0x1b`
+  and never enters the WltPicture branch — which needs an MRB encoder.
+

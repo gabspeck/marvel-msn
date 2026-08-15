@@ -128,6 +128,9 @@ _HFS_DYNAMIC_BLOCK_DATA_MAX = 0x4000
 # Keep each type-4 record within one MPCCL dynamic-buffer growth unit,
 # including its 12-byte frame header and the outer 0x85 stream tag.
 _PICTURE_CHUNK_DATA_MAX = 0x3F00
+# BITMAPFILEHEADER + BITMAPINFOHEADER. The same 0x36 the client's decoder
+# uses to tell a header-only arrival from one carrying pixel bytes.
+_BMP_HEADER_BYTES = 0x36
 # `PictureStartPayload.modeByte`. Value 1 is the client's initial/offline
 # mode: `PictureDownload_StartOrRefresh` emits it when its local transfer-mode
 # flag is clear, and the same condition makes the wrapper reset the type-4
@@ -739,6 +742,51 @@ def _parse_subscriber_state_payload(payload: bytes) -> tuple[int, bool] | None:
         return None
     enabled = struct.unpack_from("<I", payload, 1)[0]
     return payload[0], bool(enabled & 0x01)
+
+
+def _bmp_pixel_offset(data: bytes) -> int | None:
+    """`bfOffBits` of a Windows DIB, or None when this is not one."""
+    if len(data) < _BMP_HEADER_BYTES or data[:2] != b"BM":
+        return None
+    pixel_offset = struct.unpack_from("<I", data, 10)[0]
+    if not _BMP_HEADER_BYTES <= pixel_offset <= len(data):
+        return None
+    return pixel_offset
+
+
+def _picture_chunk_limit(data: bytes, offset: int) -> int:
+    """Size of the transfer chunk that starts at `offset`.
+
+    A DIB's first chunk ends exactly on `bfOffBits`, so header and
+    palette arrive without any pixel bytes behind them.
+
+    `MVPR14N!MVPicture_PlainBmpDecodeIncremental @ 0x7E866953` builds the
+    DIB's HPALETTE on the first decode pass that makes strictly more than
+    `bfOffBits` bytes newly available. It sizes the LOGPALETTE as
+    `entryCount * 4` and then writes entry `k` at `buf + 4 + 4k`, never
+    budgeting the 4-byte `palVersion`/`palNumEntries` header — at 8bpp a
+    1024-byte block takes 1028 bytes. The spill lands on the neighbouring
+    heap block header, and KERNEL32's next heap walk at `0xBFF78040`
+    reads the corrupted size, runs off the end of the 1 MB heap, and
+    faults. Causality proven live 2026-07-30 (SoftICE, FRANCE.M14
+    `albi.bmp`); the plate comment on the function carries the trace.
+
+    Landing the boundary on `bfOffBits` fails that guard by construction,
+    and every later pass fails the companion `alreadyConsumed < 0x36`
+    guard, so the palette is never built. `WltSimple_PaintDIB` still
+    paints — it passes the DIB's own colour table to `SetDIBitsToDevice`
+    — it just skips `RealizePalette`, which only matters on a 256-colour
+    display.
+
+    Not helped: a DIB whose `bfOffBits` sits below the decoder's own
+    400-byte creation threshold, which is every 1bpp and 4bpp image. The
+    decoder does not exist until more than `bfOffBits` has already
+    arrived, so its first pass overflows whatever the chunking is.
+    """
+    pixel_offset = _bmp_pixel_offset(data)
+    if pixel_offset is not None and offset < pixel_offset:
+        return pixel_offset - offset
+    return _PICTURE_CHUNK_DATA_MAX
 
 
 def _picture_status_metrics(data: bytes) -> tuple[int, int, int]:
@@ -1515,7 +1563,7 @@ class MEDVIEWHandler:
             chunk_count = 0
             while offset < len(data):
                 chunk_data = data[
-                    offset : offset + _PICTURE_CHUNK_DATA_MAX
+                    offset : offset + _picture_chunk_limit(data, offset)
                 ]
                 frame = build_type4_transfer_chunk_frame(
                     transfer_id,

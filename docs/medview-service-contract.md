@@ -1358,6 +1358,41 @@ Known opcode:
   (gap-tolerance is the caller's responsibility). The transfer completes when
   the committed cursor equals the `targetBytes` supplied by type 3.
 
+Chunk boundaries are not free. For a plain Windows DIB (`"BM"` with a
+`biCompression` other than `'CWLT'` / `'GWLT'`) the bytes reach
+`MVPR14N!MVPicture_PlainBmpDecodeIncremental @ 0x7E866953`, which builds the
+picture's `HPALETTE` on the first decode pass satisfying all of:
+
+- no palette cached yet (`transferObject+0x44 == 0`),
+- more than `0x36` bytes newly available this pass,
+- fewer than `0x36` bytes consumed by earlier passes,
+- `bfOffBits` < the bytes newly available this pass.
+
+The build then sizes the `LOGPALETTE` as `entryCount * 4` while writing entry
+`k` at `buf + 4 + 4k`, never budgeting the 4-byte
+`palVersion`/`palNumEntries` header. At 8bpp that is 1028 bytes written into a
+1024-byte `GlobalAlloc`; the spill lands on the neighbouring heap block
+header and KERNEL32's next heap walk at `0xBFF78040` runs off the end of the
+1 MB heap and faults. Causality proven live 2026-07-30 (SoftICE, Win95 VM,
+`FRANCE.M14` `albi.bmp`): patching the pushed `dwBytes` from 1024 to 1028
+makes the fault disappear. Both the RTM and OSR2 `MVPR14N.DLL` carry the
+defect at the same file offset.
+
+`biClrUsed` is not consulted at or below 8bpp, so no field of the image
+avoids it. Ending the first chunk exactly on `bfOffBits` does: the fourth
+condition fails by construction, and every later pass fails the third.
+`WltSimple_PaintDIB` still paints — it hands the DIB's own colour table to
+`SetDIBitsToDevice` — it only skips `RealizePalette`, which matters solely on
+a 256-colour display.
+
+This does not reach a DIB whose `bfOffBits` sits below the 400-byte threshold
+`MVPicture_SelectDecoderByMagic` requires before it instantiates the decoder
+at all — every 1bpp and 4bpp image. There the decoder does not exist until
+more than `bfOffBits` has already arrived, and its first pass overflows
+whatever the chunking is. MediaView's own shipped content sidesteps the whole
+branch: every picture in `MVDOC.M14` is an `lP` segmented hypergraphic, which
+the client reads inline over selector `0x1b` and decodes through `Shed_*`.
+
 ## Value Type `FixedRecord`
 
 ### `ChildPaneRecord`

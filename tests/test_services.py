@@ -143,6 +143,7 @@ from server.services.logsrv import (
     build_logsrv_service_map_payload,
 )
 from server.services.medview import MEDVIEWHandler
+from server.services.medview.handler import _picture_chunk_limit
 from server.services.medview.payload import BM0_BAGGAGE
 from server.services.olregsrv import (
     OLREGSRVHandler,
@@ -4902,6 +4903,65 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
             (3, 12 + len(picture) - 2, 7, 2),
         )
         self.assertEqual(chunk_push[13:], picture[2:])
+
+    def test_dib_first_chunk_stops_on_bfoffbits(self):
+        # MVPR14N!MVPicture_PlainBmpDecodeIncremental @ 0x7E866953 builds
+        # the HPALETTE on the first decode pass that makes strictly more
+        # than bfOffBits bytes newly available, undersizing the LOGPALETTE
+        # by its 4-byte header. Ending chunk 1 on bfOffBits fails that
+        # guard; every later pass fails the companion consumed < 0x36 one.
+        def dib(entries: int, total: int) -> bytes:
+            pixels = 0x36 + entries * 4
+            return (
+                b"BM"
+                + struct.pack("<IHHI", total, 0, 0, pixels)
+                + struct.pack("<IiiHHII", 40, 8, 8, 1, 8, 0, 0)
+                + b"\x00" * 16
+                + b"\xAA" * (pixels - 0x36)
+                + b"\x11" * (total - pixels)
+            )
+
+        # A real 8bpp DIB: 256 entries, pixels at 1078.
+        eight_bpp = dib(256, 12100)
+        self.assertEqual(_picture_chunk_limit(eight_bpp, 0), 1078)
+        self.assertEqual(_picture_chunk_limit(eight_bpp, 1078), 0x3F00)
+
+        # Same rule, sized to stay inside one transport fragment so the
+        # wire assertions below do not have to reassemble.
+        pixel_offset = 0x36 + 16 * 4
+        picture = dib(16, 400)
+        self.assertEqual(len(picture), 400)
+
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        handler.baggage_map = {"albi.bmp": picture}
+        self._subscribe(handler, 3, 3)
+        self._subscribe(handler, 4, 4)
+
+        pkts = handler.handle_request(
+            0x01,
+            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            5,
+            self._picture_start_request(transfer_id=7, mode=0),
+            10,
+            5,
+        )
+        chunks = [
+            parse_packet(p[:-1]).payload[8:]
+            for p in pkts
+            if parse_packet(p[:-1]).payload[8:9] == b"\x85"
+            and parse_packet(p[:-1]).payload[9:11] == struct.pack("<H", 3)
+        ]
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(
+            struct.unpack("<HHII", chunks[0][1:13]),
+            (3, 12 + pixel_offset, 7, 0),
+        )
+        self.assertEqual(chunks[0][13:], picture[:pixel_offset])
+        self.assertEqual(
+            struct.unpack("<HHII", chunks[1][1:13]),
+            (3, 12 + len(picture) - pixel_offset, 7, pixel_offset),
+        )
+        self.assertEqual(chunks[1][13:], picture[pixel_offset:])
 
     def test_reset_mode_start_on_valid_object_sends_status_only(self):
         # The client's transfer-teardown pass: mode 1 (subscriber reset) with
