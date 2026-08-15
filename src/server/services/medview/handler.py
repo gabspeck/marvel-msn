@@ -131,6 +131,8 @@ _PICTURE_CHUNK_DATA_MAX = 0x3F00
 # BITMAPFILEHEADER + BITMAPINFOHEADER. The same 0x36 the client's decoder
 # uses to tell a header-only arrival from one carrying pixel bytes.
 _BMP_HEADER_BYTES = 0x36
+# A full 8bpp colour table: 256 RGBQUADs.
+_BMP_PALETTE_BYTES = 256 * 4
 # `PictureStartPayload.modeByte`. Value 1 is the client's initial/offline
 # mode: `PictureDownload_StartOrRefresh` emits it when its local transfer-mode
 # flag is clear, and the same condition makes the wrapper reset the type-4
@@ -754,6 +756,70 @@ def _bmp_pixel_offset(data: bytes) -> int | None:
     return pixel_offset
 
 
+def _widen_low_bpp_dib(data: bytes) -> bytes:
+    """Re-index a 1bpp or 4bpp DIB as 8bpp, padding its table to 256 entries.
+
+    Ending the first transfer chunk on `bfOffBits` keeps
+    `MVPR14N!MVPicture_PlainBmpDecodeIncremental @ 0x7E866953` from running
+    its four-bytes-short palette build (see `_picture_chunk_limit`), but only
+    once `bfOffBits` reaches the 400 bytes
+    `MVPicture_SelectDecoderByMagic @ 0x7E865815` wants before it will
+    instantiate the decoder at all. Below that the decoder does not exist
+    until the whole picture has arrived, and its first pass overflows
+    whatever the chunking is: `bfOffBits` is 62 at 1bpp and 118 at 4bpp.
+
+    A 256-entry table puts `bfOffBits` at 1078 and the chunk boundary back in
+    reach. The re-index is lossless — every source index maps to itself and
+    the source colours keep their slots, with the unused tail zeroed — and it
+    leaves an ordinary 8bpp DIB, the shape the rest of the corpus already
+    ships and the client already renders.
+
+    Anything that is not an uncompressed `BITMAPINFOHEADER` DIB at 1 or 4 bpp
+    is returned unchanged.
+    """
+    if len(data) < _BMP_HEADER_BYTES or data[:2] != b"BM":
+        return data
+    pixel_offset, header_size = struct.unpack_from("<II", data, 10)
+    if header_size < 40 or len(data) < 14 + header_size:
+        return data
+    width, height, _planes, bit_count, compression = struct.unpack_from(
+        "<iiHHI", data, 18
+    )
+    if bit_count not in (1, 4) or compression != 0 or width <= 0:
+        return data
+    rows = abs(height)
+    source_stride = ((width * bit_count + 31) // 32) * 4
+    if pixel_offset + source_stride * rows > len(data):
+        return data
+
+    table_start = 14 + header_size
+    table = data[table_start:pixel_offset]
+    table = table[: _BMP_PALETTE_BYTES].ljust(_BMP_PALETTE_BYTES, b"\x00")
+
+    per_byte = 8 // bit_count
+    mask = (1 << bit_count) - 1
+    stride = ((width * 8 + 31) // 32) * 4
+    pixels = bytearray(stride * rows)
+    for row in range(rows):
+        source = pixel_offset + row * source_stride
+        target = row * stride
+        for column in range(width):
+            packed = data[source + column // per_byte]
+            shift = 8 - bit_count * (column % per_byte + 1)
+            pixels[target + column] = (packed >> shift) & mask
+
+    header = bytearray(data[14 : 14 + header_size])
+    struct.pack_into("<H", header, 14, 8)
+    struct.pack_into("<I", header, 20, stride * rows)
+    struct.pack_into("<II", header, 32, 0, 0)
+    body = bytes(header) + table + bytes(pixels)
+    return (
+        b"BM"
+        + struct.pack("<IHHI", 14 + len(body), 0, 0, table_start + len(table))
+        + body
+    )
+
+
 def _picture_chunk_limit(data: bytes, offset: int) -> int:
     """Size of the transfer chunk that starts at `offset`.
 
@@ -1246,7 +1312,10 @@ class MEDVIEWHandler:
             else:
                 self.title_body = lower_m14_to_payload(title, deid)
             cache0, cache1 = title.cache_tuple(self.title_body)
-            self.baggage_map = title.baggage_map()
+            self.baggage_map = {
+                name: _widen_low_bpp_dib(blob)
+                for name, blob in title.baggage_map().items()
+            }
             if self._client_dialect == _DIALECT_OSR2:
                 self.baggage_map["mvpfile"] = build_m14_mvpfile(title)
             self.title_metadata = TitleOpenMetadata(

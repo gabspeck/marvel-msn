@@ -143,7 +143,10 @@ from server.services.logsrv import (
     build_logsrv_service_map_payload,
 )
 from server.services.medview import MEDVIEWHandler
-from server.services.medview.handler import _picture_chunk_limit
+from server.services.medview.handler import (
+    _picture_chunk_limit,
+    _widen_low_bpp_dib,
+)
 from server.services.medview.payload import BM0_BAGGAGE
 from server.services.olregsrv import (
     OLREGSRVHandler,
@@ -4962,6 +4965,78 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
             (3, 12 + len(picture) - pixel_offset, 7, pixel_offset),
         )
         self.assertEqual(chunks[1][13:], picture[pixel_offset:])
+
+    def test_low_bpp_dibs_are_reindexed_to_eight_bits(self):
+        # A 4bpp DIB puts bfOffBits at 118, below the 400 bytes
+        # MVPicture_SelectDecoderByMagic @ 0x7E865815 wants before it
+        # creates the decoder, so no chunk boundary can keep the palette
+        # build from running. Re-indexing to 8bpp moves bfOffBits to 1078.
+        palette = b"".join(
+            bytes((index * 16, index * 8, index * 4, 0)) for index in range(16)
+        )
+        rows = [[(x + y) % 16 for x in range(5)] for y in range(3)]
+        packed = b"".join(
+            bytes(
+                (row[x] << 4) | (row[x + 1] if x + 1 < len(row) else 0)
+                for x in range(0, 6, 2)
+            ).ljust(4, b"\x00")
+            for row in rows
+        )
+        source = (
+            b"BM"
+            + struct.pack("<IHHI", 118 + len(packed), 0, 0, 118)
+            + struct.pack("<IiiHHII", 40, 5, 3, 1, 4, 0, 0)
+            + b"\x00" * 16
+            + palette
+            + packed
+        )
+
+        widened = _widen_low_bpp_dib(source)
+        self.assertEqual(
+            struct.unpack_from("<IHHI", widened, 2),
+            (len(widened), 0, 0, 0x36 + 256 * 4),
+        )
+        self.assertEqual(
+            struct.unpack_from("<iiHHII", widened, 18),
+            (5, 3, 1, 8, 0, 8 * 3),
+        )
+        self.assertEqual(_picture_chunk_limit(widened, 0), 0x36 + 256 * 4)
+
+        table = widened[0x36 : 0x36 + 256 * 4]
+        self.assertEqual(table[: len(palette)], palette)
+        self.assertEqual(table[len(palette) :], bytes(256 * 4 - len(palette)))
+        for y, row in enumerate(rows):
+            line = widened[0x36 + 256 * 4 + y * 8 :][: len(row)]
+            self.assertEqual(list(line), row)
+
+        # 8bpp and non-DIB payloads pass through untouched.
+        eight_bpp = (
+            b"BM"
+            + struct.pack("<IHHI", 0x36 + 256 * 4 + 4, 0, 0, 0x36 + 256 * 4)
+            + struct.pack("<IiiHHII", 40, 4, 1, 1, 8, 0, 0)
+            + b"\x00" * 16
+            + bytes(256 * 4)
+            + b"\x01\x02\x03\x04"
+        )
+        self.assertIs(_widen_low_bpp_dib(eight_bpp), eight_bpp)
+        self.assertIs(_widen_low_bpp_dib(b"lp\x01\x00shg"), b"lp\x01\x00shg")
+
+    def test_open_title_widens_the_titles_low_bpp_baggage(self):
+        handler = MEDVIEWHandler(5, "MEDVIEW")
+        handler._handle_open_title(1, TestMEDVIEWOSR2TitleOpen._OPEN)
+
+        # HANDBOOK.M14 authors mail.bmp and smokes.bmp at 4bpp.
+        for name in ("mail.bmp", "smokes.bmp"):
+            served = handler.baggage_map[name]
+            self.assertEqual(struct.unpack_from("<H", served, 28)[0], 8, name)
+            self.assertEqual(
+                struct.unpack_from("<I", served, 10)[0], 0x36 + 256 * 4, name
+            )
+        # An 8bpp neighbour is served exactly as authored.
+        self.assertEqual(
+            handler.baggage_map["lion.bmp"],
+            handler.loaded_m14.baggage_map()["lion.bmp"],
+        )
 
     def test_reset_mode_start_on_valid_object_sends_status_only(self):
         # The client's transfer-teardown pass: mode 1 (subscriber reset) with

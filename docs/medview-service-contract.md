@@ -1385,13 +1385,19 @@ condition fails by construction, and every later pass fails the third.
 `SetDIBitsToDevice` — it only skips `RealizePalette`, which matters solely on
 a 256-colour display.
 
-This does not reach a DIB whose `bfOffBits` sits below the 400-byte threshold
-`MVPicture_SelectDecoderByMagic` requires before it instantiates the decoder
-at all — every 1bpp and 4bpp image. There the decoder does not exist until
-more than `bfOffBits` has already arrived, and its first pass overflows
-whatever the chunking is. MediaView's own shipped content sidesteps the whole
-branch: every picture in `MVDOC.M14` is an `lP` segmented hypergraphic, which
-the client reads inline over selector `0x1b` and decodes through `Shed_*`.
+The boundary only helps once `bfOffBits` reaches the 400 bytes
+`MVPicture_SelectDecoderByMagic @ 0x7E865815` requires before it instantiates
+the decoder at all. Below that the decoder does not exist until the whole
+picture has arrived, and its first pass sees everything at once — `bfOffBits`
+is 62 at 1bpp and 118 at 4bpp. Serve those re-indexed as 8bpp with the colour
+table padded to 256 entries: `bfOffBits` becomes 1078, the boundary applies,
+and the result is an ordinary 8bpp DIB. The re-index is lossless, since every
+source index keeps its own slot and the padded tail is unused.
+
+MediaView's own shipped content never enters this branch: every picture in
+`MVDOC.M14` is an `lP` segmented hypergraphic, which the client reads inline
+over selector `0x1b` and decodes through `Shed_*`. Only the sample titles
+(`FRANCE.M14`, `HANDBOOK.M14`) ship raw `BM` baggage.
 
 ## Value Type `FixedRecord`
 
