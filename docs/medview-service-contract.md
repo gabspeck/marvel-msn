@@ -234,12 +234,76 @@ the matching request hint. The font stream is `[u16 size][font bytes]`.
 The title stream is `titleId ASCIIZ`, length-prefixed caption,
 length-prefixed copyright, then the section-13 DLL map. Window, pane, and
 popup records are no longer in this body. MOSVIEW reads their MVP text from
-HFS baggage name `|MVPFILE`; the relevant sections are `[CONFIG]`,
-`[PANES]`, `[POPUPS]`, and `[WINDOWS]`.
+HFS baggage name `|MVPFILE` — see `The OSR2 MVP file` below.
 
 The server selects this shape only after the 92-byte OSR2 attach. A 12-byte
 RTM attach, an unknown attach shape, or no attach retains the five-DWORD
 reply and nine-section body.
+
+#### The OSR2 MVP file
+
+`OpenMediaTitleSession @ 0x7F3C913F` first calls `MVTitlePreNotify(title,
+0x13, &buf, 4)` and uses the returned buffer as MVP text when its first
+byte is `[`. A pre-notify reply with no payload leaves the pointer NULL,
+which routes the read to `hMVBaggageGetFile(title, "|MVPFILE", …)`.
+
+`ParseMvpText @ 0x7F3C8075` walks `[…]` headers against the table at
+`0x7F3D26BC` (`CONFIG`, `PANES`, `POPUPS`, `WINDOWS`, case-insensitive)
+and hands each `name=value` line to the matching line parser. Outside
+`[CONFIG]`, a `;` ends the line. Every parser splits on the first `=`,
+initialises its record to `-1`/`0`, then appends it.
+
+The four parsers emit exactly the record arrays that `TitleGetInfo` kinds
+`0x07`/`0x08`/`0x06`/`0x04` return on the RTM path, and
+`OpenMediaTitleSession` still issues each of those kinds whenever the MVP
+text produced zero records of that shape.
+
+| Section | Line parser | Record | Kind | Fallback array |
+|---|---|---:|---:|---|
+| `[CONFIG]` | `0x7F3C822E` | `char *` | `0x04` | `MosViewState+0x38/+0x3C` |
+| `[PANES]` | `0x7F3C8808` | `0x2B` | `0x07` | `MosViewState+0x20/+0x24` |
+| `[POPUPS]` | `0x7F3C8A08` | `0x1F` | `0x08` | `MosViewState+0x28/+0x2C` |
+| `[WINDOWS]` | `0x7F3C8B6C` | `0x98` | `0x06` | `MosViewState+0x30/+0x34` |
+
+Shared field syntax:
+
+- `(r,g,b)` — `ParseMvpColor @ 0x7F3C8564`. Each component must be
+  `0..255`. Stored as `b<<16 | g<<8 | r`.
+- `(l,t,w,h,mode)` — `ParseMvpRect @ 0x7F3C86B6`. `mode` must be `0` or
+  `1`; `0` is per-mille and additionally caps each coordinate at
+  `0x400`, `1` is absolute pixels and sets the record's rect-mode flag.
+- `(n)` — `ParseMvpSmallOrdinal @ 0x7F3C864C`. `n` must be `0..3`.
+- An empty field between two commas is skipped, leaving the
+  initialiser's `-1`. A line may stop at any field boundary.
+
+`[WINDOWS]`: `name="caption",outerRect,aspect,background,srColor,nsrColor`
+followed by `innerRect,(scale,x,y),(flag),(flag)`, and for a non-`MAIN`
+window a trailing `(scrollMode)`. `name` is capped at 8 characters;
+`main` (any case) is the record `CreateMosViewWindowHierarchy` selects,
+and any other name records a `SECONDARY` window that must supply
+`outerRect`. Field placement into `WindowScaffoldRecord`:
+
+| Field | Record slot |
+|---|---|
+| `"caption"` | `+0x15` |
+| `outerRect` | `+0x49`, flag `0x08` at `+0x48` |
+| `aspect` | `+0x59` |
+| `background` | `+0x5B`, or `!name` into `+0x5F` |
+| `srColor` | `+0x7C` — the scrolling pane |
+| `nsrColor` | `+0x78` — the non-scrolling pane |
+| `innerRect` | `+0x80`, flag `0x01` at `+0x48` |
+
+The two pane colours are therefore authored **scrolling first**, the
+reverse of their `+0x78`/`+0x7C` order in the record.
+
+`[POPUPS]`: `name=rect,color` → `PopupPaneRecord` name `+0x02`, rect
+`+0x0B`, colour `+0x1B`. Both fields are optional. A popup named `MAIN`
+is discarded.
+
+`[PANES]`: `name=rect,color,(flag),(scrollMode)` → name `+0x0C`, rect
+`+0x15`, colour `+0x25`, scroll mode `+0x29`, rect mode flag `0x08` at
+`+0x0B`. Unlike popups, the rect is mandatory: a pane line without one
+is discarded. A pane named `MAIN` is discarded.
 
 ### `0x02` `CloseTitle`
 
@@ -1409,19 +1473,25 @@ Fields (152 bytes / `0x98`; offsets verified at
   Read as `(char *)(record + 0x15)` and copied through `MosViewAlloc`
   for the outer `MosViewContainer` `CreateWindowExA` title.
 - `+0x48` `flags:u8`. Known bits:
-  - `0x01`: outer-container rect mode (set = absolute pixels at
+  - `0x08`: outer-container rect mode (set = absolute pixels at
     `+0x49`..`+0x58`; clear = per-mille → scaled via
-    `ScalePerMilleRectToWindow`).
-  - `0x08`: inner-pane rect mode (set = absolute pixels at
-    `+0x80`..`+0x8F`; clear = per-mille).
+    `ScalePerMilleRectToWindow`). Read as
+    `(record[0x48] & 8) == 0` at `CreateMosViewWindowHierarchy @
+    0x7F3C67E5`.
+  - `0x01`: inner-pane rect mode (set = absolute pixels at
+    `+0x80`..`+0x8F`; clear = per-mille). Read as
+    `TEST byte ptr [ECX + 0x48],0x1` at `0x7F3C68EE`.
   - `0x40`: when set, the non-scrolling pane's "no-scroll" flag at
     `MosPaneState+0x9C` is forced to `1`.
 - `+0x49..+0x58` `outerRect`. `left:i32` `+0x49`, `top:i32` `+0x4D`,
   `width:i32` `+0x51`, `height:i32` `+0x55`. Used by `MoveWindow` on
   the existing MosView frame. `(-1,-1,-1,-1)` skips the resize.
-- `+0x5B..+0x5E` `containerControl:i32`. Stored at `MosViewContainer+0x20`
-  via `*(int *)(this + 0x20) = *(int *)(record + 0x5B)` when the value
-  is not `-1`.
+- `+0x5B..+0x5E` `windowBackground:COLORREF`. Stored at
+  `MosViewContainer+0x20` via `*(int *)(this + 0x20) = *(int *)(record +
+  0x5B)` when the value is not `-1`. The OSR2 MVP parser fills this slot
+  from the `[WINDOWS]` `background` field with the same `(r,g,b)` reader
+  it uses for the two pane colours, and offers `!name` as the
+  alternative form (a bitmap name landing at `+0x5F`).
 - `+0x78..+0x7B` `nonScrollingPaneBackground:COLORREF`. Applied to the
   non-scrolling (second-created) `MosChildView` via
   `ApplyMosViewBackgroundColor(MosPaneState+0x40, record+0x78)`.

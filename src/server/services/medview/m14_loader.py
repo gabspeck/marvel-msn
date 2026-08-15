@@ -1184,7 +1184,19 @@ def lower_m14_to_osr2_payload(m14: LoadedM14, deid: str) -> bytes:
 
 
 def build_m14_mvpfile(m14: LoadedM14) -> bytes:
-    """Project the M14 main-window properties into OSR2 MVP text."""
+    """Project the M14 main-window properties into OSR2 MVP text.
+
+    `[WINDOWS]` field order is pinned at `MOSVIEW!ParseMvpWindowLine @
+    0x7F3C8B6C` (OSR2 build): caption, outer rect, window aspect, window
+    background, scrolling-pane colour, non-scrolling-pane colour. The
+    last two land on WindowScaffoldRecord `+0x7C` and `+0x78`, the same
+    slots `_build_sec06` fills on the RTM path.
+
+    An omitted field leaves the `-1` that `InitMvpWindowRecord @
+    0x7F3C835C` wrote, which `CreateMosViewWindowHierarchy` renders as
+    `GetSysColor(COLOR_WINDOW)`. Only the fields the title authors are
+    emitted.
+    """
 
     def color(value: int) -> str:
         if value == _COLOR_INHERIT:
@@ -1193,12 +1205,10 @@ def build_m14_mvpfile(m14: LoadedM14) -> bytes:
 
     caption = m14.title.replace('"', "'")
     non_scroll, scroll = m14.pane_backgrounds
-    popup = m14.popup_pane[0] if m14.popup_pane is not None else _COLOR_INHERIT
     window = (
-        f'main="{caption}",(0,0,640,480,1),(0),'
-        f"{color(non_scroll)},{color(scroll)},{color(popup)},"
-        "(0,0,1000,1000,1),(1,0,0),(0),(0)"
-    )
+        f'main="{caption}",(0,0,640,480,1),,,'
+        f"{color(scroll)},{color(non_scroll)}"
+    ).rstrip(",")
     return (
         "[CONFIG]\r\n\r\n"
         "[PANES]\r\n\r\n"

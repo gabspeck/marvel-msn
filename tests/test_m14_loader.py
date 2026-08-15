@@ -2,6 +2,7 @@
 
 import hashlib
 import pathlib
+import re
 import struct
 import unittest
 
@@ -226,8 +227,38 @@ class TestM14Loader(unittest.TestCase):
             mvpfile.splitlines()[:7],
             [b"[CONFIG]", b"", b"[PANES]", b"", b"[POPUPS]", b"", b"[WINDOWS]"],
         )
-        self.assertIn(b'main="Employee Handbook Example"', mvpfile)
-        self.assertIn(b"(255,255,192),(255,255,255),(255,255,255)", mvpfile)
+        self.assertEqual(
+            mvpfile.splitlines()[7],
+            b'main="Employee Handbook Example",(0,0,640,480,1),,,'
+            b"(255,255,255),(255,255,192)",
+        )
+
+    def test_mvpfile_colour_order_matches_the_rtm_window_record(self):
+        """The last two `[WINDOWS]` colours are SR then NSR.
+
+        `MOSVIEW!ParseMvpWindowLine @ 0x7F3C8B6C` stores them at
+        WindowScaffoldRecord `+0x7C` and `+0x78`, the reverse of the
+        `+0x78`/`+0x7C` order `_build_sec06` writes for RTM.
+        """
+        title = load_m14(_FRANCE)
+        non_scroll, scroll = title.pane_backgrounds
+
+        window = build_m14_mvpfile(title).splitlines()[7].decode()
+        groups = re.findall(r"\(([^)]*)\)", window)
+
+        def rgb(value: int) -> str:
+            return f"{value & 0xff},{value >> 8 & 0xff},{value >> 16 & 0xff}"
+
+        self.assertEqual(groups[-2:], [rgb(scroll), rgb(non_scroll)])
+
+        record = lower_m14_to_payload(title, "4")
+        offset = 2 + struct.unpack_from("<H", record, 0)[0] + 2
+        offset += 2 + struct.unpack_from("<H", record, offset)[0]
+        sec06, _ = _read_blob(record, offset)
+        self.assertEqual(
+            struct.unpack_from("<II", sec06, 0x78),
+            (non_scroll, scroll),
+        )
 
     def test_native_display_stream_is_preserved_in_case1_cache_record(self):
         title = load_m14(_HANDBOOK)

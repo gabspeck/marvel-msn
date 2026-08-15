@@ -249,8 +249,7 @@ OSR2_MVPFILE = (
     b"[PANES]\r\n\r\n"
     b"[POPUPS]\r\n\r\n"
     b"[WINDOWS]\r\n"
-    b'main="MSN Today",(0,0,640,480,1),(0),,,,'
-    b"(0,0,1000,1000,1),(1,0,0),(0),(0)\r\n"
+    b'main="MSN Today",(0,0,640,480,1)\r\n'
 )
 
 
