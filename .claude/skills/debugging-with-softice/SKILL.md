@@ -3,7 +3,10 @@ name: debugging-with-softice
 description: instructions on how to debug using the softice MCP
 ---
 
-* The SoftICE serial transport path is `/tmp/win95.COM1.pty` — pass that to `mcp__softice__connect`.
+* Select the SoftICE serial transport for the target VM before connecting:
+  * Windows 95 RTM: `/tmp/win95.COM1.pty`
+  * Windows 95 OSR2: `/tmp/win95osr2.COM1.pty`
+  Pass the selected path to `mcp__softice__connect`; do not assume the RTM path when debugging OSR2.
 
 * Always use `ADDR <context handle>` to set the correct address context for your breakpoints before arming them, 
 otherwise they won't hit
