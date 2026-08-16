@@ -1,19 +1,21 @@
 """Entry point: python -m server"""
 
+import contextlib
 import datetime
 import logging
+import selectors
 import socket
 import threading
 
 from . import log as server_log
-from .config import HOST, LISTEN_BACKLOG, PORT
+from .config import GATEWAY_PORT, HOST, LISTEN_BACKLOG, PORT
 from .connection import handle_connection
 from .store import app_store
 
 log = logging.getLogger("server")
 
 
-def _serve(conn, addr):
+def _serve(conn, addr, direct):
     """Run one client connection to completion on its own thread.
 
     Each connection owns its socket, its sequence numbers, and its `Session`.
@@ -22,14 +24,46 @@ def _serve(conn, addr):
     connection.
     """
     try:
-        handle_connection(conn, addr)
+        handle_connection(conn, addr, direct=direct)
     except Exception:
         log.exception("unhandled_exception")
 
 
+def _listen(port):
+    """Bind and listen, or return None after saying why not.
+
+    The gateway port is privileged, and the server is worth running without it
+    — the modem path is unaffected.
+    """
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind((HOST, port))
+    except PermissionError:
+        srv.close()
+        log.warning(
+            "listen_denied port=%d fix='sudo sysctl -w net.ipv4.ip_unprivileged_port_start=%d'",
+            port,
+            port,
+        )
+        return None
+    except OSError as e:
+        srv.close()
+        log.warning("listen_failed port=%d reason=%s", port, e)
+        return None
+    srv.listen(LISTEN_BACKLOG)
+    return srv
+
+
 def main():
     server_log.configure()
-    log.info("listen host=%s port=%d date=%s", HOST, PORT, datetime.date.today().isoformat())
+    log.info(
+        "listen host=%s port=%d gateway_port=%d date=%s",
+        HOST,
+        PORT,
+        GATEWAY_PORT,
+        datetime.date.today().isoformat(),
+    )
     # The store restores persisted Blackbird publishes while it is imported,
     # which happens before the handlers above exist — so say so here instead,
     # where it is visible. Silent state restoration is a trap when the next
@@ -39,19 +73,34 @@ def main():
     ]
     log.info("blackbird_published nodes=%s", ",".join(published) or "-")
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
-        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind((HOST, PORT))
-        srv.listen(LISTEN_BACKLOG)
+    # Two ways in, one protocol: the modem port carries MOSCP.EXE over the
+    # 86Box modem emulator, the gateway port carries ENGCT.EXE straight over
+    # TCP. Only the bring-up differs (docs/TCP-TRANSPORT.md §2).
+    listeners = {PORT: False, GATEWAY_PORT: True}
+    sel = selectors.DefaultSelector()
+    try:
+        for port, direct in listeners.items():
+            srv = _listen(port)
+            if srv is not None:
+                sel.register(srv, selectors.EVENT_READ, direct)
+
+        if not sel.get_map():
+            raise SystemExit("no listening socket")
 
         while True:
-            conn, addr = srv.accept()
-            threading.Thread(
-                target=_serve,
-                args=(conn, addr),
-                name=f"conn-{addr[0]}:{addr[1]}",
-                daemon=True,
-            ).start()
+            for key, _ in sel.select():
+                conn, addr = key.fileobj.accept()
+                threading.Thread(
+                    target=_serve,
+                    args=(conn, addr, key.data),
+                    name=f"conn-{addr[0]}:{addr[1]}",
+                    daemon=True,
+                ).start()
+    finally:
+        for key in list(sel.get_map().values()):
+            with contextlib.suppress(OSError):
+                key.fileobj.close()
+        sel.close()
 
 
 if __name__ == "__main__":

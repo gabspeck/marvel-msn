@@ -5,6 +5,12 @@ import uuid
 # --- Network ---
 HOST = "0.0.0.0"
 PORT = 2323
+# ENGCT.EXE's TCP path. The port is not configurable client-side: ENGCT pushes
+# 0x239 into ProxyConnectOpen, and the connector DLL writes nothing to the
+# socket, so the byte stream starts at the MPC framing. Binding it needs either
+# root or net.ipv4.ip_unprivileged_port_start <= 569; the listener is optional
+# and the server keeps serving PORT without it. See docs/TCP-TRANSPORT.md.
+GATEWAY_PORT = 569
 # Pending connections the kernel queues while the accept loop is between
 # accept() calls. Each accepted connection runs on its own thread, so this
 # only has to absorb clients that dial in at the same instant.

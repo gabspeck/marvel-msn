@@ -3,9 +3,25 @@
 import struct
 import unittest
 
+from server.config import (
+    TRANSPORT_ACK_BEHIND,
+    TRANSPORT_ACK_TIMEOUT_MS,
+    TRANSPORT_MAX_BYTES,
+    TRANSPORT_PACKET_SIZE,
+    TRANSPORT_WINDOW_SIZE,
+)
 from server.connection import ConnectionState
+from server.mpc import build_service_packet
 from server.pipe import build_pipe_frame
-from server.transport import build_ack_packet, build_packet, build_transport_params, parse_packet
+from server.transport import (
+    build_ack_packet,
+    build_packet,
+    build_straight_record,
+    build_transport_params,
+    parse_packet,
+    reframe_as_straight,
+    take_straight_records,
+)
 from server.wire import byte_stuff, crc32, encode_header_byte, mask_crc
 
 
@@ -162,6 +178,51 @@ class TestTransportParams(unittest.TestCase):
         self.assertTrue(parsed.crc_ok)
         self.assertEqual(parsed.seq, 0)
         self.assertEqual(parsed.ack, 0)
+
+
+class TestStraightFraming(unittest.TestCase):
+    """ENGCT's TCP framing: uint16 LE self-inclusive length, pipe index, content."""
+
+    def test_length_counts_itself(self):
+        self.assertEqual(build_straight_record(0, b"\xff\xff\x04"), bytes.fromhex("060000ffff04"))
+
+    def test_records_are_taken_off_the_stream(self):
+        buf = bytearray(build_straight_record(0, b"\xff\xff\x04") + build_straight_record(5, b"ab"))
+        self.assertEqual(take_straight_records(buf), [(0, b"\xff\xff\x04"), (5, b"ab")])
+        self.assertEqual(bytes(buf), b"")
+
+    def test_a_partial_record_waits(self):
+        whole = build_straight_record(0, b"\xff\xff\x04")
+        buf = bytearray(whole[:-1])
+        self.assertEqual(take_straight_records(buf), [])
+        self.assertEqual(len(buf), len(whole) - 1)
+        buf.extend(whole[-1:])
+        self.assertEqual(take_straight_records(buf), [(0, b"\xff\xff\x04")])
+
+    def test_transport_params_reframed(self):
+        # The shape the client answered on 2026-08-15: length, pipe 0, control
+        # routing, type 3, then the five parameters unstuffed.
+        params = struct.pack(
+            "<IIIII",
+            TRANSPORT_PACKET_SIZE,
+            TRANSPORT_MAX_BYTES,
+            TRANSPORT_WINDOW_SIZE,
+            TRANSPORT_ACK_BEHIND,
+            TRANSPORT_ACK_TIMEOUT_MS,
+        )
+        self.assertEqual(
+            reframe_as_straight([build_transport_params()]),
+            [build_straight_record(0, b"\xff\xff\x03" + params)],
+        )
+
+    def test_a_split_message_becomes_one_record(self):
+        host_block = bytes(range(256)) * 12  # far past the 1024-byte wire limit
+        packets = build_service_packet(4, host_block, 1, 1)
+        self.assertGreater(len(packets), 1)
+
+        records = reframe_as_straight(packets)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0], build_straight_record(4, struct.pack("<H", 4) + host_block))
 
 
 if __name__ == "__main__":

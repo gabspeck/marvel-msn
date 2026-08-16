@@ -448,16 +448,20 @@ def _build_continuation_frame(pipe_idx, content, last=True):
     return bytes([hdr]) + content
 
 
-def build_pipe_open_result(client_pipe_idx, server_seq, client_ack):
-    """Build Select-protocol pipe-open response."""
-    content = struct.pack(
+def build_pipe_open_result_content(client_pipe_idx):
+    """Body of the pipe-open response, without any routing in front of it."""
+    return struct.pack(
         "<HHHH",
         client_pipe_idx,
         0x0001,  # command: pipe open success
         client_pipe_idx,  # server pipe idx (mirror client's)
         0x0000,  # error: success
     )
-    pipe_frame = build_pipe_frame(client_pipe_idx, content)
+
+
+def build_pipe_open_result(client_pipe_idx, server_seq, client_ack):
+    """Build Select-protocol pipe-open response."""
+    pipe_frame = build_pipe_frame(client_pipe_idx, build_pipe_open_result_content(client_pipe_idx))
     return build_packet(server_seq, client_ack, pipe_frame)
 
 

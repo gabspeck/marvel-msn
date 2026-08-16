@@ -33,7 +33,13 @@ from .mpc import (
 from .pipe import parse_pipe0_content, parse_pipe_frames
 from .services import SERVICE_HANDLERS
 from .session import Session
-from .transport import build_ack_packet, build_transport_params, parse_packet
+from .transport import (
+    build_ack_packet,
+    build_transport_params,
+    parse_packet,
+    reframe_as_straight,
+    take_straight_records,
+)
 from .wire import byte_unstuff
 
 log = logging.getLogger(__name__)
@@ -65,9 +71,13 @@ def _strip_telnet(data, conn):
 class ConnectionState:
     """Per-connection state and protocol state machine."""
 
-    def __init__(self, conn, conn_id=0):
+    def __init__(self, conn, conn_id=0, direct=False):
         self.conn = conn
         self.conn_id = conn_id
+        # A direct connection is ENGCT.EXE on the gateway port: no modem, so no
+        # bare CR to wait for, no COM trigger, and no telnet negotiation from
+        # the 86Box modem emulator to strip.
+        self.direct = direct
         self.conn_start = time.monotonic()
         # Held while a sequence number is read and the packet stamped with it
         # goes out. A chat broadcast frames packets for connections it does
@@ -129,6 +139,27 @@ class ConnectionState:
         self.server_seq = (self.server_seq + 1) & 0x7F
         return seq
 
+    def _pipe_open_packets(self, client_pipe_idx):
+        """Build the pipe-open response.
+
+        Both links carry it the same way: the record's pipe number addresses
+        the pipe and the content is the bare result. Adding the routing prefix
+        that service records carry stops the client dead at "Verifying account"
+        (observed 2026-08-15), so the Select shape is the shape.
+        """
+        return self._wire(
+            [build_pipe_open_result(client_pipe_idx, self.server_seq, self.client_ack)]
+        )
+
+    def _wire(self, packets):
+        """Adapt builder output to the framing this link uses.
+
+        The builders speak Select; a direct link speaks Straight. Sequence
+        numbers keep advancing either way — they are simply absent from the
+        Straight wire.
+        """
+        return reframe_as_straight(packets) if self.direct else packets
+
     def _decode_transport_payloads(self, stuffed_payload):
         """Decode one wire payload, preserving an escape split across packets."""
         payloads = []
@@ -158,11 +189,13 @@ class ConnectionState:
         the pipe and keeps the sequence numbers monotonic.
         """
         with self.send_lock, server_log.connection_scope(self.conn_id):
-            pkts = build_service_packet(
-                pipe_idx,
-                host_block,
-                self.server_seq,
-                self.client_ack,
+            pkts = self._wire(
+                build_service_packet(
+                    pipe_idx,
+                    host_block,
+                    self.server_seq,
+                    self.client_ack,
+                )
             )
             total = len(pkts)
             for i, pkt in enumerate(pkts, 1):
@@ -179,8 +212,15 @@ class ConnectionState:
                 self.advance_seq()
 
     def run(self):
-        self.info("awaiting_initial_cr")
         self.conn.settimeout(SOCKET_TIMEOUT)
+        if self.direct:
+            # ENGCT opens with a control type-4 of its own, but it will not go
+            # further until it has the transport parameters, so send them now.
+            self.info("direct_connection")
+            with self.send_lock:
+                self._send_transport_params()
+        else:
+            self.info("awaiting_initial_cr")
 
         while True:
             try:
@@ -194,10 +234,15 @@ class ConnectionState:
 
             self.trace_hex("rx_bytes", data)
 
-            if not self.transport_started:
+            if not self.transport_started and not self.direct:
                 data = _strip_telnet(data, self.conn)
 
             self.buf.extend(data)
+
+            if self.direct:
+                for pipe_idx, content in take_straight_records(self.buf):
+                    self._handle_straight_record(pipe_idx, content)
+                continue
 
             while True:
                 idx = self.buf.find(PACKET_TERMINATOR)
@@ -220,10 +265,28 @@ class ConnectionState:
         with self.send_lock:
             self.conn.sendall(b"COM\r")
             time.sleep(DELAY_AFTER_COM)
+            self._send_transport_params()
 
-            params_pkt = build_transport_params()
-            self._send(params_pkt, logging.INFO, "tx_transport_params n=%d len=%d", len(params_pkt))
-            self.transport_started = True
+    def _send_transport_params(self):
+        """Open the transport with the type-3 control frame (seq 0)."""
+        for pkt in self._wire([build_transport_params()]):
+            self._send(pkt, logging.INFO, "tx_transport_params n=%d len=%d", len(pkt))
+        self.transport_started = True
+
+    def _handle_straight_record(self, pipe_idx, content):
+        """Dispatch one Straight record.
+
+        The record is already the whole pipe message — no sequence number to
+        ACK, no CRC to check, no reassembly.
+        """
+        self.rx_pkt_no += 1
+        self.info("rx_record n=%d pipe=%d len=%d", self.rx_pkt_no, pipe_idx, len(content))
+        self.trace_hex("rx_content", content)
+
+        if pipe_idx == 0:
+            self._handle_pipe0_message(content)
+        else:
+            self._handle_service_data(pipe_idx, content)
 
     def _handle_raw_packet(self, packet_data):
         pkt = parse_packet(packet_data)
@@ -251,7 +314,8 @@ class ConnectionState:
             return
 
         # ACK the client's packet and update client_ack before processing
-        # so that service replies built in this iteration use the correct value
+        # so that service replies built in this iteration use the correct
+        # value. Straight never reaches here — it carries no sequence numbers.
         with self.send_lock:
             self.client_ack = (pkt.seq + 1) & 0x7F
             ack_pkt = build_ack_packet(self.client_ack)
@@ -316,14 +380,16 @@ class ConnectionState:
         self.info("pipe_control type=%s data_len=%d", ctrl_name, len(msg.data))
 
         if msg.ctrl_type == 1:
-            echo_pkt = build_control_type1_ack(self.server_seq, self.client_ack, msg.data)
-            self._send(
-                echo_pkt,
-                logging.INFO,
-                "tx_pipe_echo n=%d seq=%d len=%d",
-                self.server_seq,
-                len(echo_pkt),
-            )
+            for echo_pkt in self._wire(
+                [build_control_type1_ack(self.server_seq, self.client_ack, msg.data)]
+            ):
+                self._send(
+                    echo_pkt,
+                    logging.INFO,
+                    "tx_pipe_echo n=%d seq=%d len=%d",
+                    self.server_seq,
+                    len(echo_pkt),
+                )
             self.advance_seq()
 
     def _handle_pipe_open(self, msg):
@@ -336,14 +402,14 @@ class ConnectionState:
         )
 
         with self.send_lock:
-            open_pkt = build_pipe_open_result(msg.client_pipe_idx, self.server_seq, self.client_ack)
-            self._send(
-                open_pkt,
-                logging.INFO,
-                "tx_pipe_open_response n=%d pipe=%d svc=%s",
-                msg.client_pipe_idx,
-                msg.svc_name,
-            )
+            for open_pkt in self._pipe_open_packets(msg.client_pipe_idx):
+                self._send(
+                    open_pkt,
+                    logging.INFO,
+                    "tx_pipe_open_response n=%d pipe=%d svc=%s",
+                    msg.client_pipe_idx,
+                    msg.svc_name,
+                )
             self.advance_seq()
 
         handler_cls = SERVICE_HANDLERS.get(msg.svc_name.casefold())
@@ -365,7 +431,9 @@ class ConnectionState:
 
             time.sleep(DELAY_BEFORE_REPLY)
             with self.send_lock:
-                discovery_pkts = handler.build_discovery_packet(self.server_seq, self.client_ack)
+                discovery_pkts = self._wire(
+                    handler.build_discovery_packet(self.server_seq, self.client_ack)
+                )
                 total = len(discovery_pkts)
                 for i, pkt in enumerate(discovery_pkts, 1):
                     self._send(
@@ -433,6 +501,7 @@ class ConnectionState:
             )
 
             if reply_pkts is not None:
+                reply_pkts = self._wire(reply_pkts)
                 total = len(reply_pkts)
                 for i, pkt in enumerate(reply_pkts, 1):
                     self._send(
@@ -487,11 +556,13 @@ class ConnectionState:
             ITERATOR_CANCEL_ACK,
         )
         with self.send_lock:
-            pkts = build_service_packet(
-                pipe_idx,
-                host_block,
-                self.server_seq,
-                self.client_ack,
+            pkts = self._wire(
+                build_service_packet(
+                    pipe_idx,
+                    host_block,
+                    self.server_seq,
+                    self.client_ack,
+                )
             )
             total = len(pkts)
             for i, pkt in enumerate(pkts, 1):
@@ -517,12 +588,12 @@ class ConnectionState:
         return all(idx in self.pipes_closed for idx in self.services)
 
 
-def handle_connection(conn, addr):
+def handle_connection(conn, addr, direct=False):
     server_log.reset_context()
     conn_id = next(_conn_id_seq)
     server_log.set_connection(conn_id)
-    log.info("connection_open addr=%s:%d", addr[0], addr[1])
-    state = ConnectionState(conn, conn_id)
+    log.info("connection_open addr=%s:%d direct=%d", addr[0], addr[1], direct)
+    state = ConnectionState(conn, conn_id, direct=direct)
     try:
         state.run()
     except (ConnectionError, BrokenPipeError, OSError) as e:

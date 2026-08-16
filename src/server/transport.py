@@ -1,6 +1,17 @@
 """Transport packets: build, parse, ACK, and transport parameter negotiation.
 
-A packet on the wire is: SeqNo | AckNo | StuffedPayload | MaskedCRC | 0x0D
+Two framings carry the same pipe traffic, matching the two protocol objects
+ENGCT.EXE registers as `Select` and `Straight`:
+
+* Select — the serial link. SeqNo | AckNo | StuffedPayload | MaskedCRC | 0x0D,
+  with byte stuffing, CRC-32 and a Go-Back-N window.
+* Straight — the TCP link. uint16 LE record length (counting itself) | pipe
+  index | pipe content. TCP already delivers in order, so nothing else is left:
+  no sequence numbers, no ACKs, no stuffing, no CRC, no terminator.
+
+Observed 2026-08-15 on the gateway port: the client's control type-4 arrived as
+`06 00 00 ff ff 04` and its 299-byte type-1 declared `2b 01` — the length counts
+the length field itself.
 """
 
 import struct
@@ -16,7 +27,7 @@ from .config import (
     TRANSPORT_WINDOW_SIZE,
 )
 from .models import Packet
-from .pipe import build_control_frame, build_pipe_frame
+from .pipe import build_control_frame, build_pipe_frame, parse_pipe_frames
 from .wire import (
     byte_stuff,
     byte_unstuff,
@@ -25,6 +36,8 @@ from .wire import (
     encode_header_byte,
     mask_crc,
 )
+
+STRAIGHT_HEADER_LEN = 3
 
 
 def build_packet(seq, ack, raw_payload):
@@ -84,6 +97,52 @@ def parse_packet(raw_packet):
         payload=payload,
         crc_ok=crc_ok,
     )
+
+
+def build_straight_record(pipe_idx, content):
+    """Frame pipe content as a Straight record."""
+    return struct.pack("<HB", STRAIGHT_HEADER_LEN + len(content), pipe_idx) + content
+
+
+def take_straight_records(buf):
+    """Pull every whole record off a Straight receive buffer.
+
+    Consumes what it returns, leaving a partial record in place. Returns a list
+    of (pipe_idx, content).
+    """
+    records = []
+    while len(buf) >= STRAIGHT_HEADER_LEN:
+        total = struct.unpack_from("<H", buf)[0]
+        if total < STRAIGHT_HEADER_LEN:
+            # Unrecoverable: the stream carries no marker to resynchronise on.
+            del buf[:]
+            break
+        if len(buf) < total:
+            break
+        records.append((buf[2], bytes(buf[STRAIGHT_HEADER_LEN:total])))
+        del buf[:total]
+    return records
+
+
+def reframe_as_straight(packets):
+    """Re-frame Select packets — one builder's output — as Straight records.
+
+    The builders speak Select because the serial path is the tested one. A
+    Straight record carries its own length, so a message the Select builder had
+    to split across packets goes back together into a single record here.
+    """
+    pending = {}
+    buffers = {}
+    records = []
+    for pkt in packets:
+        for frame in parse_pipe_frames(byte_unstuff(pkt[2:-5]), pending):
+            buffers.setdefault(frame.pipe_idx, bytearray()).extend(frame.content)
+            if pending.get(frame.pipe_idx, 0) == 0:
+                records.append(
+                    build_straight_record(frame.pipe_idx, bytes(buffers[frame.pipe_idx]))
+                )
+                buffers[frame.pipe_idx].clear()
+    return records
 
 
 def build_transport_params():

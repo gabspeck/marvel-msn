@@ -21,6 +21,13 @@ import time
 import unittest
 
 from server import log as server_log
+from server.config import (
+    TRANSPORT_ACK_BEHIND,
+    TRANSPORT_ACK_TIMEOUT_MS,
+    TRANSPORT_MAX_BYTES,
+    TRANSPORT_PACKET_SIZE,
+    TRANSPORT_WINDOW_SIZE,
+)
 from server.connection import ConnectionState, handle_connection
 from server.models import DwordParam, EndMarker, PipeOpenRequest, VarParam
 from server.mpc import (
@@ -47,7 +54,7 @@ from server.services.logsrv import (
 )
 from server.services.rooms import _rooms as conference_rooms
 from server.store import reset_app_store
-from server.transport import build_packet, parse_packet
+from server.transport import build_packet, build_straight_record, parse_packet
 
 from .support import (
     ADMIN,
@@ -244,6 +251,10 @@ class _ConnectionHarness(unittest.TestCase):
     PIPE_OLREGSRV = 6
     PIPE_ONLSTMT = 7
 
+    # False replays MOSCP.EXE over the modem emulator, True replays ENGCT.EXE
+    # on the gateway port.
+    direct = False
+
     def setUp(self):
         self.server_sock, self.client_sock = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server_sock.settimeout(5)
@@ -257,7 +268,7 @@ class _ConnectionHarness(unittest.TestCase):
 
     def _run_server(self):
         with contextlib.suppress(ConnectionError, OSError):
-            handle_connection(self.server_sock, ("test", 0))
+            handle_connection(self.server_sock, ("test", 0), direct=self.direct)
 
     def tearDown(self):
         for sock in (self.client_sock, self.server_sock):
@@ -315,12 +326,13 @@ class _ConnectionHarness(unittest.TestCase):
     # --- protocol-level helpers ---
 
     def _do_handshake(self):
-        self.client_sock.sendall(b"\x0d")
-        self.client_sock.settimeout(2)
-        com = bytearray()
-        while len(com) < 4:
-            com.extend(self.client_sock.recv(4 - len(com)))
-        self.assertEqual(bytes(com), b"COM\r")
+        if not self.direct:
+            self.client_sock.sendall(b"\x0d")
+            self.client_sock.settimeout(2)
+            com = bytearray()
+            while len(com) < 4:
+                com.extend(self.client_sock.recv(4 - len(com)))
+            self.assertEqual(bytes(com), b"COM\r")
         params = self._recv_packet()
         self.assertIsNotNone(params)
         self.assertTrue(params.crc_ok)
@@ -659,6 +671,84 @@ class TestLoginIdentity(_ConnectionHarness):
         buffer = self._billing_reply()
         self.assertIn(b"Jobs\x00", buffer)
         self.assertNotIn(b"Gates\x00", buffer)
+
+
+class TestDirectGatewaySession(_ConnectionHarness):
+    """ENGCT.EXE's path: a bare TCP connection on the gateway port.
+
+    The connector DLL puts nothing in front of the MPC stream and ENGCT carries
+    no modem code, so the server opens with the transport parameters and
+    everything above the bring-up is the dial-up path unchanged.
+    """
+
+    direct = True
+
+    def _recv_exactly(self, n, timeout=2):
+        self.client_sock.settimeout(timeout)
+        buf = bytearray()
+        while len(buf) < n:
+            chunk = self.client_sock.recv(n - len(buf))
+            if not chunk:
+                break
+            buf.extend(chunk)
+        return bytes(buf)
+
+    def _recv_record(self, timeout=2):
+        head = self._recv_exactly(3, timeout)
+        self.assertEqual(len(head), 3, "no record header")
+        total = struct.unpack("<H", head[:2])[0]
+        return head[2], self._recv_exactly(total - 3, timeout)
+
+    def _send_record(self, pipe_idx, content):
+        self.client_sock.sendall(build_straight_record(pipe_idx, content))
+
+    def test_transport_params_arrive_unprompted(self):
+        params = struct.pack(
+            "<IIIII",
+            TRANSPORT_PACKET_SIZE,
+            TRANSPORT_MAX_BYTES,
+            TRANSPORT_WINDOW_SIZE,
+            TRANSPORT_ACK_BEHIND,
+            TRANSPORT_ACK_TIMEOUT_MS,
+        )
+        self.assertEqual(self._recv_record(), (0, build_control_frame(3, params)))
+
+    def test_bring_up_continues_into_a_service_pipe(self):
+        self._recv_record()  # transport params
+
+        # ENGCT opens with type-4 and answers the parameters with type-1.
+        self._send_record(0, build_control_frame(4, b""))
+        ctrl1_data = b"\x06\x00\x00\x00" + b"\x00" * 169
+        self._send_record(0, build_control_frame(1, ctrl1_data))
+        self.assertEqual(self._recv_record(), (0, build_control_frame(1, ctrl1_data)))
+
+        self._send_record(
+            0,
+            struct.pack("<HHH", 0, 0, self.PIPE_LOGSRV)
+            + b"LOGSRV\x00"
+            + b"U\x00"
+            + struct.pack("<I", 6),
+        )
+        # The record's pipe number addresses the pipe; the content is the bare
+        # open result, with no routing prefix in front of it.
+        pipe_idx, content = self._recv_record()
+        self.assertEqual(pipe_idx, self.PIPE_LOGSRV)
+        self.assertEqual(content, struct.pack("<HHHH", self.PIPE_LOGSRV, 1, self.PIPE_LOGSRV, 0))
+
+        # Discovery follows on the service pipe, routed to it in-band.
+        pipe_idx, content = self._recv_record(timeout=3)
+        self.assertEqual(pipe_idx, self.PIPE_LOGSRV)
+        self.assertEqual(struct.unpack_from("<H", content)[0], self.PIPE_LOGSRV)
+
+    def test_a_record_split_across_writes_is_reassembled(self):
+        self._recv_record()  # transport params
+
+        ctrl1_data = b"\x06\x00\x00\x00" + b"\x00" * 169
+        record = build_straight_record(0, build_control_frame(1, ctrl1_data))
+        self.client_sock.sendall(record[:5])
+        time.sleep(0.05)
+        self.client_sock.sendall(record[5:])
+        self.assertEqual(self._recv_record(), (0, build_control_frame(1, ctrl1_data)))
 
 
 class _RecordingSocket:
