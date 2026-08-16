@@ -23,8 +23,10 @@ work), Ghidra project at `~/apps/MSN95.gpr`.
 Hierarchy: one **Connection** → one **Session** → up to 16 **Pipes** →
 per-pipe RPC traffic as **Host Blocks** containing **Tagged Parameters**.
 
-ENGCT.EXE is an alternate transport engine shipped but not loaded for dial-up
-or TCP — MOSCP.EXE handles both. Same wire format either way.
+MOSCP.EXE drives the serial link. TCP runs on ENGCT.EXE, which owns the gateway
+host names and port 569 and delegates dialling and connecting to a connector DLL
+(TCPCONN.DLL direct, MSNPROXY.DLL through a LAN proxy). Same wire format either
+way — see `docs/TCP-TRANSPORT.md`.
 
 ---
 
@@ -221,8 +223,12 @@ Any response other than `COM\r` within 20s aborts. `ENGCT.EXE` notes:
 static analysis shows X.25 prompts (`AUSTPAC:`, `TELENET`, `please log in:`,
 `please Sign-on:`, PAD 0xA3); not exercised at runtime.
 
-For TCP: connection string `P:username:server_address\0` (`P`=primary,
-`B`=backup datacenter).
+TCP has no modem stage: the OSR2 connector DLLs write nothing to the socket
+before the framing starts, and ENGCT.EXE contains no modem strings, so bring-up
+begins at the type-3 frame. `docs/TCP-TRANSPORT.md` §2. An earlier note recorded
+a connection string `P:username:server_address\0` (`P`=primary, `B`=backup
+datacenter) for TCP; no code path has been found that puts it on the wire, so
+treat it as unverified.
 
 ### 4.2 Pipe open (pipe 0, routing 0x0000)
 
