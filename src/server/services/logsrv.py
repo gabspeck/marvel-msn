@@ -30,20 +30,27 @@ from ._dispatch import log_unhandled_selector
 log = logging.getLogger(__name__)
 
 # LOGSRV wire selectors. Names track MOSCP/SIGNUP handler symbols where known.
-LOGSRV_SELECTOR_LOGIN = 0x00                       # initial login bootstrap (7 DWORDs)
-LOGSRV_SELECTOR_PASSWORD_CHANGE = 0x01             # Tools > Password dialog commit
-LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER = 0x02        # SIGNUP step after FTM transfer
-LOGSRV_SELECTOR_SIGNUP_QUERY = 0x07                # SIGNUP progressive queries
-LOGSRV_SELECTOR_BILLING_QUERY = 0x0A               # billing info fetch
-LOGSRV_SELECTOR_PM_COMMIT = 0x0B                   # payment-method commit (0x84 var + status)
-LOGSRV_SELECTOR_BILLING_COMMIT = 0x0C              # billing commit (0x84 var + status)
-LOGSRV_SELECTOR_POST_SIGNUP_QUERY = 0x0D           # post-signup phonebook/server query
-LOGSRV_SELECTOR_EXISTING_MEMBER_PHONEBOOK = 0x0E   # existing-member phonebook fetch
+LOGSRV_SELECTOR_LOGIN = 0x00  # initial login bootstrap (7 DWORDs)
+LOGSRV_SELECTOR_PASSWORD_CHANGE = 0x01  # Tools > Password dialog commit
+LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER = 0x02  # SIGNUP step after FTM transfer
+LOGSRV_SELECTOR_SIGNUP_QUERY = 0x07  # SIGNUP progressive queries
+LOGSRV_SELECTOR_BILLING_QUERY = 0x0A  # billing info fetch
+LOGSRV_SELECTOR_PM_COMMIT = 0x0B  # payment-method commit (0x84 var + status)
+LOGSRV_SELECTOR_BILLING_COMMIT = 0x0C  # billing commit (0x84 var + status)
+LOGSRV_SELECTOR_POST_SIGNUP_QUERY = 0x0D  # post-signup phonebook/server query
+LOGSRV_SELECTOR_EXISTING_MEMBER_PHONEBOOK = 0x0E  # existing-member phonebook fetch
 # OSR2 / MSN 2.5 login. The NTLM exchange runs over two selectors, one leg each:
 # 0x0F carries NEGOTIATE and answers with CHALLENGE, 0x10 carries AUTHENTICATE
 # and answers with the sign-in result.
 LOGSRV_SELECTOR_NTLM_NEGOTIATE = 0x0F
 LOGSRV_SELECTOR_NTLM_AUTHENTICATE = 0x10
+LOGSRV_SELECTOR_NTLM_BOOTSTRAP = 0x11  # account record fetch once the context is accepted
+# OSR2 replacements for the account selectors, each sealing the account data
+# under the pipe's NTLM context. The plaintext originals stay for the RTM
+# client, which reaches the same dialogs on 0x0A and 0x0B. Only the address
+# commit is shared: BILLADD submits it on 0x0C, in the clear, in both builds.
+LOGSRV_SELECTOR_SIGNED_BILLING_QUERY = 0x13
+LOGSRV_SELECTOR_SIGNED_PM_COMMIT = 0x14
 
 # The credential blob the client sends as the second send-param of selector
 # 0x00. `GUIDE.EXE!VerifyAccountViaLogSrv` @ 0x04304024 builds it out of three
@@ -101,6 +108,9 @@ class LOGSRVHandler:
         self.svc_name = svc_name
         # Anonymous when the pipe opens before the login lands.
         self.session = session or Session()
+        # Set by the AUTHENTICATE this pipe accepts. One RC4 stream per pipe,
+        # so the context cannot live on the connection-wide session.
+        self.security = None
 
     def build_discovery_packet(self, server_seq, client_ack):
         """Build the IID->selector discovery block for LOGSRV."""
@@ -124,7 +134,9 @@ class LOGSRVHandler:
         elif selector == LOGSRV_SELECTOR_NTLM_NEGOTIATE:
             reply_payload = _handle_ntlm_negotiate(payload, self.session)
         elif selector == LOGSRV_SELECTOR_NTLM_AUTHENTICATE:
-            reply_payload = _handle_ntlm_authenticate(payload, self.session)
+            reply_payload, self.security = _handle_ntlm_authenticate(payload, self.session)
+        elif selector == LOGSRV_SELECTOR_NTLM_BOOTSTRAP:
+            reply_payload = _handle_ntlm_bootstrap(self.session)
         elif selector == LOGSRV_SELECTOR_PASSWORD_CHANGE:
             reply_payload = _handle_password_change(payload, self.session)
         elif selector == LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER:
@@ -133,8 +145,12 @@ class LOGSRVHandler:
             reply_payload = _handle_signup_query(payload)
         elif selector == LOGSRV_SELECTOR_BILLING_QUERY:
             reply_payload = _handle_billing_query(self.session)
+        elif selector == LOGSRV_SELECTOR_SIGNED_BILLING_QUERY:
+            reply_payload = _handle_signed_billing_query(self.session, self.security)
         elif selector == LOGSRV_SELECTOR_PM_COMMIT:
             reply_payload = _handle_pm_commit(payload, self.session)
+        elif selector == LOGSRV_SELECTOR_SIGNED_PM_COMMIT:
+            reply_payload = _handle_signed_pm_commit(payload, self.session, self.security)
         elif selector == LOGSRV_SELECTOR_BILLING_COMMIT:
             reply_payload = _handle_billing_commit(payload, self.session)
         elif selector == LOGSRV_SELECTOR_POST_SIGNUP_QUERY:
@@ -173,10 +189,52 @@ _BAD_PASSWORD_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_BAD_PASSWORD)
 _NTLM_NEGOTIATE = 1
 _NTLM_AUTHENTICATE = 3
 
+# The word of the selector 0x10 reply. See `_ntlm_result_reply`.
+NTLM_ACCEPTED = 4
+NTLM_REFUSED = 0
+
 # Selector 0x0f owes a 0x84 variable whatever happens. An empty one carries no
 # token header, which is the only shape distinguishable from a real CHALLENGE
 # without inventing a status field.
 _NTLM_NO_CHALLENGE_REPLY = build_tagged_reply_var(0x84, b"")
+
+
+def _build_ntlm_bootstrap_payload():
+    """Build the selector 0x11 reply: five dwords, a 16-byte variable, five dwords.
+
+    `GUIDE.EXE!VerifyAccountViaLogSrv` @ 0x04304429 runs this only once
+    `StAuthenticate` reports the context accepted — a refused sign-in jumps
+    straight to the result check, which is why the selector stayed unseen while
+    selector 0x10 answered its word with anything but 4.
+
+    The variable sits sixth because that is where the request's recv
+    descriptors put it. `MPCCL!ProcessTaggedServiceReply` @ 0x04604f26 walks
+    reply fields and descriptors together, one step each, and a tag that does
+    not match the descriptor at that index fails the whole request with
+    0x8b0b0008 — so a reply cannot group its statics ahead of its variables the
+    way `_build_bootstrap_payload` does. That one only looks grouped because
+    its variable is last. End-static consumes no descriptor and can sit
+    anywhere; the parser reads it as a flag and completes the request when the
+    host block runs out.
+
+    None of the fields carry the login result: that arrives on selector 0x10 as
+    the dword `StAuthenticate` hands back. These land in the account record and
+    in `PTR_DAT_0430b0bc` slots, and zero leaves them unset the way the RTM
+    bootstrap does. Two of them have to stay zero rather than merely may: with
+    the Setup `SetupN` value present, a non-zero dword 3 or 4 rewrites the
+    result as 0x24 and raises "Software update required."
+    """
+    payload = bytearray()
+    for _ in range(5):
+        payload.extend(build_tagged_reply_dword(0))
+    payload.extend(build_tagged_reply_var(0x84, b"\x00" * 16))
+    for _ in range(5):
+        payload.extend(build_tagged_reply_dword(0))
+    payload.append(TAG_END_STATIC)
+    return bytes(payload)
+
+
+_NTLM_BOOTSTRAP_PAYLOAD = _build_ntlm_bootstrap_payload()
 
 
 def _handle_login(request_payload, session):
@@ -292,29 +350,113 @@ def _handle_billing_commit(request_payload, session):
     return _COMMIT_OK_REPLY
 
 
+ACCOUNT_BUFFER_LEN = 0x41C
+PM_BUFFER_LEN = 0x11C
+
+
 def _handle_billing_query(session):
     """Handle a billing/account info query (selector 0x0A).
 
-    The client opens this when the user clicks Tools > Billing > Payment Method.
-    Reply is a 0x84 variable containing a 0x41c (1052) byte buffer:
-
-      Offset 0x000: dword status (0 = success)
-      Offset 0x008: OI (Order Information / address) — NUL-terminated strings:
-        +0x3b  First name
-        +0x69  Last name
-        +0x1d0 Country ID (dword)
-        +0x1d8 Address line
-        +0x201 City
-        +0x253 State
-        +0x27c ZIP code
-        +0x2bd Phone
-      Offset 0x300: PM (Payment Method) — 0x11c bytes:
-        +0x00  Type dword (1=CHARGE, 2=DEBIT, 3=DIRECTDEBIT)
-        +0x19  Card number string
+    The RTM client opens this when the user clicks Tools > Billing > Payment
+    Method. Reply is a single 0x84 variable holding the account buffer.
     """
-    profile = session.user.billing
     log.info("billing_query user=%s", session.user.username or "-")
-    buf = bytearray(0x41C)  # 1052 bytes, zero-filled
+    buf = _build_account_buffer(session.user.billing)
+    _log_account_buffer("billing_query_reply", session.user.billing)
+    return build_tagged_reply_var(0x84, buf)
+
+
+def _handle_signed_billing_query(session, security):
+    """LOGSRV selector 0x13 — the OSR2 billing dialog's account fetch.
+
+    `BILLADD.DLL!BillingDlg_FetchWorker` @ 0x7f1245ba sends no parameters and
+    takes two variables back, both length-checked before anything is read: the
+    0x41c account buffer, then the 16-byte seal token. It hands the pair to
+    `CAuthenticator::FProcessMessage(buf, 0x41c, token, 1)`, which unseals them
+    in place, and a buffer that fails there is dropped as silently as a wrong
+    length.
+    """
+    log.info("signed_billing_query user=%s", session.user.username or "-")
+    buf = _build_account_buffer(session.user.billing)
+
+    if security is None:
+        # No AUTHENTICATE landed on this pipe, so there is no key to seal with.
+        # The client cannot have reached this selector without one.
+        log.warning("signed_billing_query_reply refused reason=no_security_context")
+        sealed, token = buf, bytes(_ntlm.SEAL_TOKEN_LEN)
+    else:
+        sealed, token = security.seal(buf)
+
+    _log_account_buffer("signed_billing_query_reply", session.user.billing)
+    return build_tagged_reply_var(0x84, sealed) + build_tagged_reply_var(0x84, token)
+
+
+def _handle_signed_pm_commit(request_payload, session, security):
+    """LOGSRV selector 0x14 — the OSR2 Payment Method commit.
+
+    `BILLADD.DLL` @ 0x7f124c08 seals the 0x11c PM buffer with
+    `CAuthenticator::FProcessMessage(buf, 0x11c, token, 0)` and sends the
+    ciphertext and the token as consecutive variables. The reply it reads is the
+    same 4-byte variable the unsealed commits answer with.
+
+    The buffer is traced rather than stored, for the reason `_handle_pm_commit`
+    gives — and it carries a card number, so the plaintext stays at TRACE. The
+    seal is checked so a key that drifts shows up in the log rather than as a
+    dialog that half works.
+    """
+    send_params, _ = parse_request_params(request_payload)
+    sealed = next(
+        (p.data for p in send_params if isinstance(p, VarParam) and len(p.data) == PM_BUFFER_LEN),
+        None,
+    )
+    token = next(
+        (
+            p.data
+            for p in send_params
+            if isinstance(p, VarParam) and len(p.data) == _ntlm.SEAL_TOKEN_LEN
+        ),
+        None,
+    )
+    if sealed is None or token is None or security is None:
+        log.warning(
+            "signed_pm_commit malformed params=%d payload_len=%d security=%s",
+            len(send_params),
+            len(request_payload),
+            security is not None,
+        )
+        log.log(TRACE, "signed_pm_commit payload=%s", request_payload.hex())
+        return _COMMIT_OK_REPLY
+
+    buf, intact = security.unseal(sealed, token)
+    log.info(
+        "signed_pm_commit user=%s payload_len=%d seal_ok=%s",
+        session.user.username or "-",
+        len(request_payload),
+        intact,
+    )
+    log.log(TRACE, "signed_pm_commit plaintext=%s", buf.hex())
+    log.info("signed_pm_commit_reply status=0")
+    return _COMMIT_OK_REPLY
+
+
+def _build_account_buffer(profile):
+    """Pack a billing profile into the 0x41c account buffer both queries return.
+
+    Offset 0x000: dword status (0 = success)
+    Offset 0x008: OI (Order Information / address) — NUL-terminated strings:
+      +0x3b  First name
+      +0x69  Last name
+      +0x1d0 Country ID (dword)
+      +0x1d8 Address line
+      +0x201 City
+      +0x253 State
+      +0x27c ZIP code
+      +0x2bd Phone
+    Offset 0x300: PM (Payment Method) — 0x11c bytes:
+      +0x00  Type dword (1=CHARGE, 2=DEBIT, 3=DIRECTDEBIT)
+      +0x19  Card number string
+    """
+    buf = bytearray(ACCOUNT_BUFFER_LEN)
 
     # Status = 0 (success)
     struct.pack_into("<I", buf, 0x00, 0)
@@ -335,12 +477,14 @@ def _handle_billing_query(session):
     struct.pack_into("<I", buf, pm + 0x00, profile.payment_type)
     _put_str(buf, pm + 0x19, profile.card_number)
 
-    masked_card = (
-        f"****{profile.card_number[-4:]}" if len(profile.card_number) >= 4 else "****"
-    )
+    return bytes(buf)
+
+
+def _log_account_buffer(event, profile):
+    masked_card = f"****{profile.card_number[-4:]}" if len(profile.card_number) >= 4 else "****"
     log.info(
-        "billing_query_reply status=0 type=%d first=%r last=%r country=%d"
-        " city=%r state=%r zip=%r card=%s",
+        "%s status=0 type=%d first=%r last=%r country=%d city=%r state=%r zip=%r card=%s",
+        event,
         profile.payment_type,
         profile.first_name,
         profile.last_name,
@@ -350,7 +494,6 @@ def _handle_billing_query(session):
         profile.zip,
         masked_card,
     )
-    return build_tagged_reply_var(0x84, bytes(buf))
 
 
 def _put_str(buf, offset, s):
@@ -457,20 +600,23 @@ def _handle_ntlm_authenticate(request_payload, session):
     The OSR2 client sends only an LM response, leaving NtChallengeResponse
     empty, and names itself in the Workstation field. It asks for a 0x82 word
     and a 0x83 dword back rather than another token.
+
+    Returns the reply and the signing context an accepted exchange leaves
+    behind, which is None on every refusal.
     """
     token = _ntlm_request_token(request_payload)
     if token is None or _ntlm.token_message_type(token) != _NTLM_AUTHENTICATE:
-        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID), None
 
     server_challenge = session.ntlm_challenge
     if server_challenge is None:
         log.warning("ntlm_authenticate arrived with no challenge on this connection")
-        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID), None
 
     auth = _ntlm.parse_authenticate(token, session.ntlm_flags)
     if auth is None:
         log.warning("ntlm_authenticate token too short len=%d", len(token))
-        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID), None
 
     log.info(
         "ntlm_authenticate user=%r domain=%r workstation=%r nt_len=%d lm_len=%d",
@@ -488,7 +634,7 @@ def _handle_ntlm_authenticate(request_payload, session):
             LOGIN_RESULT_BAD_MEMBER_ID,
             auth.user_name,
         )
-        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID)
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_MEMBER_ID), None
 
     if not _ntlm.password_matches(auth, server_challenge, user.password):
         log.info(
@@ -497,17 +643,25 @@ def _handle_ntlm_authenticate(request_payload, session):
             user.username,
         )
         log.log(TRACE, "ntlm_authenticate token=%s", token.hex())
-        return _ntlm_result_reply(LOGIN_RESULT_BAD_PASSWORD)
+        return _ntlm_result_reply(LOGIN_RESULT_BAD_PASSWORD), None
 
     session.sign_in(user)
     session.ntlm_challenge = None
+    security = _ntlm.establish(auth, server_challenge, user.password)
     log.info(
-        "ntlm_reply result=0 member_id=%r display_name=%r rights=0x%x",
+        "ntlm_reply result=0 member_id=%r display_name=%r rights=0x%x security=established",
         user.username,
         user.display_name,
         user.rights,
     )
-    return _ntlm_result_reply(LOGIN_RESULT_OK)
+    return _ntlm_result_reply(LOGIN_RESULT_OK), security
+
+
+def _handle_ntlm_bootstrap(session):
+    """LOGSRV selector 0x11 — the account record the accepted sign-in reads."""
+    log.info("ntlm_bootstrap user=%s", session.user.username or "-")
+    log.info("ntlm_bootstrap_reply dwords=5 var_len=16 dwords=5")
+    return _NTLM_BOOTSTRAP_PAYLOAD
 
 
 def _ntlm_request_token(request_payload):
@@ -539,12 +693,21 @@ def _ntlm_result_reply(result):
 
     The dword carries the sign-in result, in the vocabulary selector 0x00
     already uses — 0 signs in, 2 raises "This member ID is not valid.", 3
-    raises "Password not valid. Please type it again." Holding the word at 0
-    while the dword refused still produced the password box, which is what
-    separates the two fields. What the word itself means stays unread.
+    raises "Password not valid. Please type it again."
+
+    The word continues the message-type run the two legs already number: the
+    CHALLENGE this server sends is header type 2, the AUTHENTICATE the client
+    sends is 3, and 4 is the acceptance that closes the exchange.
+    `CAuthenticator::StAuthenticate` (MCM.DLL @ 0x7f644d2b) presets the field to
+    5 and compares it against 4 alone: on 4 it reports success and keeps the
+    SSPI context, and on anything else it calls DeleteSecurityContext and
+    reports the sign-in refused. The sign-in dialog reads the dword either way,
+    so a refused word still signs in — but BILLADD gates its whole fetch on the
+    status and dies with "Your account information cannot be downloaded at this
+    time" before sending a request.
     """
     return build_static_reply(
-        build_tagged_reply_word(0),
+        build_tagged_reply_word(NTLM_ACCEPTED if result == LOGIN_RESULT_OK else NTLM_REFUSED),
         build_tagged_reply_dword(result),
     )
 
