@@ -207,7 +207,7 @@ C204.79.197.203;gw-backup.moswest.msn.net;192.168.1.170!10060|2|...
 The pipe traffic is identical; the framing under it is not. On TCP a record is
 
 ```
-uint16 LE total length, counting itself | uint8 pipe index | pipe content
+uint16 LE total length, counting itself | uint8 command byte | pipe message
 ```
 
 and nothing else — no sequence numbers, no ACKs, no byte stuffing, no CRC, no
@@ -218,16 +218,26 @@ machinery has nothing to do. ENGCT still carries all of it — CRC-32
 `0x90→1B 35`, `0x8B→1B 36`) — because `FUN_057145c5` registers both protocol
 objects, `Select` and `Straight`, against provider `BuiltIn`.
 
+Byte 2 is not a pipe number. It is a copy of the message's own command byte:
+ENGCT's record builder (`FUN_05712fd6`, OSR2 build) writes the PipeBuf flag byte
+that sits one position before the content, which `FUN_05713793` zeroes for every
+data message and `FUN_05713813` sets when it writes a command into `content[2]`.
+Only the pipe close does that, with `0x01` — so byte 2 is 1 on a close and 0 on
+everything else, and `03 00 01` carries the same byte twice. The receiver
+overwrites its copy from the content before reading it
+(`PipeBuf_SetFlagFromContent @ 0x0571384c`), so nothing is ever routed on it.
+Every record must therefore route on the message's own prefix.
+
 Content rules, all observed against the client:
 
 - Control and pipe-0 records keep the in-band routing prefix: `FFFF` for
   control frames, `0000` for a pipe open, otherwise the logical pipe.
 - Service records keep it too — the record for a reply on pipe 3 is
-  `[len][03][03 00][host block]`, the same content the Select builder puts in a
+  `[len][00][03 00][host block]`, the same content the Select builder puts in a
   frame.
-- The **pipe-open response carries no prefix**: `[len][03][03 00 01 00 03 00 00
-  00]`, the bare result addressed by the record's pipe number. Prefixing it the
-  way service records are prefixed stops the client dead at "Verifying account".
+- The **pipe-open response carries no extra prefix**: `[len][00][03 00 01 00 03
+  00 00 00]`, the bare result, whose own leading `03 00` is the routing value.
+  Prefixing it a second time stops the client dead at "Verifying account".
 - `PacketSize` does not bound a record. Replies of 16396 bytes go through in one
   record where the serial link had to split them; the uint16 length is the only
   ceiling.

@@ -1,7 +1,8 @@
-"""Pipe multiplexing: frame building/parsing, control frames, pipe-0 routing.
+"""Pipe multiplexing: frame building/parsing, control frames, message routing.
 
-Up to 16 logical pipes are multiplexed over a single connection. All traffic
-flows through pipe 0 with a 2-byte LE routing prefix.
+Up to 16 logical pipes are multiplexed over a single connection. Every pipe
+message carries its destination in a 2-byte LE routing prefix; the framing
+around it never does.
 """
 
 import struct
@@ -10,8 +11,8 @@ from .config import (
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_HAS_LENGTH,
-    PIPE_INDEX_MASK,
     PIPE_LAST_DATA,
+    REASSEMBLY_INDEX_MASK,
     ROUTING_CONTROL,
     ROUTING_PIPE_OPEN,
 )
@@ -19,21 +20,23 @@ from .models import ControlMessage, PipeData, PipeFrame, PipeOpenRequest
 from .wire import decode_header_byte, encode_header_byte
 
 
-def build_pipe_frame(pipe_index, data, last=True):
+def build_pipe_frame(reassembly_index, data, last=True):
     """Build a continuation-format pipe frame.
 
-    Continuation format: bit 5 set, all remaining packet bytes belong to
-    this pipe. Used for normal data and pipe-open responses.
+    Continuation format: bit 5 set, all remaining packet bytes belong to this
+    message. `reassembly_index` names the receiver's partial-message buffer,
+    not a pipe; we pass the pipe number because only one message is ever in
+    flight per pipe, which makes it unique among our open messages.
     """
     flags = PIPE_ALWAYS_SET | PIPE_CONTINUATION
     if last:
         flags |= PIPE_LAST_DATA
-    hdr = encode_header_byte(flags | (pipe_index & PIPE_INDEX_MASK))
+    hdr = encode_header_byte(flags | (reassembly_index & REASSEMBLY_INDEX_MASK))
     content_length = struct.pack("<H", len(data))
     return bytes([hdr]) + content_length + data
 
 
-def build_pipe_frame_has_length(pipe_index, data, last=True):
+def build_pipe_frame_has_length(reassembly_index, data, last=True):
     """Build a has_length-format pipe frame.
 
     Has_length format: bit 4 set, next byte gives the data length.
@@ -42,7 +45,7 @@ def build_pipe_frame_has_length(pipe_index, data, last=True):
     flags = PIPE_ALWAYS_SET | PIPE_HAS_LENGTH
     if last:
         flags |= PIPE_LAST_DATA
-    hdr = encode_header_byte(flags | (pipe_index & PIPE_INDEX_MASK))
+    hdr = encode_header_byte(flags | (reassembly_index & REASSEMBLY_INDEX_MASK))
     data_bytes = struct.pack("<H", len(data)) + data
     length_byte = encode_header_byte(len(data_bytes) | PIPE_ALWAYS_SET)
     return bytes([hdr, length_byte]) + data_bytes
@@ -58,8 +61,8 @@ def parse_pipe_frame(payload, pending=None):
 
     Returns (PipeFrame, bytes_consumed) or (None, 0).
 
-    `pending` maps pipe index to the bytes still owed on a frame that did not
-    fit in one transport packet. Such a frame continues in the next packet
+    `pending` maps reassembly index to the bytes still owed on a frame that did
+    not fit in one transport packet. Such a frame continues in the next packet
     behind a header byte and nothing else — the 2-byte content length appears
     once, in the packet that opens the frame. Reading a length out of every
     fragment ate 2 bytes of content per packet boundary, which is what left an
@@ -70,7 +73,7 @@ def parse_pipe_frame(payload, pending=None):
         return None, 0
 
     hdr = decode_header_byte(payload[0])
-    pipe_idx = hdr & PIPE_INDEX_MASK
+    reassembly_index = hdr & REASSEMBLY_INDEX_MASK
     has_length = bool(hdr & PIPE_HAS_LENGTH)
     continuation = bool(hdr & PIPE_CONTINUATION)
     last_data = bool(hdr & PIPE_LAST_DATA)
@@ -86,7 +89,7 @@ def parse_pipe_frame(payload, pending=None):
         data_bytes = payload[pos : pos + data_len]
         pos += data_len
 
-    owed = pending.get(pipe_idx, 0) if pending is not None else 0
+    owed = pending.get(reassembly_index, 0) if pending is not None else 0
     if owed:
         content = data_bytes[:owed]
         content_length = len(content)
@@ -98,14 +101,14 @@ def parse_pipe_frame(payload, pending=None):
         content = data_bytes[2 : 2 + content_length]
         consumed = 2 + len(content)
     if pending is not None:
-        pending[pipe_idx] = (owed or content_length) - len(content)
+        pending[reassembly_index] = (owed or content_length) - len(content)
     if continuation:
         # Only this frame's own bytes are consumed. Running to the end of the
         # payload instead would swallow a second frame packed behind it.
         pos += consumed
 
     return PipeFrame(
-        pipe_idx=pipe_idx,
+        reassembly_index=reassembly_index,
         has_length=has_length,
         continuation=continuation,
         last_data=last_data,
@@ -117,7 +120,7 @@ def parse_pipe_frame(payload, pending=None):
 def parse_pipe_frames(payload, pending=None):
     """Parse all pipe frames in a transport payload.
 
-    `pending` is the caller's per-pipe fragment state, carried across packets.
+    `pending` is the caller's per-index fragment state, carried across packets.
     """
     frames = []
     pos = 0
@@ -130,10 +133,11 @@ def parse_pipe_frames(payload, pending=None):
     return frames
 
 
-def parse_pipe0_content(content):
-    """Route pipe-0 content by its 2-byte LE routing prefix.
+def parse_pipe_message(content):
+    """Route one whole pipe message by its 2-byte LE routing prefix.
 
-    Returns ControlMessage, PipeOpenRequest, PipeData, or None.
+    The routing value is the only destination a message carries. Returns
+    ControlMessage, PipeOpenRequest, PipeData, or None.
     """
     if len(content) < 2:
         return None

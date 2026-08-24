@@ -14,8 +14,8 @@ from .config import (
     MPC_TAG_CHUNKED_COPY,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
-    PIPE_INDEX_MASK,
     PIPE_LAST_DATA,
+    REASSEMBLY_INDEX_MASK,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
@@ -444,7 +444,7 @@ def _build_continuation_frame(pipe_idx, content, last=True):
     flags = PIPE_ALWAYS_SET | PIPE_CONTINUATION
     if last:
         flags |= PIPE_LAST_DATA
-    hdr = encode_header_byte(flags | (pipe_idx & PIPE_INDEX_MASK))
+    hdr = encode_header_byte(flags | (pipe_idx & REASSEMBLY_INDEX_MASK))
     return bytes([hdr]) + content
 
 

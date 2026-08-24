@@ -36,9 +36,14 @@ PIPE_ALWAYS_SET = 0x80
 PIPE_HAS_LENGTH = 0x10
 PIPE_CONTINUATION = 0x20
 PIPE_LAST_DATA = 0x40
-PIPE_INDEX_MASK = 0x0F
+# Bits 3-0 name the reassembly context a message occupies while it is in
+# flight, not the pipe it is for. ENGCT takes a free one from a 16-entry table
+# per outbound message (`FUN_05713f8e`) and releases it on completion; the
+# receiver keys its partial-message buffers on it (`recv_packet` @ 0x05714b62,
+# table at transport+0x04). Routing comes from the message's own 2-byte prefix.
+REASSEMBLY_INDEX_MASK = 0x0F
 
-# --- Pipe-0 routing ---
+# --- Pipe message routing ---
 ROUTING_CONTROL = 0xFFFF
 ROUTING_PIPE_OPEN = 0x0000
 

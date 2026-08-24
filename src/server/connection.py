@@ -30,7 +30,7 @@ from .mpc import (
     is_iterator_cancel,
     parse_host_block,
 )
-from .pipe import parse_pipe0_content, parse_pipe_frames
+from .pipe import parse_pipe_frames, parse_pipe_message
 from .services import SERVICE_HANDLERS
 from .session import Session
 from .transport import (
@@ -92,11 +92,11 @@ class ConnectionState:
         # shares it, and LOGSRV fills it in when the sign-in succeeds.
         self.session = Session()
         self.services = {}
-        self.pipe_buffers = defaultdict(bytearray)
+        self.reassembly_buffers = defaultdict(bytearray)
         # Bytes still owed on a pipe frame whose content spans transport
-        # packets; parse_pipe_frame reads a content length only when a pipe
-        # owes nothing.
-        self.pipe_pending = {}
+        # packets, keyed by reassembly index; parse_pipe_frame reads a content
+        # length only when an index owes nothing.
+        self.reassembly_pending = {}
         # The client can split a two-byte escape across transport packets.
         # Keep the whole first stuffed payload until the next packet supplies
         # the escape code, so each packet's pipe header remains separate.
@@ -240,8 +240,8 @@ class ConnectionState:
             self.buf.extend(data)
 
             if self.direct:
-                for pipe_idx, content in take_straight_records(self.buf):
-                    self._handle_straight_record(pipe_idx, content)
+                for message in take_straight_records(self.buf):
+                    self._handle_straight_record(message)
                 continue
 
             while True:
@@ -273,20 +273,16 @@ class ConnectionState:
             self._send(pkt, logging.INFO, "tx_transport_params n=%d len=%d", len(pkt))
         self.transport_started = True
 
-    def _handle_straight_record(self, pipe_idx, content):
+    def _handle_straight_record(self, message):
         """Dispatch one Straight record.
 
         The record is already the whole pipe message — no sequence number to
         ACK, no CRC to check, no reassembly.
         """
         self.rx_pkt_no += 1
-        self.info("rx_record n=%d pipe=%d len=%d", self.rx_pkt_no, pipe_idx, len(content))
-        self.trace_hex("rx_content", content)
-
-        if pipe_idx == 0:
-            self._handle_pipe0_message(content)
-        else:
-            self._handle_service_data(pipe_idx, content)
+        self.info("rx_record n=%d len=%d", self.rx_pkt_no, len(message))
+        self.trace_hex("rx_content", message)
+        self._dispatch_pipe_message(message)
 
     def _handle_raw_packet(self, packet_data):
         pkt = parse_packet(packet_data)
@@ -327,19 +323,19 @@ class ConnectionState:
         # carrying a trailing escape into the next DATA packet when needed.
         stuffed_payload = packet_data[2:-4]
         for payload in self._decode_transport_payloads(stuffed_payload):
-            frames = parse_pipe_frames(payload, self.pipe_pending)
+            frames = parse_pipe_frames(payload, self.reassembly_pending)
             for pf in frames:
-                self.pipe_buffers[pf.pipe_idx].extend(pf.content)
+                self.reassembly_buffers[pf.reassembly_index].extend(pf.content)
                 self.debug(
-                    "rx_frame pipe=%d last=%d cont=%d declared=%d got=%d owed=%d buffered=%d"
+                    "rx_frame ridx=%d last=%d cont=%d declared=%d got=%d owed=%d buffered=%d"
                     " frames_in_payload=%d",
-                    pf.pipe_idx,
+                    pf.reassembly_index,
                     pf.last_data,
                     pf.continuation,
                     pf.content_length,
                     len(pf.content),
-                    self.pipe_pending.get(pf.pipe_idx, 0),
-                    len(self.pipe_buffers[pf.pipe_idx]),
+                    self.reassembly_pending.get(pf.reassembly_index, 0),
+                    len(self.reassembly_buffers[pf.reassembly_index]),
                     len(frames),
                 )
 
@@ -353,17 +349,19 @@ class ConnectionState:
                 # bytes in. Those 4 stray bytes desynchronised the compound
                 # file — it landed 33796 bytes instead of 33792 and no longer
                 # parsed as OLE2.
-                if self.pipe_pending.get(pf.pipe_idx, 0) == 0:
-                    assembled = bytes(self.pipe_buffers[pf.pipe_idx])
-                    self.pipe_buffers[pf.pipe_idx].clear()
+                if self.reassembly_pending.get(pf.reassembly_index, 0) == 0:
+                    assembled = bytes(self.reassembly_buffers[pf.reassembly_index])
+                    self.reassembly_buffers[pf.reassembly_index].clear()
+                    self._dispatch_pipe_message(assembled)
 
-                    if pf.pipe_idx == 0:
-                        self._handle_pipe0_message(assembled)
-                    else:
-                        self._handle_service_data(pf.pipe_idx, assembled)
+    def _dispatch_pipe_message(self, assembled):
+        """Route one whole pipe message on its 2-byte routing prefix.
 
-    def _handle_pipe0_message(self, assembled):
-        msg = parse_pipe0_content(assembled)
+        The routing value is the only destination a message carries. The
+        framing around it — the Select header's reassembly index, the Straight
+        record's command byte — names no pipe, so nothing here reads it.
+        """
+        msg = parse_pipe_message(assembled)
         if msg is None:
             return
 
@@ -452,7 +450,6 @@ class ConnectionState:
         if len(data) == 1 and data[0] == PIPE_CLOSE_CMD:
             self.info("pipe_close pipe=%d", pipe_idx)
             self.pipes_closed.add(pipe_idx)
-            self.pipe_buffers.pop(pipe_idx, None)
             handler = self.services.get(pipe_idx)
             close_hook = getattr(handler, "close", None)
             if close_hook is not None:

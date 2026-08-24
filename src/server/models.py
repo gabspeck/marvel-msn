@@ -19,7 +19,8 @@ class Packet:
 
 @dataclass
 class PipeFrame:
-    pipe_idx: int
+    # The reassembly context this frame's message occupies, not a pipe number.
+    reassembly_index: int
     has_length: bool
     continuation: bool
     last_data: bool

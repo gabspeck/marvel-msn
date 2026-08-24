@@ -100,18 +100,26 @@ PipeHdr (after `decode_header_byte`):
 
 | Bits | Mask | Meaning |
 |------|------|---------|
-| 3-0 | 0x0F | Pipe index (0-15) |
+| 3-0 | 0x0F | Reassembly index (0-15) — not a pipe number |
 | 4 | 0x10 | has_length — next byte (& 0x7F) = content length |
-| 5 | 0x20 | continuation — rest of packet belongs to this pipe |
+| 5 | 0x20 | continuation — rest of packet belongs to this message |
 | 6 | 0x40 | last_data — final fragment of this message |
 | 7 | 0x80 | always set |
 
 PipeData begins with a `uint16 LE` content-length prefix, then content bytes.
 
-### 3.2 Pipe-0 routing
+Bits 3-0 name the receiver's partial-message buffer, not a destination. ENGCT
+takes a free one out of a 16-entry table per outbound message (`FUN_05713f8e`,
+table at `transport+0x44`) and releases it when the message completes
+(`FUN_05713fb4`); `recv_packet @ 0x05714b62` keys its own 16 reassembly buffers
+at `transport+0x04` on it and clears one when `last_data` lands. The client
+takes index 0 for effectively everything it sends. The destination is only ever
+the routing value.
 
-All logical pipe traffic multiplexes on **physical pipe 0**. First two bytes
-of pipe-0 content are a routing prefix (uint16 LE):
+### 3.2 Message routing
+
+Every pipe message begins with a routing prefix (uint16 LE), whatever framing
+carries it:
 
 | Routing | Meaning |
 |---------|---------|

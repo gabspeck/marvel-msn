@@ -5,9 +5,18 @@ ENGCT.EXE registers as `Select` and `Straight`:
 
 * Select — the serial link. SeqNo | AckNo | StuffedPayload | MaskedCRC | 0x0D,
   with byte stuffing, CRC-32 and a Go-Back-N window.
-* Straight — the TCP link. uint16 LE record length (counting itself) | pipe
-  index | pipe content. TCP already delivers in order, so nothing else is left:
+* Straight — the TCP link. uint16 LE record length (counting itself) | command
+  byte | pipe message. TCP already delivers in order, so nothing else is left:
   no sequence numbers, no ACKs, no stuffing, no CRC, no terminator.
+
+The command byte is a copy of the message's own command byte, written by the
+same call that puts it in the content: ENGCT's record builder (OSR2
+`FUN_05712fd6` @ 0x05712fd6) emits the buffer's flag byte, which the data path
+(`FUN_05713793`) zeroes and which `FUN_05713813` sets when it writes a command
+into content[2]. Only the pipe close does that, with 0x01, so the byte is 1 on
+a close and 0 on everything else. The receiver overwrites its copy from the
+content before reading it (`PipeBuf_SetFlagFromContent` @ 0x0571384c), so it
+carries no information and never routes anything.
 
 Observed 2026-08-15 on the gateway port: the client's control type-4 arrived as
 `06 00 00 ff ff 04` and its 299-byte type-1 declared `2b 01` — the length counts
@@ -99,18 +108,22 @@ def parse_packet(raw_packet):
     )
 
 
-def build_straight_record(pipe_idx, content):
-    """Frame pipe content as a Straight record."""
-    return struct.pack("<HB", STRAIGHT_HEADER_LEN + len(content), pipe_idx) + content
+def build_straight_record(content, cmd=0):
+    """Frame one whole pipe message as a Straight record.
+
+    `cmd` echoes the message's command byte. Nothing we send has one, so it
+    stays 0; the client ignores the field either way.
+    """
+    return struct.pack("<HB", STRAIGHT_HEADER_LEN + len(content), cmd) + content
 
 
 def take_straight_records(buf):
-    """Pull every whole record off a Straight receive buffer.
+    """Pull every whole pipe message off a Straight receive buffer.
 
-    Consumes what it returns, leaving a partial record in place. Returns a list
-    of (pipe_idx, content).
+    Consumes what it returns, leaving a partial record in place. Byte 2 is
+    dropped: it duplicates the message's command byte and names nothing.
     """
-    records = []
+    messages = []
     while len(buf) >= STRAIGHT_HEADER_LEN:
         total = struct.unpack_from("<H", buf)[0]
         if total < STRAIGHT_HEADER_LEN:
@@ -119,9 +132,9 @@ def take_straight_records(buf):
             break
         if len(buf) < total:
             break
-        records.append((buf[2], bytes(buf[STRAIGHT_HEADER_LEN:total])))
+        messages.append(bytes(buf[STRAIGHT_HEADER_LEN:total]))
         del buf[:total]
-    return records
+    return messages
 
 
 def reframe_as_straight(packets):
@@ -136,12 +149,11 @@ def reframe_as_straight(packets):
     records = []
     for pkt in packets:
         for frame in parse_pipe_frames(byte_unstuff(pkt[2:-5]), pending):
-            buffers.setdefault(frame.pipe_idx, bytearray()).extend(frame.content)
-            if pending.get(frame.pipe_idx, 0) == 0:
-                records.append(
-                    build_straight_record(frame.pipe_idx, bytes(buffers[frame.pipe_idx]))
-                )
-                buffers[frame.pipe_idx].clear()
+            idx = frame.reassembly_index
+            buffers.setdefault(idx, bytearray()).extend(frame.content)
+            if pending.get(idx, 0) == 0:
+                records.append(build_straight_record(bytes(buffers[idx])))
+                buffers[idx].clear()
     return records
 
 

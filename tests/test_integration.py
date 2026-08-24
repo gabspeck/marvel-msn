@@ -694,13 +694,14 @@ class TestDirectGatewaySession(_ConnectionHarness):
         return bytes(buf)
 
     def _recv_record(self, timeout=2):
+        """Return one record's pipe message. Byte 2 names nothing and is dropped."""
         head = self._recv_exactly(3, timeout)
         self.assertEqual(len(head), 3, "no record header")
         total = struct.unpack("<H", head[:2])[0]
-        return head[2], self._recv_exactly(total - 3, timeout)
+        return self._recv_exactly(total - 3, timeout)
 
-    def _send_record(self, pipe_idx, content):
-        self.client_sock.sendall(build_straight_record(pipe_idx, content))
+    def _send_record(self, content, cmd=0):
+        self.client_sock.sendall(build_straight_record(content, cmd))
 
     def test_transport_params_arrive_unprompted(self):
         params = struct.pack(
@@ -711,44 +712,42 @@ class TestDirectGatewaySession(_ConnectionHarness):
             TRANSPORT_ACK_BEHIND,
             TRANSPORT_ACK_TIMEOUT_MS,
         )
-        self.assertEqual(self._recv_record(), (0, build_control_frame(3, params)))
+        self.assertEqual(self._recv_record(), build_control_frame(3, params))
 
     def test_bring_up_continues_into_a_service_pipe(self):
         self._recv_record()  # transport params
 
         # ENGCT opens with type-4 and answers the parameters with type-1.
-        self._send_record(0, build_control_frame(4, b""))
+        self._send_record(build_control_frame(4, b""))
         ctrl1_data = b"\x06\x00\x00\x00" + b"\x00" * 169
-        self._send_record(0, build_control_frame(1, ctrl1_data))
-        self.assertEqual(self._recv_record(), (0, build_control_frame(1, ctrl1_data)))
+        self._send_record(build_control_frame(1, ctrl1_data))
+        self.assertEqual(self._recv_record(), build_control_frame(1, ctrl1_data))
 
         self._send_record(
-            0,
             struct.pack("<HHH", 0, 0, self.PIPE_LOGSRV)
             + b"LOGSRV\x00"
             + b"U\x00"
             + struct.pack("<I", 6),
         )
-        # The record's pipe number addresses the pipe; the content is the bare
-        # open result, with no routing prefix in front of it.
-        pipe_idx, content = self._recv_record()
-        self.assertEqual(pipe_idx, self.PIPE_LOGSRV)
-        self.assertEqual(content, struct.pack("<HHHH", self.PIPE_LOGSRV, 1, self.PIPE_LOGSRV, 0))
+        # The open result routes itself: its leading uint16 is the pipe, and
+        # nothing is prefixed in front of it.
+        self.assertEqual(
+            self._recv_record(), struct.pack("<HHHH", self.PIPE_LOGSRV, 1, self.PIPE_LOGSRV, 0)
+        )
 
         # Discovery follows on the service pipe, routed to it in-band.
-        pipe_idx, content = self._recv_record(timeout=3)
-        self.assertEqual(pipe_idx, self.PIPE_LOGSRV)
+        content = self._recv_record(timeout=3)
         self.assertEqual(struct.unpack_from("<H", content)[0], self.PIPE_LOGSRV)
 
     def test_a_record_split_across_writes_is_reassembled(self):
         self._recv_record()  # transport params
 
         ctrl1_data = b"\x06\x00\x00\x00" + b"\x00" * 169
-        record = build_straight_record(0, build_control_frame(1, ctrl1_data))
+        record = build_straight_record(build_control_frame(1, ctrl1_data))
         self.client_sock.sendall(record[:5])
         time.sleep(0.05)
         self.client_sock.sendall(record[5:])
-        self.assertEqual(self._recv_record(), (0, build_control_frame(1, ctrl1_data)))
+        self.assertEqual(self._recv_record(), build_control_frame(1, ctrl1_data))
 
 
 class _RecordingSocket:

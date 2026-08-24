@@ -1,4 +1,4 @@
-"""Tests for pipe framing, control frames, and pipe0 routing."""
+"""Tests for pipe framing, control frames, and message routing."""
 
 import struct
 import unittest
@@ -9,9 +9,9 @@ from server.pipe import (
     build_control_frame,
     build_pipe_frame,
     build_pipe_frame_has_length,
-    parse_pipe0_content,
     parse_pipe_frame,
     parse_pipe_frames,
+    parse_pipe_message,
 )
 from server.transport import parse_packet
 
@@ -22,7 +22,7 @@ class TestPipeFrameContinuation(unittest.TestCase):
         frame = build_pipe_frame(3, data)
         parsed, _ = parse_pipe_frame(frame)
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed.pipe_idx, 3)
+        self.assertEqual(parsed.reassembly_index, 3)
         self.assertTrue(parsed.last_data)
         self.assertEqual(parsed.content, data)
 
@@ -30,7 +30,7 @@ class TestPipeFrameContinuation(unittest.TestCase):
         data = b"\xff\xff\x01test"
         frame = build_pipe_frame(0, data)
         parsed, _ = parse_pipe_frame(frame)
-        self.assertEqual(parsed.pipe_idx, 0)
+        self.assertEqual(parsed.reassembly_index, 0)
         self.assertEqual(parsed.content, data)
 
     def test_last_false(self):
@@ -52,7 +52,7 @@ class TestPipeFrameHasLength(unittest.TestCase):
         frame = build_pipe_frame_has_length(3, data)
         parsed, _ = parse_pipe_frame(frame)
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed.pipe_idx, 3)
+        self.assertEqual(parsed.reassembly_index, 3)
         self.assertTrue(parsed.last_data)
         self.assertEqual(parsed.content, data)
 
@@ -88,9 +88,9 @@ class TestParseMultipleFrames(unittest.TestCase):
         f2 = build_pipe_frame(2, b"second")
         frames = parse_pipe_frames(f1 + f2)
         self.assertEqual(len(frames), 2)
-        self.assertEqual(frames[0].pipe_idx, 1)
+        self.assertEqual(frames[0].reassembly_index, 1)
         self.assertEqual(frames[0].content, b"first")
-        self.assertEqual(frames[1].pipe_idx, 2)
+        self.assertEqual(frames[1].reassembly_index, 2)
         self.assertEqual(frames[1].content, b"second")
 
 
@@ -137,20 +137,20 @@ class TestFrameCompletionBoundary(unittest.TestCase):
         for packet in packets:
             for pf in parse_pipe_frames(packet, pending):
                 buffer.extend(pf.content)
-                if pending.get(pf.pipe_idx, 0) == 0:
+                if pending.get(pf.reassembly_index, 0) == 0:
                     assembled.append(bytes(buffer))
                     buffer.clear()
 
         self.assertEqual([len(m) for m in assembled], [467, 467])
         self.assertEqual(
-            [parse_pipe0_content(m).data[2:] for m in assembled], [b"A" * 463, b"B" * 463]
+            [parse_pipe_message(m).data[2:] for m in assembled], [b"A" * 463, b"B" * 463]
         )
 
 
-class TestParsePipe0Content(unittest.TestCase):
+class TestParsePipeMessage(unittest.TestCase):
     def test_control_frame(self):
         content = b"\xff\xff\x03" + b"\x00" * 20
-        result = parse_pipe0_content(content)
+        result = parse_pipe_message(content)
         self.assertIsInstance(result, ControlMessage)
         self.assertEqual(result.ctrl_type, 3)
 
@@ -158,7 +158,7 @@ class TestParsePipe0Content(unittest.TestCase):
         payload = struct.pack("<HH H", 0, 0, 3)
         payload += b"LOGSRV\x00U\x00"
         payload += struct.pack("<I", 6)
-        result = parse_pipe0_content(payload)
+        result = parse_pipe_message(payload)
         self.assertIsInstance(result, PipeOpenRequest)
         self.assertEqual(result.client_pipe_idx, 3)
         self.assertEqual(result.svc_name, "LOGSRV")
@@ -166,7 +166,7 @@ class TestParsePipe0Content(unittest.TestCase):
 
     def test_pipe_data(self):
         content = struct.pack("<H", 3) + b"\x06\x00\x00"
-        result = parse_pipe0_content(content)
+        result = parse_pipe_message(content)
         self.assertIsInstance(result, PipeData)
         self.assertEqual(result.pipe_idx, 3)
 

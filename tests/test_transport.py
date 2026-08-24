@@ -121,19 +121,19 @@ class TestSplitEscapeReceive(unittest.TestCase):
 
     def test_escape_split_across_crc_valid_packets_survives_reassembly(self):
         pipe_idx = 4
-        content = b"SVC!" + b"A" * 233 + b"\x0b" + b"B" * 229
-        first_content_len = 238
+        body = b"SVC!" + b"A" * 233 + b"\x0b" + b"B" * 229
+        message = struct.pack("<H", pipe_idx) + body
+        first_content_len = 240
 
-        first_payload = build_pipe_frame(pipe_idx, content, last=False)
+        first_payload = build_pipe_frame(pipe_idx, message, last=False)
         first_payload = first_payload[: 3 + first_content_len]
         second_header = build_pipe_frame(pipe_idx, b"", last=True)[:1]
 
         stuffed_first = byte_stuff(first_payload)
         self.assertTrue(stuffed_first.endswith(b"\x1b\x33"))
         first_packet = _packet_from_stuffed_payload(1, stuffed_first[:-1])
-        self.assertEqual(len(first_packet[2:-4]), 241)
         second_packet = _packet_from_stuffed_payload(
-            2, second_header + stuffed_first[-1:] + byte_stuff(content[first_content_len:])
+            2, second_header + stuffed_first[-1:] + byte_stuff(message[first_content_len:])
         )
 
         state = ConnectionState(self._Socket())
@@ -151,7 +151,7 @@ class TestSplitEscapeReceive(unittest.TestCase):
         self.assertTrue(state.rx_stuffed_pending)
 
         state._handle_raw_packet(second_packet)
-        self.assertEqual(received, [(pipe_idx, content)])
+        self.assertEqual(received, [(pipe_idx, body)])
         self.assertEqual(state.rx_stuffed_pending, b"")
 
 
@@ -181,27 +181,38 @@ class TestTransportParams(unittest.TestCase):
 
 
 class TestStraightFraming(unittest.TestCase):
-    """ENGCT's TCP framing: uint16 LE self-inclusive length, pipe index, content."""
+    """ENGCT's TCP framing: uint16 LE self-inclusive length, command byte, message."""
 
     def test_length_counts_itself(self):
-        self.assertEqual(build_straight_record(0, b"\xff\xff\x04"), bytes.fromhex("060000ffff04"))
+        self.assertEqual(build_straight_record(b"\xff\xff\x04"), bytes.fromhex("060000ffff04"))
+
+    def test_the_command_byte_echoes_the_message(self):
+        # The client's own closes: `06 00 01 | 03 00 01`, the 0x01 written
+        # twice by one call (ENGCT `FUN_05713813`).
+        self.assertEqual(
+            build_straight_record(b"\x03\x00\x01", cmd=1), bytes.fromhex("060001030001")
+        )
 
     def test_records_are_taken_off_the_stream(self):
-        buf = bytearray(build_straight_record(0, b"\xff\xff\x04") + build_straight_record(5, b"ab"))
-        self.assertEqual(take_straight_records(buf), [(0, b"\xff\xff\x04"), (5, b"ab")])
+        buf = bytearray(build_straight_record(b"\xff\xff\x04") + build_straight_record(b"ab"))
+        self.assertEqual(take_straight_records(buf), [b"\xff\xff\x04", b"ab"])
         self.assertEqual(bytes(buf), b"")
 
+    def test_the_command_byte_is_dropped_on_receipt(self):
+        buf = bytearray(build_straight_record(b"\x03\x00\x01", cmd=1))
+        self.assertEqual(take_straight_records(buf), [b"\x03\x00\x01"])
+
     def test_a_partial_record_waits(self):
-        whole = build_straight_record(0, b"\xff\xff\x04")
+        whole = build_straight_record(b"\xff\xff\x04")
         buf = bytearray(whole[:-1])
         self.assertEqual(take_straight_records(buf), [])
         self.assertEqual(len(buf), len(whole) - 1)
         buf.extend(whole[-1:])
-        self.assertEqual(take_straight_records(buf), [(0, b"\xff\xff\x04")])
+        self.assertEqual(take_straight_records(buf), [b"\xff\xff\x04"])
 
     def test_transport_params_reframed(self):
-        # The shape the client answered on 2026-08-15: length, pipe 0, control
-        # routing, type 3, then the five parameters unstuffed.
+        # The shape the client answered on 2026-08-15: length, a zero command
+        # byte, control routing, type 3, then the five parameters unstuffed.
         params = struct.pack(
             "<IIIII",
             TRANSPORT_PACKET_SIZE,
@@ -212,7 +223,7 @@ class TestStraightFraming(unittest.TestCase):
         )
         self.assertEqual(
             reframe_as_straight([build_transport_params()]),
-            [build_straight_record(0, b"\xff\xff\x03" + params)],
+            [build_straight_record(b"\xff\xff\x03" + params)],
         )
 
     def test_a_split_message_becomes_one_record(self):
@@ -222,7 +233,43 @@ class TestStraightFraming(unittest.TestCase):
 
         records = reframe_as_straight(packets)
         self.assertEqual(len(records), 1)
-        self.assertEqual(records[0], build_straight_record(4, struct.pack("<H", 4) + host_block))
+        self.assertEqual(records[0], build_straight_record(struct.pack("<H", 4) + host_block))
+
+
+class TestStraightRouting(unittest.TestCase):
+    """A Straight record routes on its message, never on the record header."""
+
+    class _Socket:
+        def __init__(self):
+            self.sent = []
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+        def close(self):
+            pass
+
+    def _state(self):
+        state = ConnectionState(self._Socket())
+        state.direct = True
+        return state
+
+    def test_a_close_reaches_the_pipe_its_routing_names(self):
+        # The client sends every close with the record header set to 1 — the
+        # close command byte, echoed. Routing on that header closed pipe 1,
+        # left pipe 3 open and dropped the close on the floor.
+        state = self._state()
+        state.services[3] = object()
+        with self.assertRaises(ConnectionError):
+            state._handle_straight_record(b"\x03\x00\x01")
+        self.assertEqual(state.pipes_closed, {3})
+
+    def test_a_service_call_reaches_the_pipe_its_routing_names(self):
+        state = self._state()
+        received = []
+        state._handle_service_data = lambda idx, data: received.append((idx, data))
+        state._handle_straight_record(struct.pack("<H", 5) + b"\x06\x00\x00")
+        self.assertEqual(received, [(5, b"\x06\x00\x00")])
 
 
 if __name__ == "__main__":
