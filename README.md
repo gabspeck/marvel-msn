@@ -116,6 +116,90 @@ setting). Once built, the stub listens on port 12345.
 | `capture_dirsrv_errors.py` | MPCCL.DLL | Capture DIRSRV error codes |
 | `debug_mpccl.py` | MPCCL.DLL | Step through InitializeLoginServiceSession |
 
+## Client error dialogs (HKLM\SOFTWARE\Microsoft\MOS\Debug)
+
+`MPCCL.DLL` carries a built-in diagnostic mode that pops a message box naming the
+exact failure whenever an MPC or MCM call fails. It is off by default and is
+enabled through two registry values under
+`HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\MOS\Debug`:
+
+| Value | Type | Enables |
+|-------|------|---------|
+| `DisplayMpcErrors` | `REG_SZ` = `yes` | MPC layer errors (facility `0x8b0b`) |
+| `DisplayMcmErrors` | `REG_SZ` = `yes` | MCM dial/login errors |
+
+Comparison is case-insensitive against the literals `yes` and `no`; the value
+type is read but never checked, and anything longer than 10 bytes is discarded.
+Missing key, missing value, or any other content means disabled. The registry is
+re-read on every error, so the values take effect without restarting the client.
+
+`DisplayMpcErrors` gates `MPCCL.DLL:FUN_046010a5`, the central error funnel of
+the library (50+ call sites, from `DllGetClassObject` through request building,
+parameter marshalling and pipe I/O). It decodes the SCODE and interpolates the
+caller's detail string, so failures arrive named rather than silent:
+
+| SCODE | Message |
+|-------|---------|
+| `0x8b0b0005` | returns silently, no dialog |
+| `0x8b0b0006` | Could not maintain connection with MOS / Reason: %s |
+| `0x8b0b0007` | OLE libraries are out of date |
+| `0x8b0b0008` | Server error occurred: %s |
+| `0x8b0b0009` | Timeout while waiting for data from service! |
+| `0x8b0b000a` | Limit of 1,073,741,823 requests per service has been reached |
+| `0x8b0b000e` | Invalid MPC usage: %s |
+| `0x8b0b0019` | caller-supplied text, verbatim |
+| `0x8b0b001a` | Unable to locate service '%s' |
+| `0x8b0b001b` | Bad pointer to CMosEvents object passed to IMos::WithdrawNotification() |
+| `0x8b0b001c` | Unable to locate service '%s' because of version mismatch |
+| `0x8b0b001f` / `0x8b0b0020` | De-compression / Compression problem |
+| `0x8b0b0021` | Static buffer returned from service is larger than buffer specified in AddParam! |
+| `0x8b0b0025` | The following behavior should be fixed later: %s |
+| `0x80004002` | Invalid OLE interface was requested |
+| `0x80004005` | Catastrophic error: %s / Last Error: 0x%lx |
+| `0x8007000e` | Out of memory error occurred |
+| `0x80070057` | The following parameter to ::SetConnectionInfo() was too long: '%s' |
+| other | Unknown error SCODE is returned: '0x%lx' |
+
+The `%s` detail comes from the call site — service name, parameter name,
+`pszUserId` / `pszPassword` / `pszPhoneNumber`, or a usage diagnostic such as
+`Unable to open pipe to service '%s', locate param '%s': Error %d`.
+
+`DisplayMcmErrors` gates `MPCCL.DLL:FUN_04601376`, which maps MCM connection
+status codes reached from the login path and the MCM notification window proc:
+
+| Code | Message | SCODE |
+|------|---------|-------|
+| 1, 0x15 | User cancelled login to MOS | `0x8b0b0011` |
+| 2 | bad user id | `0x8b0b0012` |
+| 3 | no LOGIN service detected | `0x8b0b0013` |
+| 4 | no dial tone | `0x8b0b0014` |
+| 5 | bad password | `0x8b0b0015` |
+| 6 | no carrier | `0x8b0b0016` |
+| 7 | busy signal | `0x8b0b0017` |
+| 8 | network error | `0x8b0b0018` |
+| 9 | InitMos() failed | `0x8b0b0006` |
+| 0x0c | Registry keys missing -- Marvel not correctly set up | `0x8b0b0022` |
+| 0x0d | Modem or TAPI error during initialization | `0x8b0b0024` |
+| 0x0e | Connection was dropped for unkown reasons | `0x8b0b0006` |
+| 0x0f | Modem is busy or not found | `0x8b0b0023` |
+| 0x10 | GUIDE.EXE is missing | `0x8b0b001e` |
+| 0x13 | Shared memory for mcm.dll/guide.exe creation failed | `0x8b0b0006` |
+| 0x17 | Win32 API returned the following error: 0x%lx | `0x8b0b0006` |
+
+Unrecognised MCM codes are formatted as `%ld` and forwarded to the MPC reporter
+as `0x8b0b0006`, so they surface under `DisplayMpcErrors` instead.
+
+Both paths set the caller's SCODE regardless of the registry values — the
+setting only controls the dialog. The dialog is `MB_ABORTRETRYIGNORE` with a
+NULL owner: **Abort calls `ExitProcess(0)`** and kills the client, while Retry
+and Ignore return and let the failing HRESULT propagate.
+
+`DisplayMpcErrors` is the more useful of the two for server work. Version
+mismatch, unknown service, request timeout and pipe-open failure each produce a
+distinct message naming the service and parameter involved, which is faster than
+inferring the fault from wire silence. `DisplayMcmErrors` covers the dial and
+login phase before MPC is running.
+
 ## Obtaining the MSN client binaries
 
 The MSN 1.0 client shipped with Windows 95 RTM (August 1995). The binaries are
