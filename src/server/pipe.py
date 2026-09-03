@@ -8,6 +8,7 @@ around it never does.
 import struct
 
 from .config import (
+    CONNECTION_REQUEST_MIN_LEN,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_HAS_LENGTH,
@@ -16,7 +17,13 @@ from .config import (
     ROUTING_CONTROL,
     ROUTING_PIPE_OPEN,
 )
-from .models import ControlMessage, PipeData, PipeFrame, PipeOpenRequest
+from .models import (
+    ConnectionRequest,
+    ControlMessage,
+    PipeData,
+    PipeFrame,
+    PipeOpenRequest,
+)
 from .wire import decode_header_byte, encode_header_byte
 
 
@@ -54,6 +61,53 @@ def build_pipe_frame_has_length(reassembly_index, data, last=True):
 def build_control_frame(ctrl_type, payload):
     """Build a control frame: 0xFFFF marker + type byte + payload."""
     return struct.pack("<HB", ROUTING_CONTROL, ctrl_type) + payload
+
+
+def parse_connection_request(data):
+    """Decode a type-1 control frame's type-specific field for logging.
+
+    Layout (MOS-RPC-SPEC 2.2.3.1.1): FormatVer u32, LineRate u32, three
+    NUL-terminated ASCII strings written back to back with no length in
+    front of any of them, Elapsed u32, then a 28-byte OS block of seven
+    little-endian u32s. At least 43 bytes.
+
+    Returns None when the field does not match that layout. The server must
+    not validate or act on any of this — it echoes the bytes as received —
+    so a None only means the log has nothing to report.
+    """
+    if len(data) < CONNECTION_REQUEST_MIN_LEN:
+        return None
+
+    format_ver, line_rate = struct.unpack("<II", data[0:8])
+
+    pos = 8
+    strings = []
+    for _ in range(3):
+        end = data.find(b"\x00", pos)
+        if end < 0:
+            return None
+        strings.append(data[pos:end].decode("ascii", errors="replace"))
+        pos = end + 1
+
+    if len(data) - pos < 32:
+        return None
+    elapsed_ms, language_id, _, platform, major, minor, build, _ = struct.unpack(
+        "<8I", data[pos : pos + 32]
+    )
+
+    return ConnectionRequest(
+        format_ver=format_ver,
+        line_rate=line_rate,
+        locale=strings[0],
+        conn_log=strings[1],
+        link_desc=strings[2],
+        elapsed_ms=elapsed_ms,
+        language_id=language_id,
+        platform=platform,
+        major_version=major,
+        minor_version=minor,
+        build=build,
+    )
 
 
 def parse_pipe_frame(payload, pending=None):

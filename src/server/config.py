@@ -47,6 +47,11 @@ REASSEMBLY_INDEX_MASK = 0x0F
 ROUTING_CONTROL = 0xFFFF
 ROUTING_PIPE_OPEN = 0x0000
 
+# Shortest well-formed type-1 (connection request) type-specific field: 4-byte
+# FormatVer + 4-byte LineRate + three empty NUL-terminated strings + 4-byte
+# Elapsed + 28-byte OS block.
+CONNECTION_REQUEST_MIN_LEN = 43
+
 # --- MPC reply tags ---
 # See MPCCL.ProcessTaggedServiceReply (0x04605187) for the dispatch:
 #   if ((tag & 0x8f) == 0x86) SignalRequestCompletion(this);   // sets +0x18, signals +0x24 (Wait)

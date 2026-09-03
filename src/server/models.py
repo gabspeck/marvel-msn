@@ -35,6 +35,50 @@ class ControlMessage:
 
 
 @dataclass
+class ConnectionRequest:
+    """The type-1 control frame's type-specific field, decoded.
+
+    Its layout is fixed (MOS-RPC-SPEC 2.2.3.1.1) but none of it carries
+    protocol meaning: the server echoes the field byte for byte and parses
+    nothing. This decode exists so the log can report what the client said
+    about its environment and how it reached us.
+    """
+
+    format_ver: int
+    line_rate: int
+    locale: str
+    conn_log: str
+    link_desc: str
+    elapsed_ms: int
+    language_id: int
+    platform: int
+    major_version: int
+    minor_version: int
+    build: int
+
+    @property
+    def lcid(self):
+        """Locale identifier: the ninth `|`-terminated value of `locale`."""
+        values = self.locale.split("|")
+        return values[8] if len(values) > 8 else ""
+
+    @property
+    def conn_log_records(self):
+        """The CR-separated `target ! error | attempts | timestamp` records."""
+        return [rec for rec in self.conn_log.split("\r") if rec]
+
+    @property
+    def platform_name(self):
+        return {0: "unknown", 1: "win9x", 2: "winnt"}.get(self.platform, f"0x{self.platform:08x}")
+
+    @property
+    def build_number(self):
+        """Build number proper. On the 9x family the high half of `build`
+        repeats the major and minor version."""
+        return self.build & 0xFFFF
+
+
+@dataclass
 class PipeOpenRequest:
     client_pipe_idx: int
     svc_name: str

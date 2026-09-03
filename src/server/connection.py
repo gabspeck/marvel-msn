@@ -30,7 +30,7 @@ from .mpc import (
     is_iterator_cancel,
     parse_host_block,
 )
-from .pipe import parse_pipe_frames, parse_pipe_message
+from .pipe import parse_connection_request, parse_pipe_frames, parse_pipe_message
 from .services import SERVICE_HANDLERS
 from .session import Session
 from .transport import (
@@ -373,11 +373,12 @@ class ConnectionState:
             self._handle_service_data(msg.pipe_idx, msg.data)
 
     def _handle_control(self, msg):
-        """Handle control frames (type-1 echo, type-4 ack)."""
+        """Handle control frames: echo the type-1 connection request, log the rest."""
         ctrl_name = _PIPE_CTRL_NAMES.get(msg.ctrl_type, f"0x{msg.ctrl_type:02x}")
         self.info("pipe_control type=%s data_len=%d", ctrl_name, len(msg.data))
 
         if msg.ctrl_type == 1:
+            self._log_connection_request(msg.data)
             for echo_pkt in self._wire(
                 [build_control_type1_ack(self.server_seq, self.client_ack, msg.data)]
             ):
@@ -389,6 +390,39 @@ class ConnectionState:
                     len(echo_pkt),
                 )
             self.advance_seq()
+
+    def _log_connection_request(self, data):
+        """Report the client environment carried by a type-1 frame.
+
+        The field is opaque: the server echoes it byte for byte and validates
+        nothing (MOS-RPC-SPEC 2.2.3.1.1). A field that does not match the
+        documented layout is logged as such and still echoed.
+        """
+        req = parse_connection_request(data)
+        if req is None:
+            self.warning("conn_request_malformed len=%d raw=%s", len(data), data.hex())
+            return
+
+        self.info(
+            "conn_request fmt=%d line_rate=%d elapsed_ms=%d lcid=%s os=%s "
+            "ver=%d.%02d.%d build=0x%08x lang=0x%04x",
+            req.format_ver,
+            req.line_rate,
+            req.elapsed_ms,
+            req.lcid,
+            req.platform_name,
+            req.major_version,
+            req.minor_version,
+            req.build_number,
+            req.build,
+            req.language_id,
+        )
+        self.info(
+            "conn_request_env locale=%r link_desc=%r conn_log=%r",
+            req.locale,
+            req.link_desc,
+            req.conn_log_records,
+        )
 
     def _handle_pipe_open(self, msg):
         self.info(
