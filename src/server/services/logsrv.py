@@ -556,17 +556,18 @@ def _handle_existing_member_phonebook_query(request_payload):
 def _handle_signup_query(request_payload):
     """Handle the SIGNUP.EXE LOGSRV selector 0x07 request.
 
-    Observed on the wire during the "Get the latest product details" flow:
-    the request carries no send-side params — just a single recv descriptor
-    (0x85) asking for one variable-tagged reply.  The exact reply shape
-    hasn't been pinned down from the COM proxy layer yet; returning an
-    empty 0x84 variable is the minimal well-formed payload that matches
-    the recv descriptor, letting the client's unmarshaller proceed so we
-    can observe whatever it does next.
+    The method takes no reply parameters at all, so the answer is a bare
+    host block with an empty payload.  Established by live SoftICE capture
+    at MPCCL!FUN_046010a5 (0x046010a5): with a 0x84 record in the reply the
+    client raises SCODE 0x8b0b0008 from the receive-parameter binder
+    FUN_04604f26, whose registered recv-param count at [[this+0x0c]+0xe0]
+    reads 0 while the incoming tag is 0x84.  That mismatch is the blank
+    "Server error occurred:" MPC dialog, and it strands the request thread
+    on a modal box so the connection goes silent.
     """
     log.info("signup_query payload_len=%d", len(request_payload))
-    log.info("signup_query_reply var_len=0")
-    return build_tagged_reply_var(0x84, b"")
+    log.info("signup_query_reply params=0")
+    return b""
 
 
 def _handle_ntlm_negotiate(request_payload, session):
