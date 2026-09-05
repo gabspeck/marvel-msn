@@ -4,10 +4,8 @@ __pycache__/
 .venv/
 
 # Ghidra lock files (local state only)
-MSN95.lock
-MSN95.lock~
-Blackbird.lock
-Blackbird.lock~
+*.lock
+*.lock~
 
 # Original MSN95 binaries (see README for how to obtain)
 binaries*/
@@ -30,5 +28,3 @@ captures/
 htmlcov/
 
 ftp/
-
-*.lock
