@@ -126,8 +126,22 @@ class DwordParam:
 
 @dataclass
 class VarParam:
+    """An inline variable field.
+
+    Tag 0x04 carries the argument as-is. Tag 0x44 carries it compressed:
+    `MPCCL!AppendTaggedRequestField @ 0x046067E2` runs the buffer through the
+    compressor at `0x04606558` before anything else, then emits the tag
+    unchanged with the *compressed* length in the size prefix. `compressed`
+    records which one arrived; `data` is the field exactly as it came off the
+    wire, still deflated when the flag is set.
+    """
+
     tag: int
     data: bytes
+
+    @property
+    def compressed(self):
+        return bool(self.tag & 0x40)
 
 
 @dataclass
@@ -137,19 +151,28 @@ class ChunkedParam:
     `MPCCL!AppendTaggedRequestField @ 0x046067E2` takes this path when the tag
     is variable (`tag & 0x0F == 4`) and the field needs more room than the body
     has left (`remaining <= length + 0x80`). It writes a 6-byte reference in
-    place of the field — `[0x05][stream_id][u32 length]`, or tag `0x45` when the
-    original tag was `0x44` — and hands the bytes to
+    place of the field — `[0x05][stream_id][u32 length]`, or `[0x45]` when the
+    caller's tag was 0x44 — and hands the bytes to
     `AppendChunkedRequestField @ 0x04606CB2`, which queues them as class
     0xE6/0xE7 continuation frames stamped with the same `stream_id`.
 
     `stream_id` is a per-connection counter at `conn+0x96`, bumped under a
     critical section, so ids run 1, 2, 3 … across every chunked field on the
     connection and never collide between concurrent calls.
+
+    On tag 0x45 the frames carry compressed bytes and `total_length` counts
+    those, not the argument the caller passed — compression runs before the
+    inline/chunked choice is made, so the uncompressed size never reaches the
+    wire.
     """
 
     tag: int
     stream_id: int
     total_length: int
+
+    @property
+    def compressed(self):
+        return bool(self.tag & 0x40)
 
 
 @dataclass

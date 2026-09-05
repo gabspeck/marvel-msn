@@ -11,7 +11,9 @@ from .config import (
     MPC_CLASS_ONEWAY_MASK,
     MPC_CONTINUATION_HEADER_LEN,
     MPC_TAG_CHUNKED,
-    MPC_TAG_CHUNKED_COPY,
+    MPC_TAG_CHUNKED_COMPRESSED,
+    MPC_TAG_VARIABLE,
+    MPC_TAG_VARIABLE_COMPRESSED,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_LAST_DATA,
@@ -167,8 +169,17 @@ def parse_request_params(data):
     """Decode send-side tagged parameters from an MPC request payload.
 
     Send-side tags (bit 7 clear): 0x01=byte, 0x02=word, 0x03=dword,
-    0x04=variable, 0x05/0x45=chunked reference.
+    0x04/0x44=variable, 0x05/0x45=chunked reference.
     Receive descriptors (bit 7 set): 0x81-0x88, no data attached.
+
+    Bit 0x40 on a variable tag means the content is compressed. The client
+    picks it per call site: `AppendSendBufferField @ MPCCL 0x04603C0A` passes
+    0x04 and `AppendSendOwnedDwordField @ 0x04603B4F` passes 0x44 (vtable
+    0x0460CDB0 slots 13 and 14), and `AppendTaggedRequestField @ 0x046067E2`
+    compresses before it decides inline vs chunked. So 0x44 and 0x45 are the
+    compressed forms of 0x04 and 0x05, and the length that reaches the wire is
+    always the compressed one. The codec is not implemented here — see
+    `ChunkedParam.compressed` / `VarParam.compressed`.
 
     A chunked reference is 6 bytes and carries no inline data — the field rides
     class 0xE6/0xE7 frames instead. It must not go through the variable-field
@@ -203,7 +214,7 @@ def parse_request_params(data):
             val = struct.unpack("<I", data[pos : pos + 4])[0]
             send_params.append(DwordParam(tag=tag, value=val))
             pos += 4
-        elif tag in (MPC_TAG_CHUNKED, MPC_TAG_CHUNKED_COPY):
+        elif tag in (MPC_TAG_CHUNKED, MPC_TAG_CHUNKED_COMPRESSED):
             if pos + MPC_CHUNKED_REF_LEN > len(data):
                 break
             stream_id = data[pos]
@@ -212,7 +223,7 @@ def parse_request_params(data):
                 ChunkedParam(tag=tag, stream_id=stream_id, total_length=total_length)
             )
             pos += MPC_CHUNKED_REF_LEN
-        elif tag == 0x04:
+        elif tag in (MPC_TAG_VARIABLE, MPC_TAG_VARIABLE_COMPRESSED):
             length, pos = _decode_var_length(data, pos)
             if length is None:
                 break

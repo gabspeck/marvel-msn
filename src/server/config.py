@@ -84,10 +84,18 @@ MPC_CLASS_CONTINUATION_MORE = 0xE6
 MPC_CLASS_CONTINUATION_LAST = 0xE7
 MPC_CONTINUATION_HEADER_LEN = 2
 
-# Send tags standing in for a chunked field. 0x45 is 0x05 with the caller's
-# 0x40 "keep a copy" bit carried over from tag 0x44.
+# Variable-field send tags. Bit 0x40 means the content is compressed:
+# `MPCCL!AppendTaggedRequestField @ 0x046067E2` runs the buffer through the
+# compressor at 0x04606558 when the caller's tag is 0x44, then emits either the
+# tag itself (inline) or a chunked reference carrying the same bit. The
+# compressor writes repeated [u32 chunk_len][chunk] records, each covering at
+# most 0x8000 bytes of input, and tags its context "MCIC" (0x04608C00). The
+# bitstream itself has not been reversed, so nothing here inflates a field —
+# the compressed forms are parsed and flagged, not decoded.
+MPC_TAG_VARIABLE = 0x04
+MPC_TAG_VARIABLE_COMPRESSED = 0x44
 MPC_TAG_CHUNKED = 0x05
-MPC_TAG_CHUNKED_COPY = 0x45
+MPC_TAG_CHUNKED_COMPRESSED = 0x45
 MPC_CHUNKED_REF_LEN = 5  # stream_id byte + u32 length, after the tag
 
 # --- DIRSRV property 'b' browse flags ---

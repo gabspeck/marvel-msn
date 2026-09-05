@@ -334,8 +334,8 @@ have gone and sends the bytes out of band:
 inline, in the call head:   [0x05][stream_id][u32 length]
 ```
 
-The tag is `0x45` instead of `0x05` when the original tag was `0x44`, carrying
-over the caller's `0x40` "keep a copy" bit. `stream_id` comes off a
+The tag is `0x45` instead of `0x05` when the caller's tag was `0x44`, carrying
+over the `0x40` compression bit (§6.1a). `stream_id` comes off a
 per-connection counter at `conn+0x96`, bumped inside a critical section, so ids
 run 1, 2, 3 … and never collide between concurrent calls on one connection.
 
@@ -376,6 +376,8 @@ have bit 7 set. Low nibble = type.
 | 0x03 | 0x83 | dword | 4 LE |
 | 0x04 | 0x84 | variable | length-prefixed |
 | 0x05 | 0x85 | chunked request reference / dynamic reply partial | request reference / reply raw-to-end |
+| 0x44 | — | variable, compressed (§6.1a) | length-prefixed |
+| 0x45 | — | chunked reference, compressed (§6.1a) | request reference |
 |      | 0x86 | dynamic complete, single-shot waiter | rest of host block is raw |
 |      | 0x87 | end-of-static | 0 |
 |      | 0x88 | dynamic complete, iterator waiter | rest of host block is raw |
@@ -391,6 +393,118 @@ a final `0x84` completion slot — server must **not** send data for it.
 that host block. `0x85` accumulates a partial chunk without completing the
 request; `0x86` and `0x88` finalize the accumulated bytes and wake different
 client waiters.
+
+### 6.1a Bit 0x40: compressed variable fields
+
+Bit `0x40` on a variable send tag means the field content is compressed. It is
+chosen per call site, by which vtable slot the caller uses. MPCCL's request
+builder vtable at `0x0460CDB0` carries two adjacent, otherwise byte-identical
+methods:
+
+| Slot | Address | Tag passed |
+|------|---------|-----------|
+| 13 (`+0x34`) | `AppendSendBufferField @ 0x04603C0A` | `0x04` |
+| 14 (`+0x38`) | `AppendSendOwnedDwordField @ 0x04603B4F` | `0x44` |
+
+`AppendTaggedRequestField @ 0x046067E2` compresses *before* it decides inline
+vs chunked:
+
+```c
+if ((param_1 == 0x44) && (FUN_04606558(param_2, param_3, &param_2, &param_3) < 0))
+    return 0;                       /* buffer and length replaced by the compressed pair */
+...
+**(char **)(this + 0x1c) = (-(param_1 == 0x44) & 0x40U) + 5;   /* 0x05 or 0x45 */
+```
+
+Both wire forms therefore carry the **compressed** length — the size prefix on
+an inline `0x44`, and the `u32 length` of a `0x45` reference. The uncompressed
+size never reaches the wire; a receiver inflates until the input is consumed.
+After emitting, the `(param_1 & 0x60) == 0x40` tail frees the scratch buffer
+via `VirtualFree` (`FUN_04606792`).
+
+`0x45` is **not** a synonym for `0x05`. Only the 6-byte reference layout is
+shared.
+
+**The compressor** (`FUN_04606558 @ 0x04606558`) `VirtualAlloc`s `len * 2`,
+then loops over the input in blocks of at most `0x8000` bytes, emitting:
+
+```
+repeated:   [u32 compressed_block_len][compressed block]
+```
+
+Its context struct is tagged `"MCIC"` (`0x4349434D`, set in `FUN_04608C00`) and
+its error strings name `MCICreateCompression` / `MCICompress`. The engine
+allocates two 32 KB and three 64 KB buffers — consistent with a 32 KB-window
+LZ77 with hash chains, though the bitstream has **not** been reversed. Entry
+points: `0x04608C00` create, `0x04608D80` compress block, `0x04608E40` advance,
+`0x04608D10` destroy.
+
+Compression is one-way. MPCCL contains no decompressor, no `0xC4` reply tag is
+referenced anywhere in the binary, and the constant `0x45` never appears as a
+literal — it exists only as the computed expression above. The client cannot
+receive a compressed field, only send one.
+
+**No shipped binary calls slot 14.** The builder vtable is anchored by
+`ConstructServiceRequestBuilder @ 0x046036C8`, which stores
+`PTR_..._0460CDB0` into the object, so the base is `0x0460CDB0`. Each append
+method's tag is fixed by the `PUSH imm8` it passes to
+`AppendTaggedRequestField`:
+
+| Slot | Address | Tag |
+|------|---------|-----|
+| `+0x30` | `0x0460394F` | `0x01` byte |
+| `+0x2c` | `0x04603A05` | `0x02` word |
+| `+0x28` | `0x04603AAA` | `0x03` dword |
+| `+0x34` | `0x04603C0A` | `0x04` variable |
+| `+0x38` | `0x04603B4F` | `0x44` variable, compressed |
+
+Three further slots are forwarding thunks onto those:
+
+| Slot | Address | Forwards to |
+|------|---------|-------------|
+| `+0x24` | `0x04603BF5` | `+0x34` — tag `0x04` |
+| `+0x0c` | `0x04603CB0` | `+0x24` → `+0x34`, only when its type argument is `0x12` |
+| `+0x10` | `0x046039F4` | `+0x30` — tag `0x01` |
+
+Callers reach tag `0x04` mostly through the `+0x24` alias rather than `+0x34`
+directly, which is why a census keyed on `+0x34` alone understates it. **No slot
+forwards to `+0x38`**: the compressed append has exactly one entry point.
+
+The call idiom is fixed by `MVTTL14C!HighlightLookup @ 0x7E841235`:
+`wrapper->vtbl[0x0c](wrapper, selector, &builder)` creates
+(`CreateServiceRequestBuilderInterface @ 0x04603331`), appends run on the
+returned pointer, `+0x48` executes and `+0x08` releases. 171 such builder
+objects exist across the project.
+
+A census of every `CALL [reg+disp8]` with `disp == 0x38` in all 61 programs of
+both builds finds **127 instructions, none of them this slot**:
+
+| Where | Count | What it actually is |
+|-------|-------|--------------------|
+| SHDOCVW.DLL 78, BBCTL.OCX 15, MOSCP.EXE 8, DSNED.NED 4, ENGCT.EXE 2 | 107 | none of these binaries contains the MPCCL CLSID; DSNED's `FillSPForNewNode` is `IMosTreeNode` |
+| MOSSHELL.DLL (both builds) | 12 | `IMosTreeEdit` / `IMosTreeNode`; 2, 4, 5 or 6 args, never 3 |
+| BBSNAV.NAV, SIGNUP.EXE (both builds) | 4 | `IMAPITable::SortTable` — `SetColumns +0x1c`, `SortTable +0x38`, `QueryRows +0x4c` |
+| SACLIENT.DLL (both builds), osr2/MOSAF.DLL | 3 | 1-argument forwarding thunks (`RET 0x4`); slot 14 is `RET 0xc` |
+| MOSABP32.DLL | 1 | the AB provider's own `this->vtbl[0x38]` IID dispatch |
+
+The OSR2 build carries the same layout — vtable base `0x7F3FCD90`, `+0x34` →
+`0x7F3F3C0A` (tag `0x04`), `+0x38` → `0x7F3F3B4F` (tag `0x44`) — so the same
+displacements apply there.
+
+The compressed path is therefore present and wired into MPCCL's public vtable
+but dead in the client as shipped: no MSN binary in either build can put a
+`0x44` or `0x45` on the wire. This is why the server parses and flags both tags
+without inflating them, and why the block codec has not been reversed.
+
+The negative is corroborated by the positive: tag `0x04` shows 74 confirmed call
+sites through the `+0x24` alias, so the method does find real append calls where
+they exist. It is silent on `0x44` because there are none, not because it is
+blind to that shape.
+
+Two limits: it covers the 61 binaries captured in the project, so a component
+not pulled from the VM could still call the slot; and it is static, so a
+breakpoint on `0x04603B4F` or the compressor `0x04606558` that ever fires would
+overturn it.
 
 ### 6.2 Variable-field length encoding
 

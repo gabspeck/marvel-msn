@@ -1255,16 +1255,36 @@ class TestChunkedReferenceDecoding(unittest.TestCase):
         self.assertEqual(send_params[1].stream_id, 0x02)
         self.assertEqual(send_params[1].total_length, 1534)
 
-    def test_copy_tag_0x45_decodes_the_same_way(self):
-        # 0x45 is 0x05 with the caller's 0x40 bit carried over from tag 0x44.
+    def test_tag_0x45_has_the_same_reference_layout_as_0x05(self):
+        # The 6-byte reference is identical; 0x40 says the stream carries
+        # compressed bytes, and total_length counts those, not the argument.
         send_params, _ = parse_request_params(bytes([0x45, 0x07]) + struct.pack("<I", 9))
         self.assertEqual(send_params[0].tag, 0x45)
         self.assertEqual(send_params[0].stream_id, 0x07)
         self.assertEqual(send_params[0].total_length, 9)
+        self.assertTrue(send_params[0].compressed)
+
+    def test_tag_0x05_is_not_marked_compressed(self):
+        send_params, _ = parse_request_params(bytes([0x05, 0x07]) + struct.pack("<I", 9))
+        self.assertFalse(send_params[0].compressed)
 
     def test_variable_field_tag_0x04_is_untouched(self):
         send_params, _ = parse_request_params(b"\x04" + bytes([0x80 | 3]) + b"abc")
         self.assertEqual(send_params[0].data, b"abc")
+        self.assertFalse(send_params[0].compressed)
+
+    def test_inline_tag_0x44_parses_as_a_compressed_variable_field(self):
+        # AppendTaggedRequestField emits 0x44 inline whenever the compressed
+        # buffer still fits the call head. The size prefix counts compressed
+        # bytes, and parsing must not stop at the tag — a following parameter
+        # is lost if it does.
+        payload = b"\x44" + bytes([0x80 | 3]) + b"abc" + b"\x01\x2A"
+        send_params, _ = parse_request_params(payload)
+        self.assertEqual(len(send_params), 2)
+        self.assertEqual(send_params[0].tag, 0x44)
+        self.assertEqual(send_params[0].data, b"abc")
+        self.assertTrue(send_params[0].compressed)
+        self.assertEqual(send_params[1].value, 0x2A)
 
 
 class TestBBSPostRequestDecoding(PostChannelTestCase):
