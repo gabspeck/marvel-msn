@@ -420,9 +420,11 @@ class ConnectionState:
         self.info(
             "conn_request_env locale=%r link_desc=%r conn_log=%r",
             req.locale,
-            req.link_desc,
+            req.link_desc_fields,
             req.conn_log_records,
         )
+        if req.reserved_unexpected is not None:
+            self.warning("conn_request_reserved r0=0x%08x r1=0x%08x", *req.reserved_unexpected)
 
     def _handle_pipe_open(self, msg):
         self.info(

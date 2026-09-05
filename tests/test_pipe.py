@@ -9,6 +9,7 @@ from server.pipe import (
     build_control_frame,
     build_pipe_frame,
     build_pipe_frame_has_length,
+    parse_connection_request,
     parse_pipe_frame,
     parse_pipe_frames,
     parse_pipe_message,
@@ -169,6 +170,54 @@ class TestParsePipeMessage(unittest.TestCase):
         result = parse_pipe_message(content)
         self.assertIsInstance(result, PipeData)
         self.assertEqual(result.pipe_idx, 3)
+
+
+class TestParseConnectionRequest(unittest.TestCase):
+    # MOS-RPC-SPEC 5.1 capture: Straight client, US English, Windows 95 build
+    # 4.00.1111, no failed connections and no modem.
+    FIELD = bytes.fromhex(
+        "06000000"  # FormatVer 6
+        "00000000"  # LineRate 0: came in over Straight
+        "7c7c7c7c7c7c7c7c30303030303430397c00"  # Locale "||||||||00000409|"
+        "00"  # ConnLog, empty
+        "00"  # LinkDesc, empty
+        "0d000000"  # Elapsed 13 ms
+        "09000000 01000000 01000000 04000000 00000000 57040004 01000000"  # OS block
+    )
+
+    def test_capture(self):
+        req = parse_connection_request(self.FIELD)
+        self.assertIsNotNone(req)
+        self.assertEqual(req.format_ver, 6)
+        self.assertEqual(req.line_rate, 0)
+        self.assertEqual(req.locale, "||||||||00000409|")
+        self.assertEqual(req.lcid, "00000409")
+        self.assertEqual(req.conn_log, "")
+        self.assertEqual(req.conn_log_records, [])
+        self.assertEqual(req.link_desc, "")
+        self.assertEqual(req.elapsed_ms, 13)
+        self.assertEqual(req.language_id, 9)
+        self.assertEqual(req.platform_name, "win9x")
+        self.assertEqual((req.major_version, req.minor_version, req.build_number), (4, 0, 1111))
+
+    def test_filled_strings(self):
+        field = self.FIELD[:8]
+        field += b"||||||||00000416|\x00"
+        field += b"10.0.0.1!10060|3|0871234567\r!5|1|0871234599\x00"
+        field += b"5551234\x03Unimodem\x04Generic 14400\x00"
+        field += self.FIELD[-32:]
+        req = parse_connection_request(field)
+        self.assertEqual(req.lcid, "00000416")
+        self.assertEqual(req.conn_log_records, ["10.0.0.1!10060|3|0871234567", "!5|1|0871234599"])
+        self.assertEqual(req.link_desc, "5551234\x03Unimodem\x04Generic 14400")
+        self.assertEqual(req.elapsed_ms, 13)
+
+    def test_short_field_is_not_decoded(self):
+        self.assertIsNone(parse_connection_request(self.FIELD[:42]))
+
+    def test_missing_terminator_is_not_decoded(self):
+        field = self.FIELD[:8] + b"|" * 60
+        self.assertIsNone(parse_connection_request(field))
 
 
 class TestControlFrame(unittest.TestCase):

@@ -51,21 +51,48 @@ class ConnectionRequest:
     link_desc: str
     elapsed_ms: int
     language_id: int
+    reserved0: int
     platform: int
     major_version: int
     minor_version: int
     build: int
+    reserved1: int
 
     @property
     def lcid(self):
-        """Locale identifier: the ninth `|`-terminated value of `locale`."""
+        """Locale identifier: the ninth `|`-terminated value of `locale`.
+
+        MOS-RPC-SPEC 2.2.3.1.1 gives `Locale` nine `0x7C`-separated fields, and
+        `OSBlock.LanguageId` is this value masked with 0x3FF.
+        """
         values = self.locale.split("|")
         return values[8] if len(values) > 8 else ""
 
     @property
     def conn_log_records(self):
-        """The CR-separated `target ! error | attempts | timestamp` records."""
+        """The `0x0D`-separated records of earlier connection attempts."""
         return [rec for rec in self.conn_log.split("\r") if rec]
+
+    @property
+    def link_desc_fields(self):
+        """`link_desc` split on its `0x02`..`0x08` separators.
+
+        The separators delimit the fields (MOS-RPC-SPEC 2.2.3.1.1); what each
+        one holds is not documented there and has not been reversed, so they
+        are keyed by separator byte and left as text. They do not arrive in
+        ascending order — 0x08 has been observed ahead of 0x04.
+        """
+        fields = {}
+        sep = None
+        start = 0
+        for i, ch in enumerate(self.link_desc):
+            if 0x02 <= ord(ch) <= 0x08:
+                if sep is not None:
+                    fields[sep] = self.link_desc[start:i]
+                sep, start = ord(ch), i + 1
+        if sep is not None:
+            fields[sep] = self.link_desc[start:]
+        return fields
 
     @property
     def platform_name(self):
@@ -76,6 +103,13 @@ class ConnectionRequest:
         """Build number proper. On the 9x family the high half of `build`
         repeats the major and minor version."""
         return self.build & 0xFFFF
+
+    @property
+    def reserved_unexpected(self):
+        """The two OSBlock reserved dwords, when either is not the documented 1."""
+        if self.reserved0 == 1 and self.reserved1 == 1:
+            return None
+        return (self.reserved0, self.reserved1)
 
 
 @dataclass

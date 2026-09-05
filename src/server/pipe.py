@@ -89,11 +89,20 @@ def parse_connection_request(data):
         strings.append(data[pos:end].decode("ascii", errors="replace"))
         pos = end + 1
 
+    # Elapsed u32 then the seven u32s of OSBlock: LanguageId, Reserved0,
+    # Platform, MajorVersion, MinorVersion, Build, Reserved1.
     if len(data) - pos < 32:
         return None
-    elapsed_ms, language_id, _, platform, major, minor, build, _ = struct.unpack(
-        "<8I", data[pos : pos + 32]
-    )
+    (
+        elapsed_ms,
+        language_id,
+        reserved0,
+        platform,
+        major,
+        minor,
+        build,
+        reserved1,
+    ) = struct.unpack("<8I", data[pos : pos + 32])
 
     return ConnectionRequest(
         format_ver=format_ver,
@@ -103,10 +112,12 @@ def parse_connection_request(data):
         link_desc=strings[2],
         elapsed_ms=elapsed_ms,
         language_id=language_id,
+        reserved0=reserved0,
         platform=platform,
         major_version=major,
         minor_version=minor,
         build=build,
+        reserved1=reserved1,
     )
 
 
