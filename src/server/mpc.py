@@ -39,12 +39,19 @@ from .wire import encode_header_byte
 
 
 def encode_vli(value):
-    """Encode an integer as a VLI (1/2/4 bytes based on top 2 bits)."""
-    if value < 0x40:
+    """Encode an integer as a VLI (1/2/4 bytes based on top 2 bits).
+
+    The form boundaries are strict comparisons, matching
+    `MPCCL!AllocateRequestIdVliHeader @ 0x046034C6` byte for byte: each form's
+    widest value spills into the next form up, so 0x3F is `80 3f` and 0x3FFF is
+    `c0 00 3f ff`.  0x3FFFFFFF has no encoding — the client marks the request
+    header invalid instead of emitting one.
+    """
+    if value < 0x3F:
         return bytes([value])
-    elif value < 0x4000:
+    elif value < 0x3FFF:
         return bytes([0x80 | (value >> 8), value & 0xFF])
-    elif value < 0x40000000:
+    elif value < 0x3FFFFFFF:
         return struct.pack(">I", value | 0xC0000000)
     else:
         raise ValueError(f"VLI value too large: {value}")
@@ -319,10 +326,19 @@ def parse_tagged_params(data):
 
 
 def encode_reply_var_length(length):
-    """Encode a reply-side variable length. Bit 7 = inline (max 127)."""
-    if length < 0x80:
+    """Encode a reply-side variable length. Bit 7 = inline.
+
+    Strict boundaries, matching the inline branch of
+    `MPCCL!AppendTaggedRequestField @ 0x046067E2` (`CMP len,0x7f / JNC` at
+    0x046068F0, `CMP len,0x7fff / JNC` at 0x04606956) byte for byte: 127 spills
+    into the two-byte form as `00 7f`, and 0x7FFF has no inline encoding — the
+    client fails the call with 0x80004005 rather than emit one.
+    """
+    if length < 0x7F:
         return bytes([length | 0x80])
-    return bytes([(length >> 8) & 0x7F, length & 0xFF])
+    if length > 0x7FFE:
+        raise ValueError(f"variable field too long for an inline size: {length}")
+    return bytes([length >> 8, length & 0xFF])
 
 
 def build_tagged_reply_byte(value):

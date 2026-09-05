@@ -268,11 +268,28 @@ silent drop.
 
 ### 5.2 VLI (variable-length integer)
 
-| Top 2 bits | Length | Max | Decode |
+| Top 2 bits | Length | Decodes to | Decode |
 |-----------|--------|------|--------|
-| 00 | 1 byte | 63 | `b & 0x3F` |
-| 10 | 2 bytes | 16,383 | `(b0 & 0x3F) << 8 \| b1` |
-| 11 | 4 bytes | 2³⁰-1 | `b0..b3 & 0x3FFFFFFF` |
+| 00 | 1 byte | 0-63 | `b & 0x3F` |
+| 01 | — | — | Parse failure, whole host block dropped |
+| 10 | 2 bytes | 0-16,383 | `(b0 & 0x3F) << 8 \| b1` |
+| 11 | 4 bytes | 0-2³⁰-1 | `b0..b3 & 0x3FFFFFFF` |
+
+`ParseHostBlockFromPipe @ 0x04607569` tests the top 2 bits against 0x00, 0x80
+and 0xC0 and falls through to `"Unable to parse Host Block"` on 0x40 — the form
+has no length, so the parser cannot skip the id to reach the body.
+
+`AllocateRequestIdVliHeader @ 0x046034C6` picks the form with strict
+comparisons, so each form's widest value spills into the next one up:
+
+| Value | Form |
+|-------|------|
+| 0-62 | 1 byte |
+| 63-16,382 | 2 bytes (63 = `80 3f`) |
+| 16,383-2³⁰-2 | 4 bytes (16,383 = `c0 00 3f ff`) |
+| 2³⁰-1 | no encoding; the header is marked invalid |
+
+The allocator also stops handing out ids once the counter reaches 0x40000000.
 
 ### 5.3 Service discovery
 
@@ -379,8 +396,26 @@ client waiters.
 
 | Byte 0 bit 7 | Format |
 |--------------|--------|
-| set | Inline 7-bit length (`byte & 0x7F`, max 127) |
-| clear | 15-bit big-endian across two bytes (max 32767) |
+| set | Inline 7-bit length (`byte & 0x7F`, decodes 0-127) |
+| clear | 15-bit big-endian across two bytes (decodes 0-32,767) |
+
+Bit 7 marks the **short** form here, inverted from the VLI of §5.2. That buys
+the inline form a seventh value bit — the 64-127 band most string arguments land
+in — and leaves the long form a raw big-endian read with no mask, which is what
+`ProcessTaggedServiceReply @ 0x04604F26` does.
+
+The writer in `AppendTaggedRequestField @ 0x046067E2` uses strict comparisons,
+same as the VLI:
+
+| Length | Form |
+|--------|------|
+| 0-126 | 1 byte |
+| 127-32,766 | 2 bytes (127 = `00 7f`) |
+| ≥ 32,767 | no inline encoding; fails the call with 0x80004005 |
+
+A two-byte size below 128 is unambiguous — an inline size always has bit 7 set,
+so a leading byte with bit 7 clear can only start a long form — and the client
+decodes it. It must be accepted: `00 7f` is how a real client sends 127.
 
 ### 6.3 Server error codes (tag 0x8F)
 

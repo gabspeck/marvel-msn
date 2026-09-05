@@ -14,42 +14,40 @@ class TestVLI(unittest.TestCase):
         self.assertEqual(length, 1)
 
     def test_1byte_max(self):
-        encoded = encode_vli(0x3F)
+        encoded = encode_vli(0x3E)
         self.assertEqual(len(encoded), 1)
         val, length = decode_vli(encoded)
-        self.assertEqual(val, 0x3F)
+        self.assertEqual(val, 0x3E)
         self.assertEqual(length, 1)
 
     def test_2byte_min(self):
-        encoded = encode_vli(0x40)
-        self.assertEqual(len(encoded), 2)
-        val, length = decode_vli(encoded)
-        self.assertEqual(val, 0x40)
-        self.assertEqual(length, 2)
+        """0x3F is the widest 1-byte value but the client spills it to 2 bytes."""
+        self.assertEqual(encode_vli(0x3F), b"\x80\x3f")
 
     def test_2byte_max(self):
-        encoded = encode_vli(0x3FFF)
+        encoded = encode_vli(0x3FFE)
         self.assertEqual(len(encoded), 2)
         val, length = decode_vli(encoded)
-        self.assertEqual(val, 0x3FFF)
+        self.assertEqual(val, 0x3FFE)
         self.assertEqual(length, 2)
 
     def test_4byte_min(self):
-        encoded = encode_vli(0x4000)
-        self.assertEqual(len(encoded), 4)
-        val, length = decode_vli(encoded)
-        self.assertEqual(val, 0x4000)
-        self.assertEqual(length, 4)
+        """0x3FFF is the widest 2-byte value but the client spills it to 4."""
+        self.assertEqual(encode_vli(0x3FFF), b"\xc0\x00\x3f\xff")
 
     def test_4byte_large(self):
-        encoded = encode_vli(0x3FFFFFFF)
+        encoded = encode_vli(0x3FFFFFFE)
         self.assertEqual(len(encoded), 4)
         val, length = decode_vli(encoded)
-        self.assertEqual(val, 0x3FFFFFFF)
+        self.assertEqual(val, 0x3FFFFFFE)
         self.assertEqual(length, 4)
 
+    def test_max_value_has_no_encoding(self):
+        with self.assertRaises(ValueError):
+            encode_vli(0x3FFFFFFF)
+
     def test_roundtrip_range(self):
-        for v in [0, 1, 32, 63, 64, 100, 1000, 16383, 16384, 100000, 0x3FFFFFFF]:
+        for v in [0, 1, 32, 62, 63, 64, 100, 1000, 16382, 16383, 16384, 100000, 0x3FFFFFFE]:
             encoded = encode_vli(v)
             decoded, _ = decode_vli(encoded)
             self.assertEqual(decoded, v, f"Roundtrip failed for {v}")
@@ -63,7 +61,7 @@ class TestVLI(unittest.TestCase):
         self.assertEqual(encoded[0] & 0xC0, 0x80)
 
     def test_4byte_top_bits_11(self):
-        encoded = encode_vli(0x4000)
+        encoded = encode_vli(0x3FFF)
         self.assertEqual(encoded[0] & 0xC0, 0xC0)
 
     def test_decode_at_offset(self):

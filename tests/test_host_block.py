@@ -221,11 +221,25 @@ class TestTaggedReply(unittest.TestCase):
         self.assertEqual(encoded, bytes([0x80 | 16]))
         self.assertEqual(len(encoded), 1)
 
+    def test_encode_reply_var_length_inline_max(self):
+        self.assertEqual(encode_reply_var_length(126), b"\xfe")
+
+    def test_encode_reply_var_length_127_spills_to_2byte(self):
+        """127 fits the inline form but the client emits it as two bytes."""
+        self.assertEqual(encode_reply_var_length(127), b"\x00\x7f")
+
     def test_encode_reply_var_length_2byte(self):
         encoded = encode_reply_var_length(200)
         self.assertEqual(len(encoded), 2)
         reconstructed = (encoded[0] & 0x7F) << 8 | encoded[1]
         self.assertEqual(reconstructed, 200)
+
+    def test_encode_reply_var_length_2byte_max(self):
+        self.assertEqual(encode_reply_var_length(0x7FFE), b"\x7f\xfe")
+
+    def test_encode_reply_var_length_over_inline_ceiling(self):
+        with self.assertRaises(ValueError):
+            encode_reply_var_length(0x7FFF)
 
 
 class TestIteratorCancel(unittest.TestCase):
