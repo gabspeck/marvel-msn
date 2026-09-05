@@ -253,7 +253,7 @@ MEDVIEW exactly as it does over the modem.
 ## 4. Server side
 
 `src/server` listens on both ports: 2323 for MOSCP over the 86Box modem
-emulator, `GATEWAY_PORT` 569 for ENGCT. The listening port is what tells the two
+emulator, `GATEWAY_PORT` 5690 for ENGCT. The listening port is what tells the two
 apart — `handle_connection(conn, addr, direct=True)` skips the telnet stripping
 and the bare-CR wait and sends the type-3 transport parameters as soon as the
 connection is accepted.
@@ -264,16 +264,21 @@ send boundary, rejoining a message the Select builder had to split into the one
 record Straight carries. Inbound, `take_straight_records` splits the stream and
 `_handle_straight_record` feeds the same pipe-0 and service dispatchers.
 
-569 is privileged. Without one of
+ENGCT dials 569, which is privileged, so the host redirects it to
+`GATEWAY_PORT` and the server binds nothing below 1024:
 
 ```sh
-sudo sysctl -w net.ipv4.ip_unprivileged_port_start=569
+sudo firewall-cmd --permanent --add-port=569/tcp
+sudo firewall-cmd --permanent --add-forward-port=port=569:proto=tcp:toport=5690
+sudo firewall-cmd --reload
 ```
 
-or running as root, the gateway listener logs `listen_denied` and the server
-carries on serving 2323 alone. A port redirect is not equivalent: the direct
-bring-up is selected by which listener accepted the connection, so 569 has to
-land on the gateway listener itself.
+The redirect has to target the gateway listener and not 2323 — the direct
+bring-up is selected by which listener accepted the connection. firewalld puts
+the rule in nat PREROUTING, which sees packets arriving on an interface but not
+the host's own traffic, so a probe from the server host has to dial 5690
+directly; only the guest's 569 gets rewritten. Whichever listener fails to bind
+logs `listen_failed` and the other carries on alone.
 
 Guest side:
 

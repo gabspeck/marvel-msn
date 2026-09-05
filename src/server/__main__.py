@@ -32,21 +32,13 @@ def _serve(conn, addr, direct):
 def _listen(port):
     """Bind and listen, or return None after saying why not.
 
-    The gateway port is privileged, and the server is worth running without it
-    — the modem path is unaffected.
+    Either transport is worth serving without the other, so a bind that fails
+    drops that port and leaves the one that came up running.
     """
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         srv.bind((HOST, port))
-    except PermissionError:
-        srv.close()
-        log.warning(
-            "listen_denied port=%d fix='sudo sysctl -w net.ipv4.ip_unprivileged_port_start=%d'",
-            port,
-            port,
-        )
-        return None
     except OSError as e:
         srv.close()
         log.warning("listen_failed port=%d reason=%s", port, e)
