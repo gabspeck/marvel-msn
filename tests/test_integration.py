@@ -449,8 +449,11 @@ class TestFullFeatureSession(_ConnectionHarness):
         params = parse_tagged_params(self._reply_payload(pkts))
         self.assertEqual(params[0].value, 0)
 
+        # Selector 0x07 registers no receive parameters, so the reply carries
+        # no records at all. Sending one makes MPCCL's receive-parameter binder
+        # raise 0x8b0b0008 and strand the request thread on a modal box.
         pkts = self._call_selector(self.PIPE_LOGSRV, 0x06, 0x07, b"\x85", req_id=2)
-        self.assertEqual(self._reply_payload(pkts)[0], 0x84)
+        self.assertEqual(self._reply_payload(pkts), b"")
 
         sig_payload = bytes.fromhex("03 5f 01 00 00 03 00 00 00 00 03 00 00 00 00 84")
         pkts = self._call_selector(self.PIPE_LOGSRV, 0x06, 0x02, sig_payload, req_id=3)
@@ -626,7 +629,7 @@ class TestFullFeatureSession(_ConnectionHarness):
         reopened_pipe = self.PIPE_LOGSRV + 10
         self._open_pipe(reopened_pipe, "LOGSRV", 6)
         pkts = self._call_selector(reopened_pipe, 0x06, 0x07, b"\x85", req_id=0)
-        self.assertEqual(self._reply_payload(pkts)[0], 0x84)
+        self.assertEqual(self._reply_payload(pkts), b"")
         self._close_pipe(reopened_pipe)
 
 
