@@ -18,7 +18,7 @@ from ..config import (
     TAG_END_STATIC,
 )
 from ..log import TRACE
-from ..models import ByteParam, ChunkedParam, DwordParam, VarParam
+from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
     build_blob_reply,
@@ -260,7 +260,6 @@ class DirsrvHandler(ServiceHandler):
             "format": fmt_param.value,
             "size": size_param.value,
             "data": bytearray(),
-            "frames": [],
         }
         log.info(
             "add_shabby_begin format=%d stream=%d bytes=%d",
@@ -283,20 +282,8 @@ class DirsrvHandler(ServiceHandler):
             return None
 
         upload["data"].extend(payload)
-        upload["frames"].append(len(payload))
         if msg_class != MPC_CLASS_CONTINUATION_LAST:
             return None
-
-        sizes = upload["frames"]
-        modal = max(set(sizes), key=sizes.count) if sizes else 0
-        odd = [(i, n) for i, n in enumerate(sizes) if n != modal]
-        log.info(
-            "add_shabby_frames count=%d modal=%d total=%d odd=%s",
-            len(sizes),
-            modal,
-            sum(sizes),
-            odd[:12],
-        )
 
         del self._shabby_uploads[stream_id]
         reply_payload = _add_shabby_result(upload["format"], bytes(upload["data"]), upload["size"])
@@ -441,31 +428,54 @@ def size_value(node):
     return node.content.size_bytes
 
 
+# UTF-16 (0x0B) string properties read straight off NodeContent.
+_TEXT_PROPS = {
+    PROP_DESCRIPTION: "description",
+    PROP_GO_WORD: "go_word",
+    PROP_CATEGORY: "category",
+    PROP_TOPICS: "topics",
+    PROP_PEOPLE: "people",
+    PROP_PLACE: "place",
+    PROP_MAYBE_HIDDEN_U: "u_value",
+    PROP_FORUM_MANAGER: "forum_mgr",
+    PROP_OWNER: "owner",
+    PROP_CREATED: "created",
+}
+
+# Inline DWORD (0x03) properties read straight off NodeContent. `fi` is the
+# Download-and-Run shabby id; DLRed reads it only to tell whether the node
+# already carries a file (DSNED 0x7F572846 maps present/absent onto editor
+# state 1/2).
+_DWORD_PROPS = {
+    PROP_VENDOR_ID: "vendor_id",
+    PROP_PRICE: "price_dword",
+    PROP_RATING: "rating_dword",
+    PROP_FILE_ID: "dnr_shabby_id",
+    PROP_FILE_COMPRESSION: "dnr_compression",
+}
+
+
 def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
     """Serialize `node` into (type, name, value) property tuples.
 
-    Most props have a single canonical wire type regardless of caller; only
-    `tp` and `w` switch on `is_children`:
-      - is_children=True  → DSNAV details-view / MOSSHELL listview
-                            (tp = 0x0A ASCIIZ, w = 0x0C FILETIME)
-      - is_children=False → Properties dialog
-                            (tp = 0x0B UTF-16, w = 0x0B string)
-
-    Empirical source for the dialog wire types: memory
-    `project_dirsrv_dialog_props_investigation` (2026-04-15). `e` is 0x0A for
-    all callers — CMosTreeNode::Properties raw-memcpies cache into
-    PropertySheetA (ANSI); 0x0B would store UTF-16 and truncate at the first
-    wide NUL ("MSN Today" → "M").
-
-    TODO: a GetParents-style caller that arrives with dword_0=1 but a
-    dialog-shaped reader on the client side would get listview wire types for
-    tp/w and render wrong. No such caller is known today.
+    Each property has one wire type for every caller except `tp` and `w`,
+    which switch on `is_children`:
+      - True:  DSNAV details view / MOSSHELL listview (tp 0x0A, w 0x0C FILETIME)
+      - False: Properties dialog (tp 0x0B, w 0x0B string)
+    `e` is 0x0A for every caller: CMosTreeNode::Properties copies the cache
+    raw into PropertySheetA, so 0x0B would truncate at the first wide NUL
+    ("MSN Today" shows as "M"). The dialog wire types come from live client
+    observation.
     """
     content = node.content
 
     out = []
     for name in requested_props:
-        if name == PROP_MNID:
+        if name in _TEXT_PROPS:
+            out.append((0x0B, name, encode_sz(getattr(content, _TEXT_PROPS[name]))))
+        elif name in _DWORD_PROPS:
+            out.append((0x03, name, struct.pack("<I", getattr(content, _DWORD_PROPS[name]))))
+        elif name == PROP_MNID:
             out.append((0x0E, PROP_MNID, struct.pack("<I", len(node.mnid_a)) + node.mnid_a))
         elif name == PROP_BROWSE_FLAGS:
             # PROTOCOL.md §SVCPROP-props: bit 0x01 CLEAR = container (Browse),
@@ -642,26 +652,6 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
                     out.append((0x0A, PROP_LAST_CHANGED, encode_sz("")))
             else:
                 out.append((0x0B, PROP_LAST_CHANGED, encode_sz(content.modified)))
-        elif name == PROP_DESCRIPTION:
-            out.append((0x0B, PROP_DESCRIPTION, encode_sz(content.description)))
-        elif name == PROP_GO_WORD:
-            out.append((0x0B, PROP_GO_WORD, encode_sz(content.go_word)))
-        elif name == PROP_CATEGORY:
-            out.append((0x0B, PROP_CATEGORY, encode_sz(content.category)))
-        elif name == PROP_TOPICS:
-            out.append((0x0B, PROP_TOPICS, encode_sz(content.topics)))
-        elif name == PROP_PEOPLE:
-            out.append((0x0B, PROP_PEOPLE, encode_sz(content.people)))
-        elif name == PROP_PLACE:
-            out.append((0x0B, PROP_PLACE, encode_sz(content.place)))
-        elif name == PROP_MAYBE_HIDDEN_U:
-            out.append((0x0B, PROP_MAYBE_HIDDEN_U, encode_sz(content.u_value)))
-        elif name == PROP_FORUM_MANAGER:
-            out.append((0x0B, PROP_FORUM_MANAGER, encode_sz(content.forum_mgr)))
-        elif name == PROP_OWNER:
-            out.append((0x0B, PROP_OWNER, encode_sz(content.owner)))
-        elif name == PROP_CREATED:
-            out.append((0x0B, PROP_CREATED, encode_sz(content.created)))
         elif name == PROP_LANGUAGE:
             # Wire 'q' uses the 8-byte transport type 0x04, but its value is a
             # counted DWORD array: [count:u32][lcid:u32]. MCM's browse-language
@@ -671,24 +661,11 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # count 0 with one trailing LCID makes it reject the value and
             # DSNED reports the rejection as E_OUTOFMEMORY.
             out.append((0x04, PROP_LANGUAGE, struct.pack("<II", 1, content.language)))
-        elif name == PROP_VENDOR_ID:
-            out.append((0x03, PROP_VENDOR_ID, struct.pack("<I", content.vendor_id)))
-        elif name == PROP_PRICE:
-            out.append((0x03, PROP_PRICE, struct.pack("<I", content.price_dword)))
-        elif name == PROP_RATING:
-            out.append((0x03, PROP_RATING, struct.pack("<I", content.rating_dword)))
-        elif name == PROP_FILE_ID:
-            # Inline DWORD shabby id, same shape as 'mf'/'h'. DLRed reads it
-            # only to decide whether the node already carries a file
-            # (DSNED 0x7F572846 maps present/absent onto editor state 1/2).
-            out.append((0x03, PROP_FILE_ID, struct.pack("<I", content.dnr_shabby_id)))
         elif name == PROP_FILE_NAME:
             # Wire 0x0A, the type DLRed itself writes. Its reader
             # (DSNED 0x7F572387) pulls the value through GetPropSz into
             # SetDlgItemTextA, so the cache has to hold ANSI.
             out.append((0x0A, PROP_FILE_NAME, encode_sz(content.dnr_file_name)))
-        elif name == PROP_FILE_COMPRESSION:
-            out.append((0x03, PROP_FILE_COMPRESSION, struct.pack("<I", content.dnr_compression)))
         elif name == PROP_BLACKBIRD_SITE:
             # Type 0x0E, the type the wizard wrote. A node with nothing
             # published falls through to the catch-all DWORD 0 below rather
@@ -1310,41 +1287,45 @@ def _build_add_node_result(status, new_mnid):
 # `decode_property_record` has already turned each value into a Python int,
 # str or list, so the decoders here only reshape.
 _EDITABLE_PROPERTIES = {
-    PROP_NAME_EDIT: ("name", lambda v: v if isinstance(v, str) else ""),
-    PROP_GO_WORD: ("go_word", lambda v: v if isinstance(v, str) else ""),
-    PROP_DESCRIPTION: ("description", lambda v: v if isinstance(v, str) else ""),
-    PROP_CATEGORY: ("category", lambda v: v if isinstance(v, str) else ""),
-    PROP_TOPICS: ("topics", lambda v: v if isinstance(v, str) else ""),
-    PROP_PEOPLE: ("people", lambda v: v if isinstance(v, str) else ""),
-    PROP_PLACE: ("place", lambda v: v if isinstance(v, str) else ""),
-    PROP_FORUM_MANAGER: ("forum_mgr", lambda v: v if isinstance(v, str) else ""),
-    PROP_OWNER: ("owner", lambda v: v if isinstance(v, str) else ""),
-    PROP_RATING: ("rating_dword", lambda v: v if isinstance(v, int) else 0),
-    PROP_VENDOR_ID: ("vendor_id", lambda v: v if isinstance(v, int) else 0),
+    PROP_NAME_EDIT: ("name", str),
+    PROP_GO_WORD: ("go_word", str),
+    PROP_DESCRIPTION: ("description", str),
+    PROP_CATEGORY: ("category", str),
+    PROP_TOPICS: ("topics", str),
+    PROP_PEOPLE: ("people", str),
+    PROP_PLACE: ("place", str),
+    PROP_FORUM_MANAGER: ("forum_mgr", str),
+    PROP_OWNER: ("owner", str),
+    PROP_RATING: ("rating_dword", int),
+    PROP_VENDOR_ID: ("vendor_id", int),
     # `z` packs both pricing fields into one DWORD: the low byte is the index
     # into MOSSHELL's g_rgISOCurrencyCodes table (0xFF = none) and the upper 24
     # bits are the amount. The General page assembles it as
     # `(currency & 0xFF) | (amount << 8)` before the SetProperty call, so the
     # server only has to round-trip the word.
-    PROP_PRICE: ("price_dword", lambda v: v if isinstance(v, int) else 0),
-    PROP_SIZE: (
-        "size_bytes",
-        lambda v: v if isinstance(v, int) else 0,
-    ),
+    PROP_PRICE: ("price_dword", int),
+    PROP_SIZE: ("size_bytes", int),
     # `q` arrives as the type-0x10 counted DWORD array the Language listbox
     # built from its selection. NodeContent holds a single LCID, so the first
     # entry wins and an empty selection leaves the node locale-neutral.
-    PROP_LANGUAGE: ("language", lambda v: v[0] if isinstance(v, list) and v else 0),
+    PROP_LANGUAGE: ("language", list),
     # The three Download-and-Run writes that follow a successful AddShabby.
-    # `fi` guards on int because the Forum Manager help page sends the same tag
-    # as a type-0x0E inline blob, which this server does not store.
-    PROP_FILE_ID: ("dnr_shabby_id", lambda v: v if isinstance(v, int) else 0),
-    PROP_FILE_NAME: ("dnr_file_name", lambda v: v if isinstance(v, str) else ""),
+    # `fi` is checked for int because the Forum Manager help page sends the
+    # same tag as a type-0x0E inline blob, which this server does not store.
+    PROP_FILE_ID: ("dnr_shabby_id", int),
+    PROP_FILE_NAME: ("dnr_file_name", str),
     # Stored verbatim: the wizard reads back exactly what it wrote, and nothing
     # here interprets the 84 bytes.
-    PROP_BLACKBIRD_SITE: ("blackbird_site", lambda v: v if isinstance(v, bytes) else b""),
-    PROP_FILE_COMPRESSION: ("dnr_compression", lambda v: v if isinstance(v, int) else 0),
+    PROP_BLACKBIRD_SITE: ("blackbird_site", bytes),
+    PROP_FILE_COMPRESSION: ("dnr_compression", int),
 }
+
+
+def _editable_value(kind, value):
+    """`value` if it has the stored type, else that type's empty value."""
+    if kind is list:
+        return value[0] if isinstance(value, list) and value else 0
+    return value if isinstance(value, kind) else kind()
 
 
 def set_properties_reply(payload, session, content_store):
@@ -1364,7 +1345,7 @@ def set_properties_reply(payload, session, content_store):
     """
     if not session.is_admin:
         log.info("set_properties refused user=%s", session.user.username or "-")
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     send_params, recv_descriptors = parse_request_params(payload)
     fields = [param.data for param in send_params if isinstance(param, VarParam)]
@@ -1375,7 +1356,7 @@ def set_properties_reply(payload, session, content_store):
             [f"0x{tag:02x}" for tag in recv_descriptors],
             payload.hex(),
         )
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     ticket, mnid, property_record = fields
     if not is_valid_ticket(ticket) or len(mnid) != 8:
@@ -1384,7 +1365,7 @@ def set_properties_reply(payload, session, content_store):
             ticket.hex(),
             mnid.hex(),
         )
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     node_id = node_id_of(mnid)
     node = content_store.find_node(node_id)
@@ -1398,13 +1379,13 @@ def set_properties_reply(payload, session, content_store):
             len(property_record),
             property_record.hex(),
         )
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     try:
         properties = decode_property_record(property_record)
     except ValueError as exc:
         log.warning("set_properties invalid properties node=%s error=%s", node_id, exc)
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     content_changes = {}
     node_changes = {}
@@ -1421,8 +1402,8 @@ def set_properties_reply(payload, session, content_store):
             # SetProperties makes the page refuse to close.
             ignored.append(name)
             continue
-        field, decode = mapping
-        content_changes[field] = decode(value)
+        field, kind = mapping
+        content_changes[field] = _editable_value(kind, value)
 
     if content_changes or node_changes:
         content_store.add_node(
@@ -1444,7 +1425,7 @@ def set_properties_reply(payload, session, content_store):
         ",".join(f"{k}={v!r}" for k, v in applied.items()) or "-",
         ",".join(ignored) or "-",
     )
-    return _build_edit_result(0)
+    return edit_result(0)
 
 
 def delete_node_reply(payload, session, content_store):
@@ -1478,7 +1459,7 @@ def delete_node_reply(payload, session, content_store):
             [f"0x{tag:02x}" for tag in recv_descriptors],
             payload.hex(),
         )
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     ticket, mnid = fields
     if not is_valid_ticket(ticket) or len(mnid) != 8:
@@ -1487,7 +1468,7 @@ def delete_node_reply(payload, session, content_store):
             ticket.hex(),
             mnid.hex(),
         )
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     node_id = node_id_of(mnid)
     node = content_store.find_node(node_id)
@@ -1499,13 +1480,13 @@ def delete_node_reply(payload, session, content_store):
             node_id,
             name,
         )
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
     if not content_store.remove_node(node_id):
         log.warning("delete_node unknown node=%s", node_id)
-        return _build_edit_result(TREEEDCL_STATUS_REFUSED)
+        return edit_result(TREEEDCL_STATUS_REFUSED)
 
     log.info("delete_node status=0 node=%s name=%r", node_id, name)
-    return _build_edit_result(0)
+    return edit_result(0)
 
 
 def _may_delete(session, node):
@@ -1525,9 +1506,44 @@ def _may_delete(session, node):
     return bbs is not None and bbs.author == session.user.display_name
 
 
-def _build_edit_result(status):
-    """Build the `status` + `operation id` pair every completed edit op returns."""
+def edit_result(status):
+    """`status` + operation id 0: the reply to every completed TREEEDCL or
+    DATAEDCL write."""
     return build_static_reply(build_tagged_reply_dword(status), build_tagged_reply_dword(0))
+
+
+# DATAEDCL call shapes, as CDataEditClient sends them: send-parameter kinds in
+# order, then the receive descriptors. Add and SetProperties carry ticket,
+# table, record id, dataset and property record; Delete the same without the
+# record; GetProperties table, record id, dataset, name count and names.
+DATA_EDIT_WRITE_SHAPE = ((VarParam, DwordParam, VarParam, WordParam, VarParam), [0x83, 0x83])
+DATA_EDIT_DELETE_SHAPE = ((VarParam, DwordParam, VarParam, WordParam), [0x83, 0x83])
+DATA_EDIT_GET_PROPS_SHAPE = (
+    (DwordParam, VarParam, WordParam, DwordParam, VarParam),
+    [0x83, 0x83, 0x85],
+)
+
+
+def data_edit_params(logger, name, request_id, payload, shape):
+    """The send parameters of a DATAEDCL call, or None when they do not
+    match `shape`."""
+    kinds, recv = shape
+    send_params, recv_descriptors = parse_request_params(payload)
+    if tuple(type(p) for p in send_params) == kinds and recv_descriptors == recv:
+        return send_params
+    logger.warning(
+        "%s invalid request req_id=%d params=%d recv=%s",
+        name,
+        request_id,
+        len(send_params),
+        [f"0x{tag:02x}" for tag in recv_descriptors],
+    )
+    return None
+
+
+def is_property_record(record):
+    """A CServiceProperties record leads with its own u32 length."""
+    return len(record) >= 4 and struct.unpack_from("<I", record)[0] == len(record)
 
 
 def decode_property_record(record):

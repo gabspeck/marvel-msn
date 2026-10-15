@@ -403,18 +403,29 @@ def query_restrict_rows_reply(payload):
     return build_row_reply(len(members), blob)
 
 
-def _decode_query_restrict_rows_request(payload):
-    """Pull the restriction, the requested tags and the row limit out."""
+def _request_fields(payload):
+    """A request's variable params and DWORDs, each in wire order."""
     send_params, _recv = parse_request_params(payload)
     var_params = [p.data for p in send_params if isinstance(p, VarParam)]
     dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+    return var_params, dwords
 
+
+def _tag_array(tag_bytes, count):
+    """`count` u32 tags from `tag_bytes`, or as many as it holds when the
+    count is missing or overstated."""
+    available = len(tag_bytes) // 4
+    count = available if count is None else min(count, available)
+    return list(struct.unpack_from(f"<{count}I", tag_bytes)) if count else []
+
+
+def _decode_query_restrict_rows_request(payload):
+    """Pull the restriction, the requested tags and the row limit out."""
+    var_params, dwords = _request_fields(payload)
     restriction = parse_restriction(var_params[0]) if var_params else []
     tag_bytes = var_params[2] if len(var_params) > 2 else b""
     row_limit = dwords[2] if len(dwords) > 2 else 0
-    count = dwords[3] if len(dwords) > 3 else len(tag_bytes) // 4
-    count = min(count, len(tag_bytes) // 4)
-    tags = list(struct.unpack_from(f"<{count}I", tag_bytes)) if count else []
+    tags = _tag_array(tag_bytes, dwords[3] if len(dwords) > 3 else None)
     return restriction, tags, row_limit
 
 
@@ -499,10 +510,7 @@ def _match_restriction(restriction, row_limit):
 
 def _decode_query_ww_rows_request(payload):
     """Pull the name prefix, the requested tags and the row limit out."""
-    send_params, _recv = parse_request_params(payload)
-    var_params = [p.data for p in send_params if isinstance(p, VarParam)]
-    dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
-
+    var_params, dwords = _request_fields(payload)
     name = ""
     if var_params:
         name = var_params[0].split(b"\x00", 1)[0].decode("cp1252", errors="replace")
@@ -510,9 +518,7 @@ def _decode_query_ww_rows_request(payload):
     tag_bytes = var_params[1] if len(var_params) > 1 else b""
     # dwords: handle, unidentified, cRows, cValues
     row_limit = dwords[2] if len(dwords) > 2 else 0
-    count = dwords[3] if len(dwords) > 3 else len(tag_bytes) // 4
-    count = min(count, len(tag_bytes) // 4)
-    tags = list(struct.unpack_from(f"<{count}I", tag_bytes)) if count else []
+    tags = _tag_array(tag_bytes, dwords[3] if len(dwords) > 3 else None)
     return name, tags, row_limit
 
 
@@ -602,19 +608,13 @@ def _decode_get_user_details_request(payload):
     compares its own `cValues` against the count this server writes into the
     blob and fails the call with 0x80040118 on a mismatch (`FUN_7F4DD770`).
     """
-    send_params, _recv = parse_request_params(payload)
-    var_params = [p.data for p in send_params if isinstance(p, VarParam)]
-    dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
-
+    var_params, dwords = _request_fields(payload)
     member_id = ""
     if var_params:
         member_id = var_params[0].split(b"\x00", 1)[0].decode("ascii", errors="replace")
 
     tag_bytes = var_params[1] if len(var_params) > 1 else b""
-    count = dwords[0] if dwords else len(tag_bytes) // 4
-    count = min(count, len(tag_bytes) // 4)
-    tags = list(struct.unpack_from(f"<{count}I", tag_bytes)) if count else []
-    return member_id, tags
+    return member_id, _tag_array(tag_bytes, dwords[0] if dwords else None)
 
 
 def build_member_blob(profile, tags):

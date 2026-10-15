@@ -89,7 +89,16 @@ from ...mpc import (
 )
 from .._dispatch import log_unhandled_selector
 from .._handler import ServiceHandler
-from ..dirsrv import TREEEDCL_STATUS_REFUSED, get_ticket_reply, is_valid_ticket
+from ..dirsrv import (
+    DATA_EDIT_DELETE_SHAPE,
+    DATA_EDIT_WRITE_SHAPE,
+    TREEEDCL_STATUS_REFUSED,
+    data_edit_params,
+    edit_result,
+    get_ticket_reply,
+    is_property_record,
+    is_valid_ticket,
+)
 from . import replies
 from .m14_loader import (
     LoadedM14,
@@ -1014,24 +1023,11 @@ class MedviewHandler(ServiceHandler):
         return reply_packets
 
     def _handle_data_edit_add(self, request_id, payload) -> bytes:
-        send_params, recv_descriptors = parse_request_params(payload)
-        valid_shape = (
-            len(send_params) == 5
-            and isinstance(send_params[0], VarParam)
-            and isinstance(send_params[1], DwordParam)
-            and isinstance(send_params[2], VarParam)
-            and isinstance(send_params[3], WordParam)
-            and isinstance(send_params[4], VarParam)
-            and recv_descriptors == [0x83, 0x83]
+        send_params = data_edit_params(
+            log, "data_edit_add", request_id, payload, DATA_EDIT_WRITE_SHAPE
         )
-        if not valid_shape:
-            log.warning(
-                "data_edit_add invalid request req_id=%d params=%d recv=%s",
-                request_id,
-                len(send_params),
-                [f"0x{tag:02x}" for tag in recv_descriptors],
-            )
-            return replies.data_edit_result(TREEEDCL_STATUS_REFUSED)
+        if send_params is None:
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         ticket = send_params[0].data
         record_id = send_params[2].data
@@ -1040,8 +1036,7 @@ class MedviewHandler(ServiceHandler):
             self.session.is_admin
             and is_valid_ticket(ticket)
             and len(record_id) == 8
-            and len(properties) >= 4
-            and struct.unpack_from("<I", properties)[0] == len(properties)
+            and is_property_record(properties)
         )
         if not valid_payload:
             log.warning(
@@ -1053,7 +1048,7 @@ class MedviewHandler(ServiceHandler):
                 len(record_id),
                 len(properties),
             )
-            return replies.data_edit_result(TREEEDCL_STATUS_REFUSED)
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         log.info(
             "data_edit_add status=0 req_id=%d table=%d record_id=%s "
@@ -1064,27 +1059,15 @@ class MedviewHandler(ServiceHandler):
             send_params[3].value,
             len(properties),
         )
-        return replies.data_edit_result()
+        return edit_result(0)
 
     def _handle_data_edit_delete(self, request_id, payload) -> bytes:
         """Complete DATAEDCL Delete after TREEEDCL removed the directory node."""
-        send_params, recv_descriptors = parse_request_params(payload)
-        valid_shape = (
-            len(send_params) == 4
-            and isinstance(send_params[0], VarParam)
-            and isinstance(send_params[1], DwordParam)
-            and isinstance(send_params[2], VarParam)
-            and isinstance(send_params[3], WordParam)
-            and recv_descriptors == [0x83, 0x83]
+        send_params = data_edit_params(
+            log, "data_edit_delete", request_id, payload, DATA_EDIT_DELETE_SHAPE
         )
-        if not valid_shape:
-            log.warning(
-                "data_edit_delete invalid request req_id=%d params=%d recv=%s",
-                request_id,
-                len(send_params),
-                [f"0x{tag:02x}" for tag in recv_descriptors],
-            )
-            return replies.data_edit_result(TREEEDCL_STATUS_REFUSED)
+        if send_params is None:
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         ticket = send_params[0].data
         record_id = send_params[2].data
@@ -1096,7 +1079,7 @@ class MedviewHandler(ServiceHandler):
                 len(ticket),
                 len(record_id),
             )
-            return replies.data_edit_result(TREEEDCL_STATUS_REFUSED)
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         log.info(
             "data_edit_delete status=0 req_id=%d table=%d record_id=%s dataset=0x%04x",
@@ -1105,7 +1088,7 @@ class MedviewHandler(ServiceHandler):
             record_id.hex(),
             send_params[3].value,
         )
-        return replies.data_edit_result()
+        return edit_result(0)
 
     def _build_hfs_read_reply_packets(
         self,

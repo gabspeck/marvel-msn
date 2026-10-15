@@ -71,6 +71,12 @@ ONLSTMT_SELECTOR_CANCEL_SUBSCRIPTION = 0x04  # cancel-subscription ack
 ONLSTMT_SELECTOR_GET_DETAILS = 0x05  # per-period charge details
 
 
+def _sample(items, render, limit=3):
+    """The first `limit` items rendered for a log line, then a count of the rest."""
+    text = ",".join(render(item) for item in items[:limit])
+    return text if len(items) <= limit else f"{text},...+{len(items) - limit}"
+
+
 def build_summary_payload(user):
     """Build the statement-summary reply for selector=0x00.
 
@@ -211,17 +217,18 @@ def build_details_payload(period_index, user):
         )
         for t in txns
     ]
-    sample = ",".join(
-        f"{t.when.strftime('%Y-%m-%dT%H:%M')}|{t.description!r}|amt={t.amount_minor}|tot={t.total_minor}"
-        for t in txns[:3]
-    )
     log.info(
-        "get_details_reply period=%d record_count=%d currency=%d txns=[%s%s]",
+        "get_details_reply period=%d record_count=%d currency=%d txns=[%s]",
         period_index,
         len(records),
         currency,
-        sample,
-        "" if len(txns) <= 3 else f",...+{len(txns) - 3}",
+        _sample(
+            txns,
+            lambda t: (
+                f"{t.when.strftime('%Y-%m-%dT%H:%M')}|{t.description!r}"
+                f"|amt={t.amount_minor}|tot={t.total_minor}"
+            ),
+        ),
     )
     blob = _DETAILS_HEADER + b"".join(records)
     return build_blob_reply(
@@ -341,20 +348,20 @@ def build_subscriptions_payload(user):
     expires = statement.expires_date
     effective = statement.effective_date
     records_blob = b"".join(_encode_subscription_record(s) for s in subs)
-    sample = ",".join(
-        f"kind=0x{s.kind:02x}|{s.name!r}|price={s.price_minor}|cur={s.price_currency}"
-        for s in subs[:3]
-    )
     log.info(
         "subscriptions_reply count=%d balance_cents=%d currency=%d"
-        " first_date=%s second_date=%s subs=[%s%s]",
+        " first_date=%s second_date=%s subs=[%s]",
         len(subs),
         statement.balance_cents,
         statement.currency_iso,
         expires.isoformat(),
         effective.isoformat(),
-        sample,
-        "" if len(subs) <= 3 else f",...+{len(subs) - 3}",
+        _sample(
+            subs,
+            lambda s: (
+                f"kind=0x{s.kind:02x}|{s.name!r}|price={s.price_minor}|cur={s.price_currency}"
+            ),
+        ),
     )
     return build_static_reply(
         build_tagged_reply_byte(len(subs)),
@@ -418,12 +425,10 @@ def build_plans_payload():
     """
     plans = _default_store.catalog.get_plans()
     blob = b"".join(_encode_plan_record(p) for p in plans)
-    sample = ",".join(f"id={p.plan_id}|{p.name!r}" for p in plans[:3])
     log.info(
-        "plans_reply count=%d plans=[%s%s]",
+        "plans_reply count=%d plans=[%s]",
         len(plans),
-        sample,
-        "" if len(plans) <= 3 else f",...+{len(plans) - 3}",
+        _sample(plans, lambda p: f"id={p.plan_id}|{p.name!r}"),
     )
     return build_static_reply(
         build_tagged_reply_byte(len(plans)), build_tagged_reply_var(0x84, blob)

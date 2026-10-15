@@ -10,7 +10,7 @@ from ..config import (
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
-from ..models import DwordParam, VarParam, WordParam
+from ..models import DwordParam, VarParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
     build_blob_reply,
@@ -26,10 +26,16 @@ from ..store.records import node_id_of
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 from .dirsrv import (
+    DATA_EDIT_DELETE_SHAPE,
+    DATA_EDIT_GET_PROPS_SHAPE,
+    DATA_EDIT_WRITE_SHAPE,
     TREEEDCL_STATUS_REFUSED,
     build_property_record,
+    data_edit_params,
     decode_property_record,
+    edit_result,
     get_ticket_reply,
+    is_property_record,
     is_valid_ticket,
 )
 from .rooms import room_for
@@ -117,24 +123,11 @@ class ConflocHandler(ServiceHandler):
         ticket, table DWORD, 8-byte record id, dataset WORD, property record,
         then status and operation-id receive descriptors.
         """
-        send_params, recv_descriptors = parse_request_params(payload)
-        valid_shape = (
-            len(send_params) == 5
-            and isinstance(send_params[0], VarParam)
-            and isinstance(send_params[1], DwordParam)
-            and isinstance(send_params[2], VarParam)
-            and isinstance(send_params[3], WordParam)
-            and isinstance(send_params[4], VarParam)
-            and recv_descriptors == [0x83, 0x83]
+        send_params = data_edit_params(
+            log, "data_edit_add", request_id, payload, DATA_EDIT_WRITE_SHAPE
         )
-        if not valid_shape:
-            log.warning(
-                "data_edit_add invalid request req_id=%d params=%d recv=%s",
-                request_id,
-                len(send_params),
-                [f"0x{tag:02x}" for tag in recv_descriptors],
-            )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+        if send_params is None:
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         ticket = send_params[0].data
         record_id = send_params[2].data
@@ -143,8 +136,7 @@ class ConflocHandler(ServiceHandler):
             self.session.is_admin
             and is_valid_ticket(ticket)
             and len(record_id) == 8
-            and len(properties) >= 4
-            and struct.unpack_from("<I", properties)[0] == len(properties)
+            and is_property_record(properties)
         )
         if not valid_payload:
             log.warning(
@@ -156,7 +148,7 @@ class ConflocHandler(ServiceHandler):
                 len(record_id),
                 len(properties),
             )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         try:
             decoded = decode_property_record(properties)
@@ -172,7 +164,7 @@ class ConflocHandler(ServiceHandler):
                 record_id.hex(),
                 exc,
             )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         log.info(
             "data_edit_add status=0 req_id=%d table=%d record_id=%s dataset=0x%04x props=%s",
@@ -186,7 +178,7 @@ class ConflocHandler(ServiceHandler):
             self._records.pop(record_id, None)
         else:
             self._records[record_id] = properties
-        return _build_data_edit_result(0)
+        return edit_result(0)
 
     def data_edit_delete_reply(self, request_id, payload):
         """Complete the application-record half of a tree-node deletion.
@@ -196,23 +188,11 @@ class ConflocHandler(ServiceHandler):
         DATAEDCL 0x7F5A183F sends the ticket, table DWORD, 8-byte record id and
         dataset WORD, then waits for status and operation-id DWORDs.
         """
-        send_params, recv_descriptors = parse_request_params(payload)
-        valid_shape = (
-            len(send_params) == 4
-            and isinstance(send_params[0], VarParam)
-            and isinstance(send_params[1], DwordParam)
-            and isinstance(send_params[2], VarParam)
-            and isinstance(send_params[3], WordParam)
-            and recv_descriptors == [0x83, 0x83]
+        send_params = data_edit_params(
+            log, "data_edit_delete", request_id, payload, DATA_EDIT_DELETE_SHAPE
         )
-        if not valid_shape:
-            log.warning(
-                "data_edit_delete invalid request req_id=%d params=%d recv=%s",
-                request_id,
-                len(send_params),
-                [f"0x{tag:02x}" for tag in recv_descriptors],
-            )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+        if send_params is None:
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         ticket = send_params[0].data
         record_id = send_params[2].data
@@ -224,7 +204,7 @@ class ConflocHandler(ServiceHandler):
                 len(ticket),
                 len(record_id),
             )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         self._records.pop(record_id, None)
         log.info(
@@ -234,7 +214,7 @@ class ConflocHandler(ServiceHandler):
             record_id.hex(),
             send_params[3].value,
         )
-        return _build_data_edit_result(0)
+        return edit_result(0)
 
     def data_edit_set_props_reply(self, request_id, payload):
         """Apply DATAEDCL properties to an existing conference record.
@@ -243,24 +223,11 @@ class ConflocHandler(ServiceHandler):
         table DWORD, 8-byte record id, dataset WORD, and property record. It
         waits for status and operation-id DWORDs; status 0 completes the write.
         """
-        send_params, recv_descriptors = parse_request_params(payload)
-        valid_shape = (
-            len(send_params) == 5
-            and isinstance(send_params[0], VarParam)
-            and isinstance(send_params[1], DwordParam)
-            and isinstance(send_params[2], VarParam)
-            and isinstance(send_params[3], WordParam)
-            and isinstance(send_params[4], VarParam)
-            and recv_descriptors == [0x83, 0x83]
+        send_params = data_edit_params(
+            log, "data_edit_set_properties", request_id, payload, DATA_EDIT_WRITE_SHAPE
         )
-        if not valid_shape:
-            log.warning(
-                "data_edit_set_properties invalid request req_id=%d params=%d recv=%s",
-                request_id,
-                len(send_params),
-                [f"0x{tag:02x}" for tag in recv_descriptors],
-            )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+        if send_params is None:
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         ticket = send_params[0].data
         record_id = send_params[2].data
@@ -295,7 +262,7 @@ class ConflocHandler(ServiceHandler):
                 record_id.hex(),
                 len(properties),
             )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         try:
             stored = _apply_conference_properties(
@@ -310,7 +277,7 @@ class ConflocHandler(ServiceHandler):
                 record_id.hex(),
                 exc,
             )
-            return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
+            return edit_result(TREEEDCL_STATUS_REFUSED)
 
         if stored:
             self._records.pop(record_id, None)
@@ -325,7 +292,7 @@ class ConflocHandler(ServiceHandler):
             send_params[3].value,
             ",".join(decoded),
         )
-        return _build_data_edit_result(0)
+        return edit_result(0)
 
     def data_edit_get_props_reply(self, request_id, payload):
         """Return the property record previously attached by DATAEDCL Add.
@@ -335,23 +302,10 @@ class ConflocHandler(ServiceHandler):
         property names. It binds status, record count, and an iterator. The
         iterator item is a complete CServiceProperties record.
         """
-        send_params, recv_descriptors = parse_request_params(payload)
-        valid_shape = (
-            len(send_params) == 5
-            and isinstance(send_params[0], DwordParam)
-            and isinstance(send_params[1], VarParam)
-            and isinstance(send_params[2], WordParam)
-            and isinstance(send_params[3], DwordParam)
-            and isinstance(send_params[4], VarParam)
-            and recv_descriptors == [0x83, 0x83, 0x85]
+        send_params = data_edit_params(
+            log, "data_edit_get_properties", request_id, payload, DATA_EDIT_GET_PROPS_SHAPE
         )
-        if not valid_shape:
-            log.warning(
-                "data_edit_get_properties invalid request req_id=%d params=%d recv=%s",
-                request_id,
-                len(send_params),
-                [f"0x{tag:02x}" for tag in recv_descriptors],
-            )
+        if send_params is None:
             return _build_data_edit_properties_result(TREEEDCL_STATUS_REFUSED, ())
 
         record_id = send_params[1].data
@@ -917,10 +871,6 @@ def _apply_conference_properties(content_store, record_id, properties):
 
     content_store.add_node(replace(node, content=replace(node.content, conference=conference)))
     return True
-
-
-def _build_data_edit_result(status):
-    return build_static_reply(build_tagged_reply_dword(status), build_tagged_reply_dword(0))
 
 
 def _build_data_edit_properties_result(status, records):

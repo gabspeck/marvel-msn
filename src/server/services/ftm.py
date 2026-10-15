@@ -206,11 +206,9 @@ class FtmHandler(ServiceHandler):
                 override_filename=not source_names_the_file,
                 fast_path=not is_streamed,
             )
-            flags = FTM_FLAG_HAS_UNPACK_METHOD
-            if not is_streamed:
-                flags |= FTM_FLAG_FAST_PATH
-            if not source_names_the_file:
-                flags |= FTM_FLAG_HAS_FILENAME
+            flags = _request_download_flags(
+                fast_path=not is_streamed, override_filename=not source_names_the_file
+            )
             log.info(
                 "request_download_reply status=0 size=%d flags=0x%02x unpack=%d filename=%r",
                 len(content),
@@ -483,6 +481,15 @@ def _encode_reply_filename(filename):
     return encoded + b"\x00"
 
 
+def _request_download_flags(*, fast_path, override_filename):
+    flags = FTM_FLAG_HAS_UNPACK_METHOD
+    if fast_path:
+        flags |= FTM_FLAG_FAST_PATH
+    if override_filename:
+        flags |= FTM_FLAG_HAS_FILENAME
+    return flags
+
+
 def _build_request_download_reply(
     filename,
     content_len,
@@ -527,11 +534,7 @@ def _build_request_download_reply(
     struct.pack_into("<I", buf, FTM_REPLY_STATUS_OFFSET, 0)
     struct.pack_into("<I", buf, FTM_REPLY_SIZE1_OFFSET, content_len)
     struct.pack_into("<I", buf, FTM_REPLY_SIZE2_OFFSET, content_len)
-    flags = FTM_FLAG_HAS_UNPACK_METHOD
-    if fast_path:
-        flags |= FTM_FLAG_FAST_PATH
-    if override_filename:
-        flags |= FTM_FLAG_HAS_FILENAME
+    flags = _request_download_flags(fast_path=fast_path, override_filename=override_filename)
     struct.pack_into("<I", buf, FTM_REPLY_FLAGS_OFFSET, flags)
     struct.pack_into("<I", buf, FTM_REPLY_UNPACK_METHOD_OFFSET, unpack_method)
     if override_filename:

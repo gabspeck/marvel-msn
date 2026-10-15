@@ -85,6 +85,12 @@ SASRV_TOKEN_NAME_MAX = 0x5C - 1
 SA_E_BAD_LIST_KIND = 0x12
 
 
+def _dword_params(payload):
+    """The DWORD send parameters of a request, in wire order."""
+    send_params, _ = parse_request_params(payload)
+    return [p.value for p in send_params if isinstance(p, DwordParam)]
+
+
 class SasrvHandler(ServiceHandler):
     """Serve SACLIENT's master-list enumerator on one logical pipe.
 
@@ -127,8 +133,7 @@ class SasrvHandler(ServiceHandler):
         reply is `0x83 [status] 0x83 [handle] 0x87`. The handle comes back on
         selector 0x04.
         """
-        send_params, _ = parse_request_params(payload)
-        dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+        dwords = _dword_params(payload)
         kind = dwords[0] if dwords else None
 
         # An account holding no token grant has no master list to enumerate.
@@ -167,8 +172,7 @@ class SasrvHandler(ServiceHandler):
         `0x83 [count] 0x83 [status] 0x87`. The count lands at list+0x18, which
         is what `GetCount` @ 0x7F343965 hands the Security page.
         """
-        send_params, _ = parse_request_params(payload)
-        dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+        dwords = _dword_params(payload)
         handle = dwords[0] if dwords else None
 
         kind = self._enums.get(handle)
@@ -210,8 +214,7 @@ class SasrvHandler(ServiceHandler):
         per row, and caches it as `(index / 0x14) * 0x14 + n` — so a request
         for index i wants the 20 rows starting at `(i // 20) * 20`.
         """
-        send_params, _ = parse_request_params(payload)
-        dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+        dwords = _dword_params(payload)
         handle = dwords[0] if dwords else None
         start = dwords[1] if len(dwords) > 1 else 0
         log.info(
@@ -257,8 +260,7 @@ class SasrvHandler(ServiceHandler):
         An unknown handle still answers 0. The client discards the result, and
         failing a release would only strand the page's cleanup path.
         """
-        send_params, _ = parse_request_params(payload)
-        dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
+        dwords = _dword_params(payload)
         handle = dwords[0] if dwords else None
 
         kind = self._enums.pop(handle, None)
