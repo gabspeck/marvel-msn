@@ -48,7 +48,7 @@ def room_population(room_id):
 
     Backs the chat node's `p`: MSNFIND's Size cell renders that DWORD as
     "%d people" when `c` is 4, so a room reports occupancy where a file reports
-    bytes. Read by `dirsrv._size_value`.
+    bytes. Read by `dirsrv.size_value`.
 
     Never creates the room — a search listing every chat node would otherwise
     register one per result. An unvisited room is 0, which is also the value

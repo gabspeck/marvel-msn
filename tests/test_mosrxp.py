@@ -13,8 +13,12 @@ import unittest
 
 from server.config import MOSRXP_INTERFACE_GUIDS
 from server.mpc import parse_host_block
+from server.services._mapi import (
+    UEID_PROVIDER_UID,
+    USR_ENTRYID_LEN,
+    build_usr_entryid,
+)
 from server.services.mosrxp import (
-    CONNINFO_LEN,
     MOS_ENTRYID_LEN,
     MOSRXP_CLASS_XP,
     MOSRXP_CLOSE_INBOX,
@@ -35,9 +39,7 @@ from server.services.mosrxp import (
     PR_SENDER_EMAIL_ADDRESS,
     PR_SENT_REPRESENTING_NAME,
     PR_SUBJECT,
-    UEID_PROVIDER_UID,
     MOSRXPHandler,
-    build_conninfo,
     build_header_record,
     build_message_blob,
     decode_entryid,
@@ -50,7 +52,7 @@ from server.store import MailMessage, MailRecipient, app_store, reset_app_store
 from server.store.records import from_filetime, to_filetime
 from server.transport import parse_packet
 
-_FIXED_WIDTHS = {0x02: 2, 0x03: 4, 0x04: 4, 0x05: 8, 0x06: 8, 0x07: 8, 0x0B: 2, 0x14: 8, 0x40: 8}
+FIXED_WIDTHS = {0x02: 2, 0x03: 4, 0x04: 4, 0x05: 8, 0x06: 8, 0x07: 8, 0x0B: 2, 0x14: 8, 0x40: 8}
 
 
 def decode_prop(raw, pos):
@@ -72,7 +74,7 @@ def decode_prop(raw, pos):
         return tag, raw[pos : pos + cb], pos + cb
     if prop_type == 0x48:
         return tag, raw[pos : pos + 16], pos + 16
-    width = _FIXED_WIDTHS[prop_type]
+    width = FIXED_WIDTHS[prop_type]
     return tag, int.from_bytes(raw[pos : pos + width], "little"), pos + width
 
 
@@ -295,20 +297,20 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(payload[:5], b"\x83" + struct.pack("<I", 0))
         self.assertEqual(payload[5], 0x87)
         self.assertEqual(payload[6], 0x84)
-        blob = payload[-CONNINFO_LEN:]
-        self.assertEqual(len(blob), CONNINFO_LEN)
+        blob = payload[-USR_ENTRYID_LEN:]
+        self.assertEqual(len(blob), USR_ENTRYID_LEN)
         self.assertEqual(blob[0x04:0x14], UEID_PROVIDER_UID)
         self.assertEqual(struct.unpack_from("<II", blob, 0x14), (2, 1))
         self.assertEqual(blob[0x1C:].split(b"\x00", 1)[0], b"Bill Gates")
         self.assertEqual(blob[0x77:].split(b"\x00", 1)[0], b"billg")
 
     def test_conninfo_names_are_truncated_with_room_for_a_terminator(self):
-        blob = build_conninfo("D" * 200, "M" * 200)
-        self.assertEqual(len(blob), CONNINFO_LEN)
+        blob = build_usr_entryid("D" * 200, "M" * 200)
+        self.assertEqual(len(blob), USR_ENTRYID_LEN)
         self.assertEqual(blob[0x1C : 0x1C + 0x5B].count(b"D"), 0x5A)
         self.assertEqual(blob[0x1C + 0x5A], 0)
         self.assertEqual(blob[0x77:].count(b"M"), 0x40)
-        self.assertEqual(blob[CONNINFO_LEN - 1], 0)
+        self.assertEqual(blob[USR_ENTRYID_LEN - 1], 0)
 
     def test_open_inbox_answers_status_and_count(self):
         payload = self.call(MOSRXP_OPEN_INBOX, b"\x83\x83\x85")

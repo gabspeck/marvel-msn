@@ -42,6 +42,19 @@ from ..store import app_store as _default_store
 from ..store.records import to_filetime
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
+from ._mapi import (
+    FIXED_WIDTHS,
+    MAPI_MAILUSER,
+    MSN_ADDRTYPE,
+    PR_ADDRTYPE,
+    PR_DISPLAY_NAME,
+    PR_EMAIL_ADDRESS,
+    PR_OBJECT_TYPE,
+    PT_BINARY,
+    PT_STRING8,
+    PT_UNICODE,
+    build_usr_entryid,
+)
 
 log = logging.getLogger(__name__)
 
@@ -61,40 +74,10 @@ MOSRXP_GET_MESSAGE = 0x07
 MOSRXP_GET_FIRST_MESSAGE = 0x08
 MOSRXP_FLAG_SERVER_MESSAGE = 0x09
 
-# MAPI property types `CConn::HrDSrlProp` @ 0x7F432435 decodes. Anything else
-# aborts its parse with 0x1A, so these are the whole vocabulary.
-PT_I2 = 0x02
-PT_LONG = 0x03
-PT_R4 = 0x04
-PT_DOUBLE = 0x05
-PT_CURRENCY = 0x06
-PT_APPTIME = 0x07
-PT_BOOLEAN = 0x0B
-PT_I8 = 0x14
-PT_STRING8 = 0x1E
-PT_UNICODE = 0x1F
-PT_SYSTIME = 0x40
-PT_CLSID = 0x48
-PT_BINARY = 0x102
-
-_FIXED_WIDTHS = {
-    PT_I2: 2,
-    PT_LONG: 4,
-    PT_R4: 4,
-    PT_DOUBLE: 8,
-    PT_CURRENCY: 8,
-    PT_APPTIME: 8,
-    PT_BOOLEAN: 2,
-    PT_I8: 8,
-    PT_SYSTIME: 8,
-    PT_CLSID: 16,
-}
-
 # The 12 tags `MOSMUTIL!PSptaHdr` @ 0x7E991297 returns, in array order. A
 # header record carries exactly this set: `FIsHeaderProp` is a linear search
 # over it, and it is what splits a serialised message's first property list
 # from its third.
-PR_OBJECT_TYPE = 0x0FFE0003
 PR_MSG_STATUS = 0x0E170003
 PR_MESSAGE_FLAGS = 0x0E070003
 PR_MESSAGE_CLASS = 0x001A001E
@@ -117,14 +100,11 @@ PR_SENDER_SEARCH_KEY = 0x0C1D0102
 PR_SENT_REPRESENTING_ADDRTYPE = 0x0064001E
 PR_SENT_REPRESENTING_EMAIL_ADDRESS = 0x0065001E
 
-# Recipient (ADRENTRY) props.
+# Recipient (ADRENTRY) props, beside the shared PR_DISPLAY_NAME / PR_ADDRTYPE /
+# PR_EMAIL_ADDRESS.
 PR_RECIPIENT_TYPE = 0x0C150003
-PR_DISPLAY_NAME = 0x3001001E
-PR_ADDRTYPE = 0x3002001E
-PR_EMAIL_ADDRESS = 0x3003001E
 
 MAPI_MESSAGE = 5
-MAPI_MAILUSER = 6
 MSGFLAG_UNMODIFIED = 0x02
 IMPORTANCE_NORMAL = 1
 SENSITIVITY_NONE = 0
@@ -140,28 +120,11 @@ MSGSTATUS_REMOTE_DELETE = 0x2000
 # 0x7F43CE90. `HrCompleteTransmit` marks a recipient PR_RESPONSIBILITY only
 # when its PR_ADDRTYPE matches one of these, so anything else is another
 # provider's delivery and never reaches us.
-MOSRXP_ADDRTYPE = "MSN"
-TRANSPORT_ADDRTYPES = (MOSRXP_ADDRTYPE, "MSNLIST", "MSNINET", "INTERNET", "SMTP")
+TRANSPORT_ADDRTYPES = (MSN_ADDRTYPE, "MSNLIST", "MSNINET", "INTERNET", "SMTP")
 
 # Reply tag for a variable param. The client declares the slot with a `0x84`
 # receive descriptor (`IMosMethod` slot +0x14).
 TAG_REPLY_VAR = 0x84
-
-# CONNINFO, the 0xB8-byte blob method 0 answers with, is a `_usr_entryid` —
-# same structure `MOSMUTIL!HrBuildUeid` @ 0x7E991036 builds for the address
-# book, and the same length. Layout: abFlags, provider MAPIUID, version 2,
-# EIDTYPE, then two fixed-width name fields.
-CONNINFO_LEN = 0xB8
-UEID_PROVIDER_UID = bytes.fromhex("1becba6c5f92101bb93d00000b70346a")
-UEID_VERSION = 2
-UEID_DISPLAY_NAME_OFFSET = 0x1C
-UEID_DISPLAY_NAME_MAX = 0x5B
-UEID_MEMBER_NAME_OFFSET = 0x77
-UEID_MEMBER_NAME_MAX = 0x41
-# EIDTYPE 1 keys the entry id on the member name at +0x77. MOSABP32 branches on
-# `ueid[0x18] == 4` to pick its account-handle lookup instead, so type 1 is what
-# routes a Member Properties sheet opened on this sender to MOSABP method 2.
-EIDTYPE_MEMBER_NAME = 1
 
 # 12-byte MOS_ENTRYID. The client memcpys it out of a header record and hands
 # it back verbatim on GetMessage / DelMessages / FlagServerMessage without ever
@@ -252,7 +215,7 @@ class MOSRXPHandler(ServiceHandler):
         DIRSRV's GetDeidFromGoWord already answers `84` with.
         """
         user = self.session.user
-        blob = build_conninfo(user.display_name, user.username)
+        blob = build_usr_entryid(user.display_name, user.username)
         log.info("mosrxp_get_conn_info member=%r bytes=%d", user.username, len(blob))
         return build_static_reply(build_tagged_reply_dword(0)) + build_tagged_reply_var(
             TAG_REPLY_VAR, blob
@@ -542,25 +505,6 @@ def _status_reply(status):
 # --- Entry ids ---
 
 
-def build_conninfo(display_name, member_name):
-    """The signed-in member's `_usr_entryid`, the blob method 0 answers with.
-
-    Both names are truncated one short of their field so the terminator always
-    fits: `HrBuildUeid` uses `strncpy`, which writes no NUL when the source
-    fills the field exactly.
-    """
-    blob = bytearray(CONNINFO_LEN)
-    blob[0x04:0x14] = UEID_PROVIDER_UID
-    struct.pack_into("<II", blob, 0x14, UEID_VERSION, EIDTYPE_MEMBER_NAME)
-    for offset, limit, text in (
-        (UEID_DISPLAY_NAME_OFFSET, UEID_DISPLAY_NAME_MAX, display_name),
-        (UEID_MEMBER_NAME_OFFSET, UEID_MEMBER_NAME_MAX, member_name),
-    ):
-        encoded = text.encode("cp1252", errors="replace")[: limit - 1]
-        blob[offset : offset + len(encoded)] = encoded
-    return bytes(blob)
-
-
 def encode_entryid(message_id):
     return struct.pack("<III", MOS_ENTRYID_VERSION, message_id, 0)
 
@@ -594,7 +538,7 @@ def encode_prop(tag, value):
         return head + value.encode("utf-16le", errors="replace") + b"\x00\x00"
     if prop_type == PT_BINARY:
         return head + struct.pack("<I", len(value)) + value
-    width = _FIXED_WIDTHS.get(prop_type)
+    width = FIXED_WIDTHS.get(prop_type)
     if width is None:
         raise ValueError(f"MOSRXP tag 0x{tag:08X} has unserialisable type 0x{prop_type:04X}")
     return head + int(value).to_bytes(width, "little", signed=False)
@@ -658,17 +602,17 @@ def body_props(message):
         (PR_BODY, message.body),
         (PR_CLIENT_SUBMIT_TIME, to_filetime(message.delivered)),
         (PR_SENDER_NAME, message.sender_name),
-        (PR_SENDER_ADDRTYPE, MOSRXP_ADDRTYPE),
+        (PR_SENDER_ADDRTYPE, MSN_ADDRTYPE),
         (PR_SENDER_EMAIL_ADDRESS, message.sender_address),
         (PR_SENDER_SEARCH_KEY, _search_key(message.sender_address)),
-        (PR_SENT_REPRESENTING_ADDRTYPE, MOSRXP_ADDRTYPE),
+        (PR_SENT_REPRESENTING_ADDRTYPE, MSN_ADDRTYPE),
         (PR_SENT_REPRESENTING_EMAIL_ADDRESS, message.sender_address),
     ]
 
 
 def _search_key(address):
     """`ADDRTYPE:ADDRESS`, the form HrSendMessage builds for its own sender key."""
-    return f"{MOSRXP_ADDRTYPE}:{address}".encode("cp1252", errors="replace") + b"\x00"
+    return f"{MSN_ADDRTYPE}:{address}".encode("cp1252", errors="replace") + b"\x00"
 
 
 def message_size(message):
@@ -759,7 +703,7 @@ def parse_prop(raw, pos):
         pos += 4
         return tag, raw[pos : pos + cb], pos + cb
 
-    width = _FIXED_WIDTHS.get(prop_type)
+    width = FIXED_WIDTHS.get(prop_type)
     if width is None:
         raise ValueError(f"unserialisable property type 0x{prop_type:04X}")
     return tag, int.from_bytes(raw[pos : pos + width], "little"), pos + width
@@ -787,7 +731,7 @@ def parse_recip_list(raw, pos):
             MailRecipient(
                 display_name=props.get(PR_DISPLAY_NAME, ""),
                 address=props.get(PR_EMAIL_ADDRESS, ""),
-                addrtype=props.get(PR_ADDRTYPE, MOSRXP_ADDRTYPE),
+                addrtype=props.get(PR_ADDRTYPE, MSN_ADDRTYPE),
                 recipient_type=props.get(PR_RECIPIENT_TYPE, 1),
             )
         )

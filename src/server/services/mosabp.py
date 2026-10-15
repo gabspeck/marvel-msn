@@ -45,6 +45,20 @@ from ..mpc import (
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
+from ._mapi import (
+    FIXED_WIDTHS,
+    MAPI_MAILUSER,
+    MSN_ADDRTYPE,
+    PR_ADDRTYPE,
+    PR_DISPLAY_NAME,
+    PR_EMAIL_ADDRESS,
+    PR_OBJECT_TYPE,
+    PT_BINARY,
+    PT_STRING8,
+    PT_UNICODE,
+    UEID_PROVIDER_UID,
+    build_usr_entryid,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,38 +81,6 @@ MOSABP_QUERY_RESTRICT_ROWS = 0x0D
 MOSABP_ENUM_DIST_LIST = 0x0E
 MOSABP_QUERY_ROWS_MORE = 0x0F
 
-# MAPI property types the reply serialiser encodes, from the pair of client
-# functions that consume the blob: `FUN_7F4DD472` decides whether a type
-# carries a `[cb:u32]` prefix, `FUN_7F4DD4C4` gives the width of the ones that
-# do not. Only 0x1E / 0x1F / 0x102 are length-prefixed.
-PT_I2 = 0x02
-PT_LONG = 0x03
-PT_R4 = 0x04
-PT_DOUBLE = 0x05
-PT_CURRENCY = 0x06
-PT_APPTIME = 0x07
-PT_BOOLEAN = 0x0B
-PT_I8 = 0x14
-PT_STRING8 = 0x1E
-PT_UNICODE = 0x1F
-PT_SYSTIME = 0x40
-PT_CLSID = 0x48
-PT_BINARY = 0x102
-
-_FIXED_WIDTHS = {
-    PT_I2: 2,
-    PT_LONG: 4,
-    PT_R4: 4,
-    PT_DOUBLE: 8,
-    PT_CURRENCY: 8,
-    PT_APPTIME: 8,
-    PT_BOOLEAN: 2,
-    PT_I8: 8,
-    PT_SYSTIME: 8,
-    PT_CLSID: 16,
-}
-_LENGTH_PREFIXED = (PT_STRING8, PT_UNICODE, PT_BINARY)
-
 # Property tags the Member Properties sheet asks for. The master array lives at
 # MOSABP32:0x7F4E8198 with 26 entries; `FUN_7F4D307D` copies it minus six tags
 # it never sends (PT_NULL, 0x0FF60102, PR_ENTRYID, PR_SEARCH_KEY,
@@ -106,10 +88,10 @@ _LENGTH_PREFIXED = (PT_STRING8, PT_UNICODE, PT_BINARY)
 # 20-tag array is what reaches the wire. The dialog field each one drives comes
 # from the three WM_INITDIALOG handlers (0x7F4D122F / 0x7F4D12D8 / 0x7F4D136C),
 # which call `FUN_7F4D1400(ctrl_id, tag)` per control.
-PR_OBJECT_TYPE = 0x0FFE0003
-PR_DISPLAY_NAME = 0x3001001E
-PR_ADDRTYPE = 0x3002001E
-PR_EMAIL_ADDRESS = 0x3003001E  # "Member ID:" (ctrl 301)
+# Only these MAPI types carry a `[cb:u32]` prefix (MOSABP32 `FUN_7F4DD472`).
+_LENGTH_PREFIXED = (PT_STRING8, PT_UNICODE, PT_BINARY)
+
+# PR_EMAIL_ADDRESS drives "Member ID:" (ctrl 301).
 PR_DISPLAY_TYPE = 0x39000003
 MOS_CITY = 0x6000001E  # "City/Town:" (ctrl 304)
 MOS_STATE = 0x6001001E  # "State/Province:" (ctrl 305)
@@ -127,30 +109,9 @@ MOS_LANGUAGE = 0x60100003  # "Language:" (ctrl 310)
 MOS_MARITAL_STATUS = 0x60110003  # "Marital status:" (ctrl 309)
 MOS_WORK_COUNTRY = 0x60120003  # "Country:" (ctrl 316)
 
-# PR_OBJECT_TYPE / PR_DISPLAY_TYPE values for one member: MAPI_MAILUSER and
-# DT_MAILUSER. Neither is displayed; the sheet requests them and drops them.
-MAPI_MAILUSER = 6
+# PR_DISPLAY_TYPE for one member. Like PR_OBJECT_TYPE (MAPI_MAILUSER) it is
+# requested by the sheet and not displayed.
 DT_MAILUSER = 0
-
-# PR_ADDRTYPE for an MSN member. The address types MOSABP32 knows sit in one
-# block at 0x7F4E8010 — `UNKNOWN`, `MSNINET`, `MSNLIST`, `MSN` — alongside the
-# `':'` search-key separator and the provider MAPIUID. A member is `MSN`, which
-# is also what MOSRXP32 stamps as its own sender addrtype and one of the five
-# types its transport claims delivery for (docs/MOSRXP.md §7).
-MOSABP_ADDRTYPE = "MSN"
-
-# `_usr_entryid` — a member's address book entry id, the structure
-# `MOSMUTIL!HrBuildUeid` (0x7E991036) builds. 184 bytes; same shape MOSRXP
-# answers GetConnInfo with.
-USR_ENTRYID_LEN = 0xB8
-USR_ENTRYID_VERSION = 2
-UEID_DISPLAY_NAME_OFFSET = 0x1C
-UEID_DISPLAY_NAME_MAX = 0x5B
-UEID_MEMBER_NAME_OFFSET = 0x77
-UEID_MEMBER_NAME_MAX = 0x41
-# EIDTYPE 1 keys the id on the member name at +0x77 — the form
-# `HrGetUserDetails` routes to method 2. Type 4 is the account-handle form.
-EIDTYPE_MEMBER_NAME = 1
 
 # PR_SEARCH_KEY is `ADDRTYPE:ADDRESS`, separator from 0x7F4E8014, uppercased by
 # MAPI convention.
@@ -174,7 +135,6 @@ AB_DISPLAY_TYPE_OFFSET = 0xD8
 # `_usr_entryid`, version 2, type 0, container id at +0x1C.
 CONT_ENTRYID_LEN = 0x20
 CONT_ENTRYID_VERSION = 2
-UEID_PROVIDER_UID = bytes.fromhex("1becba6c5f92101bb93d00000b70346a")
 
 # PR_DISPLAY_TYPE for a server-side global list.
 DT_GLOBAL = 0x00020000
@@ -310,33 +270,9 @@ def build_ab_container(container):
     return bytes(blob)
 
 
-def build_usr_entryid(display_name, member_name, eidtype=EIDTYPE_MEMBER_NAME):
-    """One member's `_usr_entryid`, as `MOSMUTIL!HrBuildUeid` builds it.
-
-    A resolved recipient is addressed by this: `PR_ENTRYID` is what MAPI hands
-    back to the provider to open the member, so a row that answers it with an
-    empty value resolves to nothing and Check Names reports the name as
-    unrecognised.
-
-    Both names are truncated one short of their field so the terminator always
-    fits — `HrBuildUeid` uses `strncpy`, which writes no NUL when the source
-    fills the field exactly.
-    """
-    blob = bytearray(USR_ENTRYID_LEN)
-    blob[0x04:0x14] = UEID_PROVIDER_UID
-    struct.pack_into("<II", blob, 0x14, USR_ENTRYID_VERSION, eidtype)
-    for offset, limit, text in (
-        (UEID_DISPLAY_NAME_OFFSET, UEID_DISPLAY_NAME_MAX, display_name),
-        (UEID_MEMBER_NAME_OFFSET, UEID_MEMBER_NAME_MAX, member_name),
-    ):
-        encoded = text.encode("cp1252", errors="replace")[: limit - 1]
-        blob[offset : offset + len(encoded)] = encoded
-    return bytes(blob)
-
-
 def build_search_key(member_id):
     """`MSN:<MEMBER ID>` — the `ADDRTYPE:ADDRESS` form, uppercased."""
-    return f"{MOSABP_ADDRTYPE}:{member_id}".upper().encode("cp1252", errors="replace") + b"\x00"
+    return f"{MSN_ADDRTYPE}:{member_id}".upper().encode("cp1252", errors="replace") + b"\x00"
 
 
 def build_cont_entryid(container_id):
@@ -718,7 +654,7 @@ def _encode_value(tag, value):
         return struct.pack("<I", len(data)) + data
     if prop_type == PT_BINARY:
         return struct.pack("<I", len(value)) + value
-    width = _FIXED_WIDTHS.get(prop_type)
+    width = FIXED_WIDTHS.get(prop_type)
     if width is None:
         raise ValueError(f"MOSABP tag 0x{tag:08X} has unserialisable type 0x{prop_type:04X}")
     return int(value).to_bytes(width, "little", signed=False)
@@ -745,7 +681,7 @@ def _member_value(profile, tag):
 _TAG_VALUES = {
     PR_OBJECT_TYPE: lambda _p: MAPI_MAILUSER,
     PR_DISPLAY_TYPE: lambda _p: DT_MAILUSER,
-    PR_ADDRTYPE: lambda _p: MOSABP_ADDRTYPE,
+    PR_ADDRTYPE: lambda _p: MSN_ADDRTYPE,
     # An address book row is what a recipient is built from, so these two carry
     # real values rather than the empty default: without an entry id there is
     # nothing to address, and Check Names rejects the name.

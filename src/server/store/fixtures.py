@@ -217,7 +217,7 @@ MEMBER_ASSISTANCE_LEAF_DEFS = (
 
 
 # Categorias (BR) — Portuguese counterparts to CATEGORY_DEFS. Names are
-# ASCII-only because the SVCPROP string encoder (`_sz` in services/dirsrv.py)
+# ASCII-only because the SVCPROP string encoder (`encode_sz` in services/dirsrv.py)
 # narrows to ASCII via `errors="replace"`; CP-1252 accents would land as `?`
 # on the wire. Real Marvel server data isn't documented for pt-BR, so this is
 # a parallel-structure mirror of the US set with localised display strings.

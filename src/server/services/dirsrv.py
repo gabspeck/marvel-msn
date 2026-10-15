@@ -121,7 +121,7 @@ PROP_OWNER = "on"
 # DSNED Banner page and the DLRed payload, an article count on a bulletin
 # board, an occupancy on a chat room. MOSSHELL reads it through
 # FormatSizeString regardless; MSNFIND picks the unit from `c`. See
-# `_size_value`.
+# `size_value`.
 PROP_SIZE = "p"
 PROP_LANGUAGE = "q"
 PROP_TOPICS = "r"
@@ -373,7 +373,7 @@ def _format_props_for_log(properties):
 
 
 def _decode_flag_byte_string(value):
-    """Decode the flag-byte wire body produced by _sz().
+    """Decode the flag-byte wire body produced by encode_sz().
 
     flag & 0x02 = empty; flag & 0x01 = ASCII + NUL; else UTF-16LE + wide NUL.
     """
@@ -388,7 +388,7 @@ def _decode_flag_byte_string(value):
     return body.split(b"\x00\x00", 1)[0].decode("utf-16le", errors="replace")
 
 
-def _sz(s):
+def encode_sz(s):
     """Value body for a type-0x0A or 0x0B string property.
 
     Wire body is the flag-byte string format shared by 0x0A and 0x0B:
@@ -415,7 +415,7 @@ def _sz(s):
     return b"\x01" + data + b"\x00"
 
 
-def _size_value(node):
+def size_value(node):
     """The DWORD `p` carries for one node.
 
     `p` is not a byte count everywhere — it is whatever the node's app counts,
@@ -513,14 +513,14 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # Must be 0x0A (ASCII cache). Both the dialog titlebar
             # (PropertySheetA raw memcpy) and the nav icon label expect ANSI.
             # 0x0B would store UTF-16 and truncate at the first wide NUL.
-            out.append((0x0A, PROP_NAME, _sz(content.name)))
+            out.append((0x0A, PROP_NAME, encode_sz(content.name)))
         elif name == PROP_NAME_EDIT:
             # Read side of the name tag. Only MOSFIND's result-row filler asks
             # for it, and it narrows the value itself with WideCharToMultiByte
             # (0x7E9B1E68), so the cache has to hold UTF-16 — wire type 0x0B.
             # The 0x0A that `e` uses would leave it reading ANSI bytes as wide
             # characters and the Name column would come out as CJK noise.
-            out.append((0x0B, PROP_NAME_EDIT, _sz(content.name)))
+            out.append((0x0B, PROP_NAME_EDIT, encode_sz(content.name)))
         elif name == PROP_SECONDARY_ICON:
             # 'h' = shabby_id for the listview per-item icon. MOSSHELL
             # FUN_7f404786 reads it as DWORD → vtable[0x74] GetShabbyToFile →
@@ -565,7 +565,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
                 )
             )
         elif name == PROP_SIZE:
-            out.append((0x03, PROP_SIZE, struct.pack("<I", _size_value(node) & 0xFFFFFFFF)))
+            out.append((0x03, PROP_SIZE, struct.pack("<I", size_value(node) & 0xFFFFFFFF)))
         elif name == PROP_GENERATION:
             # The node's change stamp. `CMosTreeNode::QueryOutOfDate` @ MOSSHELL
             # 0x7F3FDB3F asks for {g, a} on every refresh and compares the value
@@ -621,7 +621,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # Details-view column uses 0x0A (ASCII cache for MOSSHELL's column
             # render); Properties dialog uses 0x0B (UTF-16 cache for GetPropSz).
             ptype = 0x0A if is_children else 0x0B
-            out.append((ptype, PROP_TYPE, _sz(content.type_str)))
+            out.append((ptype, PROP_TYPE, encode_sz(content.type_str)))
         elif name == PROP_LAST_CHANGED:
             # Details-view cell = 0x0C FILETIME (8-byte, 100-ns since 1601)
             # → MOSSHELL 0x7F3FBC12 case 0xC → FileTimeToSz. DWORD path only
@@ -645,29 +645,29 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
                         )
                     )
                 else:
-                    out.append((0x0A, PROP_LAST_CHANGED, _sz("")))
+                    out.append((0x0A, PROP_LAST_CHANGED, encode_sz("")))
             else:
-                out.append((0x0B, PROP_LAST_CHANGED, _sz(content.modified)))
+                out.append((0x0B, PROP_LAST_CHANGED, encode_sz(content.modified)))
         elif name == PROP_DESCRIPTION:
-            out.append((0x0B, PROP_DESCRIPTION, _sz(content.description)))
+            out.append((0x0B, PROP_DESCRIPTION, encode_sz(content.description)))
         elif name == PROP_GO_WORD:
-            out.append((0x0B, PROP_GO_WORD, _sz(content.go_word)))
+            out.append((0x0B, PROP_GO_WORD, encode_sz(content.go_word)))
         elif name == PROP_CATEGORY:
-            out.append((0x0B, PROP_CATEGORY, _sz(content.category)))
+            out.append((0x0B, PROP_CATEGORY, encode_sz(content.category)))
         elif name == PROP_TOPICS:
-            out.append((0x0B, PROP_TOPICS, _sz(content.topics)))
+            out.append((0x0B, PROP_TOPICS, encode_sz(content.topics)))
         elif name == PROP_PEOPLE:
-            out.append((0x0B, PROP_PEOPLE, _sz(content.people)))
+            out.append((0x0B, PROP_PEOPLE, encode_sz(content.people)))
         elif name == PROP_PLACE:
-            out.append((0x0B, PROP_PLACE, _sz(content.place)))
+            out.append((0x0B, PROP_PLACE, encode_sz(content.place)))
         elif name == PROP_MAYBE_HIDDEN_U:
-            out.append((0x0B, PROP_MAYBE_HIDDEN_U, _sz(content.u_value)))
+            out.append((0x0B, PROP_MAYBE_HIDDEN_U, encode_sz(content.u_value)))
         elif name == PROP_FORUM_MANAGER:
-            out.append((0x0B, PROP_FORUM_MANAGER, _sz(content.forum_mgr)))
+            out.append((0x0B, PROP_FORUM_MANAGER, encode_sz(content.forum_mgr)))
         elif name == PROP_OWNER:
-            out.append((0x0B, PROP_OWNER, _sz(content.owner)))
+            out.append((0x0B, PROP_OWNER, encode_sz(content.owner)))
         elif name == PROP_CREATED:
-            out.append((0x0B, PROP_CREATED, _sz(content.created)))
+            out.append((0x0B, PROP_CREATED, encode_sz(content.created)))
         elif name == PROP_LANGUAGE:
             # Wire 'q' uses the 8-byte transport type 0x04, but its value is a
             # counted DWORD array: [count:u32][lcid:u32]. MCM's browse-language
@@ -692,7 +692,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
             # Wire 0x0A, the type DLRed itself writes. Its reader
             # (DSNED 0x7F572387) pulls the value through GetPropSz into
             # SetDlgItemTextA, so the cache has to hold ANSI.
-            out.append((0x0A, PROP_FILE_NAME, _sz(content.dnr_file_name)))
+            out.append((0x0A, PROP_FILE_NAME, encode_sz(content.dnr_file_name)))
         elif name == PROP_FILE_COMPRESSION:
             out.append((0x03, PROP_FILE_COMPRESSION, struct.pack("<I", content.dnr_compression)))
         elif name == PROP_BLACKBIRD_SITE:
@@ -737,7 +737,7 @@ def build_get_properties_reply_payload(request, rights=RIGHTS_NONE):
     one call and walks the reply with GetNthNode, so it needs all 20 records
     back and would fail every row past the first without them.
     """
-    requested_props = _parse_prop_group(request.prop_group)
+    requested_props = parse_prop_group(request.prop_group)
     _log_request("get_properties", request, requested_props)
 
     # MOSFIND's rows read `tp` with lstrcpynA and `w` with FileTimeToLocalFileTime
@@ -794,7 +794,7 @@ def build_get_children_reply_payload(request, rights=RIGHTS_NONE):
          BrowseLanguage — GetLocalizedNode relies on this to pick the
          first localized child when descending into 1:0 / 1:1.
     """
-    requested_props = _parse_prop_group(request.prop_group)
+    requested_props = parse_prop_group(request.prop_group)
     _log_request("get_children", request, requested_props)
 
     records_with_ids = _collect_children_records(request, requested_props, rights)
@@ -805,7 +805,7 @@ def build_get_children_reply_payload(request, rights=RIGHTS_NONE):
 
 def build_get_parents_reply_payload(request, rights=RIGHTS_NONE):
     """Build a DIRSRV GetParents (selector 0x01) reply: direct parents."""
-    requested_props = _parse_prop_group(request.prop_group)
+    requested_props = parse_prop_group(request.prop_group)
     _log_request("get_parents", request, requested_props)
 
     content_store = _default_store.content
@@ -846,7 +846,7 @@ def _collect_children_records(request, requested_props, rights):
     return records
 
 
-def _parse_prop_group(prop_group):
+def parse_prop_group(prop_group):
     return [p for p in prop_group.split("\x00") if p]
 
 
@@ -1226,7 +1226,7 @@ def build_add_node_reply_payload(payload, session, content_store, node_factory=N
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     try:
-        properties = _decode_property_record(property_record)
+        properties = decode_property_record(property_record)
         if node_factory is None:
             node_factory = _build_dirsrv_child_node
         node = node_factory(content_store, parent, properties)
@@ -1252,17 +1252,17 @@ def build_add_node_reply_payload(payload, session, content_store, node_factory=N
 def _build_dirsrv_child_node(content_store, parent, properties):
     """Build the directory-specific node behind TREEEDCL AddNode."""
     new_mnid = _allocate_child_mnid(content_store, parent.node_id, parent.mnid_a)
-    app_id = _property_int(properties, PROP_APP_ID, parent.app_id)
+    app_id = property_int(properties, PROP_APP_ID, parent.app_id)
     if app_id == APP_TEXT_CONFERENCE:
         _field_0, field_8 = struct.unpack("<II", new_mnid)
         new_mnid = _allocate_app_instance_mnid(content_store, app_id, field_8)
-    browse_flags = _property_int(properties, PROP_BROWSE_FLAGS, 0)
+    browse_flags = property_int(properties, PROP_BROWSE_FLAGS, 0)
     delegate = bool(browse_flags & DIRSRV_BROWSE_FLAGS_DELEGATE)
-    language_values = _property_value(properties, PROP_LANGUAGE, [])
+    language_values = property_value(properties, PROP_LANGUAGE, [])
     language = language_values[0] if language_values else parent.content.language
     name = (
-        _property_text(properties, PROP_NAME_EDIT)
-        or _property_text(properties, PROP_NAME)
+        property_text(properties, PROP_NAME_EDIT)
+        or property_text(properties, PROP_NAME)
         or "New Item"
     )
     return DirectoryNode(
@@ -1272,28 +1272,28 @@ def _build_dirsrv_child_node(content_store, parent, properties):
         mnid_a=new_mnid,
         content=NodeContent(
             name=name,
-            go_word=_property_text(properties, PROP_GO_WORD),
-            category=_property_text(properties, PROP_CATEGORY),
-            type_str=_property_text(properties, PROP_TYPE) or "Folder",
-            price_dword=_property_int(properties, PROP_PRICE, 0),
-            rating_dword=_property_int(properties, PROP_RATING, 0),
-            description=_property_text(properties, PROP_DESCRIPTION),
+            go_word=property_text(properties, PROP_GO_WORD),
+            category=property_text(properties, PROP_CATEGORY),
+            type_str=property_text(properties, PROP_TYPE) or "Folder",
+            price_dword=property_int(properties, PROP_PRICE, 0),
+            rating_dword=property_int(properties, PROP_RATING, 0),
+            description=property_text(properties, PROP_DESCRIPTION),
             language=language,
-            topics=_property_text(properties, PROP_TOPICS),
-            people=_property_text(properties, PROP_PEOPLE),
-            place=_property_text(properties, PROP_PLACE),
-            u_value=_property_text(properties, PROP_MAYBE_HIDDEN_U),
-            forum_mgr=_property_text(properties, PROP_FORUM_MANAGER),
-            vendor_id=_property_int(properties, PROP_VENDOR_ID, 0),
-            owner=_property_text(properties, PROP_OWNER),
-            created=_property_text(properties, PROP_CREATED),
-            modified=_property_text(properties, PROP_LAST_CHANGED),
-            size_bytes=_property_int(properties, PROP_SIZE, 0),
+            topics=property_text(properties, PROP_TOPICS),
+            people=property_text(properties, PROP_PEOPLE),
+            place=property_text(properties, PROP_PLACE),
+            u_value=property_text(properties, PROP_MAYBE_HIDDEN_U),
+            forum_mgr=property_text(properties, PROP_FORUM_MANAGER),
+            vendor_id=property_int(properties, PROP_VENDOR_ID, 0),
+            owner=property_text(properties, PROP_OWNER),
+            created=property_text(properties, PROP_CREATED),
+            modified=property_text(properties, PROP_LAST_CHANGED),
+            size_bytes=property_int(properties, PROP_SIZE, 0),
         ),
         browse_flags=browse_flags,
         delegate=delegate,
-        delegate_mnid_a=(_property_mnid(properties, PROP_DELEGATE_MNID) if delegate else None),
-        secondary_icon_shabby_id=_property_int(
+        delegate_mnid_a=(property_mnid(properties, PROP_DELEGATE_MNID) if delegate else None),
+        secondary_icon_shabby_id=property_int(
             properties, PROP_SECONDARY_ICON, shabby.DEFAULT_NODE_ICON_ID
         ),
     )
@@ -1313,7 +1313,7 @@ def _build_add_node_result(status, new_mnid):
 # The wire type each one carries is fixed by those two handlers — strings go out
 # as 0x0A except the name, which CMosTreeEdit::SetProperty rewrites to 0x0B.
 #
-# `_decode_property_record` has already turned each value into a Python int,
+# `decode_property_record` has already turned each value into a Python int,
 # str or list, so the decoders here only reshape.
 _EDITABLE_PROPERTIES = {
     PROP_NAME_EDIT: ("name", lambda v: v if isinstance(v, str) else ""),
@@ -1407,7 +1407,7 @@ def build_set_properties_reply_payload(payload, session, content_store):
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     try:
-        properties = _decode_property_record(property_record)
+        properties = decode_property_record(property_record)
     except ValueError as exc:
         log.warning("set_properties invalid properties node=%s error=%s", node_id, exc)
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
@@ -1536,7 +1536,7 @@ def _build_edit_result(status):
     return build_static_reply(build_tagged_reply_dword(status), build_tagged_reply_dword(0))
 
 
-def _decode_property_record(record):
+def decode_property_record(record):
     if len(record) < 6:
         raise ValueError("record is shorter than its header")
     total_size, property_count = struct.unpack_from("<IH", record)
@@ -1664,23 +1664,23 @@ def _allocate_app_instance_mnid(content_store, app_id, field_8):
     raise ValueError("no free app instance remains")
 
 
-def _property_value(properties, name, default):
+def property_value(properties, name, default):
     return properties.get(name, (None, default))[1]
 
 
-def _property_int(properties, name, default):
-    value = _property_value(properties, name, default)
+def property_int(properties, name, default):
+    value = property_value(properties, name, default)
     return value if isinstance(value, int) else default
 
 
-def _property_text(properties, name):
-    value = _property_value(properties, name, "")
+def property_text(properties, name):
+    value = property_value(properties, name, "")
     return value if isinstance(value, str) else ""
 
 
-def _property_mnid(properties, name):
+def property_mnid(properties, name):
     """Decode an 8-byte inline MNID property into its wire byte form."""
-    value = _property_value(properties, name, None)
+    value = property_value(properties, name, None)
     if isinstance(value, int):
         return struct.pack("<Q", value)
     if isinstance(value, bytes) and len(value) == 8:

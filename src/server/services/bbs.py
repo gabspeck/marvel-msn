@@ -501,9 +501,9 @@ def build_bbs_props(requested_props, node, *, is_children):
         elif name == PROP_NAME:
             # Subject. 0x0A (ASCII cache) like DIRSRV `e`: column 0 and the
             # Properties dialog both read ANSI.
-            out.append((0x0A, name, dirsrv._sz(content.name)))
+            out.append((0x0A, name, dirsrv.encode_sz(content.name)))
         elif name == PROP_AUTHOR:
-            out.append((0x0A, name, dirsrv._sz(bbs.author)))
+            out.append((0x0A, name, dirsrv.encode_sz(bbs.author)))
         elif name == PROP_ATTACHMENT_COUNT:
             # FUN_7F5F1CAD reads one byte from `_t`; a nonzero value marks the
             # row for Attached Files view. The Properties page also formats
@@ -563,7 +563,7 @@ def build_bbs_get_properties_reply_payload(request):
     and Properties dialog feed the first received record into the requesting
     CMosTreeNode, so returning children would corrupt the node's identity.
     """
-    requested = _requested_props(request.prop_group)
+    requested = dirsrv.parse_prop_group(request.prop_group)
     node = _default_store.content.get_node(request.node_id)
     log.info(
         "bbs_get_properties node=%s props=%s",
@@ -587,7 +587,7 @@ def build_bbs_get_children_reply_payload(request):
     the staleness check to the inner bbsnav node, which runs the same MOSSHELL
     code over this pipe and reads the first record as the node's own.
     """
-    requested = _requested_props(request.prop_group)
+    requested = dirsrv.parse_prop_group(request.prop_group)
     store = _default_store.content
     children = store.get_children(request.node_id, request.locale_raw)
     with_self = request.flags == dirsrv.GET_CHILDREN_FLAG_WITH_SELF
@@ -603,22 +603,18 @@ def build_bbs_get_children_reply_payload(request):
     return dirsrv.build_tree_reply_wire(records)
 
 
-def _requested_props(prop_group):
-    return [p for p in prop_group.split("\x00") if p]
-
-
 def _build_bbs_folder_node(content_store, parent, properties):
     """Build the node requested by BBSNAV's New BBS Folder command."""
     new_mnid = _allocate_bbs_folder_mnid(content_store, parent.mnid_a)
     message_id, board_id = struct.unpack("<II", new_mnid)
-    flags = dirsrv._property_int(
+    flags = dirsrv.property_int(
         properties,
         PROP_HAS_CHILDREN,
         BBS_F_FORMAT_RICH_TEXT | BBS_F_MSN_BULLETIN_BOARD,
     )
     name = (
-        dirsrv._property_text(properties, PROP_NAME)
-        or dirsrv._property_text(properties, dirsrv.PROP_NAME_EDIT)
+        dirsrv.property_text(properties, PROP_NAME)
+        or dirsrv.property_text(properties, dirsrv.PROP_NAME_EDIT)
         or _NEW_BBS_FOLDER_NAME
     )
     return bbs_node(

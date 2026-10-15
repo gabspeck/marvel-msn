@@ -12,6 +12,10 @@ import unittest
 import zlib
 
 from server.config import MOSABP_INTERFACE_GUIDS
+from server.services._mapi import (
+    UEID_PROVIDER_UID,
+    USR_ENTRYID_LEN,
+)
 from server.services.mosabp import (
     ABCONTAINER_LEN,
     CONT_ENTRYID_LEN,
@@ -24,8 +28,6 @@ from server.services.mosabp import (
     PR_SEARCH_KEY,
     RES_AND,
     RES_PROPERTY,
-    UEID_PROVIDER_UID,
-    USR_ENTRYID_LEN,
     AbContainer,
     MOSABPHandler,
     build_ab_container,
@@ -70,7 +72,7 @@ _SHEET_TAGS = [
 ]
 
 # Widths `FUN_7F4DD4C4` returns for the types that carry no length prefix.
-_FIXED_WIDTHS = {0x02: 2, 0x03: 4, 0x04: 4, 0x05: 8, 0x06: 8, 0x07: 8, 0x0B: 2, 0x14: 8, 0x40: 8}
+FIXED_WIDTHS = {0x02: 2, 0x03: 4, 0x04: 4, 0x05: 8, 0x06: 8, 0x07: 8, 0x0B: 2, 0x14: 8, 0x40: 8}
 _LENGTH_PREFIXED = (0x1E, 0x1F, 0x102)
 
 
@@ -119,7 +121,7 @@ def _parse_blob(blob, tags):
             pos += cb
             values[tag] = raw if prop_type == 0x102 else raw.decode("cp1252")
         else:
-            width = _FIXED_WIDTHS[prop_type]
+            width = FIXED_WIDTHS[prop_type]
             values[tag] = int.from_bytes(blob[pos : pos + width], "little")
             pos += width
     return count, values, pos

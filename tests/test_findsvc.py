@@ -12,7 +12,7 @@ import unittest
 
 from server.config import FINDSVC_INTERFACE_GUIDS
 from server.mpc import decode_dirsrv_request
-from server.services.dirsrv import _size_value, build_get_properties_reply_payload
+from server.services.dirsrv import build_get_properties_reply_payload, size_value
 from server.services.findquery import (
     QueryError,
     _term_matcher,
@@ -256,7 +256,7 @@ class TestIndexScope(unittest.TestCase):
         board = self._bbs_nodes(container=True)[0]
         messages = app_store.content.count_children(board.node_id)
         self.assertTrue(messages)
-        self.assertEqual(_size_value(board), messages)
+        self.assertEqual(size_value(board), messages)
 
     def test_attachments_do_not_inflate_the_message_count(self):
         # Attachment nodes are registered by mnid but deliberately kept off the
@@ -269,13 +269,13 @@ class TestIndexScope(unittest.TestCase):
             len(children),
             "fixture has no off-list attachment nodes to distinguish",
         )
-        self.assertEqual(_size_value(board), len(children))
+        self.assertEqual(size_value(board), len(children))
 
     def test_a_non_bbs_node_still_reports_bytes(self):
         # c == 7 goes through HrSzForByteCount; the DnR leaf keeps its payload
         # length.
         dnr = next(node for node in app_store.content.all_nodes() if node.app_id == 7)
-        self.assertEqual(_size_value(dnr), dnr.content.size_bytes)
+        self.assertEqual(size_value(dnr), dnr.content.size_bytes)
 
 
 class TestChatRoomOccupancy(unittest.TestCase):
@@ -290,19 +290,19 @@ class TestChatRoomOccupancy(unittest.TestCase):
     def test_a_room_nobody_joined_reports_zero(self):
         # 0 leaves the Size cell empty, which is what an idle room should look
         # like.
-        self.assertEqual(_size_value(self.node), 0)
+        self.assertEqual(size_value(self.node), 0)
 
     def test_reading_p_does_not_register_the_room(self):
         # A search over every chat node must not create a _Room per result.
-        _size_value(self.node)
+        size_value(self.node)
         self.assertEqual(conference_rooms, {})
 
     def test_occupancy_is_counted_live(self):
         room = room_for(self.room_id)
         room.members.extend([object(), object(), object()])
-        self.assertEqual(_size_value(self.node), 3)
+        self.assertEqual(size_value(self.node), 3)
         room.members.pop()
-        self.assertEqual(_size_value(self.node), 2)
+        self.assertEqual(size_value(self.node), 2)
 
     def test_every_indexed_node_carries_a_date(self):
         # CFindNav_FillResultRow has no blank branch for `w`; a node with no

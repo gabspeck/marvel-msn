@@ -27,9 +27,9 @@ from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 from .dirsrv import (
     TREEEDCL_STATUS_REFUSED,
-    _decode_property_record,
     build_get_ticket_reply_payload,
     build_property_record,
+    decode_property_record,
     is_valid_ticket,
 )
 from .rooms import room_for
@@ -150,7 +150,7 @@ class CONFLOCHandler(ServiceHandler):
             return _build_data_edit_result(TREEEDCL_STATUS_REFUSED)
 
         try:
-            decoded = _decode_property_record(properties)
+            decoded = decode_property_record(properties)
             stored = _apply_conference_properties(
                 self.content_store,
                 record_id,
@@ -267,7 +267,7 @@ class CONFLOCHandler(ServiceHandler):
             and known_record
         )
         try:
-            decoded = _decode_property_record(properties)
+            decoded = decode_property_record(properties)
         except ValueError as exc:
             decoded = None
             log.warning(
@@ -923,7 +923,7 @@ def _build_data_edit_properties_result(status, records):
 
 
 def _select_dword_properties(record, names):
-    properties = _decode_property_record(record)
+    properties = decode_property_record(record)
     selected = []
     for name in names:
         item = properties.get(name)
