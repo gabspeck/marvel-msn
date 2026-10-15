@@ -10,7 +10,7 @@ The module-level payload constants are assembled at import time:
   trailer) wrapped in the multi-bitmap container preamble. Returned by
   selector 0x1A `bm0` and chunked out via 0x1B reads.
 - `OSR2_TITLE_OPEN_BODY` — OSR2's two cache streams: font data followed
-  by title metadata. Window layout moved to `OSR2_MVPFILE`.
+  by title metadata. OSR2 takes its window layout from `OSR2_MVPFILE`.
 
 `TITLE_OPEN_METADATA` carries the static-section dwords that pin the
 TitleOpen reply (slot, va, addr, topic_count, two cache header dwords).

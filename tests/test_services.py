@@ -4353,9 +4353,16 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
 
     def test_data_edit_delete_refuses_anonymous_writes(self):
         handler = MedviewHandler(5, "MEDVIEW", Session())
+        pkts = handler.handle_request(
+            MEDVIEW_DATA_EDIT_CLASS,
+            MEDVIEW_SELECTOR_DATA_EDIT_DELETE,
+            1,
+            self._delete_request(),
+            5,
+            5,
+        )
 
-        reply = handler._handle_data_edit_delete(1, self._delete_request())
-
+        reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
 
 

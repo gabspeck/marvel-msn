@@ -20,21 +20,11 @@ from ...mpc import (
     build_tagged_reply_var,
     build_tagged_reply_word,
 )
-from .payload import (
-    BM0_BAGGAGE,
-    TITLE_OPEN_BODY,
-    TITLE_OPEN_METADATA,
-    TitleOpenMetadata,
-)
+from .payload import TitleOpenMetadata
 
 # --------------------------------------------------------------------------
 # Generic shapes
 # --------------------------------------------------------------------------
-
-
-def ack() -> bytes:
-    """Bare end-static (`0x87`)."""
-    return bytes([TAG_END_STATIC])
 
 
 def stream_end() -> bytes:
@@ -43,11 +33,6 @@ def stream_end() -> bytes:
     SignalRequestCompletion (which would set request +0x18=1 and produce
     a tight MsgWaitForSingleObject spin)."""
     return bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END])
-
-
-def _dynamic_complete(static_fields: bytes, dyn: bytes = b"") -> bytes:
-    """Static section + `0x87` end-static + `0x86` dynamic-complete + bytes."""
-    return build_blob_reply(static_fields, blob=dyn)
 
 
 # --------------------------------------------------------------------------
@@ -61,19 +46,14 @@ def attach_session() -> bytes:
     return build_static_reply(build_tagged_reply_dword(1))
 
 
-def pre_notify_title() -> bytes:
-    """`0x1E` — bare acknowledgement; the client binds no reply fields."""
-    return ack()
-
-
 # --------------------------------------------------------------------------
 # TitleService
 # --------------------------------------------------------------------------
 
 
 def open_title(
-    body: bytes = TITLE_OPEN_BODY,
-    metadata: TitleOpenMetadata = TITLE_OPEN_METADATA,
+    body: bytes,
+    metadata: TitleOpenMetadata,
     *,
     osr2: bool = False,
     title_id: bytes = b"\x00",
@@ -102,17 +82,12 @@ def open_title(
             + build_tagged_reply_dword(0)
             + build_tagged_reply_var(0x84, title_id)
         )
-    return _dynamic_complete(static, body)
+    return build_blob_reply(static, blob=body)
 
 
 def validate_title(is_valid: bool) -> bytes:
     """`0x00` — `isValid : u8`."""
     return build_static_reply(build_tagged_reply_byte(1 if is_valid else 0))
-
-
-def close_title() -> bytes:
-    """`0x02` — ack."""
-    return ack()
 
 
 # `0x03 GetTitleInfoRemote` reply per kind (`docs/medview-service-contract.md`
@@ -144,15 +119,15 @@ _REMOTE_INFO_KIND_CLASS: dict[int, str] = {
 def get_title_info_remote(info_kind: int) -> bytes:
     classification = _REMOTE_INFO_KIND_CLASS.get(info_kind)
     if classification in ("cstring", "cached"):
-        return _dynamic_complete(build_tagged_reply_dword(1), b"\x00")
-    return _dynamic_complete(build_tagged_reply_dword(0), b"")
+        return build_blob_reply(build_tagged_reply_dword(1), blob=b"\x00")
+    return build_blob_reply(build_tagged_reply_dword(0))
 
 
 def query_topics() -> bytes:
     """`0x04` — empty-result shape: highlightContext=0, logicalCount=0,
     secondaryResult=0, no aux blob, no sideband."""
     static = build_tagged_reply_byte(0) + build_tagged_reply_dword(0) + build_tagged_reply_dword(0)
-    return _dynamic_complete(static, b"")
+    return build_blob_reply(static)
 
 
 # --------------------------------------------------------------------------
@@ -185,7 +160,7 @@ def count_key_matches() -> bytes:
 
 def read_key_addresses() -> bytes:
     """`0x0E` — empty `addressList` dynbytes."""
-    return _dynamic_complete(b"", b"")
+    return build_blob_reply()
 
 
 def set_key_count_hint() -> bytes:
@@ -200,7 +175,7 @@ def set_key_count_hint() -> bytes:
 
 def load_topic_highlights() -> bytes:
     """`0x10` — empty highlight blob (8B opaque header + u32 count=0)."""
-    return _dynamic_complete(b"", b"\x00" * 12)
+    return build_blob_reply(blob=b"\x00" * 12)
 
 
 def find_highlight_address() -> bytes:
@@ -217,19 +192,17 @@ def open_remote_hfs_file_reject() -> bytes:
     """`0x1A` rejection — `0x87 0x81 <handle=0> 0x83 <size=0>`. Used when
     the requested baggage name is not `bm0` (e.g. the engine's first probe
     `|bm0`); MVCL14N then retries with the canonical `bm0`."""
-    return bytes([TAG_END_STATIC]) + build_tagged_reply_byte(0) + build_tagged_reply_dword(0)
+    return build_static_reply() + build_tagged_reply_byte(0) + build_tagged_reply_dword(0)
 
 
 def open_remote_hfs_file_accept(handle: int, size: int) -> bytes:
     """`0x1A` accept — `0x87 0x81 <handle> 0x83 <size>`."""
-    return (
-        bytes([TAG_END_STATIC]) + build_tagged_reply_byte(handle) + build_tagged_reply_dword(size)
-    )
+    return build_static_reply() + build_tagged_reply_byte(handle) + build_tagged_reply_dword(size)
 
 
 def read_remote_hfs_file_chunk(chunk: bytes) -> bytes:
     """`0x1B` — `0x81 <status=0> 0x87 0x86 <chunk bytes>`."""
-    return _dynamic_complete(build_tagged_reply_byte(0), chunk)
+    return build_blob_reply(build_tagged_reply_byte(0), blob=chunk)
 
 
 def read_remote_hfs_file_error() -> bytes:
@@ -240,45 +213,3 @@ def read_remote_hfs_file_error() -> bytes:
 def get_remote_fs_error() -> bytes:
     """`0x1D` — `fsError : u16` = 0."""
     return build_static_reply(build_tagged_reply_word(0))
-
-
-# --------------------------------------------------------------------------
-# bm0 baggage helpers
-# --------------------------------------------------------------------------
-
-
-_DEFAULT_BAGGAGE_MAP: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
-
-
-def baggage_size(
-    canonical_name: str,
-    baggage_map: dict[str, bytes] | None = None,
-) -> int | None:
-    """Baggage byte count for a canonical name, or None when the name
-    isn't in the active map. `baggage_map` defaults to the hardcoded
-    MSN Today bm0; handler injects a per-load
-    `{"bm0": ..., "bm1": ..., ...}` for multi-page titles."""
-    bm = baggage_map if baggage_map is not None else _DEFAULT_BAGGAGE_MAP
-    container = bm.get(canonical_name)
-    if container is None:
-        return None
-    return len(container)
-
-
-def baggage_chunk(
-    name: str,
-    offset: int,
-    count: int,
-    baggage_map: dict[str, bytes] | None = None,
-) -> bytes:
-    """Slice `baggage_map[name][offset : offset + count]`.
-
-    Returns empty bytes when `name` is missing. The handler splits a large
-    logical read across dynamic-reply host blocks without shortening it.
-    """
-    bm = baggage_map if baggage_map is not None else _DEFAULT_BAGGAGE_MAP
-    container = bm.get(name)
-    if container is None:
-        return b""
-    end = min(offset + count, len(container))
-    return container[offset:end]

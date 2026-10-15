@@ -9,37 +9,41 @@ CK_MAGIC = b"CK"
 
 
 def parse_type_names_map(data: bytes) -> dict[int, str]:
-    """`\\x03type_names_map` stream → `{storage_table_id: class_name}`.
+    """`\\x03type_names_map` stream → `{storage id: class name}`.
 
-    Wire shape: `[u32 count][u16 max_slot]{[u8 name_len][ASCII name]
-    [u32 level_specifier]}*count`. The `level_specifier` is the
-    top-level storage directory number (e.g. `5` for storage `5/<n>/`).
+    Layout: `[u32 count][u16 max_slot]` then `[u8 len][name][u32 storage_id]`
+    per entry (docs/BLACKBIRD.md §3.1.1). The storage id is the top-level
+    storage number (`5` for `5/<n>/`). A short or truncated stream yields the
+    entries read so far.
     """
     if len(data) < 6:
-        raise ValueError("type_names_map stream too short")
-    count = struct.unpack_from("<I", data, 0)[0]
-    pos = 6  # skip count + max_slot
-    out: dict[int, str] = {}
+        return {}
+    count = struct.unpack_from("<I", data)[0]
+    names = {}
+    pos = 6
     for _ in range(count):
-        name_len = data[pos]
+        if pos >= len(data):
+            break
+        length = data[pos]
         pos += 1
-        name = data[pos : pos + name_len].decode("ascii", errors="replace")
-        pos += name_len
-        level_specifier = struct.unpack_from("<I", data, pos)[0]
+        name = data[pos : pos + length].decode("ascii", errors="replace")
+        pos += length
+        if pos + 4 > len(data):
+            break
+        names[struct.unpack_from("<I", data, pos)[0]] = name
         pos += 4
-        out[level_specifier] = name
-    return out
+    return names
 
 
-def parse_handles(data: bytes) -> tuple[int, ...]:
-    """`\\x03handles` stream → tuple of u32 handles. Swizzle index `i`
-    resolves to `handles[i]`."""
-    count = struct.unpack_from("<I", data, 0)[0]
-    if len(data) != 4 + count * 4:
-        raise ValueError(
-            f"handles stream length {len(data)} ≠ expected {4 + count * 4}",
-        )
-    return struct.unpack_from(f"<{count}I", data, 4)
+def parse_handles(data: bytes) -> list[int]:
+    """`\\x03handles` swizzle table, `[u32 count][u32 handle x count]`.
+    Swizzle index `i` resolves to `handles[i]`; a short stream yields none."""
+    if len(data) < 4:
+        return []
+    count = struct.unpack_from("<I", data)[0]
+    if len(data) < 4 + count * 4:
+        return []
+    return list(struct.unpack_from(f"<{count}I", data, 4))
 
 
 def maybe_decompress_ck(data: bytes) -> bytes:

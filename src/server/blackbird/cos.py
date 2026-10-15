@@ -27,6 +27,8 @@ from dataclasses import dataclass
 
 import olefile
 
+from ..services.medview.ole_helpers import parse_handles, parse_type_names_map
+
 log = logging.getLogger(__name__)
 
 # Artifact-kind bits, as `paste_object` tests them.
@@ -115,31 +117,6 @@ def _stream(ole, path):
         return b""
 
 
-def _parse_type_names(blob):
-    """`{storage id → class name}` from `\\x03type_names_map`.
-
-    Layout is `[u32 count][u16 opaque]` then `[u8 len][name][u32 storage_id]`
-    per entry (docs/BLACKBIRD.md §3.1.1).
-    """
-    if len(blob) < 6:
-        return {}
-    count = struct.unpack_from("<I", blob)[0]
-    names = {}
-    pos = 6
-    for _ in range(count):
-        if pos >= len(blob):
-            break
-        length = blob[pos]
-        pos += 1
-        name = blob[pos : pos + length].decode("ascii", errors="replace")
-        pos += length
-        if pos + 4 > len(blob):
-            break
-        names[struct.unpack_from("<I", blob, pos)[0]] = name
-        pos += 4
-    return names
-
-
 def _parse_ref(blob, storage_id):
     """Every `(guid, sub_id, flags)` a `\\x03ref_N` record names.
 
@@ -203,16 +180,6 @@ def _ref_flags(blob, guid_start):
     return flags
 
 
-def _parse_handles(blob):
-    """The stored `\\x03handles` swizzle table: `[u32 count][u32 handle × count]`."""
-    if len(blob) < 4:
-        return []
-    count = struct.unpack_from("<I", blob)[0]
-    if len(blob) < 4 + count * 4:
-        return []
-    return list(struct.unpack_from(f"<{count}I", blob, 4))
-
-
 def _build_swizzle(handles, typenames, refs):
     """The transmit-form swizzle section for one object.
 
@@ -272,7 +239,7 @@ def load_title(path):
     objects = {}
     title = pathlib.Path(path).stem
     with olefile.OleFileIO(str(path)) as ole:
-        names = _parse_type_names(_stream(ole, "\x03type_names_map"))
+        names = parse_type_names_map(_stream(ole, "\x03type_names_map"))
         available = {"/".join(entry) for entry in ole.listdir(streams=True)}
         refs = {}
         for storage_id in names:
@@ -285,7 +252,7 @@ def load_title(path):
             object_path = f"{storage_id}/{sub_id}/\x03object"
             if object_path not in available:
                 continue
-            handles = _parse_handles(_stream(ole, f"{storage_id}/{sub_id}/\x03handles"))
+            handles = parse_handles(_stream(ole, f"{storage_id}/{sub_id}/\x03handles"))
             objects[guid] = CosObject(
                 guid=guid,
                 typename=names[storage_id],

@@ -16,6 +16,7 @@ import unittest
 import olefile
 
 from server.blackbird import cos
+from server.services.medview.ole_helpers import parse_type_names_map
 
 _FIXTURE = pathlib.Path(__file__).resolve().parent / "assets" / "captions_test.ttl"
 
@@ -129,7 +130,7 @@ class TestRefFlags(unittest.TestCase):
     def setUp(self):
         self.ole = olefile.OleFileIO(str(_FIXTURE))
         self.addCleanup(self.ole.close)
-        self.typenames = cos._parse_type_names(cos._stream(self.ole, "\x03type_names_map"))
+        self.typenames = parse_type_names_map(cos._stream(self.ole, "\x03type_names_map"))
         self.streams = {"/".join(entry) for entry in self.ole.listdir(streams=True)}
 
     def _entries(self):

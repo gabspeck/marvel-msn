@@ -14,11 +14,12 @@ import logging
 import pathlib
 import struct
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 log = logging.getLogger(__name__)
 
 _HFS_MAGIC = 0x00035F3F
+_BTREE_HEADER_SIZE = 38
 _BTREE_MAGIC = 0x293B
 _SYSTEM_MAGIC = 0x036C
 _FILE_HEADER_SIZE = 9
@@ -210,10 +211,9 @@ class LoadedM14:
 
         A single shared sentinel below every TOPICPOS therefore spans
         from itself up to the lowest record cached so far and swallows
-        every lookup under it. That silently broke navigation to the
-        title's lowest topic (France popup `va=0x49`, confirmed under
-        SoftICE 2026-07-30): the terminator cached while a later topic
-        was on screen claimed the whole range beneath it.
+        every lookup under it: the terminator cached while a later topic is
+        on screen claims the whole range beneath it, and navigation to the
+        title's lowest topic fails (SoftICE, France popup `va=0x49`).
         """
         for topic in self.topics:
             for index, display in enumerate(topic.displays):
@@ -243,20 +243,6 @@ class LoadedM14:
         return baggage
 
 
-@dataclass
-class _TopicBuilder:
-    title: str
-    topic_number: int
-    non_scroll: int
-    scroll: int
-    next_topic: int
-    non_scroll_background: int | None
-    scroll_background: int | None
-    popup_background: int | None
-    popup_window: str
-    displays: list[M14DisplayRecord]
-
-
 @dataclass(frozen=True)
 class _SystemInfo:
     title: str
@@ -280,64 +266,47 @@ def _read_internal_file(buf: bytes, offset: int) -> bytes:
     return bytes(buf[start:end])
 
 
-def _btree_first_leaf(
-    data: bytes,
-    pages_start: int,
-    page_size: int,
-    root_page: int,
-    level_count: int,
-    what: str,
-) -> int:
-    """Descend a Media View B-tree from its root page to the leftmost leaf.
+def _btree_leaf_pages(data: bytes, what: str):
+    """Yield `(start, end, count)` for each leaf page of a Media View B-tree.
 
-    An index page carries `Unused(2) NEntries(2) PreviousPage(2)` followed
-    by `key, child_page` pairs. `PreviousPage` is the leftmost child, so
-    taking it once per index level reaches the head of the leaf chain.
-    A one-level tree is already a leaf and descends zero times.
+    The 38-byte header carries the magic, the page size, the root page at
+    +26 and the level count at +32; pages follow it. An index page is
+    `Unused(2) NEntries(2) PreviousPage(2)` then `key, child_page` pairs, and
+    `PreviousPage` is its leftmost child, so taking it once per index level
+    reaches the head of the leaf chain. A leaf page is
+    `Unused(2) NEntries(2) PreviousPage(2) NextPage(2)` then its entries.
     """
-    page = root_page
+    if len(data) < _BTREE_HEADER_SIZE:
+        raise ValueError(f"{what} is shorter than its B-tree header")
+    magic, _flags, page_size = struct.unpack_from("<HHH", data, 0)
+    if magic != _BTREE_MAGIC:
+        raise ValueError(f"{what} B-tree magic mismatch: 0x{magic:04x}")
+    page = struct.unpack_from("<H", data, 26)[0]
+    level_count = struct.unpack_from("<H", data, 32)[0]
     for _ in range(level_count - 1):
-        start = pages_start + page * page_size
+        start = _BTREE_HEADER_SIZE + page * page_size
         if start + 6 > len(data):
             raise ValueError(f"{what} index page {page} overruns file")
         page = struct.unpack_from("<H", data, start + 4)[0]
-    return page
+
+    visited: set[int] = set()
+    while page != 0xFFFF:
+        if page in visited:
+            raise ValueError(f"{what} leaf chain contains a cycle")
+        visited.add(page)
+        start = _BTREE_HEADER_SIZE + page * page_size
+        end = start + page_size
+        if end > len(data):
+            raise ValueError(f"{what} page {page} overruns file")
+        _unused, count, _previous, next_page = struct.unpack_from("<HHhh", data, start)
+        yield start, end, count
+        page = 0xFFFF if next_page < 0 else next_page
 
 
 def _read_directory(buf: bytes, directory_offset: int) -> dict[str, int]:
     directory = _read_internal_file(buf, directory_offset)
-    if len(directory) < 38:
-        raise ValueError("HFS directory is shorter than its B-tree header")
-    magic, _flags, page_size = struct.unpack_from("<HHH", directory, 0)
-    if magic != _BTREE_MAGIC:
-        raise ValueError(f"HFS directory magic mismatch: 0x{magic:04x}")
-    root_page = struct.unpack_from("<H", directory, 26)[0]
-    level_count = struct.unpack_from("<H", directory, 32)[0]
-
-    pages_start = 38
-    page = _btree_first_leaf(
-        directory,
-        pages_start,
-        page_size,
-        root_page,
-        level_count,
-        "HFS directory",
-    )
     entries: dict[str, int] = {}
-    visited: set[int] = set()
-    while page != 0xFFFF:
-        if page in visited:
-            raise ValueError("HFS directory leaf chain contains a cycle")
-        visited.add(page)
-        start = pages_start + page * page_size
-        end = start + page_size
-        if end > len(directory):
-            raise ValueError(f"HFS directory page {page} overruns file")
-        _unused, count, _previous, next_page = struct.unpack_from(
-            "<HHhh",
-            directory,
-            start,
-        )
+    for start, end, count in _btree_leaf_pages(directory, "HFS directory"):
         pos = start + 8
         for _ in range(count):
             name_end = directory.find(b"\x00", pos, end)
@@ -345,10 +314,8 @@ def _read_directory(buf: bytes, directory_offset: int) -> dict[str, int]:
                 raise ValueError("malformed HFS directory entry")
             name = directory[pos:name_end].decode("latin-1")
             pos = name_end + 1
-            file_offset = struct.unpack_from("<I", directory, pos)[0]
+            entries[name] = struct.unpack_from("<I", directory, pos)[0]
             pos += 4
-            entries[name] = file_offset
-        page = 0xFFFF if next_page < 0 else next_page
     return entries
 
 
@@ -461,35 +428,12 @@ def _parse_font(data: bytes) -> tuple[tuple[str, ...], tuple[bytes, ...]]:
 
 
 def _parse_context(data: bytes) -> tuple[tuple[int, int], ...]:
-    if len(data) < 38:
-        raise ValueError("|CONTEXT is shorter than its B-tree header")
-    magic, _flags, page_size = struct.unpack_from("<HHH", data, 0)
-    if magic != _BTREE_MAGIC:
-        raise ValueError(f"|CONTEXT B-tree magic mismatch: 0x{magic:04x}")
-    root_page = struct.unpack_from("<H", data, 26)[0]
-    level_count = struct.unpack_from("<H", data, 32)[0]
-
     records: list[tuple[int, int]] = []
-    page = _btree_first_leaf(data, 38, page_size, root_page, level_count, "|CONTEXT")
-    visited: set[int] = set()
-    while page != 0xFFFF:
-        if page in visited:
-            raise ValueError("|CONTEXT leaf chain contains a cycle")
-        visited.add(page)
-        start = 38 + page * page_size
-        end = start + page_size
-        if end > len(data):
-            raise ValueError(f"|CONTEXT page {page} overruns file")
-        _unused, count, _previous, next_page = struct.unpack_from(
-            "<HHhh",
-            data,
-            start,
-        )
+    for start, end, count in _btree_leaf_pages(data, "|CONTEXT"):
         pos = start + 8
         if pos + count * 8 > end:
-            raise ValueError(f"|CONTEXT page {page} records overrun page")
+            raise ValueError(f"|CONTEXT page at 0x{start:x} records overrun page")
         records.extend(struct.unpack_from("<II", data, pos + index * 8) for index in range(count))
-        page = 0xFFFF if next_page < 0 else next_page
     return tuple(records)
 
 
@@ -635,7 +579,8 @@ def _read_topic_link(
     topic_pos_stride: int,
     topic_pos: int,
     phrases: tuple[bytes, ...],
-) -> tuple[int, int, int, int, int, bytes, bytes]:
+) -> tuple[int, int, bytes, bytes]:
+    """`(record_type, following, data1, data2)` of the TOPICLINK at `topic_pos`."""
     relative = topic_pos - 12
     if relative < 0:
         raise ValueError(f"invalid TOPICPOS 0x{topic_pos:x}")
@@ -645,7 +590,7 @@ def _read_topic_link(
     record_data = b"".join([blocks[block_index][offset:], *blocks[block_index + 1 :]])
     if len(record_data) < _TOPIC_LINK_HEADER_SIZE:
         raise ValueError(f"TOPICLINK 0x{topic_pos:x} header overruns block")
-    size, data2_size, previous, following, data1_size = struct.unpack_from(
+    size, data2_size, _previous, following, data1_size = struct.unpack_from(
         "<iiiii",
         record_data,
         0,
@@ -665,15 +610,7 @@ def _read_topic_link(
             )
     else:
         data2 = stored_data2[:data2_size]
-    return (
-        record_type,
-        previous,
-        following,
-        size,
-        data2_size,
-        data1,
-        data2,
-    )
+    return record_type, following, data1, data2
 
 
 def _parse_topic_color(value: str) -> int | None:
@@ -718,7 +655,7 @@ def _parse_topic_properties(
     return non_scroll, scroll, popup, popup_window
 
 
-def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
+def _parse_topic_header(data1: bytes, data2: bytes) -> M14Topic:
     if len(data1) < 28:
         raise ValueError("M14 TOPICHEADER data is shorter than 28 bytes")
     (
@@ -738,7 +675,7 @@ def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
         popup_background,
         popup_window,
     ) = _parse_topic_properties(properties if separator else b"")
-    return _TopicBuilder(
+    return M14Topic(
         title=title,
         topic_number=topic_number,
         non_scroll=non_scroll,
@@ -748,7 +685,7 @@ def _parse_topic_header(data1: bytes, data2: bytes) -> _TopicBuilder:
         scroll_background=scroll_background,
         popup_background=popup_background,
         popup_window=popup_window,
-        displays=[],
+        displays=(),
     )
 
 
@@ -951,15 +888,16 @@ def _parse_topics(
     phrases: tuple[bytes, ...],
 ) -> tuple[tuple[M14Topic, ...], M14Topic]:
     headers, blocks, topic_pos_stride = _load_topic_blocks(data, system)
-    builders: list[_TopicBuilder] = []
-    home_builder: _TopicBuilder | None = None
+    # Each header's displays, gathered while the chain is walked.
+    topics: list[tuple[M14Topic, list[M14DisplayRecord]]] = []
+    home_index: int | None = None
     contents_block = system.contents_offset >> 15
     contents_character = system.contents_offset & 0x7FFF
     if not headers or headers[0][1] < 12:
         raise ValueError("M14 contains no first TOPICLINK")
 
     current_pos = headers[0][1]
-    current_topic: _TopicBuilder | None = None
+    current: tuple[M14Topic, list[M14DisplayRecord]] | None = None
     current_block = -1
     character_count = 0
     visited: set[int] = set()
@@ -973,69 +911,47 @@ def _parse_topics(
             character_count = 0
 
         visited.add(current_pos)
-        (
-            record_type,
-            _previous,
-            following,
-            _size,
-            _data2_size,
-            data1,
-            data2,
-        ) = _read_topic_link(blocks, topic_pos_stride, current_pos, phrases)
+        record_type, following, data1, data2 = _read_topic_link(
+            blocks, topic_pos_stride, current_pos, phrases
+        )
 
         if record_type == _TOPIC_HEADER:
-            current_topic = _parse_topic_header(data1, data2)
-            builders.append(current_topic)
+            current = (_parse_topic_header(data1, data2), [])
+            topics.append(current)
         elif record_type in (_TOPIC_DISPLAY, _TOPIC_TABLE):
             topic_length = _display_topic_length(data1)
-            if current_topic is not None:
+            if current is not None:
+                topic, displays = current
                 lower = _parse_display if record_type == _TOPIC_DISPLAY else _parse_table
                 display = lower(
                     current_pos,
                     (block_index << 15) | character_count,
                     data1,
                     data2,
-                    current_topic.non_scroll,
-                    current_topic.scroll,
+                    topic.non_scroll,
+                    topic.scroll,
                 )
-                current_topic.displays.append(display)
+                displays.append(display)
                 if (
                     block_index == contents_block
                     and character_count
                     <= contents_character
                     < character_count + max(1, topic_length)
                 ):
-                    home_builder = current_topic
+                    home_index = len(topics) - 1
             character_count += topic_length
 
         if following in (0, -1):
             break
         current_pos = following
 
-    viable = [topic for topic in builders if topic.displays]
+    finished = tuple(replace(topic, displays=tuple(displays)) for topic, displays in topics)
+    viable = [index for index, topic in enumerate(finished) if topic.displays]
     if not viable:
         raise ValueError("M14 contains no displayable topic")
-    if home_builder not in viable:
-        home_builder = viable[0]
-
-    converted: dict[int, M14Topic] = {}
-    topics: list[M14Topic] = []
-    for builder in builders:
-        topic = M14Topic(
-            title=builder.title,
-            topic_number=builder.topic_number,
-            non_scroll=builder.non_scroll,
-            scroll=builder.scroll,
-            next_topic=builder.next_topic,
-            non_scroll_background=builder.non_scroll_background,
-            scroll_background=builder.scroll_background,
-            popup_background=builder.popup_background,
-            popup_window=builder.popup_window,
-            displays=tuple(builder.displays),
-        )
-        converted[id(builder)] = topic
-        topics.append(topic)
-    return tuple(topics), converted[id(home_builder)]
+    if home_index not in viable:
+        home_index = viable[0]
+    return finished, finished[home_index]
 
 
 def _resolve_context_map(
