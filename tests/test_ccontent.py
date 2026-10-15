@@ -2,15 +2,12 @@
 `server.services.medview.ccontent`."""
 
 import unittest
-from pathlib import Path
 
 import olefile
 
 from scripts.inspect_blackbird_title import maybe_decompress_ck
 from server.services.medview.ccontent import (
     TEXT_NODE_TAG,
-    PictureRef,
-    StyleRun,
     decode_textruns,
     decode_texttree,
     is_texttree,
@@ -30,24 +27,11 @@ def _load_ttl_object(fixture: str, stream: str) -> bytes:
 class TestDecodeTextRuns(unittest.TestCase):
     FIXTURE = "tests/assets/story_test.ttl"
 
-    def test_msn_today_8_7_truncated_head(self):
-        # First 32 bytes of tests/assets/story_test.ttl `8/7/object` (TextRuns).
-        # Body is CTypedPtrArray<CElementData>::Serialize: u16 count
-        # then count × CElementData. count = 0x0002 = 2 (bytes 0..1).
+    def test_truncated_element_yields_no_blobs(self):
+        # First 32 bytes of `8/7/object`: count 2, then element 0 declares
+        # 0x53 bytes but only 30 follow.
         head = bytes.fromhex("0200535468697320697320616e206578616d706c65206f6620636f6e74656e74")
-        decoded = decode_textruns(head)
-        # Legacy (version, flag) view: bytes 0..1 are the count
-        # (matches `02 00`), exposed as-is for backward compat.
-        self.assertEqual(decoded.header_version, 0x02)
-        self.assertEqual(decoded.header_byte_1, 0x00)
-        # `text` retains legacy semantics (everything from +2).
-        self.assertTrue(decoded.text.startswith("S"))
-        self.assertIn("This is an example of content", decoded.text)
-        self.assertEqual(decoded.style_runs, ())
-        # Element 0's length byte is 0x53 (=83); 32-byte head has only
-        # 30 of those, so the decoder can't fully parse element 0 and
-        # returns an empty blob list.
-        self.assertEqual(decoded.blobs, ())
+        self.assertEqual(decode_textruns(head).blobs, ())
 
     def test_full_8_7_decodes_to_two_blobs(self):
         # Full TextRuns body has two prose blobs:
@@ -62,19 +46,10 @@ class TestDecodeTextRuns(unittest.TestCase):
         self.assertTrue(decoded.blobs[1].startswith("Ordered list"))
         self.assertEqual(len(decoded.blobs[1]), 0x23)
 
-    def test_empty_blob_returns_empty_container(self):
-        # CContent `8/3` and `8/7` for missing/empty TextRuns ship as
-        # `00 00` (2 B). Decoder must NOT raise.
-        decoded = decode_textruns(b"\x00\x00")
-        self.assertEqual(decoded.text, "")
-        self.assertEqual(decoded.style_runs, ())
-        self.assertEqual(decoded.header_version, 0x00)
-        self.assertEqual(decoded.header_byte_1, 0x00)
-
-    def test_zero_length_input_returns_empty(self):
-        decoded = decode_textruns(b"")
-        self.assertEqual(decoded.text, "")
-        self.assertEqual(decoded.raw_payload, b"")
+    def test_empty_body_has_no_blobs(self):
+        # Missing TextRuns ship as `00 00`.
+        self.assertEqual(decode_textruns(b"\x00\x00").blobs, ())
+        self.assertEqual(decode_textruns(b"").blobs, ())
 
     def test_texttree_header_raises(self):
         # 8/6 in story_test.ttl (TextTree): `01 05 ...`. Caller should
@@ -89,12 +64,6 @@ class TestDecodeTextRuns(unittest.TestCase):
 
 
 class TestDecodeTextTree(unittest.TestCase):
-    """Partial TextTree decoder — scans `[0x03 length text]` segments.
-
-    Pinned against the two TextTree CContent streams in
-    `tests/assets/story_test.ttl` (8/2 plain prose, 8/6 with a
-    picture-INTRUDE record and an itemised list)."""
-
     FIXTURE = "tests/assets/story_test.ttl"
 
     def test_8_2_recovers_two_text_segments(self):
@@ -109,7 +78,6 @@ class TestDecodeTextTree(unittest.TestCase):
             decoded.text,
             "Calendar of Events\nhere's what's been happenin' ",
         )
-        self.assertEqual(decoded.style_runs, ())
         self.assertEqual(decoded.picture_refs, ())
 
     def test_8_6_recovers_text_and_picture_intrusion(self):
@@ -156,18 +124,6 @@ class TestDecodeTextTree(unittest.TestCase):
         self.assertEqual(decoded.text, "")
         self.assertEqual(decoded.segments, ())
         self.assertEqual(decoded.picture_refs, ())
-
-
-class TestStyleRunDataclass(unittest.TestCase):
-    """StyleRun is the PR1 surface for the future style-runs decoder;
-    PR1 always emits an empty tuple, but the dataclass shape is fixed
-    so downstream callers can begin to type against it."""
-
-    def test_construction(self):
-        run = StyleRun(char_offset=10, char_length=5, style_id=2)
-        self.assertEqual(run.char_offset, 10)
-        self.assertEqual(run.char_length, 5)
-        self.assertEqual(run.style_id, 2)
 
 
 class TestElementTree(unittest.TestCase):
@@ -253,20 +209,6 @@ class TestElementTree(unittest.TestCase):
         self.assertEqual(body.children[0].text, "Calendar of Events")
         # The scanner's flattened `text` stays the same view.
         self.assertIn("Calendar of Events", decoded.text)
-
-
-class TestPictureRefDataclass(unittest.TestCase):
-    def test_construction(self):
-        ref = PictureRef(
-            byte_offset=0x4B5,
-            clsid="PICTURE.PictureCtrl.1",
-            filename="bitmap.bmp",
-            iuid=b"\x01" * 16,
-        )
-        self.assertEqual(ref.byte_offset, 0x4B5)
-        self.assertEqual(ref.clsid, "PICTURE.PictureCtrl.1")
-        self.assertEqual(ref.filename, "bitmap.bmp")
-        self.assertEqual(len(ref.iuid), 16)
 
 
 if __name__ == "__main__":

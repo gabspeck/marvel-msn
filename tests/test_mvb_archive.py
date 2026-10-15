@@ -17,7 +17,6 @@ from scripts.inspect_mvb_archive import (
     scan_text_segments,
 )
 
-
 _MMAG = Path("binaries/MVPUBKIT/MMAG.MVB")
 _MVAPIREF = Path("binaries/MVPUBKIT/MVAPIREF.MVB")
 _MVAUTHOR = Path("binaries/MVPUBKIT/MVAUTHOR.MVB")

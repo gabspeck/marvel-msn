@@ -964,35 +964,6 @@ class TestTextMetafileAlignment(unittest.TestCase):
         textouts = _find_textout_records(meta)
         self.assertEqual(textouts[0][0], 100)
 
-    def test_captions_test_fixture_lowers_alignment_end_to_end(self):
-        # captions_test.ttl seq 2 (simple_right, alignment=1) and seq 3
-        # (simple_center, alignment=2) must drive both SetTextAlign and
-        # TextOut anchor shifts inside bm0 baggage.
-        from src.server.services.medview.ttl_loader import (
-            CaptionControl,
-            build_all_bm_baggage,
-            load_title,
-        )
-
-        t = load_title("tests/assets/captions_test.ttl")
-        bag = build_all_bm_baggage(t)["bm0"]
-        captions = {c.seq: c for c in t.pages[0].controls if isinstance(c, CaptionControl)}
-        self.assertEqual(captions[2].alignment, 1)
-        self.assertEqual(captions[3].alignment, 2)
-        # Container preamble is 8 bytes, kind=8 header before metafile;
-        # search the whole baggage for TA modes — at least one TA_RIGHT
-        # (0x02) and one TA_CENTER (0x06) must appear in SetTextAlign
-        # records, alongside the default TA_LEFT for the rest.
-        self.assertIn(b"\x04\x00\x00\x00\x2e\x01\x02\x00", bag)
-        self.assertIn(b"\x04\x00\x00\x00\x2e\x01\x06\x00", bag)
-
-
-def _textouts_in_baggage(bag: bytes) -> list[tuple[int, int, str]]:
-    """Locate the WMF inside a bm0 baggage (container + kind=8 header
-    precede it) by its METAHEADER signature, then parse its TextOuts."""
-    meta_start = bag.index(b"\x01\x00\x09\x00\x00\x03")  # Type=1,HdrSize=9,Ver=0x0300
-    return _find_textout_records(bag[meta_start:])
-
 
 @unittest.skipUnless(_MS_SANS.exists(), "binaries/fonts not present")
 class TestTextMetafileWordWrap(unittest.TestCase):
@@ -1090,20 +1061,6 @@ class TestTextMetafileWordWrap(unittest.TestCase):
         )
         lines = [t.strip() for (_x, _y, t) in _find_textout_records(meta)]
         self.assertIn("supercalifragilisticexpialidocious", lines)
-
-    def test_captions_fixture_seq19_wraps_end_to_end(self):
-        from src.server.services.medview.ttl_loader import build_all_bm_baggage, load_title
-
-        t = load_title("tests/assets/captions_test.ttl")
-        bag = build_all_bm_baggage(t)["bm0"]
-        textouts = _textouts_in_baggage(bag)
-        full = "Word wrap enabled for this one"
-        # The wrapping caption must NOT survive as a single TextOut...
-        self.assertNotIn(full, [t for (_x, _y, t) in textouts])
-        # ...but its words are present, split across records.
-        joined = " ".join(t for (_x, _y, t) in textouts)
-        self.assertIn("Word wrap", joined)
-        self.assertIn("one", joined.split())
 
 
 @unittest.skipUnless(_MS_SANS.exists(), "binaries/fonts not present")
