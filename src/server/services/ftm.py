@@ -38,13 +38,9 @@ from ..config import (
 )
 from ..models import VarParam
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_tagged_reply_var,
     parse_request_params,
 )
-from ..session import Session
 from ..store import app_store as _default_store
 from . import shabby
 from ._dispatch import log_unhandled_selector
@@ -192,16 +188,7 @@ def _read_signup_file(filename):
 
 
 class FTMHandler(ServiceHandler):
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_discovery_payload(FTM_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+    GUIDS = FTM_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         if selector == FTM_SELECTOR_REQUEST_DOWNLOAD:
@@ -277,8 +264,7 @@ class FTMHandler(ServiceHandler):
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
     def _build_start_download_packets(
         self, msg_class, selector, request_id, content, server_seq, client_ack
@@ -305,17 +291,7 @@ class FTMHandler(ServiceHandler):
         read splits on the same boundary.
         """
         blocks = _build_start_download_blocks(content)
-        packets = []
-        for block in blocks:
-            host_block = build_host_block(msg_class, selector, request_id, block)
-            packets.extend(
-                build_service_packet(
-                    self.pipe_idx,
-                    host_block,
-                    (server_seq + len(packets)) & 0x7F,
-                    client_ack,
-                )
-            )
+        packets = self.reply_blocks(msg_class, selector, request_id, blocks, server_seq, client_ack)
         log.info(
             "start_download_stream req_id=%d bytes=%d blocks=%d fragments=%d",
             request_id,

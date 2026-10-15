@@ -71,7 +71,6 @@ from ...config import (
     MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
     MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS,
     MEDVIEW_VALIDATE_TITLE,
-    MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_PARTIAL,
 )
@@ -83,12 +82,11 @@ from ...models import (
     WordParam,
 )
 from ...mpc import (
-    build_discovery_payload,
     build_host_block,
     build_service_packet,
+    is_oneway,
     parse_request_params,
 )
-from ...session import Session
 from .._dispatch import log_unhandled_selector
 from .._handler import ServiceHandler
 from ..dirsrv import TREEEDCL_STATUS_REFUSED, build_get_ticket_reply_payload
@@ -884,11 +882,10 @@ def _picture_status_metrics(data: bytes) -> tuple[int, int, int]:
 class MEDVIEWHandler(ServiceHandler):
     """Per-pipe MEDVIEW handler."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
+    GUIDS = MEDVIEW_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         self._subscriptions: dict[int, tuple[int, int]] = {}
         self._open_title_slots: set[int] = set()
         # Per-baggage-name handle table. The handler returns one stable
@@ -909,18 +906,6 @@ class MEDVIEWHandler(ServiceHandler):
         # the stock attach sequence enables type 4 right after subscribing.
         self._subscriber_enabled: dict[int, bool] = {}
 
-    # --- BootstrapDiscovery ----------------------------------------
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_discovery_payload(MEDVIEW_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(
-            self.pipe_idx,
-            host_block,
-            server_seq,
-            client_ack,
-        )
-
     # --- Top-level dispatch ----------------------------------------
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
@@ -934,7 +919,7 @@ class MEDVIEWHandler(ServiceHandler):
             _format_request_params(selector, payload),
         )
 
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             log.info(
                 "oneway_continuation class=0x%02x selector=0x%02x payload_len=%d",
                 msg_class,
@@ -965,17 +950,8 @@ class MEDVIEWHandler(ServiceHandler):
                 request_id,
                 _format_reply_payload(selector, reply_payload),
             )
-            host_block = build_host_block(
-                msg_class,
-                selector,
-                request_id,
-                reply_payload,
-            )
-            return build_service_packet(
-                self.pipe_idx,
-                host_block,
-                server_seq,
-                client_ack,
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
             )
 
         if selector in _PUSH_DISPATCH:
@@ -1016,12 +992,8 @@ class MEDVIEWHandler(ServiceHandler):
                 server_seq,
                 client_ack,
             )
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        reply_packets = build_service_packet(
-            self.pipe_idx,
-            host_block,
-            server_seq,
-            client_ack,
+        reply_packets = self.reply(
+            msg_class, selector, request_id, reply_payload, server_seq, client_ack
         )
         if selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS and len(payload) >= 2 and payload[1] == 4:
             push_packets = self._flush_pending_picture_chunks(
@@ -1144,47 +1116,23 @@ class MEDVIEWHandler(ServiceHandler):
         if len(reply_payload) <= 4 + _HFS_DYNAMIC_BLOCK_DATA_MAX or reply_payload[:4] != bytes(
             [0x81, 0x00, 0x87, TAG_DYNAMIC_COMPLETE_SIGNAL]
         ):
-            host_block = build_host_block(
-                msg_class,
-                selector,
-                request_id,
-                reply_payload,
-            )
-            return build_service_packet(
-                self.pipe_idx,
-                host_block,
-                server_seq,
-                client_ack,
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
             )
 
-        packets = []
         block_count = (
             len(dynamic) + _HFS_DYNAMIC_BLOCK_DATA_MAX - 1
         ) // _HFS_DYNAMIC_BLOCK_DATA_MAX
+        blocks = []
         for block_index in range(block_count):
             start = block_index * _HFS_DYNAMIC_BLOCK_DATA_MAX
-            end = start + _HFS_DYNAMIC_BLOCK_DATA_MAX
-            chunk = dynamic[start:end]
-            is_first = block_index == 0
             is_last = block_index == block_count - 1
-            block_payload = (
-                (reply_payload[:3] if is_first else b"")
+            blocks.append(
+                (reply_payload[:3] if block_index == 0 else b"")
                 + bytes([TAG_DYNAMIC_COMPLETE_SIGNAL if is_last else TAG_DYNAMIC_PARTIAL])
-                + chunk
+                + dynamic[start : start + _HFS_DYNAMIC_BLOCK_DATA_MAX]
             )
-            host_block = build_host_block(
-                msg_class,
-                selector,
-                request_id,
-                block_payload,
-            )
-            block_packets = build_service_packet(
-                self.pipe_idx,
-                host_block,
-                (server_seq + len(packets)) & 0x7F,
-                client_ack,
-            )
-            packets.extend(block_packets)
+        packets = self.reply_blocks(msg_class, selector, request_id, blocks, server_seq, client_ack)
 
         log.info(
             "read_remote_hfs_file_stream req_id=%d bytes=%d host_blocks=%d transport_fragments=%d",
@@ -1467,17 +1415,8 @@ class MEDVIEWHandler(ServiceHandler):
             request_id,
             _format_reply_payload(MEDVIEW_PRE_NOTIFY_TITLE, reply_payload),
         )
-        host_block = build_host_block(
-            msg_class,
-            MEDVIEW_PRE_NOTIFY_TITLE,
-            request_id,
-            reply_payload,
-        )
-        packets = build_service_packet(
-            self.pipe_idx,
-            host_block,
-            server_seq,
-            client_ack,
+        packets = self.reply(
+            msg_class, MEDVIEW_PRE_NOTIFY_TITLE, request_id, reply_payload, server_seq, client_ack
         )
         if notify_op == 8 and len(notify_payload) > 1:
             # Opcode 0x08's long form is MOSVIEW's own failure report, not the
@@ -1835,12 +1774,8 @@ class MEDVIEWHandler(ServiceHandler):
             request_id,
             _format_reply_payload(selector, ack_payload),
         )
-        host_block = build_host_block(msg_class, selector, request_id, ack_payload)
-        reply_pkts = build_service_packet(
-            self.pipe_idx,
-            host_block,
-            server_seq,
-            client_ack,
+        reply_pkts = self.reply(
+            msg_class, selector, request_id, ack_payload, server_seq, client_ack
         )
         if title_slot is None or key is None:
             return reply_pkts

@@ -20,25 +20,22 @@ expires.  We don't persist the submitted data yet.
 
 import logging
 
-from ..config import MPC_CLASS_ONEWAY_MASK, OLREGSRV_INTERFACE_GUIDS
+from ..config import OLREGSRV_INTERFACE_GUIDS
 from ..mpc import (
     build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_tagged_reply_dword,
+    is_oneway,
     parse_request_params,
 )
-from ..session import Session
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
 
-# OLREGSRV wire selectors. Only the class=0x01 sel=0x01 commit head gets a
-# reply; sel=0x02 is a pre-check that must be ignored (replying aborts
-# signup with "important part of signup cannot be found").
+# Only the commit head gets a reply. Replying to the pre-check aborts signup
+# with "important part of signup cannot be found" (client session).
 OLREGSRV_SELECTOR_COMMIT = 0x01
-OLREGSRV_SELECTOR_PRECHECK = 0x02  # intentionally unhandled (fall through to warn)
+OLREGSRV_SELECTOR_PRECHECK = 0x02
 
 # MOSRPC message class for a normal (non-oneway) call head. The oneway
 # continuations ride on 0xe6/0xe7 which trip MPC_CLASS_ONEWAY_MASK (0xE0).
@@ -46,16 +43,7 @@ OLREGSRV_MSG_CLASS_CALL = 0x01
 
 
 class OLREGSRVHandler(ServiceHandler):
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_discovery_payload(OLREGSRV_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+    GUIDS = OLREGSRV_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         if log.isEnabledFor(logging.INFO):
@@ -63,7 +51,7 @@ class OLREGSRVHandler(ServiceHandler):
             log.info("recv_descs=%s", ",".join(f"0x{d:02x}" for d in recv_descs) or "-")
         # 0xe6/0xe7 continuations are known one-way frames that carry the
         # tail of the commit buffers; they must not be acked.
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             log.info(
                 "oneway_continuation class=0x%02x selector=0x%02x payload_len=%d",
                 msg_class,
@@ -71,7 +59,9 @@ class OLREGSRVHandler(ServiceHandler):
                 len(payload),
             )
             return None
-        # Only the commit head (class=0x01 sel=0x01) gets a reply.
+        if msg_class == OLREGSRV_MSG_CLASS_CALL and selector == OLREGSRV_SELECTOR_PRECHECK:
+            log.info("precheck no_reply")
+            return None
         if msg_class != OLREGSRV_MSG_CLASS_CALL or selector != OLREGSRV_SELECTOR_COMMIT:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -80,8 +70,7 @@ class OLREGSRVHandler(ServiceHandler):
         # branch fires and the error dialog (res=0xd2) is skipped.
         reply_body = build_tagged_reply_dword(0)
         log.info("commit_reply status=0 class=0x%02x selector=0x%02x", msg_class, selector)
-        host_block = build_host_block(msg_class, selector, request_id, reply_body)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_body, server_seq, client_ack)
 
 
 def build_olregsrv_service_map_payload():

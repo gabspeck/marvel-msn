@@ -45,21 +45,17 @@ import logging
 import struct
 
 from ..config import (
-    MPC_CLASS_ONEWAY_MASK,
     ONLSTMT_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_END_STATIC,
 )
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
     build_tagged_reply_var,
     build_tagged_reply_word,
+    is_oneway,
 )
-from ..session import Session
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
@@ -463,21 +459,11 @@ _CANCEL_ACK_PAYLOAD = b"".join(
 class OnlStmtHandler(ServiceHandler):
     """Handles OnlStmt service requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        """Build the IID->selector discovery block for OnlStmt."""
-        payload = build_discovery_payload(ONLSTMT_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+    GUIDS = ONLSTMT_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch an OnlStmt request.  Returns a wire packet or None."""
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             log.info(
                 "oneway_continuation class=0x%02x selector=0x%02x payload_len=%d",
                 msg_class,
@@ -510,5 +496,4 @@ class OnlStmtHandler(ServiceHandler):
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)

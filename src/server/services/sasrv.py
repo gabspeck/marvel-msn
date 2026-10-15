@@ -33,12 +33,9 @@ from ..config import SASRV_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE_SIGNAL, TAG_END
 from ..models import DwordParam
 from ..mpc import (
     build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_tagged_reply_dword,
     parse_request_params,
 )
-from ..session import Session
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 
@@ -94,18 +91,12 @@ class SASRVHandler(ServiceHandler):
     and closes it with the property sheet.
     """
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
+    GUIDS = SASRV_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         self._enums = {}
         self._next_handle = 1
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_sasrv_service_map_payload()
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         if selector == SASRV_SELECTOR_BEGIN_ENUM:
@@ -119,8 +110,7 @@ class SASRVHandler(ServiceHandler):
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
     def build_begin_enum_reply_payload(self, payload):
         """Open an enumeration over one master list (selector 0x02).

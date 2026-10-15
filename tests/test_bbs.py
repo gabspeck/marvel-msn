@@ -33,10 +33,11 @@ from server.services.bbs import (
     parse_article_headers,
 )
 from server.services.dirsrv import DIRSRVHandler
+from server.session import Session
 from server.store import app_store, reset_app_store
 from server.transport import parse_packet
 
-from .support import SUBSCRIBER, seed_user, signed_in
+from .support import ADMIN, SUBSCRIBER, seed_user, signed_in
 
 # Sample-board node ids, decimal wire form `field_8:field_c` = message id : board
 # id. The board itself carries message id 0 — GetParent (0x7F5F12CE) reaches it by
@@ -209,8 +210,8 @@ class TestBBSDiscovery(unittest.TestCase):
         # CreateTnc("BBS", 3) when a message is opened (BBSNAV FUN_7F5FCD1A).
         # Without it that negotiation returns E_NOINTERFACE and the reader
         # reports "Cannot open message" before any request reaches the wire.
-        bbs_pkts = BBSHandler(1, "BBS").build_discovery_packet(3, 3)
-        dirsrv_pkts = DIRSRVHandler(1, "DIRSRV").build_discovery_packet(3, 3)
+        bbs_pkts = BBSHandler(1, "BBS", Session()).build_discovery_packet(3, 3)
+        dirsrv_pkts = DIRSRVHandler(1, "DIRSRV", Session()).build_discovery_packet(3, 3)
         self.assertIsInstance(bbs_pkts, list)
         parsed = parse_packet(bbs_pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -441,7 +442,7 @@ class TestBBSGetChildren(unittest.TestCase):
     def test_dispatch_via_handler_returns_packet(self):
         # Full read path: wire request (board mnid = message id 0, board id 1 +
         # propList "a,e") → decode → GetChildren reply → framed packet.
-        handler = BBSHandler(1, "BBS")
+        handler = BBSHandler(1, "BBS", Session())
         wire = (
             b"\x04"
             + bytes([0x80 | 8])
@@ -707,7 +708,7 @@ class TestBBSClassDispatch(unittest.TestCase):
         # message-content channel (IID 00028B2F). Dispatching on `selector`
         # alone routed the article fetch into the tree serialiser, which
         # answered with a record the reader cannot use — and the client ACKed it.
-        handler = BBSHandler(1, "BBS")
+        handler = BBSHandler(1, "BBS", Session())
         wire = _ARTICLE_REQUEST
         article = handler.handle_request(BBS_CLASS_MESSAGE, 0x00, 0, wire, 5, 5)
         tree = handler.handle_request(BBS_CLASS_TREE, 0x00, 0, wire, 5, 5)
@@ -716,7 +717,7 @@ class TestBBSClassDispatch(unittest.TestCase):
         self.assertNotEqual(article, tree)
 
     def test_unknown_method_on_the_message_class_stays_unanswered(self):
-        handler = BBSHandler(1, "BBS")
+        handler = BBSHandler(1, "BBS", Session())
         with self.assertLogs("server.services.bbs", level="WARNING"):
             self.assertIsNone(
                 handler.handle_request(BBS_CLASS_MESSAGE, 0x01, 0, _ARTICLE_REQUEST, 5, 5)
@@ -947,7 +948,9 @@ class TestBBSEditChannel(unittest.TestCase):
             client_ack=0,
         )
 
-        self.assertEqual(self._reply_payload(packets), dirsrv.build_get_ticket_reply_payload())
+        self.assertEqual(
+            self._reply_payload(packets), dirsrv.build_get_ticket_reply_payload(signed_in(ADMIN))
+        )
 
     def test_add_node_creates_a_bbs_folder_and_returns_its_mnid(self):
         handler = BBSHandler(1, "BBS", signed_in())
@@ -1033,7 +1036,7 @@ class TestBBSEditChannel(unittest.TestCase):
 
     def test_unmapped_edit_selector_stays_unanswered(self):
         # Lock/Unlock/LinkNode and the rest of the edit table are not served.
-        handler = BBSHandler(1, "BBS")
+        handler = BBSHandler(1, "BBS", Session())
         with self.assertLogs("server.services.bbs", level="WARNING") as cap:
             result = handler.handle_request(
                 msg_class=0x04,

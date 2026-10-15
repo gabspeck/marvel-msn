@@ -68,16 +68,6 @@ class TestHandlerInjection(unittest.TestCase):
             with self.subTest(service=name):
                 self.assertIs(handler_cls(3, name.upper(), session).session, session)
 
-    def test_a_handler_built_without_one_gets_its_own_anonymous_session(self):
-        # Tests construct handlers directly, and a pipe can open before the
-        # login lands; neither may borrow another connection's identity.
-        for name, handler_cls in SERVICE_HANDLERS.items():
-            with self.subTest(service=name):
-                first = handler_cls(3, name.upper()).session
-                second = handler_cls(3, name.upper()).session
-                self.assertIsNot(first, second)
-                self.assertFalse(first.is_authenticated)
-
 
 if __name__ == "__main__":
     unittest.main()

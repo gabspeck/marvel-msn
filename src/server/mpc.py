@@ -82,6 +82,11 @@ def build_host_block(msg_class, selector, request_id, payload=b""):
     return bytes([msg_class, selector]) + encode_vli(request_id) + payload
 
 
+def is_oneway(msg_class):
+    """A one-way continuation frame: all of the 0xE0 class bits set."""
+    return (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK
+
+
 def parse_host_block(data):
     """Parse an MPC host block. Returns HostBlock or None.
 
@@ -94,7 +99,7 @@ def parse_host_block(data):
     if len(data) < 2:
         return None
     msg_class = data[0]
-    if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+    if is_oneway(msg_class):
         return HostBlock(
             msg_class=msg_class,
             selector=data[1],

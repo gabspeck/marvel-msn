@@ -39,13 +39,9 @@ from ..config import (
 )
 from ..models import DwordParam, VarParam
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_tagged_reply_dword,
     parse_request_params,
 )
-from ..session import Session
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
@@ -225,21 +221,7 @@ class AbContainer:
 class MOSABPHandler(ServiceHandler):
     """Handles MSN address-book requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        """Advertise IID 00028B22 — the only interface MOSABP32 resolves.
-
-        `HrGetMethod` bails to E_NOINTERFACE before any request reaches the wire
-        if this reply omits it, and the sheet never opens.
-        """
-        payload = build_discovery_payload(MOSABP_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+    GUIDS = MOSABP_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch by (interface class, ServiceMethod)."""
@@ -261,8 +243,7 @@ class MOSABPHandler(ServiceHandler):
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
 
 def build_get_ab_containers_reply_payload():

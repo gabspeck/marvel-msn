@@ -6,22 +6,19 @@ import struct
 
 from ..config import (
     LOGSRV_INTERFACE_GUIDS,
-    MPC_CLASS_ONEWAY_MASK,
     TAG_END_STATIC,
 )
 from ..log import TRACE
 from ..models import DwordParam, VarParam
 from ..mpc import (
     build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_var,
     build_tagged_reply_word,
+    is_oneway,
     parse_request_params,
 )
-from ..session import Session
 from ..store import app_store as _default_store
 from . import _ntlm
 from ._dispatch import log_unhandled_selector
@@ -103,24 +100,17 @@ PASSWORD_CHANGE_REFUSED = 1
 class LOGSRVHandler(ServiceHandler):
     """Handles LOGSRV service requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
+    GUIDS = LOGSRV_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         # Set by the AUTHENTICATE this pipe accepts. One RC4 stream per pipe,
         # so the context cannot live on the connection-wide session.
         self.security = None
 
-    def build_discovery_packet(self, server_seq, client_ack):
-        """Build the IID->selector discovery block for LOGSRV."""
-        payload = build_discovery_payload(LOGSRV_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
-
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch a LOGSRV request. Returns a wire packet or None."""
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             log.info(
                 "oneway_continuation class=0x%02x selector=0x%02x payload_len=%d",
                 msg_class,
@@ -161,8 +151,7 @@ class LOGSRVHandler(ServiceHandler):
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
 
 def _build_bootstrap_payload(result):

@@ -82,26 +82,22 @@ from ..blackbird import cos
 from ..config import (
     BBIRD_OB_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ..models import ChunkedParam, DwordParam, VarParam
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
     build_tagged_reply_var,
     build_tagged_reply_word,
+    is_oneway,
     parse_request_params,
 )
-from ..session import Session
 from ..store import blackbird_state
-from ._dispatch import describe_param
+from ._dispatch import describe_param, log_unhandled_selector
 from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
@@ -214,13 +210,10 @@ def _load_published_objects():
 
 
 class BbirdOBHandler(ServiceHandler):
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands. Blackbird
-        # publishes over the same MOSCP transport as the shell, so a release
-        # started after sign-in inherits that session.
-        self.session = session or Session()
+    GUIDS = BBIRD_OB_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         # stream_id → accumulated bytes for chunked fields riding class
         # 0xE6/0xE7 frames. The compound file arrives this way.
         self._streams = {}
@@ -233,13 +226,8 @@ class BbirdOBHandler(ServiceHandler):
         self._blob_title = ""
         self._capture_stamp = time.strftime("%Y%m%d-%H%M%S")
 
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_discovery_payload(BBIRD_OB_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
-
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             return self._take_continuation(msg_class, selector, payload, server_seq, client_ack)
 
         cls_name = _CLASS_NAMES.get(msg_class, "unknown")
@@ -261,8 +249,9 @@ class BbirdOBHandler(ServiceHandler):
             reply_payload = self._build_incremental_query_reply(send_params, recv_descs)
             if reply_payload is None:
                 return None
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
+            )
 
         if msg_class == BBIRD_OB_CLASS_PUBLISH and selector == BBIRD_OB_SELECTOR_FILE_WRITE:
             return self._handle_file_write(
@@ -273,15 +262,17 @@ class BbirdOBHandler(ServiceHandler):
             reply_payload = self._build_changes_since_reply(send_params, recv_descs)
             if reply_payload is None:
                 return None
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
+            )
 
         if msg_class == BBIRD_OB_CLASS_RETRIEVE and selector == BBIRD_OB_SELECTOR_OBJECT_INFO:
             reply_payload = self._build_object_info_reply(send_params, recv_descs)
             if reply_payload is None:
                 return None
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
+            )
 
         if msg_class == BBIRD_OB_CLASS_RETRIEVE and selector in (
             BBIRD_OB_SELECTOR_READ_OBJECT,
@@ -295,43 +286,27 @@ class BbirdOBHandler(ServiceHandler):
             blocks = self._build_read_artifact_blocks(send_params, recv_descs, artifact)
             if blocks is None:
                 return None
-            packets = []
-            for block in blocks:
-                host_block = build_host_block(msg_class, selector, request_id, block)
-                packets.extend(
-                    build_service_packet(
-                        self.pipe_idx,
-                        host_block,
-                        (server_seq + len(packets)) & 0x7F,
-                        client_ack,
-                    )
-                )
-            return packets
+            return self.reply_blocks(
+                msg_class, selector, request_id, blocks, server_seq, client_ack
+            )
 
         if msg_class == BBIRD_OB_CLASS_RETRIEVE and selector == BBIRD_OB_SELECTOR_READ_OBJECTS:
             blocks = self._build_read_objects_blocks(send_params, recv_descs)
             if blocks is None:
                 return None
-            packets = []
-            for block in blocks:
-                host_block = build_host_block(msg_class, selector, request_id, block)
-                packets.extend(
-                    build_service_packet(
-                        self.pipe_idx,
-                        host_block,
-                        (server_seq + len(packets)) & 0x7F,
-                        client_ack,
-                    )
-                )
-            return packets
+            return self.reply_blocks(
+                msg_class, selector, request_id, blocks, server_seq, client_ack
+            )
 
         if msg_class == BBIRD_OB_CLASS_PUBLISH and selector == BBIRD_OB_SELECTOR_DELETE_NODE:
             reply_payload = self._build_delete_node_reply(send_params, recv_descs)
             if reply_payload is None:
                 return None
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
+            )
 
+        log_unhandled_selector(log, msg_class, selector, request_id, payload)
         return None
 
     def _build_delete_node_reply(self, send_params, recv_descs):
@@ -597,10 +572,14 @@ class BbirdOBHandler(ServiceHandler):
         reply_payload = build_static_reply(
             *(build_tagged_reply_dword(_STATUS_OK) for _ in descriptors)
         )
-        host_block = build_host_block(
-            BBIRD_OB_CLASS_PUBLISH, BBIRD_OB_SELECTOR_FILE_WRITE, request_id, reply_payload
+        return self.reply(
+            BBIRD_OB_CLASS_PUBLISH,
+            BBIRD_OB_SELECTOR_FILE_WRITE,
+            request_id,
+            reply_payload,
+            server_seq,
+            client_ack,
         )
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def _store_blob(self):
         """Write the reassembled compound file out.

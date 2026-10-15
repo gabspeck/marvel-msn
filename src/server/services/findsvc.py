@@ -30,13 +30,9 @@ from ..config import (
 )
 from ..models import DwordParam, VarParam
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_tagged_reply_dword,
     parse_request_params,
 )
-from ..session import Session
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
@@ -67,41 +63,21 @@ FINDSVC_MAX_RESULTS = 200
 class FindSvcHandler(ServiceHandler):
     """Handles directory-search requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        """Advertise the 00028BB0 run MOSFIND's OpenChannel array asks for.
-
-        Without 00028BB0 the marshaller's slot 0x24 fails with E_NOINTERFACE
-        and the dialog reports the failure before a single request reaches the
-        wire — which is exactly what a FindSvc pipe that gets no discovery at
-        all looks like.
-        """
-        payload = build_discovery_payload(FINDSVC_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+    GUIDS = FINDSVC_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch by (interface class, ServiceMethod)."""
         if msg_class != FINDSVC_CLASS_SEARCH or selector != FINDSVC_SEARCH:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
-        packets = []
-        for block in build_search_reply_blocks(payload):
-            host_block = build_host_block(msg_class, selector, request_id, block)
-            packets.extend(
-                build_service_packet(
-                    self.pipe_idx,
-                    host_block,
-                    (server_seq + len(packets)) & 0x7F,
-                    client_ack,
-                )
-            )
-        return packets
+        return self.reply_blocks(
+            msg_class,
+            selector,
+            request_id,
+            build_search_reply_blocks(payload),
+            server_seq,
+            client_ack,
+        )
 
 
 def build_search_reply_blocks(payload):

@@ -26,20 +26,16 @@ import struct
 from ..config import (
     MOSRXP_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_END_STATIC,
 )
 from ..models import ChunkedParam, DwordParam, VarParam
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_tagged_reply_dword,
     build_tagged_reply_var,
+    is_oneway,
     parse_request_params,
 )
-from ..session import Session
 from ..store import MailMessage, MailRecipient
 from ..store import app_store as _default_store
 from ..store.records import to_filetime
@@ -192,12 +188,10 @@ class ChunkStream:
 class MOSRXPHandler(ServiceHandler):
     """Handles remote-mail requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands — which is the
-        # normal case: the client opens this pipe immediately after LOGSRV.
-        self.session = session or Session()
+    GUIDS = MOSRXP_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         # Blocks of the message currently being submitted, in arrival order.
         # A submit runs InitTransmit → SendBlock… on one pipe and the handler
         # lives as long as that pipe, so the buffer belongs here.
@@ -212,24 +206,13 @@ class MOSRXPHandler(ServiceHandler):
     def mailbox(self):
         return self.session.user.username
 
-    def build_discovery_packet(self, server_seq, client_ack):
-        """Advertise IID 00028B20 — the only interface MOSRXP32 resolves.
-
-        `HrGetMethod` bails to E_NOINTERFACE before any request reaches the
-        wire if this reply omits it, which is what a client sitting on an open
-        MOSRXP pipe with no traffic on it is waiting for.
-        """
-        payload = build_discovery_payload(MOSRXP_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
-
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch by (interface class, ServiceMethod).
 
         Class 0xE6/0xE7 are not calls. They carry the body of a SendBlock field
         the request head was too small to hold, and expect no reply.
         """
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             self._take_continuation(msg_class, selector, payload)
             return None
 
@@ -261,8 +244,7 @@ class MOSRXPHandler(ServiceHandler):
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
     # --- Methods ---
 

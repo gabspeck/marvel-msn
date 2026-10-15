@@ -24,22 +24,18 @@ import struct
 from ..config import (
     BBS_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_END_STATIC,
 )
 from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
     decode_dirsrv_request,
+    is_oneway,
     parse_request_params,
 )
-from ..session import Session
 from ..store import app_store as _default_store
 from ..store.base import BbsFields
 from ..store.records import bbs_node, build_bbs_attachment_nodes, build_bbs_post
@@ -200,11 +196,10 @@ log = logging.getLogger(__name__)
 class BBSHandler(ServiceHandler):
     """Handles BBS read-channel requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
+    GUIDS = BBS_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         # In-flight post uploads, handle byte → PostUpload. A post runs
         # START → [APPEND …] → COMMIT on one pipe, and the handler lives as
         # long as that pipe (Connection._handle_pipe_open builds one per open),
@@ -216,18 +211,6 @@ class BBSHandler(ServiceHandler):
         # the id the head referenced. The ids come off a per-connection counter
         # and the handler is per-pipe, so this dict is the whole namespace.
         self._streams = {}
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        """Advertise the generic TREENVCL tree IIDs plus the message channel.
-
-        BBS rides MOSSHELL's tree client, so it resolves the same read-channel
-        IIDs as DIRSRV — it is not a self-describing MEDVIEW-style service. It
-        needs one extra: 00028B2F, which the reader negotiates on a second
-        CreateTnc("BBS", 3) when a message is opened. See BBS_INTERFACE_GUIDS.
-        """
-        payload = build_discovery_payload(BBS_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch a BBS request by (interface class, method selector).
@@ -242,19 +225,20 @@ class BBSHandler(ServiceHandler):
         Class 0xE6/0xE7 are not calls. They carry the body of a field the head
         was too small to hold, and they expect no reply.
         """
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             self._take_continuation(msg_class, selector, payload)
             return None
         if msg_class == dirsrv.TREEEDCL_CLASS_EDIT:
             if selector == dirsrv.TREEEDCL_SELECTOR_ADD_NODE:
                 reply_payload = dirsrv.build_add_node_reply_payload(
                     payload,
-                    session=self.session,
+                    self.session,
+                    _default_store.content,
                     node_factory=_build_bbs_folder_node,
                 )
             elif selector == dirsrv.TREEEDCL_SELECTOR_SET_PROPERTIES:
                 reply_payload = dirsrv.build_set_properties_reply_payload(
-                    payload, session=self.session
+                    payload, self.session, _default_store.content
                 )
             elif selector == dirsrv.TREEEDCL_SELECTOR_GET_TICKET:
                 reply_payload = dirsrv.build_get_ticket_reply_payload(
@@ -262,13 +246,14 @@ class BBSHandler(ServiceHandler):
                 )
             elif selector == dirsrv.TREEEDCL_SELECTOR_DELETE_NODE:
                 reply_payload = dirsrv.build_delete_node_reply_payload(
-                    payload, session=self.session
+                    payload, self.session, _default_store.content
                 )
             else:
                 log_unhandled_selector(log, msg_class, selector, request_id, payload)
                 return None
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
+            )
         if msg_class == BBS_CLASS_MESSAGE:
             if selector == BBS_SELECTOR_GET_ARTICLE:
                 reply_payload = build_bbs_article_reply_payload(payload)
@@ -283,8 +268,9 @@ class BBSHandler(ServiceHandler):
             else:
                 log_unhandled_selector(log, msg_class, selector, request_id, payload)
                 return None
-            host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-            return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+            return self.reply(
+                msg_class, selector, request_id, reply_payload, server_seq, client_ack
+            )
         if msg_class != BBS_CLASS_TREE:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -301,8 +287,7 @@ class BBSHandler(ServiceHandler):
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
     def _post_start(self, payload):
         """Method 2: open an upload and take its first chunk.
@@ -1158,7 +1143,7 @@ def _header_int(headers, name, default):
         return default
 
 
-def _next_message_id(board_key, board_id, content_store=None):
+def _next_message_id(board_key, board_id):
     """One past the last id any message on the board owns.
 
     Message ids are the `field_8` half of the mnid and must be unique per board
@@ -1167,10 +1152,8 @@ def _next_message_id(board_key, board_id, content_store=None):
     attachment as `message id + k`, so the next message starts past the last of
     them or the two collide on one mnid.
     """
-    if content_store is None:
-        content_store = _default_store.content
     highest = 0
-    for child in content_store.get_children(board_key):
+    for child in _default_store.content.get_children(board_key):
         msg_id, _sep, child_board = child.node_id.partition(":")
         if child_board == str(board_id) and msg_id.isdigit():
             bbs = child.content.bbs or _EMPTY_BBS

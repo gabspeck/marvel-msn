@@ -27,6 +27,7 @@ from server.services.findsvc import (
 )
 from server.services.rooms import _rooms as conference_rooms
 from server.services.rooms import room_for
+from server.session import Session
 from server.store import app_store
 from server.transport import parse_packet
 
@@ -101,7 +102,7 @@ class TestFindSvcDiscovery(unittest.TestCase):
         self.assertEqual(tails, list(range(0x00028BB0, 0x00028BB6)))
 
     def test_discovery_packet_carries_the_iid(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc")
+        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         packets = handler.build_discovery_packet(server_seq=1, client_ack=1)
         payload = b"".join(parse_packet(p).payload for p in packets)
         self.assertIn(struct.pack("<I", 0x00028BB0), payload)
@@ -128,7 +129,7 @@ class TestSearchFraming(unittest.TestCase):
         self.assertEqual(complete, b"\x86")
 
     def test_handler_emits_both_blocks_as_separate_host_blocks(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc")
+        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         packets = handler.handle_request(
             FINDSVC_CLASS_SEARCH,
             FINDSVC_SEARCH,
@@ -143,7 +144,7 @@ class TestSearchFraming(unittest.TestCase):
         self.assertIn(bytes([FINDSVC_CLASS_SEARCH, FINDSVC_SEARCH, 3, 0x86]), tail, tail.hex())
 
     def test_handler_answers_class_1_method_1(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc")
+        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         packets = handler.handle_request(
             FINDSVC_CLASS_SEARCH,
             FINDSVC_SEARCH,
@@ -155,7 +156,7 @@ class TestSearchFraming(unittest.TestCase):
         self.assertTrue(packets)
 
     def test_unknown_selector_is_not_answered(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc")
+        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         self.assertIsNone(
             handler.handle_request(FINDSVC_CLASS_SEARCH, 0x02, 7, b"", server_seq=1, client_ack=1)
         )

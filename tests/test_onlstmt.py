@@ -33,6 +33,7 @@ from server.services.onlstmt import (
     build_subscriptions_payload,
     build_summary_payload,
 )
+from server.session import Session
 from server.transport import parse_packet
 
 from .support import seed_user, signed_in
@@ -319,7 +320,7 @@ class TestCancelAck(unittest.TestCase):
 
 class TestUnknownSelectorReturnsNone(unittest.TestCase):
     def test_unhandled_selector_returns_none(self):
-        handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt")
+        handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt", session=Session())
         with self.assertLogs("server.services.onlstmt", level="WARNING") as cap:
             result = handler.handle_request(
                 msg_class=0x01,
@@ -334,7 +335,7 @@ class TestUnknownSelectorReturnsNone(unittest.TestCase):
 
     def test_oneway_continuation_returns_none(self):
         # MPC_CLASS_ONEWAY_MASK in msg_class -> drop without reply.
-        handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt")
+        handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt", session=Session())
         logging.disable(logging.CRITICAL)
         try:
             result = handler.handle_request(

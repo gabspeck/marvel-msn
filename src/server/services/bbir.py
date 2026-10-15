@@ -99,19 +99,15 @@ from ..blackbird.irresults import (
 from ..config import (
     BBIR_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ..models import ChunkedParam
 from ..mpc import (
-    build_discovery_payload,
-    build_host_block,
-    build_service_packet,
+    is_oneway,
     parse_request_params,
 )
-from ..session import Session
 from ._dispatch import describe_param, log_unhandled_selector
 from ._handler import ServiceHandler
 
@@ -198,12 +194,10 @@ def _row_values(doc, columns):
 
 
 class BBIRServiceHandler(ServiceHandler):
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # The Find UI can open the pipe before the shell login lands, same as
-        # the publish channel.
-        self.session = session or Session()
+    GUIDS = BBIR_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         # stream_id → accumulated bytes for chunked fields riding class
         # 0xE6/0xE7 frames. The query spec arrives this way.
         self._streams = {}
@@ -213,13 +207,8 @@ class BBIRServiceHandler(ServiceHandler):
         self._pending_queries = {}
         self._capture_stamp = time.strftime("%Y%m%d-%H%M%S")
 
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_discovery_payload(BBIR_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
-
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             return self._take_continuation(msg_class, selector, payload, server_seq, client_ack)
 
         name = _SELECTOR_NAMES.get(selector, "unknown")
@@ -366,18 +355,7 @@ class BBIRServiceHandler(ServiceHandler):
             bytes([TAG_END_STATIC, TAG_DYNAMIC_STREAM_END]) + body,
             bytes([TAG_DYNAMIC_COMPLETE_SIGNAL]),
         ]
-        packets = []
-        for block in blocks:
-            host_block = build_host_block(msg_class, selector, request_id, block)
-            packets.extend(
-                build_service_packet(
-                    self.pipe_idx,
-                    host_block,
-                    (server_seq + len(packets)) & 0x7F,
-                    client_ack,
-                )
-            )
-        return packets
+        return self.reply_blocks(msg_class, selector, request_id, blocks, server_seq, client_ack)
 
     def _log_payload(self, tag, payload):
         """Decode a request head's tagged parameters, log them, keep the bytes.

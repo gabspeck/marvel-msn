@@ -14,26 +14,23 @@ from ..config import (
     DIRSRV_BROWSE_FLAGS_LEAF,
     DIRSRV_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    MPC_CLASS_ONEWAY_MASK,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ..log import TRACE
-from ..models import ByteParam, ChunkedParam, DirsrvRequest, DwordParam, VarParam
+from ..models import ByteParam, ChunkedParam, DwordParam, VarParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
     build_discovery_payload,
-    build_host_block,
-    build_service_packet,
     build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_var,
     build_tagged_reply_word,
     decode_dirsrv_request,
+    is_oneway,
     parse_request_params,
 )
-from ..session import Session
 from ..store import RIGHTS_NONE, DirectoryNode, NodeContent, blackbird_state
 from ..store import app_store as _default_store
 from . import shabby
@@ -181,34 +178,33 @@ def _dump_debug_bytes(path, blob):
 class DIRSRVHandler(ServiceHandler):
     """Handles DIRSRV service requests on a logical pipe."""
 
-    def __init__(self, pipe_idx, svc_name, session=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        # Anonymous when the pipe opens before the login lands.
-        self.session = session or Session()
+    GUIDS = DIRSRV_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
         # AddShabby image bytes may follow the call head in class-0xE6/0xE7
         # frames. Stream IDs are unique per connection and this handler is
         # scoped to one pipe, so they are sufficient keys here.
         self._shabby_uploads = {}
 
-    def build_discovery_packet(self, server_seq, client_ack):
-        """Build the IID->selector discovery block for DIRSRV."""
-        payload = build_discovery_payload(DIRSRV_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
-
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Handle a DIRSRV request — dispatch by selector."""
-        if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
+        if is_oneway(msg_class):
             return self._take_shabby_continuation(
                 msg_class, selector, payload, server_seq, client_ack
             )
         if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_NODE:
-            reply_payload = build_add_node_reply_payload(payload, session=self.session)
+            reply_payload = build_add_node_reply_payload(
+                payload, self.session, _default_store.content
+            )
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_DELETE_NODE:
-            reply_payload = build_delete_node_reply_payload(payload, session=self.session)
+            reply_payload = build_delete_node_reply_payload(
+                payload, self.session, _default_store.content
+            )
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_SET_PROPERTIES:
-            reply_payload = build_set_properties_reply_payload(payload, session=self.session)
+            reply_payload = build_set_properties_reply_payload(
+                payload, self.session, _default_store.content
+            )
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_SHABBY:
             reply_payload = self._begin_add_shabby(request_id, payload)
             if reply_payload is None:
@@ -237,8 +233,7 @@ class DIRSRVHandler(ServiceHandler):
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
     def _begin_add_shabby(self, request_id, payload):
         """Validate an AddShabby head and register or await its image bytes."""
@@ -325,13 +320,14 @@ class DIRSRVHandler(ServiceHandler):
 
         del self._shabby_uploads[stream_id]
         reply_payload = _add_shabby_result(upload["format"], bytes(upload["data"]), upload["size"])
-        host_block = build_host_block(
+        return self.reply(
             TREEEDCL_CLASS_EDIT,
             TREEEDCL_SELECTOR_ADD_SHABBY,
             upload["request_id"],
             reply_payload,
+            server_seq,
+            client_ack,
         )
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
 
 def build_property_record(properties):
@@ -740,7 +736,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
     return out
 
 
-def build_get_properties_reply_payload(request=None, rights=RIGHTS_NONE):
+def build_get_properties_reply_payload(request, rights=RIGHTS_NONE):
     """Build a DIRSRV GetProperties (selector 0x00) reply: one record per id.
 
     One record per id in the request's node array, in request order. Almost
@@ -755,9 +751,6 @@ def build_get_properties_reply_payload(request=None, rights=RIGHTS_NONE):
     one call and walks the reply with GetNthNode, so it needs all 20 records
     back and would fail every row past the first without them.
     """
-    if request is None:
-        request = DirsrvRequest()
-
     requested_props = _parse_prop_group(request.prop_group)
     _log_request("get_properties", request, requested_props)
 
@@ -797,7 +790,7 @@ def _as_find_row(props):
     ]
 
 
-def build_get_children_reply_payload(request=None, rights=RIGHTS_NONE):
+def build_get_children_reply_payload(request, rights=RIGHTS_NONE):
     """Build a DIRSRV GetChildren (selector 0x02) reply: child records.
 
     Special cases (order matters):
@@ -815,9 +808,6 @@ def build_get_children_reply_payload(request=None, rights=RIGHTS_NONE):
          BrowseLanguage — GetLocalizedNode relies on this to pick the
          first localized child when descending into 1:0 / 1:1.
     """
-    if request is None:
-        request = DirsrvRequest()
-
     requested_props = _parse_prop_group(request.prop_group)
     _log_request("get_children", request, requested_props)
 
@@ -827,11 +817,8 @@ def build_get_children_reply_payload(request=None, rights=RIGHTS_NONE):
     return build_tree_reply_wire(records_with_ids)
 
 
-def build_get_parents_reply_payload(request=None, rights=RIGHTS_NONE):
+def build_get_parents_reply_payload(request, rights=RIGHTS_NONE):
     """Build a DIRSRV GetParents (selector 0x01) reply: direct parents."""
-    if request is None:
-        request = DirsrvRequest()
-
     requested_props = _parse_prop_group(request.prop_group)
     _log_request("get_parents", request, requested_props)
 
@@ -1122,7 +1109,7 @@ def _build_add_shabby_result(status, shabby_id):
     )
 
 
-def build_get_ticket_reply_payload(session=None, *, require_admin=True):
+def build_get_ticket_reply_payload(session, *, require_admin=True):
     """Return a TREEEDCL capability ticket to an account allowed to write here.
 
     Enabling wire property `x` makes DSNAV initialize its node editors while
@@ -1144,9 +1131,7 @@ def build_get_ticket_reply_payload(session=None, *, require_admin=True):
     has to answer something outside that pair — a server-side policy choice, not
     a documented Marvel status code.
     """
-    if session is not None and not (
-        session.is_admin if require_admin else session.is_authenticated
-    ):
+    if not (session.is_admin if require_admin else session.is_authenticated):
         log.info(
             "get_ticket refused user=%s require_admin=%s status=0x%x",
             session.user.username or "-",
@@ -1219,7 +1204,7 @@ def build_get_datasets_reply_payload():
     )
 
 
-def build_add_node_reply_payload(payload, content_store=None, session=None, node_factory=None):
+def build_add_node_reply_payload(payload, session, content_store, node_factory=None):
     """Create one child for a TREEEDCL AddNode request.
 
     CTreeEditClient::PrivateAddNode sends three variable fields: the capability
@@ -1235,9 +1220,7 @@ def build_add_node_reply_payload(payload, content_store=None, session=None, node
     The ticket it would have to carry is refused too, so this is the second gate
     rather than the only one.
     """
-    if content_store is None:
-        content_store = _default_store.content
-    if session is not None and not session.is_admin:
+    if not session.is_admin:
         log.info("add_node refused user=%s", session.user.username or "-")
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
@@ -1277,7 +1260,7 @@ def build_add_node_reply_payload(payload, content_store=None, session=None, node
         if node_factory is None:
             node_factory = _build_dirsrv_child_node
         node = node_factory(content_store, parent, properties)
-        if session is not None and session.is_authenticated and node.app_id == APP_TEXT_CONFERENCE:
+        if session.is_authenticated and node.app_id == APP_TEXT_CONFERENCE:
             node = replace(node, host_usernames=(session.user.username,))
     except ValueError as exc:
         log.warning("add_node invalid properties parent=%s error=%s", parent_id, exc)
@@ -1404,7 +1387,7 @@ _EDITABLE_PROPERTIES = {
 }
 
 
-def build_set_properties_reply_payload(payload, content_store=None, session=None):
+def build_set_properties_reply_payload(payload, session, content_store):
     """Apply a TREEEDCL SetProperties request to one existing node.
 
     `CTreeEditClient::PrivateSetProperties` @ TREEEDCL 0x7F2C1CEE sends three
@@ -1419,9 +1402,7 @@ def build_set_properties_reply_payload(payload, content_store=None, session=None
 
     An account without authoring rights is refused before the store is touched.
     """
-    if content_store is None:
-        content_store = _default_store.content
-    if session is not None and not session.is_admin:
+    if not session.is_admin:
         log.info("set_properties refused user=%s", session.user.username or "-")
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
@@ -1507,7 +1488,7 @@ def build_set_properties_reply_payload(payload, content_store=None, session=None
     return _build_edit_result(0)
 
 
-def build_delete_node_reply_payload(payload, content_store=None, session=None):
+def build_delete_node_reply_payload(payload, session, content_store):
     """Remove one node for a TREEEDCL DeleteNode request.
 
     `CTreeEditClient::PrivateDeleteNode` @ TREEEDCL 0x7F2C1BE3 sends two
@@ -1528,8 +1509,6 @@ def build_delete_node_reply_payload(payload, content_store=None, session=None):
     Who may delete what is decided by `_may_delete`. The BBS reader reaches this
     same builder over its own pipe, which is why the rule lives here.
     """
-    if content_store is None:
-        content_store = _default_store.content
 
     send_params, recv_descriptors = parse_request_params(payload)
     fields = [param.data for param in send_params if isinstance(param, VarParam)]
@@ -1553,10 +1532,9 @@ def build_delete_node_reply_payload(payload, content_store=None, session=None):
 
     field_0, field_8 = struct.unpack("<II", mnid)
     node_id = f"{field_0}:{field_8}"
-    node = content_store.get_node(node_id)
-    known = node is not None and node.node_id == node_id
-    name = node.content.name if known else ""
-    if session is not None and known and not _may_delete(session, node):
+    node = content_store.find_node(node_id)
+    name = node.content.name if node is not None else ""
+    if node is not None and not _may_delete(session, node):
         log.info(
             "delete_node refused user=%s node=%s name=%r",
             session.user.username or "-",

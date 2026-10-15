@@ -108,13 +108,15 @@ class TestDirectoryWrites(unittest.TestCase):
 
     def test_add_node_is_refused_for_the_subscriber(self):
         before = len(app_store.content.get_children("1:0"))
-        reply = dirsrv.build_add_node_reply_payload(b"", session=signed_in(SUBSCRIBER))
+        reply = dirsrv.build_add_node_reply_payload(b"", signed_in(SUBSCRIBER), app_store.content)
         self.assertEqual(_status(reply), TREEEDCL_STATUS_REFUSED)
         self.assertEqual(len(app_store.content.get_children("1:0")), before)
 
     def test_set_properties_is_refused_for_the_subscriber(self):
         node = app_store.content.get_node("1:256")
-        reply = dirsrv.build_set_properties_reply_payload(b"", session=signed_in(SUBSCRIBER))
+        reply = dirsrv.build_set_properties_reply_payload(
+            b"", signed_in(SUBSCRIBER), app_store.content
+        )
         self.assertEqual(_status(reply), TREEEDCL_STATUS_REFUSED)
         self.assertEqual(app_store.content.get_node("1:256"), node)
 
@@ -152,7 +154,9 @@ class TestDeleteOwnership(unittest.TestCase):
 
     def _delete(self, session, msg_id):
         return _status(
-            dirsrv.build_delete_node_reply_payload(self._delete_request(msg_id), session=session)
+            dirsrv.build_delete_node_reply_payload(
+                self._delete_request(msg_id), session, app_store.content
+            )
         )
 
     def _node_id(self, msg_id):

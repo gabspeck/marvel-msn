@@ -14,14 +14,11 @@ from ..config import (
 from ..models import DwordParam, VarParam, WordParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
-    build_discovery_payload,
     build_host_block,
-    build_service_packet,
     build_tagged_reply_dword,
     build_tagged_reply_word,
     parse_request_params,
 )
-from ..session import Session
 from ..store import ConferenceFields
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
@@ -76,17 +73,12 @@ DEFAULT_MESSAGE_LENGTH = 1000
 class CONFLOCHandler(ServiceHandler):
     """Resolve a DIRSRV chat node to a CONFSRV instance."""
 
-    def __init__(self, pipe_idx, svc_name, session=None, content_store=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        self.session = session or Session()
-        self.content_store = content_store or _default_store.content
-        self._records = {}
+    GUIDS = CONFLOC_INTERFACE_GUIDS
 
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_discovery_payload(CONFLOC_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
+        self.content_store = _default_store.content
+        self._records = {}
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         if msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_GET_TICKET:
@@ -104,8 +96,7 @@ class CONFLOCHandler(ServiceHandler):
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
-        host_block = build_host_block(msg_class, selector, request_id, reply_payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
+        return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
     def build_data_edit_add_reply_payload(self, request_id, payload):
         """Complete DATAEDCL's CONFLOC record attached to a new chat node.
@@ -450,11 +441,11 @@ class CONFSRVHandler(ServiceHandler):
     whose own thread is parked in `recv`.
     """
 
-    def __init__(self, pipe_idx, svc_name, session=None, content_store=None):
-        self.pipe_idx = pipe_idx
-        self.svc_name = svc_name
-        self.session = session or Session()
-        self.content_store = content_store or _default_store.content
+    GUIDS = CONFSRV_INTERFACE_GUIDS
+
+    def __init__(self, pipe_idx, svc_name, session):
+        super().__init__(pipe_idx, svc_name, session)
+        self.content_store = _default_store.content
         self.connection = None
         self._join_subscription = None
         self._participant_id = None
@@ -466,11 +457,6 @@ class CONFSRVHandler(ServiceHandler):
 
     def bind_connection(self, connection):
         self.connection = connection
-
-    def build_discovery_packet(self, server_seq, client_ack):
-        payload = build_discovery_payload(CONFSRV_INTERFACE_GUIDS)
-        host_block = build_host_block(0x00, 0x00, 0, payload)
-        return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Record the request and answer from `flush_pending_events`.

@@ -39,6 +39,7 @@ from server.services.mosabp import (
     build_ww_row_blob,
     parse_restriction,
 )
+from server.session import Session
 from server.store import app_store
 from server.store.base import MemberProfile
 from server.transport import parse_packet
@@ -135,7 +136,7 @@ class TestMOSABPDiscovery(unittest.TestCase):
         self.assertEqual(selector, MOSABP_CLASS_AB)
 
     def test_discovery_packet_carries_the_iid_selector_pair(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.build_discovery_packet(server_seq=1, client_ack=1)
         self.assertEqual(len(packets), 1)
         payload = parse_packet(packets[0]).payload
@@ -219,7 +220,7 @@ class TestGetAbContainers(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<III", ceid, 0x14), (2, 0, 9))
 
     def test_handler_answers_class_1_method_0(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(MOSABP_CLASS_AB, 0x00, 0, b"\x83\x83\x85", 1, 1)
         self.assertIsNotNone(packets)
         self.assertIn(b"The Microsoft Network", parse_packet(packets[0][:-1]).payload)
@@ -366,7 +367,7 @@ class TestQueryWWRows(unittest.TestCase):
             self.assertNotIn(" ", address)
 
     def test_handler_answers_class_1_method_12(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(MOSABP_CLASS_AB, 0x0C, 0, _ww_request("", _WW_TAGS), 1, 1)
         self.assertIsNotNone(packets)
 
@@ -496,7 +497,7 @@ class TestQueryRestrictRows(unittest.TestCase):
         self.assertEqual(dwords[3], 0)
 
     def test_handler_answers_class_1_method_13(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(
             MOSABP_CLASS_AB, 0x0D, 0, _restrict_request(_res_property(PR_ANR, "b"), _WW_TAGS), 1, 1
         )
@@ -510,7 +511,7 @@ class TestCloseTable(unittest.TestCase):
         self.assertEqual(payload, b"\x83" + struct.pack("<I", 0) + b"\x87")
 
     def test_handler_answers_class_1_method_9(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(
             MOSABP_CLASS_AB, 0x09, 0, b"\x03" + struct.pack("<I", 7) + b"\x83", 1, 1
         )
@@ -528,7 +529,7 @@ class TestGetUserDetailsFraming(unittest.TestCase):
         self.assertTrue(blob)
 
     def test_handler_answers_class_1_method_2(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(
             MOSABP_CLASS_AB,
             MOSABP_GET_USER_DETAILS,
@@ -540,7 +541,7 @@ class TestGetUserDetailsFraming(unittest.TestCase):
         self.assertEqual(len(packets), 1)
 
     def test_other_methods_are_left_unanswered(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
+        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         for msg_class, selector in (
             (MOSABP_CLASS_AB, MOSABP_UPDATE_USER_DETAILS),
             (MOSABP_CLASS_AB, 0x01),
