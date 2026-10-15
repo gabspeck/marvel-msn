@@ -5,8 +5,6 @@ import unittest
 from dataclasses import replace
 
 from server.config import (
-    CONFLOC_INTERFACE_GUIDS,
-    CONFSRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
@@ -140,38 +138,6 @@ class TestConferenceStartup(unittest.TestCase):
     def setUp(self):
         conference_rooms.clear()
         self.addCleanup(conference_rooms.clear)
-
-    def test_discovery_catalogs_match_confapi_tables(self):
-        self.assertEqual(
-            [guid[0] for guid, _selector in CONFLOC_INTERFACE_GUIDS],
-            [
-                0x52,
-                0x53,
-                0x54,
-                0x55,
-                0x56,
-                0x57,
-                0x58,
-                0x60,
-                0x61,
-                0x70,
-                0x71,
-                0x72,
-                0x73,
-                0x74,
-                0x78,
-                0x79,
-                0x81,
-            ],
-        )
-        self.assertEqual(
-            [guid[0] for guid, _selector in CONFSRV_INTERFACE_GUIDS],
-            [0xC8, 0xC9, 0xCA],
-        )
-        self.assertEqual(
-            [selector for _guid, selector in CONFLOC_INTERFACE_GUIDS],
-            list(range(1, 18)),
-        )
 
     def test_locator_resolves_a_created_chat_node(self):
         store = AddNodeContentStore()

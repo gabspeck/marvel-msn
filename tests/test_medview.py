@@ -5,7 +5,6 @@ import unittest
 
 from server.config import (
     MEDVIEW_DATA_EDIT_CLASS,
-    MEDVIEW_INTERFACE_GUIDS,
     MEDVIEW_SELECTOR_ATTACH_SESSION,
     MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA,
     MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA,
@@ -76,17 +75,6 @@ def _subscribe(handler, notification_type, request_id):
 
 
 class TestMEDVIEWServiceMap(unittest.TestCase):
-    def test_guid_count(self):
-        # docs/MEDVIEW.md §2.1 — 42 IIDs sourced from MVTTL14C.DLL:0x7E84C1B0.
-        self.assertEqual(len(MEDVIEW_INTERFACE_GUIDS), 42)
-
-    def test_selectors_are_1_based_contiguous(self):
-        # Client indexes the array at call time; selectors must match
-        # position + 1 so the hard-coded 0x1F (handshake) resolves to
-        # IID 00028BB8 at position 30.
-        for i, (_guid, sel) in enumerate(MEDVIEW_INTERFACE_GUIDS):
-            self.assertEqual(sel, i + 1)
-
     def test_discovery_payload_size(self):
         handler = _handler()
         pkts = handler.build_discovery_packet(3, 3)

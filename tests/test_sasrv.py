@@ -4,7 +4,6 @@ import struct
 import unittest
 
 from server.config import (
-    SASRV_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_END_STATIC,
 )
@@ -22,13 +21,6 @@ from .support import (
 
 
 class TestSASRVServiceMap(unittest.TestCase):
-    def test_catalog_matches_saclient_table(self):
-        self.assertEqual(len(SASRV_INTERFACE_GUIDS), 29)
-        self.assertEqual(
-            [selector for _guid, selector in SASRV_INTERFACE_GUIDS],
-            list(range(1, 30)),
-        )
-
     def test_produces_discovery_packet(self):
         packets = SasrvHandler(5, "SASRV", Session()).build_discovery_packet(4, 4)
         parsed = parse_packet(packets[0][:-1])

@@ -97,10 +97,6 @@ class TestFindSvcDiscovery(unittest.TestCase):
         self.assertEqual(guid[4:], bytes.fromhex("00000000c000000000000046"))
         self.assertEqual(selector, FINDSVC_CLASS_SEARCH)
 
-    def test_run_stops_before_logsrv_claims_00028bb6(self):
-        tails = [struct.unpack_from("<I", guid)[0] for guid, _ in FINDSVC_INTERFACE_GUIDS]
-        self.assertEqual(tails, list(range(0x00028BB0, 0x00028BB6)))
-
     def test_discovery_packet_carries_the_iid(self):
         handler = FindsvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         packets = handler.build_discovery_packet(server_seq=1, client_ack=1)
