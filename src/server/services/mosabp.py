@@ -70,16 +70,16 @@ MOSABP_CLASS_AB = 0x01
 # operation reached two ways: 2 keys on the member name at `ueid+0x77`, 10 on
 # the account handle at `ueid+0x1C`, chosen by `ueid+0x18 == 4`. BBSNAV always
 # builds EIDTYPE 1, so the reader's sheet takes method 2.
-MOSABP_GET_AB_CONTAINERS = 0x00
-MOSABP_GET_VALIDATION_LIST = 0x01
-MOSABP_GET_USER_DETAILS = 0x02
-MOSABP_CLOSE_TABLE = 0x09
-MOSABP_GET_USER_DETAILS_BY_HACCT = 0x0A
-MOSABP_UPDATE_USER_DETAILS = 0x0B
-MOSABP_QUERY_WW_ROWS = 0x0C
-MOSABP_QUERY_RESTRICT_ROWS = 0x0D
-MOSABP_ENUM_DIST_LIST = 0x0E
-MOSABP_QUERY_ROWS_MORE = 0x0F
+MOSABP_SELECTOR_GET_AB_CONTAINERS = 0x00
+MOSABP_SELECTOR_GET_VALIDATION_LIST = 0x01
+MOSABP_SELECTOR_GET_USER_DETAILS = 0x02
+MOSABP_SELECTOR_CLOSE_TABLE = 0x09
+MOSABP_SELECTOR_GET_USER_DETAILS_BY_HACCT = 0x0A
+MOSABP_SELECTOR_UPDATE_USER_DETAILS = 0x0B
+MOSABP_SELECTOR_QUERY_WW_ROWS = 0x0C
+MOSABP_SELECTOR_QUERY_RESTRICT_ROWS = 0x0D
+MOSABP_SELECTOR_ENUM_DIST_LIST = 0x0E
+MOSABP_SELECTOR_QUERY_ROWS_MORE = 0x0F
 
 # Property tags the Member Properties sheet asks for. The master array lives at
 # MOSABP32:0x7F4E8198 with 26 entries; `FUN_7F4D307D` copies it minus six tags
@@ -178,7 +178,7 @@ class AbContainer:
     display_type: int
 
 
-class MOSABPHandler(ServiceHandler):
+class MosabpHandler(ServiceHandler):
     """Handles MSN address-book requests on a logical pipe."""
 
     GUIDS = MOSABP_INTERFACE_GUIDS
@@ -189,16 +189,16 @@ class MOSABPHandler(ServiceHandler):
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
-        if selector == MOSABP_GET_AB_CONTAINERS:
-            reply_payload = build_get_ab_containers_reply_payload()
-        elif selector == MOSABP_QUERY_WW_ROWS:
-            reply_payload = build_query_ww_rows_reply_payload(payload)
-        elif selector == MOSABP_QUERY_RESTRICT_ROWS:
-            reply_payload = build_query_restrict_rows_reply_payload(payload)
-        elif selector == MOSABP_CLOSE_TABLE:
-            reply_payload = build_close_table_reply_payload(payload)
-        elif selector == MOSABP_GET_USER_DETAILS:
-            reply_payload = build_get_user_details_reply_payload(payload)
+        if selector == MOSABP_SELECTOR_GET_AB_CONTAINERS:
+            reply_payload = get_ab_containers_reply()
+        elif selector == MOSABP_SELECTOR_QUERY_WW_ROWS:
+            reply_payload = query_ww_rows_reply(payload)
+        elif selector == MOSABP_SELECTOR_QUERY_RESTRICT_ROWS:
+            reply_payload = query_restrict_rows_reply(payload)
+        elif selector == MOSABP_SELECTOR_CLOSE_TABLE:
+            reply_payload = close_table_reply(payload)
+        elif selector == MOSABP_SELECTOR_GET_USER_DETAILS:
+            reply_payload = get_user_details_reply(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -206,7 +206,7 @@ class MOSABPHandler(ServiceHandler):
         return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
 
-def build_get_ab_containers_reply_payload():
+def get_ab_containers_reply():
     """Method 0: the address book's container list.
 
     Request carries no send params — `83 83 85`, two receive dwords and the
@@ -289,7 +289,7 @@ def build_cont_entryid(container_id):
     return bytes(blob)
 
 
-def build_query_ww_rows_reply_payload(payload):
+def query_ww_rows_reply(payload):
     """Method 12: a page of member rows for the address book list.
 
     Request, from `CAbConnection::HrQueryWWRows` @ 0x7F4D4A18:
@@ -357,7 +357,7 @@ def build_row_reply(row_count, blob):
     )
 
 
-def build_close_table_reply_payload(payload):
+def close_table_reply(payload):
     """Method 9: release a table the row queries opened.
 
     ```
@@ -379,7 +379,7 @@ def build_close_table_reply_payload(payload):
     return build_static_reply(build_tagged_reply_dword(0))
 
 
-def build_query_restrict_rows_reply_payload(payload):
+def query_restrict_rows_reply(payload):
     """Method 13: rows matching a restriction — the name resolution path.
 
     Same request as method 12 with a serialised `CSRestriction` in front of the
@@ -556,7 +556,7 @@ def build_ww_row_blob(members, tags):
     return CK_MAGIC + deflate.compress(rows) + deflate.flush()
 
 
-def build_get_user_details_reply_payload(payload):
+def get_user_details_reply(payload):
     """Method 2: one member's details for the tag array the sheet asked for.
 
     Request, built by `CAbConnection::HrGetUserDetails` @ 0x7F4D4611 through the

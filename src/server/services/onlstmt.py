@@ -441,7 +441,7 @@ def build_plans_payload():
 _CANCEL_ACK_PAYLOAD = build_static_reply(build_tagged_reply_byte(1))
 
 
-class OnlStmtHandler(ServiceHandler):
+class OnlstmtHandler(ServiceHandler):
     """Handles OnlStmt service requests on a logical pipe."""
 
     GUIDS = ONLSTMT_INTERFACE_GUIDS

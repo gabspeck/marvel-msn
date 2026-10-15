@@ -21,25 +21,25 @@ from server.services.mosabp import (
     CONT_ENTRYID_LEN,
     DT_GLOBAL,
     MOSABP_CLASS_AB,
-    MOSABP_GET_USER_DETAILS,
-    MOSABP_UPDATE_USER_DETAILS,
+    MOSABP_SELECTOR_GET_USER_DETAILS,
+    MOSABP_SELECTOR_UPDATE_USER_DETAILS,
     PR_ANR,
     PR_ENTRYID,
     PR_SEARCH_KEY,
     RES_AND,
     RES_PROPERTY,
     AbContainer,
-    MOSABPHandler,
+    MosabpHandler,
     build_ab_container,
-    build_close_table_reply_payload,
     build_cont_entryid,
-    build_get_ab_containers_reply_payload,
-    build_get_user_details_reply_payload,
     build_member_blob,
-    build_query_restrict_rows_reply_payload,
-    build_query_ww_rows_reply_payload,
     build_ww_row_blob,
+    close_table_reply,
+    get_ab_containers_reply,
+    get_user_details_reply,
     parse_restriction,
+    query_restrict_rows_reply,
+    query_ww_rows_reply,
 )
 from server.session import Session
 from server.store import app_store
@@ -138,7 +138,7 @@ class TestMOSABPDiscovery(unittest.TestCase):
         self.assertEqual(selector, MOSABP_CLASS_AB)
 
     def test_discovery_packet_carries_the_iid_selector_pair(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
+        handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.build_discovery_packet(server_seq=1, client_ack=1)
         self.assertEqual(len(packets), 1)
         payload = parse_packet(packets[0]).payload
@@ -154,7 +154,7 @@ class TestGetAbContainers(unittest.TestCase):
     """
 
     def test_reply_framing(self):
-        payload = build_get_ab_containers_reply_payload()
+        payload = get_ab_containers_reply()
         self.assertEqual(payload[:5], b"\x83" + struct.pack("<I", 0))
         self.assertEqual(payload[5], 0x83)
         (count,) = struct.unpack_from("<I", payload, 6)
@@ -164,7 +164,7 @@ class TestGetAbContainers(unittest.TestCase):
     def test_blob_length_matches_the_count(self):
         # HrGetAbContainers sizes its buffer from the count and memcpys the
         # blob whole; a short blob leaves the last record part uninitialised.
-        payload = build_get_ab_containers_reply_payload()
+        payload = get_ab_containers_reply()
         (count,) = struct.unpack_from("<I", payload, 6)
         self.assertEqual(len(payload) - 12, count * ABCONTAINER_LEN)
 
@@ -205,7 +205,7 @@ class TestGetAbContainers(unittest.TestCase):
         self.assertEqual(blob[0xCF], 0)
 
     def test_content_count_tracks_the_member_directory(self):
-        payload = build_get_ab_containers_reply_payload()
+        payload = get_ab_containers_reply()
         blob = payload[12:]
         self.assertEqual(
             struct.unpack_from("<I", blob, 0xD0)[0],
@@ -222,7 +222,7 @@ class TestGetAbContainers(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<III", ceid, 0x14), (2, 0, 9))
 
     def test_handler_answers_class_1_method_0(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
+        handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(MOSABP_CLASS_AB, 0x00, 0, b"\x83\x83\x85", 1, 1)
         self.assertIsNotNone(packets)
         self.assertIn(b"The Microsoft Network", parse_packet(packets[0][:-1]).payload)
@@ -272,7 +272,7 @@ class TestQueryWWRows(unittest.TestCase):
     def test_reply_carries_the_row_count_in_all_count_slots(self):
         # Slot 3 bounds QueryRows, slot 4 sizes the rowset, and slot 5 reports
         # how many rows the provider copied upward.
-        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        payload = query_ww_rows_reply(_ww_request("", _WW_TAGS))
         dwords, _blob = _split_ww_reply(payload)
         expected = len(app_store.member.list_members())
         self.assertEqual(dwords, [0, 0, expected, expected, expected])
@@ -280,13 +280,13 @@ class TestQueryWWRows(unittest.TestCase):
     def test_blob_is_ck_wrapped_raw_deflate(self):
         # HrUncompressWWData has no uncompressed path: MOSMUTIL checks the CK
         # magic at 0x7E994D10 and inflates what follows.
-        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        payload = query_ww_rows_reply(_ww_request("", _WW_TAGS))
         _dwords, blob = _split_ww_reply(payload)
         self.assertEqual(blob[:2], b"CK")
         zlib.decompress(blob[2:], -15)
 
     def test_rows_decode_in_requested_tag_order(self):
-        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        payload = query_ww_rows_reply(_ww_request("", _WW_TAGS))
         dwords, blob = _split_ww_reply(payload)
         raw = zlib.decompress(blob[2:], -15)
         pos = 0
@@ -300,7 +300,7 @@ class TestQueryWWRows(unittest.TestCase):
         self.assertEqual(len(names), len(app_store.member.list_members()))
 
     def test_name_prefix_filters_the_directory(self):
-        payload = build_query_ww_rows_reply_payload(_ww_request("Bill", _WW_TAGS))
+        payload = query_ww_rows_reply(_ww_request("Bill", _WW_TAGS))
         dwords, blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 1)
         raw = zlib.decompress(blob[2:], -15)
@@ -310,12 +310,12 @@ class TestQueryWWRows(unittest.TestCase):
     def test_no_match_is_an_empty_rowset(self):
         # HrBuildWWSrowset allocates count*0xC+4 and writes nothing more at 0,
         # and the decompression step is skipped, so an empty blob is valid.
-        payload = build_query_ww_rows_reply_payload(_ww_request("Nobody", _WW_TAGS))
+        payload = query_ww_rows_reply(_ww_request("Nobody", _WW_TAGS))
         dwords, _blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 0)
 
     def test_row_limit_is_honoured(self):
-        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS, row_limit=2))
+        payload = query_ww_rows_reply(_ww_request("", _WW_TAGS, row_limit=2))
         dwords, _blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 2)
 
@@ -329,9 +329,7 @@ class TestQueryWWRows(unittest.TestCase):
         # PR_ENTRYID is what MAPI hands back to open the member. An empty one
         # resolves to nothing and Check Names reports the name as unrecognised.
         tags = [0x3001001E, 0x3003001E, 0x3002001E, PR_ENTRYID, PR_SEARCH_KEY]
-        payload = build_query_restrict_rows_reply_payload(
-            _restrict_request(_res_property(PR_ANR, "sjobs"), tags)
-        )
+        payload = query_restrict_rows_reply(_restrict_request(_res_property(PR_ANR, "sjobs"), tags))
         dwords, blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 1)
         raw = zlib.decompress(blob[2:], -15)
@@ -349,7 +347,7 @@ class TestQueryWWRows(unittest.TestCase):
         # PR_EMAIL_ADDRESS is the field the sheet labels "Member ID:", and it is
         # what a mail recipient resolved out of the address book carries — so a
         # display name here is undeliverable mail, not a cosmetic slip.
-        payload = build_query_ww_rows_reply_payload(_ww_request("Bill", _WW_TAGS))
+        payload = query_ww_rows_reply(_ww_request("Bill", _WW_TAGS))
         _dwords, blob = _split_ww_reply(payload)
         raw = zlib.decompress(blob[2:], -15)
         _count, values, _consumed = _parse_blob(raw, _WW_TAGS)
@@ -357,7 +355,7 @@ class TestQueryWWRows(unittest.TestCase):
         self.assertEqual(values[0x3003001E], "billg")
 
     def test_every_row_address_names_a_real_account_or_none(self):
-        payload = build_query_ww_rows_reply_payload(_ww_request("", _WW_TAGS))
+        payload = query_ww_rows_reply(_ww_request("", _WW_TAGS))
         dwords, blob = _split_ww_reply(payload)
         raw = zlib.decompress(blob[2:], -15)
         pos = 0
@@ -369,7 +367,7 @@ class TestQueryWWRows(unittest.TestCase):
             self.assertNotIn(" ", address)
 
     def test_handler_answers_class_1_method_12(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
+        handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(MOSABP_CLASS_AB, 0x0C, 0, _ww_request("", _WW_TAGS), 1, 1)
         self.assertIsNotNone(packets)
 
@@ -442,7 +440,7 @@ class TestRestrictionParsing(unittest.TestCase):
 
 class TestQueryRestrictRows(unittest.TestCase):
     def test_anr_resolves_on_the_member_id(self):
-        payload = build_query_restrict_rows_reply_payload(
+        payload = query_restrict_rows_reply(
             _restrict_request(_res_property(PR_ANR, "billg"), _WW_TAGS)
         )
         dwords, blob = _split_ww_reply(payload)
@@ -456,7 +454,7 @@ class TestQueryRestrictRows(unittest.TestCase):
     def test_anr_resolves_on_the_display_name(self):
         # PR_ANR stands for "whatever a person is called" — there is no such
         # field on a member, so both names have to answer to it.
-        payload = build_query_restrict_rows_reply_payload(
+        payload = query_restrict_rows_reply(
             _restrict_request(_res_property(PR_ANR, "Steve"), _WW_TAGS)
         )
         dwords, blob = _split_ww_reply(payload)
@@ -467,14 +465,14 @@ class TestQueryRestrictRows(unittest.TestCase):
 
     def test_ambiguous_name_returns_every_candidate(self):
         # Two "Chris" profiles. Resolution is the client's to disambiguate.
-        payload = build_query_restrict_rows_reply_payload(
+        payload = query_restrict_rows_reply(
             _restrict_request(_res_property(PR_ANR, "Chris"), _WW_TAGS)
         )
         dwords, _blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 2)
 
     def test_no_match_is_an_empty_rowset(self):
-        payload = build_query_restrict_rows_reply_payload(
+        payload = query_restrict_rows_reply(
             _restrict_request(_res_property(PR_ANR, "zzz"), _WW_TAGS)
         )
         dwords, _blob = _split_ww_reply(payload)
@@ -483,7 +481,7 @@ class TestQueryRestrictRows(unittest.TestCase):
         self.assertEqual(dwords[4], 0)
 
     def test_row_bound_matches_the_served_rows(self):
-        payload = build_query_restrict_rows_reply_payload(
+        payload = query_restrict_rows_reply(
             _restrict_request(_res_property(PR_ANR, "Chris"), _WW_TAGS)
         )
         dwords, _blob = _split_ww_reply(payload)
@@ -492,14 +490,14 @@ class TestQueryRestrictRows(unittest.TestCase):
 
     def test_a_term_on_another_property_matches_nothing(self):
         # Matching everything would resolve a name the client did not ask for.
-        payload = build_query_restrict_rows_reply_payload(
+        payload = query_restrict_rows_reply(
             _restrict_request(_res_property(0x3001001E, "Bill Gates"), _WW_TAGS)
         )
         dwords, _blob = _split_ww_reply(payload)
         self.assertEqual(dwords[3], 0)
 
     def test_handler_answers_class_1_method_13(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
+        handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(
             MOSABP_CLASS_AB, 0x0D, 0, _restrict_request(_res_property(PR_ANR, "b"), _WW_TAGS), 1, 1
         )
@@ -509,11 +507,11 @@ class TestQueryRestrictRows(unittest.TestCase):
 class TestCloseTable(unittest.TestCase):
     def test_acknowledges_with_a_zero_status(self):
         # The client returns this status verbatim as its HRESULT.
-        payload = build_close_table_reply_payload(b"\x03" + struct.pack("<I", 0) + b"\x83")
+        payload = close_table_reply(b"\x03" + struct.pack("<I", 0) + b"\x83")
         self.assertEqual(payload, b"\x83" + struct.pack("<I", 0) + b"\x87")
 
     def test_handler_answers_class_1_method_9(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
+        handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(
             MOSABP_CLASS_AB, 0x09, 0, b"\x03" + struct.pack("<I", 7) + b"\x83", 1, 1
         )
@@ -525,16 +523,16 @@ class TestGetUserDetailsFraming(unittest.TestCase):
         # `HrGetUserDetails` returns the status DWORD verbatim as its HRESULT
         # before reading the blob, and waits on request vtable +0x10, which only
         # the 0x86 branch of ProcessTaggedServiceReply releases.
-        payload = build_get_user_details_reply_payload(_request("Chris Hahn", _SHEET_TAGS))
+        payload = get_user_details_reply(_request("Chris Hahn", _SHEET_TAGS))
         status, blob = _split_reply(payload)
         self.assertEqual(status, 0)
         self.assertTrue(blob)
 
     def test_handler_answers_class_1_method_2(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
+        handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         packets = handler.handle_request(
             MOSABP_CLASS_AB,
-            MOSABP_GET_USER_DETAILS,
+            MOSABP_SELECTOR_GET_USER_DETAILS,
             0,
             _request("Chris Hahn", _SHEET_TAGS),
             server_seq=1,
@@ -543,11 +541,11 @@ class TestGetUserDetailsFraming(unittest.TestCase):
         self.assertEqual(len(packets), 1)
 
     def test_other_methods_are_left_unanswered(self):
-        handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
+        handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         for msg_class, selector in (
-            (MOSABP_CLASS_AB, MOSABP_UPDATE_USER_DETAILS),
+            (MOSABP_CLASS_AB, MOSABP_SELECTOR_UPDATE_USER_DETAILS),
             (MOSABP_CLASS_AB, 0x01),
-            (0x02, MOSABP_GET_USER_DETAILS),
+            (0x02, MOSABP_SELECTOR_GET_USER_DETAILS),
         ):
             with self.subTest(msg_class=msg_class, selector=selector):
                 self.assertIsNone(
@@ -558,18 +556,14 @@ class TestGetUserDetailsFraming(unittest.TestCase):
 class TestMemberBlobLayout(unittest.TestCase):
     def test_count_matches_the_requested_tag_count(self):
         # A mismatch is 0x80040118 out of `FUN_7F4DD770` before any value is read.
-        _status, blob = _split_reply(
-            build_get_user_details_reply_payload(_request("Chris Hahn", _SHEET_TAGS))
-        )
+        _status, blob = _split_reply(get_user_details_reply(_request("Chris Hahn", _SHEET_TAGS)))
         count, _values, _pos = _parse_blob(blob, _SHEET_TAGS)
         self.assertEqual(count, len(_SHEET_TAGS))
 
     def test_blob_is_consumed_exactly(self):
         # Trailing or missing bytes mean a width disagreement with the client's
         # own walk, which slides every later field.
-        _status, blob = _split_reply(
-            build_get_user_details_reply_payload(_request("Chris Hahn", _SHEET_TAGS))
-        )
+        _status, blob = _split_reply(get_user_details_reply(_request("Chris Hahn", _SHEET_TAGS)))
         _count, _values, consumed = _parse_blob(blob, _SHEET_TAGS)
         self.assertEqual(consumed, len(blob))
 
@@ -605,9 +599,7 @@ class TestMemberBlobLayout(unittest.TestCase):
 
 class TestMemberLookup(unittest.TestCase):
     def test_sheet_fields_come_from_the_matching_profile(self):
-        _status, blob = _split_reply(
-            build_get_user_details_reply_payload(_request("Chris Hahn", _SHEET_TAGS))
-        )
+        _status, blob = _split_reply(get_user_details_reply(_request("Chris Hahn", _SHEET_TAGS)))
         _count, values, _pos = _parse_blob(blob, _SHEET_TAGS)
         profile = app_store.member.get_member("Chris Hahn")
         self.assertEqual(values[0x3003001E], profile.member_id)
@@ -628,9 +620,7 @@ class TestMemberLookup(unittest.TestCase):
         self.assertEqual(values[0x60120003], profile.work_country_code)
 
     def test_object_and_display_type_say_mail_user(self):
-        _status, blob = _split_reply(
-            build_get_user_details_reply_payload(_request("Chris Hahn", _SHEET_TAGS))
-        )
+        _status, blob = _split_reply(get_user_details_reply(_request("Chris Hahn", _SHEET_TAGS)))
         _count, values, _pos = _parse_blob(blob, _SHEET_TAGS)
         self.assertEqual(values[0x0FFE0003], 6)  # MAPI_MAILUSER
         self.assertEqual(values[0x39000003], 0)  # DT_MAILUSER
@@ -646,9 +636,7 @@ class TestMemberLookup(unittest.TestCase):
         )
 
     def test_unknown_member_still_yields_a_sheet_with_the_id(self):
-        _status, blob = _split_reply(
-            build_get_user_details_reply_payload(_request("Nobody At All", _SHEET_TAGS))
-        )
+        _status, blob = _split_reply(get_user_details_reply(_request("Nobody At All", _SHEET_TAGS)))
         _count, values, _pos = _parse_blob(blob, _SHEET_TAGS)
         self.assertEqual(values[0x3003001E], "Nobody At All")
         self.assertEqual(values[0x600D001E], "")

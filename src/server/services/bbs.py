@@ -193,7 +193,7 @@ _EMPTY_BBS = BbsFields()
 log = logging.getLogger(__name__)
 
 
-class BBSHandler(ServiceHandler):
+class BbsHandler(ServiceHandler):
     """Handles BBS read-channel requests on a logical pipe."""
 
     GUIDS = BBS_INTERFACE_GUIDS
@@ -230,22 +230,20 @@ class BBSHandler(ServiceHandler):
             return None
         if msg_class == dirsrv.TREEEDCL_CLASS_EDIT:
             if selector == dirsrv.TREEEDCL_SELECTOR_ADD_NODE:
-                reply_payload = dirsrv.build_add_node_reply_payload(
+                reply_payload = dirsrv.add_node_reply(
                     payload,
                     self.session,
                     _default_store.content,
                     node_factory=_build_bbs_folder_node,
                 )
             elif selector == dirsrv.TREEEDCL_SELECTOR_SET_PROPERTIES:
-                reply_payload = dirsrv.build_set_properties_reply_payload(
+                reply_payload = dirsrv.set_properties_reply(
                     payload, self.session, _default_store.content
                 )
             elif selector == dirsrv.TREEEDCL_SELECTOR_GET_TICKET:
-                reply_payload = dirsrv.build_get_ticket_reply_payload(
-                    self.session, require_admin=False
-                )
+                reply_payload = dirsrv.get_ticket_reply(self.session, require_admin=False)
             elif selector == dirsrv.TREEEDCL_SELECTOR_DELETE_NODE:
-                reply_payload = dirsrv.build_delete_node_reply_payload(
+                reply_payload = dirsrv.delete_node_reply(
                     payload, self.session, _default_store.content
                 )
             else:
@@ -256,7 +254,7 @@ class BBSHandler(ServiceHandler):
             )
         if msg_class == BBS_CLASS_MESSAGE:
             if selector == BBS_SELECTOR_GET_ARTICLE:
-                reply_payload = build_bbs_article_reply_payload(payload)
+                reply_payload = bbs_article_reply(payload)
             elif selector == BBS_SELECTOR_POST_START:
                 reply_payload = self._post_start(payload)
             elif selector in (BBS_SELECTOR_POST_APPEND, BBS_SELECTOR_POST_COMMIT):
@@ -276,14 +274,14 @@ class BBSHandler(ServiceHandler):
             return None
         if selector == BBS_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_bbs_get_properties_reply_payload(request)
+            reply_payload = bbs_get_properties_reply(request)
         elif selector == BBS_SELECTOR_GET_CHILDREN:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_bbs_get_children_reply_payload(request)
+            reply_payload = bbs_get_children_reply(request)
         elif selector == BBS_SELECTOR_GET_DEID_FROM_GO_WORD:
-            reply_payload = dirsrv.build_get_deid_from_go_word_reply_payload(payload)
+            reply_payload = dirsrv.get_deid_from_go_word_reply(payload)
         elif selector == BBS_SELECTOR_GET_SHABBY:
-            reply_payload = dirsrv.build_get_shabby_reply_payload(payload)
+            reply_payload = dirsrv.get_shabby_reply(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -556,7 +554,7 @@ def build_bbs_props(requested_props, node, *, is_children):
     return out
 
 
-def build_bbs_get_properties_reply_payload(request):
+def bbs_get_properties_reply(request):
     """BBS GetProperties (selector 0x00): one self record for the node.
 
     Same single-record contract as DIRSRV GetProperties — the reader header
@@ -574,7 +572,7 @@ def build_bbs_get_properties_reply_payload(request):
     return dirsrv.build_tree_reply_wire(records)
 
 
-def build_bbs_get_children_reply_payload(request):
+def bbs_get_children_reply(request):
     """BBS GetChildren (selector 0x02): every message on the board.
 
     One flat list — replies included, since threading rides `_P` rather than
@@ -641,7 +639,7 @@ def _allocate_bbs_folder_mnid(content_store, parent_mnid):
 # --- Message-content channel (class 0x0B) ---
 
 
-def build_bbs_article_reply_payload(payload):
+def bbs_article_reply(payload):
     """Class 0x0B method 0: the opened message as an RFC-1036 news article.
 
     Request is `04 88 [msg_id:u32][board_id:u32] 83 85` — the 8-byte mnid the

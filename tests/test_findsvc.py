@@ -12,7 +12,7 @@ import unittest
 
 from server.config import FINDSVC_INTERFACE_GUIDS
 from server.mpc import decode_dirsrv_request
-from server.services.dirsrv import build_get_properties_reply_payload, size_value
+from server.services.dirsrv import get_properties_reply, size_value
 from server.services.findquery import (
     QueryError,
     _term_matcher,
@@ -21,8 +21,8 @@ from server.services.findquery import (
 )
 from server.services.findsvc import (
     FINDSVC_CLASS_SEARCH,
-    FINDSVC_SEARCH,
-    FindSvcHandler,
+    FINDSVC_SELECTOR_SEARCH,
+    FindsvcHandler,
     build_search_reply_blocks,
 )
 from server.services.rooms import _rooms as conference_rooms
@@ -102,7 +102,7 @@ class TestFindSvcDiscovery(unittest.TestCase):
         self.assertEqual(tails, list(range(0x00028BB0, 0x00028BB6)))
 
     def test_discovery_packet_carries_the_iid(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
+        handler = FindsvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         packets = handler.build_discovery_packet(server_seq=1, client_ack=1)
         payload = b"".join(parse_packet(p).payload for p in packets)
         self.assertIn(struct.pack("<I", 0x00028BB0), payload)
@@ -129,10 +129,10 @@ class TestSearchFraming(unittest.TestCase):
         self.assertEqual(complete, b"\x86")
 
     def test_handler_emits_both_blocks_as_separate_host_blocks(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
+        handler = FindsvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         packets = handler.handle_request(
             FINDSVC_CLASS_SEARCH,
-            FINDSVC_SEARCH,
+            FINDSVC_SELECTOR_SEARCH,
             3,
             _request(f"({SCOPE_FOLDERS})"),
             server_seq=1,
@@ -141,13 +141,15 @@ class TestSearchFraming(unittest.TestCase):
         self.assertEqual(len(packets), 2)
         # The completion block rides the same (class, selector, req_id) triple.
         tail = parse_packet(packets[-1]).payload
-        self.assertIn(bytes([FINDSVC_CLASS_SEARCH, FINDSVC_SEARCH, 3, 0x86]), tail, tail.hex())
+        self.assertIn(
+            bytes([FINDSVC_CLASS_SEARCH, FINDSVC_SELECTOR_SEARCH, 3, 0x86]), tail, tail.hex()
+        )
 
     def test_handler_answers_class_1_method_1(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
+        handler = FindsvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         packets = handler.handle_request(
             FINDSVC_CLASS_SEARCH,
-            FINDSVC_SEARCH,
+            FINDSVC_SELECTOR_SEARCH,
             7,
             _request(f"({SCOPE_FOLDERS})"),
             server_seq=1,
@@ -156,7 +158,7 @@ class TestSearchFraming(unittest.TestCase):
         self.assertTrue(packets)
 
     def test_unknown_selector_is_not_answered(self):
-        handler = FindSvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
+        handler = FindsvcHandler(pipe_idx=2, svc_name="FindSvc", session=Session())
         self.assertIsNone(
             handler.handle_request(FINDSVC_CLASS_SEARCH, 0x02, 7, b"", server_seq=1, client_ack=1)
         )
@@ -468,7 +470,7 @@ class TestResultRowResolution(unittest.TestCase):
     def _records(self, node_ids):
         request = decode_dirsrv_request(self._batch_request(node_ids))
         self.assertEqual(request.node_ids, node_ids)
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         count = struct.unpack_from("<I", payload, 6)[0]
         return count, _walk_records(payload[12:])
 

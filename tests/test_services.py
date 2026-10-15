@@ -25,22 +25,22 @@ from server.config import (
     CONFSRV_INTERFACE_GUIDS,
     DIRSRV_INTERFACE_GUIDS,
     LOGSRV_INTERFACE_GUIDS,
-    MEDVIEW_ATTACH_SESSION,
-    MEDVIEW_CONVERT_HASH_TO_VA,
-    MEDVIEW_CONVERT_TOPIC_TO_VA,
-    MEDVIEW_DATA_EDIT_ADD,
     MEDVIEW_DATA_EDIT_CLASS,
-    MEDVIEW_DATA_EDIT_DELETE,
-    MEDVIEW_DATA_EDIT_GET_TICKET,
-    MEDVIEW_FETCH_NEARBY_TOPIC,
-    MEDVIEW_GET_TITLE_INFO_REMOTE,
     MEDVIEW_INTERFACE_GUIDS,
-    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS,
-    MEDVIEW_OPEN_REMOTE_HFS_FILE,
-    MEDVIEW_OPEN_TITLE,
-    MEDVIEW_PRE_NOTIFY_TITLE,
-    MEDVIEW_READ_REMOTE_HFS_FILE,
-    MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+    MEDVIEW_SELECTOR_ATTACH_SESSION,
+    MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA,
+    MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA,
+    MEDVIEW_SELECTOR_DATA_EDIT_ADD,
+    MEDVIEW_SELECTOR_DATA_EDIT_DELETE,
+    MEDVIEW_SELECTOR_DATA_EDIT_GET_TICKET,
+    MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC,
+    MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE,
+    MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS,
+    MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE,
+    MEDVIEW_SELECTOR_OPEN_TITLE,
+    MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
+    MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE,
+    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
     MPC_CLASS_CONTINUATION_LAST,
     MPC_CLASS_CONTINUATION_MORE,
     OLREGSRV_INTERFACE_GUIDS,
@@ -68,17 +68,17 @@ from server.services.bbir import (
     BBIR_SELECTOR_GET_SEARCH_OBJECTS,
     BBIR_SELECTOR_GET_SOURCES,
     BBIR_SELECTOR_QUERY,
-    BBIRServiceHandler,
+    BbirHandler,
 )
 from server.services.conference import (
-    CONFLOC_DATA_EDIT_ADD,
     CONFLOC_DATA_EDIT_CLASS,
-    CONFLOC_DATA_EDIT_DELETE,
-    CONFLOC_DATA_EDIT_GET_PROPERTIES,
-    CONFLOC_DATA_EDIT_GET_TICKET,
-    CONFLOC_DATA_EDIT_SET_PROPERTIES,
     CONFLOC_RESULT_FOUND,
     CONFLOC_RESULT_NOT_FOUND,
+    CONFLOC_SELECTOR_DATA_EDIT_ADD,
+    CONFLOC_SELECTOR_DATA_EDIT_DELETE,
+    CONFLOC_SELECTOR_DATA_EDIT_GET_PROPERTIES,
+    CONFLOC_SELECTOR_DATA_EDIT_GET_TICKET,
+    CONFLOC_SELECTOR_DATA_EDIT_SET_PROPERTIES,
     CONFSRV_EVENT_PARTICIPANT_JOINED,
     CONFSRV_EVENT_PARTICIPANT_LEFT,
     CONFSRV_EVENT_PARTICIPANT_LIST,
@@ -91,28 +91,28 @@ from server.services.conference import (
     CONFSRV_ROOM_FULL,
     CONFSRV_SELECTOR_JOIN,
     CONFSRV_SELECTOR_SEND,
-    CONFLOCHandler,
-    CONFSRVHandler,
+    ConflocHandler,
+    ConfsrvHandler,
 )
 from server.services.dirsrv import (
     DIRSRV_CLASS_TREE,
     DS_E_NOT_FOUND,
     ENUM_SHN_KEY_ICONS,
     SUPPORTED_BROWSE_LCIDS,
-    DIRSRVHandler,
-    build_add_node_reply_payload,
-    build_delete_node_reply_payload,
+    DirsrvHandler,
+    add_node_reply,
     build_dirsrv_service_map_payload,
-    build_enum_shn_reply_payload,
-    build_get_children_reply_payload,
-    build_get_datasets_reply_payload,
-    build_get_deid_from_go_word_reply_payload,
-    build_get_parents_reply_payload,
-    build_get_properties_reply_payload,
-    build_get_ticket_reply_payload,
     build_property_record,
     build_props,
-    build_set_properties_reply_payload,
+    delete_node_reply,
+    enum_shn_reply,
+    get_children_reply,
+    get_datasets_reply,
+    get_deid_from_go_word_reply,
+    get_parents_reply,
+    get_properties_reply,
+    get_ticket_reply,
+    set_properties_reply,
 )
 from server.services.ftm import (
     FTM_BBS_SOURCE,
@@ -121,7 +121,7 @@ from server.services.ftm import (
     FTM_DIRSRV_SOURCE,
     FTM_FALLBACK_FILENAME,
     FTM_MOS2_UNPACK_METHOD,
-    FTMHandler,
+    FtmHandler,
     _build_bill_client_reply,
     _build_request_download_reply,
     _build_start_download_blocks,
@@ -135,28 +135,28 @@ from server.services.logsrv import (
     LOGIN_BLOB_PASSWORD_OFFSET,
     LOGIN_RESULT_BAD_MEMBER_ID,
     LOGIN_RESULT_BAD_PASSWORD,
-    LOGSRVHandler,
+    LogsrvHandler,
     _handle_billing_query,
     _handle_login,
     _handle_password_change,
     build_logsrv_bootstrap_payload,
     build_logsrv_service_map_payload,
 )
-from server.services.medview import MEDVIEWHandler
+from server.services.medview import MedviewHandler
 from server.services.medview.handler import (
     _picture_chunk_limit,
     _widen_low_bpp_dib,
 )
 from server.services.medview.payload import BM0_BAGGAGE
 from server.services.olregsrv import (
-    OLREGSRVHandler,
+    OlregsrvHandler,
     build_olregsrv_service_map_payload,
 )
 from server.services.rooms import _rooms as conference_rooms
 from server.services.sasrv import (
     SA_E_BAD_LIST_KIND,
     SASRV_TOKENS,
-    SASRVHandler,
+    SasrvHandler,
     build_sasrv_service_map_payload,
 )
 from server.session import Session
@@ -236,7 +236,7 @@ class TestLOGSRVServiceMap(unittest.TestCase):
             self.assertEqual(record[16], selector)
 
     def test_produces_packet(self):
-        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        handler = LogsrvHandler(3, "LOGSRV", Session())
         pkts = handler.build_discovery_packet(3, 3)
         self.assertIsInstance(pkts, list)
         parsed = parse_packet(pkts[0][:-1])
@@ -244,7 +244,7 @@ class TestLOGSRVServiceMap(unittest.TestCase):
         self.assertTrue(parsed.crc_ok)
 
     def test_known_wire_bytes(self):
-        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        handler = LogsrvHandler(3, "LOGSRV", Session())
         pkts = handler.build_discovery_packet(3, 3)
         expected_start = bytes.fromhex("83 83 e3 af 00 03 00 00 00 00")
         self.assertEqual(pkts[0][:10], expected_start)
@@ -395,7 +395,7 @@ class TestLOGSRVBillingQuery(unittest.TestCase):
 
 class TestLOGSRVReply(unittest.TestCase):
     def test_login_reply_returns_packet(self):
-        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        handler = LogsrvHandler(3, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x00, 0, _login_request(), 4, 4)
         self.assertIsNotNone(pkts)
         self.assertIsInstance(pkts, list)
@@ -409,7 +409,7 @@ class TestLOGSRVReply(unittest.TestCase):
             "3f 27 27 04 91 61 76 6f 63 61 64 6f 73 00 00 00"
             "00 54 2b 10 04 b8 83"
         )
-        handler = LOGSRVHandler(8, "LOGSRV", Session())
+        handler = LogsrvHandler(8, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x01, 0, pw_payload, 37, 36)
         self.assertIsNotNone(pkts)
         self.assertIsInstance(pkts, list)
@@ -423,7 +423,7 @@ class TestLOGSRVReply(unittest.TestCase):
         variable satisfying the single recv descriptor.
         """
         payload = bytes.fromhex("03 5f 01 00 00 03 00 00 00 00 03 00 00 00 00 84")
-        handler = LOGSRVHandler(6, "LOGSRV", Session())
+        handler = LogsrvHandler(6, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x02, 0, payload, 5, 5)
         self.assertIsNotNone(pkts)
         self.assertIsInstance(pkts, list)
@@ -437,7 +437,7 @@ class TestLOGSRVReply(unittest.TestCase):
         the server returns None; the minimum viable reply is an empty
         0x84 variable.
         """
-        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        handler = LogsrvHandler(3, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x07, 1, b"\x85", 5, 5)
         self.assertIsNotNone(pkts)
         self.assertIsInstance(pkts, list)
@@ -450,7 +450,7 @@ class TestLOGSRVReply(unittest.TestCase):
         before the Internet-access prompt and Congrats dialog can appear.
         """
         payload = bytes.fromhex("03 5f 01 00 00 03 00 00 00 00 03 00 00 00 00 84")
-        handler = LOGSRVHandler(6, "LOGSRV", Session())
+        handler = LogsrvHandler(6, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x0D, 0, payload, 5, 5)
         self.assertIsNotNone(pkts)
         self.assertIsInstance(pkts, list)
@@ -463,7 +463,7 @@ class TestLOGSRVReply(unittest.TestCase):
         path.  Caller checks recv_dword == 0 for success.
         """
         payload = bytes.fromhex("03 08 00 00 00 83")
-        handler = LOGSRVHandler(4, "LOGSRV", Session())
+        handler = LogsrvHandler(4, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x0E, 0, payload, 5, 5)
         self.assertIsNotNone(pkts)
         self.assertIsInstance(pkts, list)
@@ -471,12 +471,12 @@ class TestLOGSRVReply(unittest.TestCase):
         self.assertTrue(parsed.crc_ok)
 
     def test_unknown_selector_returns_none(self):
-        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        handler = LogsrvHandler(3, "LOGSRV", Session())
         pkt = handler.handle_request(0x06, 0xFF, 0, b"", 5, 5)
         self.assertIsNone(pkt)
 
     def test_known_login_reply_wire_bytes(self):
-        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        handler = LogsrvHandler(3, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x00, 0, _login_request(), 4, 4)
         expected = bytes.fromhex(
             "84 84 e3 3b 00 03 00 06 00 00 83 00 00 00 00 83"
@@ -523,7 +523,7 @@ def _with_store(handler, content_store):
 
 def _joined_handler(pipe_idx, session, room_id, content_store=None, request_id=7):
     """A CONFSRV handler bound to a recording connection and already joined."""
-    handler = _with_store(CONFSRVHandler(pipe_idx, "CONFSRV", session), content_store)
+    handler = _with_store(ConfsrvHandler(pipe_idx, "CONFSRV", session), content_store)
     connection = RecordingConnection(pipe_idx)
     handler.bind_connection(connection)
     _join_room(handler, room_id, request_id)
@@ -628,9 +628,9 @@ class TestConferenceStartup(unittest.TestCase):
             content=parent.content,
         )
         store.add_child("1:16", chat)
-        handler = _with_store(CONFLOCHandler(10, "CONFLOC", Session()), store)
+        handler = _with_store(ConflocHandler(10, "CONFLOC", Session()), store)
 
-        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 1) + b"\x82\x82")
+        reply = handler.locate_reply(b"\x03" + struct.pack("<I", 1) + b"\x82\x82")
 
         self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 1)
         self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_FOUND)
@@ -650,27 +650,27 @@ class TestConferenceStartup(unittest.TestCase):
             app_store.content.get_children("1:16", struct.pack("<II", 1, 0x0409)),
         )
 
-        handler = CONFLOCHandler(10, "CONFLOC", Session())
-        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 1) + b"\x82\x82")
+        handler = ConflocHandler(10, "CONFLOC", Session())
+        reply = handler.locate_reply(b"\x03" + struct.pack("<I", 1) + b"\x82\x82")
 
         self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 1)
         self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_FOUND)
 
     def test_data_edit_get_ticket_returns_the_capability_blob(self):
-        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        handler = ConflocHandler(10, "CONFLOC", signed_in())
         packets = handler.handle_request(
             CONFLOC_DATA_EDIT_CLASS,
-            CONFLOC_DATA_EDIT_GET_TICKET,
+            CONFLOC_SELECTOR_DATA_EDIT_GET_TICKET,
             0,
             b"\x83\x85",
             0,
             0,
         )
         parsed = parse_packet(packets[0][:-1])
-        self.assertEqual(parsed.payload[8:], build_get_ticket_reply_payload(handler.session))
+        self.assertEqual(parsed.payload[8:], get_ticket_reply(handler.session))
 
     def test_data_edit_add_completes_the_chat_record(self):
-        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        handler = ConflocHandler(10, "CONFLOC", signed_in())
         ticket = b"\x02\x00"
         record_id = struct.pack("<II", 1, 275)
         properties = struct.pack("<IH", 6, 0)
@@ -688,7 +688,7 @@ class TestConferenceStartup(unittest.TestCase):
 
         packets = handler.handle_request(
             CONFLOC_DATA_EDIT_CLASS,
-            CONFLOC_DATA_EDIT_ADD,
+            CONFLOC_SELECTOR_DATA_EDIT_ADD,
             1,
             request,
             0,
@@ -712,11 +712,11 @@ class TestConferenceStartup(unittest.TestCase):
             + b"\x83\x83"
         )
         # TREEEDCL removes the directory node before DATAEDCL reaches CONFLOC.
-        handler = _with_store(CONFLOCHandler(10, "CONFLOC", signed_in()), _AddNodeContentStore())
+        handler = _with_store(ConflocHandler(10, "CONFLOC", signed_in()), _AddNodeContentStore())
 
         packets = handler.handle_request(
             CONFLOC_DATA_EDIT_CLASS,
-            CONFLOC_DATA_EDIT_DELETE,
+            CONFLOC_SELECTOR_DATA_EDIT_DELETE,
             1,
             request,
             0,
@@ -730,7 +730,7 @@ class TestConferenceStartup(unittest.TestCase):
         )
 
     def test_data_edit_get_properties_round_trips_the_authored_record(self):
-        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        handler = ConflocHandler(10, "CONFLOC", signed_in())
         ticket = b"\x02\x00"
         record_id = struct.pack("<II", 1, 275)
         properties = build_property_record(
@@ -753,7 +753,7 @@ class TestConferenceStartup(unittest.TestCase):
             + properties
             + b"\x83\x83"
         )
-        handler.build_data_edit_add_reply_payload(1, add_request)
+        handler.data_edit_add_reply(1, add_request)
         get_request = (
             b"\x03\x01\x00\x00\x00"
             + b"\x04\x88"
@@ -766,7 +766,7 @@ class TestConferenceStartup(unittest.TestCase):
 
         packets = handler.handle_request(
             CONFLOC_DATA_EDIT_CLASS,
-            CONFLOC_DATA_EDIT_GET_PROPERTIES,
+            CONFLOC_SELECTOR_DATA_EDIT_GET_PROPERTIES,
             2,
             get_request,
             0,
@@ -788,7 +788,7 @@ class TestConferenceStartup(unittest.TestCase):
 
     def test_seeded_chat_exposes_its_conference_settings(self):
         reset_app_store()
-        handler = CONFLOCHandler(10, "CONFLOC", signed_in())
+        handler = ConflocHandler(10, "CONFLOC", signed_in())
         record_id = struct.pack("<II", 1, 0x10F)
         request = (
             b"\x03\x01\x00\x00\x00"
@@ -802,7 +802,7 @@ class TestConferenceStartup(unittest.TestCase):
 
         packets = handler.handle_request(
             CONFLOC_DATA_EDIT_CLASS,
-            CONFLOC_DATA_EDIT_GET_PROPERTIES,
+            CONFLOC_SELECTOR_DATA_EDIT_GET_PROPERTIES,
             2,
             request,
             0,
@@ -833,7 +833,7 @@ class TestConferenceStartup(unittest.TestCase):
             content=parent.content,
         )
         store.add_child("1:16", chat)
-        handler = _with_store(CONFLOCHandler(10, "CONFLOC", signed_in()), store)
+        handler = _with_store(ConflocHandler(10, "CONFLOC", signed_in()), store)
         ticket = b"\x02\x00"
         record_id = struct.pack("<II", 1, 275)
         properties = build_property_record(
@@ -858,7 +858,7 @@ class TestConferenceStartup(unittest.TestCase):
 
         packets = handler.handle_request(
             CONFLOC_DATA_EDIT_CLASS,
-            CONFLOC_DATA_EDIT_SET_PROPERTIES,
+            CONFLOC_SELECTOR_DATA_EDIT_SET_PROPERTIES,
             3,
             request,
             0,
@@ -886,7 +886,7 @@ class TestConferenceStartup(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<H", join_reply, 10)[0], CONFSRV_ROLE_SPECTATOR)
         self.assertEqual(struct.unpack_from("<I", join_reply, 12)[0], 500)
 
-        fresh_handler = _with_store(CONFLOCHandler(10, "CONFLOC", signed_in()), store)
+        fresh_handler = _with_store(ConflocHandler(10, "CONFLOC", signed_in()), store)
         get_request = (
             b"\x03\x01\x00\x00\x00"
             + b"\x04\x88"
@@ -896,7 +896,7 @@ class TestConferenceStartup(unittest.TestCase):
             + b"\x04\x89mm\x00ml\x00ds\x00"
             + b"\x83\x83\x85"
         )
-        fresh_reply = fresh_handler.build_data_edit_get_properties_reply_payload(
+        fresh_reply = fresh_handler.data_edit_get_props_reply(
             4,
             get_request,
         )
@@ -913,7 +913,7 @@ class TestConferenceStartup(unittest.TestCase):
         )
 
     def test_data_edit_add_rejects_anonymous_writes(self):
-        handler = CONFLOCHandler(10, "CONFLOC", Session())
+        handler = ConflocHandler(10, "CONFLOC", Session())
         ticket = b"\x02\x00"
         request = (
             b"\x04\x82"
@@ -926,12 +926,12 @@ class TestConferenceStartup(unittest.TestCase):
             + struct.pack("<IH", 6, 0)
             + b"\x83\x83"
         )
-        reply = handler.build_data_edit_add_reply_payload(1, request)
+        reply = handler.data_edit_add_reply(1, request)
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
 
     def test_locator_rejects_an_unknown_room(self):
-        handler = _with_store(CONFLOCHandler(10, "CONFLOC", Session()), _AddNodeContentStore())
-        reply = handler.build_locate_reply_payload(b"\x03" + struct.pack("<I", 275) + b"\x82\x82")
+        handler = _with_store(ConflocHandler(10, "CONFLOC", Session()), _AddNodeContentStore())
+        reply = handler.locate_reply(b"\x03" + struct.pack("<I", 275) + b"\x82\x82")
         self.assertEqual(struct.unpack_from("<H", reply, 1)[0], 0)
         self.assertEqual(struct.unpack_from("<H", reply, 4)[0], CONFLOC_RESULT_NOT_FOUND)
 
@@ -1235,7 +1235,7 @@ class TestSASRVServiceMap(unittest.TestCase):
             self.assertEqual(record, guid_bytes + bytes([selector]))
 
     def test_produces_discovery_packet(self):
-        packets = SASRVHandler(5, "SASRV", Session()).build_discovery_packet(4, 4)
+        packets = SasrvHandler(5, "SASRV", Session()).build_discovery_packet(4, 4)
         parsed = parse_packet(packets[0][:-1])
         self.assertTrue(parsed.crc_ok)
 
@@ -1251,7 +1251,7 @@ class TestSASRVMasterListEnum(unittest.TestCase):
     BEGIN_ENUM_TOKENS = bytes.fromhex("030a000000030000000001008383")
 
     def setUp(self):
-        self.handler = SASRVHandler(6, "SASRV", signed_in())
+        self.handler = SasrvHandler(6, "SASRV", signed_in())
 
     @staticmethod
     def _list_page_request(handle, index):
@@ -1266,7 +1266,7 @@ class TestSASRVMasterListEnum(unittest.TestCase):
         )
 
     def test_begin_enum_opens_a_handle_for_the_token_list(self):
-        reply = self.handler.build_begin_enum_reply_payload(self.BEGIN_ENUM_TOKENS)
+        reply = self.handler.begin_enum_reply(self.BEGIN_ENUM_TOKENS)
 
         status, handle = (
             struct.unpack_from("<I", reply, 1)[0],
@@ -1277,10 +1277,10 @@ class TestSASRVMasterListEnum(unittest.TestCase):
         self.assertEqual(reply[10], TAG_END_STATIC)
 
     def test_read_enum_results_reports_the_row_count_then_status(self):
-        begin = self.handler.build_begin_enum_reply_payload(self.BEGIN_ENUM_TOKENS)
+        begin = self.handler.begin_enum_reply(self.BEGIN_ENUM_TOKENS)
         handle = struct.unpack_from("<I", begin, 6)[0]
 
-        reply = self.handler.build_read_enum_results_reply_payload(
+        reply = self.handler.read_enum_results_reply(
             b"\x03" + struct.pack("<I", handle) + b"\x83\x83"
         )
 
@@ -1289,16 +1289,14 @@ class TestSASRVMasterListEnum(unittest.TestCase):
         self.assertEqual(status, 0)
 
     def test_unknown_list_kind_is_refused(self):
-        reply = self.handler.build_begin_enum_reply_payload(
+        reply = self.handler.begin_enum_reply(
             b"\x03" + struct.pack("<I", 7) + b"\x03\x00\x00\x00\x00\x01\x00\x83\x83"
         )
 
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], SA_E_BAD_LIST_KIND)
 
     def test_unknown_handle_is_refused(self):
-        reply = self.handler.build_read_enum_results_reply_payload(
-            b"\x03" + struct.pack("<I", 999) + b"\x83\x83"
-        )
+        reply = self.handler.read_enum_results_reply(b"\x03" + struct.pack("<I", 999) + b"\x83\x83")
 
         self.assertEqual(struct.unpack_from("<I", reply, 6)[0], SA_E_BAD_LIST_KIND)
 
@@ -1308,12 +1306,10 @@ class TestSASRVMasterListEnum(unittest.TestCase):
         The record layout is pinned by the consumer, SACLIENT 0x7F343973:
         `[u32 token_id][ASCIIZ name]`, stride 4 + strlen + 1.
         """
-        begin = self.handler.build_begin_enum_reply_payload(self.BEGIN_ENUM_TOKENS)
+        begin = self.handler.begin_enum_reply(self.BEGIN_ENUM_TOKENS)
         self.assertEqual(struct.unpack_from("<I", begin, 6)[0], 1)
 
-        reply = self.handler.build_get_list_page_reply_payload(
-            bytes.fromhex("030100000003000000000204008385")
-        )
+        reply = self.handler.get_list_page_reply(bytes.fromhex("030100000003000000000204008385"))
 
         self.assertEqual(reply[0], 0x83)
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0)
@@ -1335,29 +1331,23 @@ class TestSASRVMasterListEnum(unittest.TestCase):
         page 0; an index past the end resolves to an empty page instead of
         reusing the handle as an offset.
         """
-        self.handler.build_begin_enum_reply_payload(self.BEGIN_ENUM_TOKENS)
+        self.handler.begin_enum_reply(self.BEGIN_ENUM_TOKENS)
 
-        in_page = self.handler.build_get_list_page_reply_payload(
-            self._list_page_request(handle=1, index=2)
-        )
-        past_end = self.handler.build_get_list_page_reply_payload(
-            self._list_page_request(handle=1, index=40)
-        )
+        in_page = self.handler.get_list_page_reply(self._list_page_request(handle=1, index=2))
+        past_end = self.handler.get_list_page_reply(self._list_page_request(handle=1, index=40))
 
         self.assertGreater(len(in_page), 7)
         self.assertEqual(len(past_end), 7)
 
     def test_end_enum_releases_the_handle(self):
-        begin = self.handler.build_begin_enum_reply_payload(self.BEGIN_ENUM_TOKENS)
+        begin = self.handler.begin_enum_reply(self.BEGIN_ENUM_TOKENS)
         handle = struct.unpack_from("<I", begin, 6)[0]
 
-        reply = self.handler.build_end_enum_reply_payload(
-            b"\x03" + struct.pack("<I", handle) + b"\x83"
-        )
+        reply = self.handler.end_enum_reply(b"\x03" + struct.pack("<I", handle) + b"\x83")
 
         self.assertEqual(reply, b"\x83\x00\x00\x00\x00" + bytes([TAG_END_STATIC]))
         # A released handle no longer answers a row count.
-        after = self.handler.build_read_enum_results_reply_payload(
+        after = self.handler.read_enum_results_reply(
             b"\x03" + struct.pack("<I", handle) + b"\x83\x83"
         )
         self.assertEqual(struct.unpack_from("<I", after, 6)[0], SA_E_BAD_LIST_KIND)
@@ -1464,7 +1454,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="q",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         # Should start with two 0x83 dwords
         self.assertEqual(payload[0], 0x83)
         status = struct.unpack("<I", payload[1:5])[0]
@@ -1484,7 +1474,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"Categories (US)", payload)
         self.assertIn(b"Categorias (BR)", payload)
 
@@ -1494,14 +1484,10 @@ class TestDIRSRVReply(unittest.TestCase):
         # `OkToGetChildren` sends flags=0 and must keep getting children alone.
         prop_group = "g\x00a"
         plain = _walk_get_children_records(
-            build_get_children_reply_payload(
-                DirsrvRequest(node_ids=["1:16"], prop_group=prop_group)
-            )
+            get_children_reply(DirsrvRequest(node_ids=["1:16"], prop_group=prop_group))
         )
         with_self = _walk_get_children_records(
-            build_get_children_reply_payload(
-                DirsrvRequest(node_ids=["1:16"], prop_group=prop_group, flags=1)
-            )
+            get_children_reply(DirsrvRequest(node_ids=["1:16"], prop_group=prop_group, flags=1))
         )
 
         self.assertEqual(len(with_self), len(plain) + 1)
@@ -1518,7 +1504,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e\x00x",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request, RIGHTS_AUTHORING)
+        payload = get_children_reply(request, RIGHTS_AUTHORING)
         records = _walk_get_children_records(payload)
 
         self.assertGreater(len(records), 0)
@@ -1535,7 +1521,7 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
 
-        [record] = _walk_get_children_records(build_get_properties_reply_payload(request))
+        [record] = _walk_get_children_records(get_properties_reply(request))
 
         self.assertEqual(record["np"], struct.pack("<I", 1))
         self.assertEqual(record["nc"], struct.pack("<I", 13))
@@ -1551,7 +1537,7 @@ class TestDIRSRVReply(unittest.TestCase):
             recv_descriptors=[0x83, 0x83, 0x85],
         )
 
-        [record] = _walk_get_children_records(build_get_properties_reply_payload(request))
+        [record] = _walk_get_children_records(get_properties_reply(request))
 
         self.assertEqual(record["np"], struct.pack("<I", 2))
         self.assertEqual(record["nc"], struct.pack("<I", 0))
@@ -1570,7 +1556,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         self.assertIn(b"Categories (US)", payload)
         # First child A&E must NOT appear — that was the corruption signal.
         self.assertNotIn(b"Arts and Entertainment", payload)
@@ -1593,7 +1579,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         self.assertIn(b"Worldwide Categories", payload)
 
     def test_special_msn_today_node_returns_title(self):
@@ -1605,7 +1591,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         self.assertIn(b"MSN Today", payload)
 
     def test_explicit_leaf_children_do_not_fall_back_to_unknown_sentinel(self):
@@ -1617,7 +1603,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
     def test_special_msn_today_leaf_children_emit_self_nav_record(self):
@@ -1629,7 +1615,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(struct.pack("<II", 4, 0), payload)
         self.assertIn(b"MSN Today", payload)
         # 4:0 is a leaf: b=0x01 (LEAF), so HOMEBASE click goes through
@@ -1668,7 +1654,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(struct.pack("<II", 1, 0x10), payload)  # Categories (US) 'a'
         self.assertIn(struct.pack("<II", 1, 0x13), payload)  # Categorias (BR) 'a'
         self.assertIn(b"Categories (US)", payload)
@@ -1692,7 +1678,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(struct.pack("<II", 1, 0x11), payload)  # Member Assistance (US)
         self.assertIn(struct.pack("<II", 1, 0x14), payload)  # Assistencia (BR)
         self.assertIn(b"Member Assistance (US)", payload)
@@ -1709,7 +1695,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(struct.pack("<II", 1, 0x10), payload)
         self.assertIn(b"Categories (US)", payload)
         self.assertNotIn(struct.pack("<II", 4, 0), payload)
@@ -1725,7 +1711,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(struct.pack("<II", 1, 0x11), payload)
         self.assertIn(b"Member Assistance (US)", payload)
 
@@ -1743,7 +1729,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 prop_group="a\x00e",
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
-            payload = build_get_children_reply_payload(request)
+            payload = get_children_reply(request)
             self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
     def test_startup_browse_walk_for_hubs_omits_menu_aliases(self):
@@ -1761,7 +1747,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
-            payload = build_get_children_reply_payload(request)
+            payload = get_children_reply(request)
             self.assertNotIn(struct.pack("<II", 4, 0), payload)
             self.assertNotIn(struct.pack("<II", 3, 1), payload)
             # The hub's own localized wrapper — the GetLocalizedNode target
@@ -1779,7 +1765,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         self.assertIn(b"Worldwide Member Assistance", payload)
 
     def test_worldwide_member_assistance_children_return_locale_wrappers(self):
@@ -1791,7 +1777,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"Member Assistance (US)", payload)
         self.assertIn(b"Assistencia ao Associado (BR)", payload)
 
@@ -1807,7 +1793,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"The MSN Member Lobby", payload)
         self.assertIn(b"MSN Beta Center", payload)
         self.assertIn(b"MSN Today", payload)
@@ -1823,7 +1809,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00b\x00e\x00tp",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"Arts and Entertainment", payload)
         self.assertIn(b"The Microsoft Network Beta", payload)
         # "Folder"-tagged entries still surface as distinct listview rows.
@@ -1838,7 +1824,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"Books and Writing", payload)
         self.assertIn(b"Coming Attractions", payload)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
@@ -1856,7 +1842,7 @@ class TestDIRSRVReply(unittest.TestCase):
             locale_lcid=0x0416,
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"Assistencia ao Associado (BR)", payload)
         self.assertNotIn(b"Member Assistance (US)", payload)
 
@@ -1870,7 +1856,7 @@ class TestDIRSRVReply(unittest.TestCase):
             locale_raw=b"\x00\x00\x00\x00",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"Member Assistance (US)", payload)
         self.assertIn(b"Assistencia ao Associado (BR)", payload)
 
@@ -1890,7 +1876,7 @@ class TestDIRSRVReply(unittest.TestCase):
             locale_lcid=0x0416,
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         records = _walk_get_children_records(payload)
         self.assertGreater(len(records), 0)
         self.assertEqual(records[0].get("e"), "Categorias (BR)")
@@ -1981,7 +1967,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 prop_group="a\x00e",
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
-            payload = build_get_children_reply_payload(request)
+            payload = get_children_reply(request)
             records = _walk_get_children_records(payload)
             self.assertEqual(
                 len(records),
@@ -2014,7 +2000,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         # Containers emit type_str="Directory" via _container_content default.
         # ASCII string bodies use the shared flag-byte wire body: \x01 + asciiz.
         self.assertIn(b"\x0atp\x00\x01Directory\x00", payload)
@@ -2062,7 +2048,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00c\x00h\x00b\x00e\x00g\x00x\x00mf\x00wv\x00tp\x00p\x00w\x00l\x00i",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"\x03p\x00" + struct.pack("<I", 5 * 1024 * 1024), payload)
         # tp carries the MSN Today fixture's type_str "News & Features".
         self.assertIn(b"\x0atp\x00\x01News & Features\x00", payload)
@@ -2088,7 +2074,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="e\x00j\x00k\x00ca\x00tp\x00z\x00o\x00g",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_children_reply_payload(request)
+        payload = get_children_reply(request)
         self.assertIn(b"\x0ae\x00\x01MSN Today\x00", payload)
         self.assertIn(b"\x0bj\x00\x01Your daily window to MSN.\x00", payload)
         self.assertIn(b"\x0bk\x00\x01today\x00", payload)
@@ -2111,7 +2097,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="e\x00tp\x00w\x00j",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         self.assertIn(b"\x0ae\x00\x01MSN Today\x00", payload)
         self.assertIn(b"\x0btp\x00\x01News & Features\x00", payload)
         self.assertIn(b"\x0bw\x00\x01April 15, 2026\x00", payload)
@@ -2132,7 +2118,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="q",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = build_get_properties_reply_payload(request)
+        payload = get_properties_reply(request)
         # DSNED stores q as SVCPROP type 0x10, whose size invariant is
         # `length == count * 4 + 4`. One LCID therefore starts with count 1.
         self.assertIn(b"\x04q\x00" + struct.pack("<II", 1, 1033), payload)
@@ -2155,7 +2141,7 @@ class TestDIRSRVReply(unittest.TestCase):
                 prop_group="q",
                 recv_descriptors=[0x83, 0x83, 0x85],
             )
-            payload = build_get_children_reply_payload(request)
+            payload = get_children_reply(request)
             for lcid in SUPPORTED_BROWSE_LCIDS:
                 self.assertIn(
                     b"\x04q\x00" + struct.pack("<II", 1, lcid),
@@ -2172,7 +2158,7 @@ class TestDIRSRVReply(unittest.TestCase):
             prop_group="a\x00e",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        addrbar_payload = build_get_children_reply_payload(addrbar_request)
+        addrbar_payload = get_children_reply(addrbar_request)
         # Regular GetChildren on MSN root returns the localized wrappers
         # (the address-bar entries); the language-list short-circuit is
         # scoped to propList=["q"] only, so this reply carries nav data.
@@ -2195,14 +2181,14 @@ class TestDIRSRVGetParents(unittest.TestCase):
         self.assertEqual(request.dword_0, 0)
         self.assertEqual(request.dword_1, 2)
 
-        records = _walk_get_children_records(build_get_parents_reply_payload(request))
+        records = _walk_get_children_records(get_parents_reply(request))
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["c"], struct.pack("<I", 1))
         self.assertEqual(records[0]["a"], struct.pack("<II", 1, 0x11))
 
     def test_handler_routes_observed_tree_class_and_selector(self):
-        handler = DIRSRVHandler(pipe_idx=5, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=5, svc_name="DIRSRV", session=Session())
 
         packets = handler.handle_request(
             msg_class=DIRSRV_CLASS_TREE,
@@ -2218,7 +2204,7 @@ class TestDIRSRVGetParents(unittest.TestCase):
         self.assertTrue(parsed.crc_ok)
         self.assertEqual(
             parsed.payload[8:],
-            build_get_parents_reply_payload(decode_dirsrv_request(self.REQUEST)),
+            get_parents_reply(decode_dirsrv_request(self.REQUEST)),
         )
 
 
@@ -2229,7 +2215,7 @@ class TestDIRSRVUnhandledSelector(unittest.TestCase):
     """
 
     def test_unknown_selector_warns_and_returns_none(self):
-        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         # Selector 0x07 has no TREENVCL method and must surface as an
         # `unhandled` warning, not a self-record reply.
         payload = b""
@@ -2260,7 +2246,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
 
         ids = shabby_mod.enum_pickable_shabby_ids()
         self.assertEqual(
-            build_enum_shn_reply_payload(self.REQUEST),
+            enum_shn_reply(self.REQUEST),
             b"\x83\x00\x00\x00\x00"
             + b"\x82"
             + struct.pack("<H", len(ids))
@@ -2278,7 +2264,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         nothing to wake it and the Change Icon click hangs.
         """
         # 0x83 + dword, then 0x82 + word = 8 bytes of static section.
-        payload = build_enum_shn_reply_payload(self.REQUEST)
+        payload = enum_shn_reply(self.REQUEST)
         self.assertEqual(payload[8], TAG_END_STATIC)
         self.assertEqual(payload[9], TAG_DYNAMIC_COMPLETE_SIGNAL)
         self.assertNotIn(TAG_DYNAMIC_STREAM_END, payload[8:10])
@@ -2293,7 +2279,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         from server.services import shabby as shabby_mod
 
         ids = shabby_mod.enum_pickable_shabby_ids()
-        body = build_enum_shn_reply_payload(self.REQUEST)[10:]
+        body = enum_shn_reply(self.REQUEST)[10:]
         self.assertEqual(len(body), 4 * len(ids))
         for index in range(len(ids)):
             self.assertLessEqual(index * 4, len(body))
@@ -2328,7 +2314,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         )
 
     def test_unknown_key_enumerates_empty_without_hanging(self):
-        payload = build_enum_shn_reply_payload(b"\x01\x07\x83\x82\x85")
+        payload = enum_shn_reply(b"\x01\x07\x83\x82\x85")
         self.assertEqual(
             payload,
             b"\x83\x00\x00\x00\x00\x82\x00\x00"
@@ -2336,7 +2322,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         )
 
     def test_selector_dispatches_to_a_reply_packet(self):
-        handler = DIRSRVHandler(pipe_idx=4, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=4, svc_name="DIRSRV", session=Session())
         packets = handler.handle_request(
             msg_class=0x03,
             selector=0x05,
@@ -2349,7 +2335,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         self.assertIsNotNone(packets)
         parsed = parse_packet(packets[0][:-1])
         self.assertTrue(parsed.crc_ok)
-        self.assertEqual(parsed.payload[8:], build_enum_shn_reply_payload(self.REQUEST))
+        self.assertEqual(parsed.payload[8:], enum_shn_reply(self.REQUEST))
 
     def test_key_constant_matches_the_observed_request(self):
         self.assertEqual(self.REQUEST[1], ENUM_SHN_KEY_ICONS)
@@ -2388,7 +2374,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         blob = shabby_mod.load_shabby_bytes(0x059A)
         self.assertEqual(len(blob), 1078)
         expected_id = max(shabby_mod.PICKABLE_ICONS) + 1
-        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+        handler = DirsrvHandler(4, "DIRSRV", signed_in(ADMIN))
 
         self.assertIsNone(handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0))
         self.assertIsNone(
@@ -2428,7 +2414,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
             + struct.pack("<I", len(blob))
             + b"\x83\x83\x83"
         )
-        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+        handler = DirsrvHandler(4, "DIRSRV", signed_in(ADMIN))
 
         packets = handler.handle_request(0x04, 0x07, 9, request, 0, 0)
 
@@ -2437,7 +2423,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         self.assertEqual(shabby_mod.load_shabby_bytes(shabby_id), blob)
 
     def test_non_authoring_account_is_refused_before_upload_state_is_created(self):
-        handler = DIRSRVHandler(4, "DIRSRV", signed_in(SUBSCRIBER))
+        handler = DirsrvHandler(4, "DIRSRV", signed_in(SUBSCRIBER))
 
         packets = handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
 
@@ -2449,7 +2435,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         from server.services import shabby as shabby_mod
 
         before = shabby_mod.enum_pickable_shabby_ids()
-        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+        handler = DirsrvHandler(4, "DIRSRV", signed_in(ADMIN))
         handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
 
         packets = handler.handle_request(MPC_CLASS_CONTINUATION_LAST, 1, 0, b"short", 0, 0)
@@ -2472,7 +2458,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
             + struct.pack("<I", len(blob))
             + b"\x83\x83\x83"
         )
-        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+        handler = DirsrvHandler(4, "DIRSRV", signed_in(ADMIN))
 
         self.assertIsNone(handler.handle_request(0x04, 0x07, 7, head, 0, 0))
         self.assertIsNone(
@@ -2495,12 +2481,12 @@ class TestDIRSRVAddShabby(unittest.TestCase):
 class TestDIRSRVGetTicket(unittest.TestCase):
     def test_minimal_ticket_reply_shape(self):
         self.assertEqual(
-            build_get_ticket_reply_payload(signed_in(ADMIN)),
+            get_ticket_reply(signed_in(ADMIN)),
             b"\x83\x00\x00\x00\x00\x87\x86\x02\x00",
         )
 
     def test_edit_channel_selector_returns_ticket_packet(self):
-        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         packets = handler.handle_request(
             msg_class=0x04,
             selector=0x0C,
@@ -2514,18 +2500,18 @@ class TestDIRSRVGetTicket(unittest.TestCase):
         parsed = parse_packet(packets[0][:-1])
         self.assertTrue(parsed.crc_ok)
         # header + size prefix + routing + class + selector + one-byte VLI
-        self.assertEqual(parsed.payload[8:], build_get_ticket_reply_payload(handler.session))
+        self.assertEqual(parsed.payload[8:], get_ticket_reply(handler.session))
 
 
 class TestDIRSRVGetDataSets(unittest.TestCase):
     def test_empty_dataset_reply_contains_complete_property_record(self):
         self.assertEqual(
-            build_get_datasets_reply_payload(),
+            get_datasets_reply(),
             b"\x83\x00\x00\x00\x00\x87\x86\x06\x00\x00\x00\x00\x00",
         )
 
     def test_edit_channel_selector_returns_dataset_packet(self):
-        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         packets = handler.handle_request(
             msg_class=0x04,
             selector=0x0B,
@@ -2539,7 +2525,7 @@ class TestDIRSRVGetDataSets(unittest.TestCase):
         parsed = parse_packet(packets[0][:-1])
         self.assertTrue(parsed.crc_ok)
         # header + size prefix + routing + class + selector + one-byte VLI
-        self.assertEqual(parsed.payload[8:], build_get_datasets_reply_payload())
+        self.assertEqual(parsed.payload[8:], get_datasets_reply())
 
 
 class _AddNodeContentStore:
@@ -2604,7 +2590,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         self.assertEqual(len(request), 108)
         store = _AddNodeContentStore()
 
-        reply = build_add_node_reply_payload(request, signed_in(ADMIN), store)
+        reply = add_node_reply(request, signed_in(ADMIN), store)
 
         new_mnid = struct.pack("<II", 1, 17)
         self.assertEqual(
@@ -2647,7 +2633,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
                 + self._tagged_var(properties)
                 + b"\x83\x83\x84"
             )
-            reply = build_add_node_reply_payload(request, signed_in(ADMIN), store)
+            reply = add_node_reply(request, signed_in(ADMIN), store)
             return f"{struct.unpack('<I', reply[-8:-4])[0]}:{struct.unpack('<I', reply[-4:])[0]}"
 
         encarta = create(11, "Microsoft Encarta Viewer", "New Microsoft Encarta Viewer")
@@ -2681,7 +2667,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         built_in = next(node for node in default_seed().directory_nodes if node.app_id == 4)
         store.add_child("1:16", built_in)
 
-        reply = build_add_node_reply_payload(request, signed_in(ADMIN), store)
+        reply = add_node_reply(request, signed_in(ADMIN), store)
 
         new_mnid = reply[-8:]
         instance_id, field_8 = struct.unpack("<II", new_mnid)
@@ -2692,7 +2678,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
 
     def test_rejects_the_read_side_receive_shape(self):
         store = _AddNodeContentStore()
-        reply = build_add_node_reply_payload(b"\x83\x85", signed_in(ADMIN), store)
+        reply = add_node_reply(b"\x83\x85", signed_in(ADMIN), store)
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
         self.assertEqual(store.children["1:16"], [])
 
@@ -2715,7 +2701,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         )
         store = _AddNodeContentStore()
 
-        build_add_node_reply_payload(request, signed_in(ADMIN), store)
+        add_node_reply(request, signed_in(ADMIN), store)
 
         node = store.get_node("1:17")
         self.assertTrue(node.delegate)
@@ -2727,9 +2713,9 @@ class TestDIRSRVAddNode(unittest.TestCase):
         self.assertEqual(properties["l"], inner_mnid)
 
     def test_edit_class_selector_two_does_not_fall_through_to_get_children(self):
-        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         with patch(
-            "server.services.dirsrv.build_add_node_reply_payload",
+            "server.services.dirsrv.add_node_reply",
             return_value=b"\x83\x00\x00\x00\x00",
         ) as build_reply:
             packets = handler.handle_request(
@@ -2820,7 +2806,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             ]
         )
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(reply, self.OK)
         content = store.get_node(store.NODE_ID).content
@@ -2845,7 +2831,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             ]
         )
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(reply, self.OK)
         content = store.get_node(store.NODE_ID).content
@@ -2862,7 +2848,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         selected_id = 0x059B
         request = self._request([(0x0F, "h", struct.pack("<I", selected_id))])
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(reply, self.OK)
         node = store.get_node(store.NODE_ID)
@@ -2890,7 +2876,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         self.assertEqual(len(site), 0x54)
         request = self._request([(0x0E, "bbix", struct.pack("<I", len(site)) + site)])
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(reply, self.OK)
         node = store.get_node(store.NODE_ID)
@@ -2929,7 +2915,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             ]
         )
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(reply, self.OK)
         node = store.get_node(store.NODE_ID)
@@ -2951,7 +2937,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         store = _SetPropertiesContentStore()
         before = store.get_node(store.NODE_ID)
 
-        build_set_properties_reply_payload(
+        set_properties_reply(
             self._request([(0x0A, "k", self._ascii("artsgo"))]), signed_in(ADMIN), store
         )
 
@@ -2973,7 +2959,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         store = _SetPropertiesContentStore()
         request = self._request([(0x00, "k", b"")])
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(reply, self.OK)
         self.assertEqual(store.get_node(store.NODE_ID).content.go_word, "")
@@ -2987,7 +2973,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             ]
         )
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(reply, self.OK)
         self.assertEqual(store.get_node(store.NODE_ID).content.category, "Entertainment")
@@ -3002,7 +2988,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             + b"\x83\x83\x84"
         )
 
-        reply = build_set_properties_reply_payload(request, signed_in(ADMIN), store)
+        reply = set_properties_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
         self.assertIs(store.get_node(store.NODE_ID), before)
@@ -3010,7 +2996,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
     def test_rejects_an_unknown_node(self):
         store = _SetPropertiesContentStore()
 
-        reply = build_set_properties_reply_payload(
+        reply = set_properties_reply(
             self._request([(0x0A, "k", self._ascii("nope"))], node_id="9:99"),
             signed_in(ADMIN),
             store,
@@ -3019,9 +3005,9 @@ class TestDIRSRVSetProperties(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
 
     def test_edit_class_selector_four_does_not_fall_through_to_get_shabby(self):
-        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         with patch(
-            "server.services.dirsrv.build_set_properties_reply_payload",
+            "server.services.dirsrv.set_properties_reply",
             return_value=b"\x83\x00\x00\x00\x00",
         ) as build_reply:
             packets = handler.handle_request(
@@ -3083,10 +3069,10 @@ class TestDIRSRVDeleteNode(unittest.TestCase):
         )
 
     def test_edit_class_selector_three_dispatches_to_delete(self):
-        handler = DIRSRVHandler(4, "DIRSRV", signed_in(ADMIN))
+        handler = DirsrvHandler(4, "DIRSRV", signed_in(ADMIN))
         request = self._request("1:271")
         with patch(
-            "server.services.dirsrv.build_delete_node_reply_payload",
+            "server.services.dirsrv.delete_node_reply",
             return_value=b"\x87",
         ) as delete:
             packets = handler.handle_request(0x04, 0x03, 3, request, 5, 5)
@@ -3098,7 +3084,7 @@ class TestDIRSRVDeleteNode(unittest.TestCase):
         store = _DeleteNodeContentStore()
         doomed = store.children[store.BOARD_ID][0]
 
-        reply = build_delete_node_reply_payload(self._request(doomed), signed_in(ADMIN), store)
+        reply = delete_node_reply(self._request(doomed), signed_in(ADMIN), store)
 
         self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
         self.assertNotIn(doomed, store.nodes)
@@ -3108,7 +3094,7 @@ class TestDIRSRVDeleteNode(unittest.TestCase):
         store = _DeleteNodeContentStore()
         before = list(store.children[store.BOARD_ID])
 
-        reply = build_delete_node_reply_payload(self._request("9000:1"), signed_in(ADMIN), store)
+        reply = delete_node_reply(self._request("9000:1"), signed_in(ADMIN), store)
 
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
         self.assertEqual(store.children[store.BOARD_ID], before)
@@ -3120,7 +3106,7 @@ class TestDIRSRVDeleteNode(unittest.TestCase):
         doomed = store.children[store.BOARD_ID][0]
         request = self._request(doomed)[:-2] + b"\x83\x83\x84"
 
-        reply = build_delete_node_reply_payload(request, signed_in(ADMIN), store)
+        reply = delete_node_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
         self.assertIn(doomed, store.nodes)
@@ -3135,7 +3121,7 @@ class TestDIRSRVDeleteNode(unittest.TestCase):
             + b"\x83\x83"
         )
 
-        reply = build_delete_node_reply_payload(request, signed_in(ADMIN), store)
+        reply = delete_node_reply(request, signed_in(ADMIN), store)
 
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
         self.assertIn(doomed, store.nodes)
@@ -3162,7 +3148,7 @@ class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
 
     def test_known_go_word_returns_matching_deid(self):
         # MSN Today fixture: node_id "4:0", go_word "today" (case fold).
-        payload = build_get_deid_from_go_word_reply_payload(self._build_request("Today"))
+        payload = get_deid_from_go_word_reply(self._build_request("Today"))
         expected = (
             b"\x83\x00\x00\x00\x00"  # status=0
             + bytes([TAG_END_STATIC])  # 0x87
@@ -3172,7 +3158,7 @@ class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
         self.assertEqual(payload, expected)
 
     def test_unknown_go_word_returns_zero_deid_with_error(self):
-        payload = build_get_deid_from_go_word_reply_payload(self._build_request("nonexistent"))
+        payload = get_deid_from_go_word_reply(self._build_request("nonexistent"))
         expected = (
             b"\x83"
             + struct.pack("<I", DS_E_NOT_FOUND)
@@ -3183,7 +3169,7 @@ class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
         self.assertEqual(payload, expected)
 
     def test_dispatch_via_handler(self):
-        handler = DIRSRVHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
+        handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         result = handler.handle_request(
             msg_class=0x01,
             selector=0x03,
@@ -3208,7 +3194,7 @@ class TestOLREGSRVServiceMap(unittest.TestCase):
             self.assertEqual(record[16], selector)
 
     def test_produces_packet(self):
-        handler = OLREGSRVHandler(4, "OLREGSRV", Session())
+        handler = OlregsrvHandler(4, "OLREGSRV", Session())
         pkts = handler.build_discovery_packet(6, 6)
         self.assertIsInstance(pkts, list)
         parsed = parse_packet(pkts[0][:-1])
@@ -3219,7 +3205,7 @@ class TestOLREGSRVServiceMap(unittest.TestCase):
 class TestOLREGSRVReply(unittest.TestCase):
     def test_class01_acked_with_hresult_zero(self):
         """The class=0x01 head of the commit gets an HRESULT=0 reply body."""
-        handler = OLREGSRVHandler(4, "OLREGSRV", Session())
+        handler = OlregsrvHandler(4, "OLREGSRV", Session())
         pkts = handler.handle_request(0x01, 0x01, 0, b"", 5, 5)
         self.assertIsNotNone(pkts)
         self.assertEqual(len(pkts), 1)
@@ -3230,14 +3216,14 @@ class TestOLREGSRVReply(unittest.TestCase):
 
     def test_one_way_records_get_no_reply(self):
         """class=0xe6/0xe7 continuation frames are fire-and-forget."""
-        handler = OLREGSRVHandler(4, "OLREGSRV", Session())
+        handler = OlregsrvHandler(4, "OLREGSRV", Session())
         self.assertIsNone(handler.handle_request(0xE7, 0x01, 0, b"", 5, 5))
         self.assertIsNone(handler.handle_request(0xE6, 0x02, 0, b"", 5, 5))
         self.assertIsNone(handler.handle_request(0xE7, 0x02, 0, b"", 5, 5))
 
     def test_sel02_probe_left_unanswered(self):
         """sel=0x02 pre-check must stay silent — any reply aborts signup."""
-        handler = OLREGSRVHandler(4, "OLREGSRV", Session())
+        handler = OlregsrvHandler(4, "OLREGSRV", Session())
         self.assertIsNone(handler.handle_request(0x01, 0x02, 0, b"\x83", 5, 5))
 
 
@@ -3249,7 +3235,7 @@ class TestFTMHandler(unittest.TestCase):
             " 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
             " 00 00 00 00 00 00 00 00 00 00 00 00"
         )
-        handler = FTMHandler(1, "FTM", Session())
+        handler = FtmHandler(1, "FTM", Session())
         pkts = handler.handle_request(0x01, 0x00, 0, payload, 5, 5)
         self.assertIsNotNone(pkts)
         self.assertEqual(len(pkts), 1)
@@ -3257,14 +3243,14 @@ class TestFTMHandler(unittest.TestCase):
         self.assertTrue(parsed.crc_ok)
 
     def test_bill_client_reply_returns_packet(self):
-        handler = FTMHandler(1, "FTM", Session())
+        handler = FtmHandler(1, "FTM", Session())
         pkts = handler.handle_request(0x01, 0x03, 0, b"", 5, 5)
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
 
     def test_unknown_selector_returns_none(self):
-        handler = FTMHandler(1, "FTM", Session())
+        handler = FtmHandler(1, "FTM", Session())
         self.assertIsNone(handler.handle_request(0x01, 0x02, 0, b"", 5, 5))
 
     def test_resolve_ftm_target_returns_name_for_expected_var_layout(self):
@@ -3369,7 +3355,7 @@ class TestFTMSignupLogsrvMapping(unittest.TestCase):
         self.assertEqual(content, b"")
 
     def test_request_download_reply_encodes_mapped_filename(self):
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
         pkts = handler.handle_request(
             0x01,
             0x00,
@@ -3384,7 +3370,7 @@ class TestFTMSignupLogsrvMapping(unittest.TestCase):
         self.assertIn(b"prodinfo.rtf\x00", joined)
 
     def test_bill_client_reply_emits_rtf_for_counter_1(self):
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
         pkts = handler.handle_request(
             0x01,
             0x03,
@@ -3436,7 +3422,7 @@ class TestFTMBbsAttachment(unittest.TestCase):
         self.assertEqual(reply[0x28:], b"\x00" * 32)
 
     def test_bill_client_carries_the_mos2_container(self):
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
         pkts = handler.handle_request(
             0x01,
             0x03,
@@ -3448,7 +3434,7 @@ class TestFTMBbsAttachment(unittest.TestCase):
         self.assertIn(b"MOS2", b"".join(pkts))
 
     def test_request_download_does_not_increment_the_download_count(self):
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
         handler.handle_request(
             0x01,
             0x00,
@@ -3461,7 +3447,7 @@ class TestFTMBbsAttachment(unittest.TestCase):
         self.assertEqual(attachment.content.bbs.download_count, 0)
 
     def test_bill_client_increments_the_download_count(self):
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
         for expected in (1, 2):
             handler.handle_request(
                 0x01,
@@ -3545,7 +3531,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         self.assertEqual(content, b"")
 
     def test_request_download_clears_fast_path_and_keeps_the_local_name(self):
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
         pkts = handler.handle_request(
             0x01, 0x00, 1, _make_dirsrv_file_request(self.NODE_ID), 10, 10
         )
@@ -3566,7 +3552,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         self.assertIsNotNone(pkts)
 
     def test_start_download_streams_the_payload_on_the_iterator(self):
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
 
         pkts = handler.handle_request(
             0x01, 0x01, 2, _make_dirsrv_file_request(self.NODE_ID), 10, 10
@@ -3650,7 +3636,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         self.assertEqual(content, fixtures.DNR_TEST_PAYLOAD)
         self.assertIsNone(mos2_original_size(content))
 
-        handler = FTMHandler(5, "FTM", Session())
+        handler = FtmHandler(5, "FTM", Session())
         pkts = handler.handle_request(
             0x01,
             0x00,
@@ -3855,7 +3841,7 @@ class TestServicePacketFragmentation(unittest.TestCase):
 
     def test_billing_reply_fragments(self):
         """The actual billing handler produces correctly fragmented packets."""
-        handler = LOGSRVHandler(8, "LOGSRV", Session())
+        handler = LogsrvHandler(8, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, 0x0A, 0, b"", 10, 10)
         self.assertEqual(len(pkts), 2)
         for pkt in pkts:
@@ -3899,7 +3885,7 @@ class TestLOGSRVCommitTagType(unittest.TestCase):
     check rejects 0x83 — leaving the OK button stuck."""
 
     def _commit_reply(self, selector):
-        handler = LOGSRVHandler(3, "LOGSRV", Session())
+        handler = LogsrvHandler(3, "LOGSRV", Session())
         pkts = handler.handle_request(0x06, selector, 0, b"", 5, 5)
         parsed = parse_packet(pkts[0][:-1])
         # Skip pipe header(1) + length prefix(2) + routing prefix(2)
@@ -4074,13 +4060,13 @@ class TestMEDVIEWServiceMap(unittest.TestCase):
             self.assertEqual(sel, i + 1)
 
     def test_handshake_selector_is_0x1F(self):
-        self.assertEqual(MEDVIEW_ATTACH_SESSION, 0x1F)
+        self.assertEqual(MEDVIEW_SELECTOR_ATTACH_SESSION, 0x1F)
 
     def test_title_open_selector_is_0x01(self):
-        self.assertEqual(MEDVIEW_OPEN_TITLE, 0x01)
+        self.assertEqual(MEDVIEW_SELECTOR_OPEN_TITLE, 0x01)
 
     def test_discovery_payload_size(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkts = handler.build_discovery_packet(3, 3)
         self.assertIsInstance(pkts, list)
         self.assertGreaterEqual(len(pkts), 1)
@@ -4091,10 +4077,10 @@ class TestMEDVIEWServiceMap(unittest.TestCase):
 
 class TestMEDVIEWHandshake(unittest.TestCase):
     def test_handshake_reply_is_nonzero_dword(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # Request: 0x01 0x01 (byte=1), 0x04 with 12 zero bytes, 0x83 recv.
         req_payload = bytes.fromhex("01 01 04 8c 00 00 20 00 06 40 00 00 09 04 00 00 83")
-        pkts = handler.handle_request(0x01, MEDVIEW_ATTACH_SESSION, 0, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_ATTACH_SESSION, 0, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -4110,7 +4096,7 @@ class TestMEDVIEWHandshake(unittest.TestCase):
         self.assertEqual(reply_payload[5], TAG_END_STATIC)
 
     def test_handshake_unknown_selector_returns_none(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkt = handler.handle_request(0x01, 0x99, 0, b"", 5, 5)
         self.assertIsNone(pkt)
 
@@ -4127,10 +4113,10 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
     )
 
     def _decode_reply(self, req_payload):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_OPEN_TITLE,
+            MEDVIEW_SELECTOR_OPEN_TITLE,
             1,
             req_payload,
             5,
@@ -4149,10 +4135,10 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         return reply[31:]
 
     def _open_handler(self, req_payload=None):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_OPEN_TITLE,
+            MEDVIEW_SELECTOR_OPEN_TITLE,
             1,
             req_payload or self._MSN_TODAY_REQ,
             5,
@@ -4240,7 +4226,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         )
         handler.handle_request(
             0x01,
-            MEDVIEW_ATTACH_SESSION,
+            MEDVIEW_SELECTOR_ATTACH_SESSION,
             0,
             request,
             5,
@@ -4248,17 +4234,17 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         )
 
     def test_rtm_attach_keeps_the_existing_reply_byte_for_byte(self):
-        default_handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        default_handler = MedviewHandler(5, "MEDVIEW", Session())
         default_reply = default_handler._handle_open_title(1, self._OPEN)
 
-        rtm_handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        rtm_handler = MedviewHandler(5, "MEDVIEW", Session())
         self._attach(rtm_handler, 12)
         rtm_reply = rtm_handler._handle_open_title(1, self._OPEN)
 
         self.assertEqual(rtm_reply, default_reply)
 
     def test_osr2_attach_selects_eight_dwords_and_osr2_body(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._attach(handler, 92)
         reply = handler._handle_open_title(1, self._OPEN)
 
@@ -4290,7 +4276,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         self.assertIn(b"Employee Handbook Example\x00", title_data)
 
     def test_osr2_cache_hit_omits_only_the_matching_stream(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._attach(handler, 92)
         handler._handle_open_title(1, self._OPEN)
         font_end = 2 + struct.unpack_from("<H", handler.title_body)[0]
@@ -4316,7 +4302,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
     def test_osr2_pipe_mvpfile_opens_while_rtm_rejects_it(self):
         open_mvpfile = b"\x01\x01\x04\x89|MVPFILE\x00\x01\x02\x81\x83"
 
-        osr2 = MEDVIEWHandler(5, "MEDVIEW", Session())
+        osr2 = MedviewHandler(5, "MEDVIEW", Session())
         self._attach(osr2, 92)
         osr2._handle_open_title(1, self._OPEN)
         reply = osr2._handle_open_remote_hfs_file(2, open_mvpfile)
@@ -4327,7 +4313,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         )
         self.assertIn(b"[WINDOWS]\r\n", osr2.baggage_map["mvpfile"])
 
-        rtm = MEDVIEWHandler(5, "MEDVIEW", Session())
+        rtm = MedviewHandler(5, "MEDVIEW", Session())
         self._attach(rtm, 12)
         rtm._handle_open_title(1, self._OPEN)
         self.assertEqual(rtm._handle_open_remote_hfs_file(2, open_mvpfile)[2], 0)
@@ -4335,7 +4321,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
 
 class TestMEDVIEWTitleGetInfo(unittest.TestCase):
     def test_get_info_reply_size_zero(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # Request: 0x01 <title_byte>, 3× 0x03 dword, 0x83 recv.
         req_payload = bytes.fromhex(
             "01 01"
@@ -4344,7 +4330,9 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
             "03 00 00 00 00"  # buffer_ptr=0
             "83"
         )
-        pkts = handler.handle_request(0x01, MEDVIEW_GET_TITLE_INFO_REMOTE, 2, req_payload, 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE, 2, req_payload, 5, 5
+        )
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -4393,10 +4381,10 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
         )
 
     def test_data_edit_get_ticket_does_not_dispatch_as_viewer_cache_miss(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", signed_in(ADMIN))
+        handler = MedviewHandler(5, "MEDVIEW", signed_in(ADMIN))
         pkts = handler.handle_request(
             MEDVIEW_DATA_EDIT_CLASS,
-            MEDVIEW_DATA_EDIT_GET_TICKET,
+            MEDVIEW_SELECTOR_DATA_EDIT_GET_TICKET,
             0,
             b"\x83\x85",
             5,
@@ -4405,14 +4393,14 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
 
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
-        self.assertEqual(reply, build_get_ticket_reply_payload(handler.session))
+        self.assertEqual(reply, get_ticket_reply(handler.session))
         self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x87\x86\x02\x00")
 
     def test_data_edit_add_does_not_dispatch_as_validate_title(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", signed_in(ADMIN))
+        handler = MedviewHandler(5, "MEDVIEW", signed_in(ADMIN))
         pkts = handler.handle_request(
             MEDVIEW_DATA_EDIT_CLASS,
-            MEDVIEW_DATA_EDIT_ADD,
+            MEDVIEW_SELECTOR_DATA_EDIT_ADD,
             1,
             self._add_request(),
             5,
@@ -4424,11 +4412,11 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
         self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
 
     def test_data_edit_delete_does_not_dispatch_as_open_title(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", signed_in(ADMIN))
+        handler = MedviewHandler(5, "MEDVIEW", signed_in(ADMIN))
 
         pkts = handler.handle_request(
             MEDVIEW_DATA_EDIT_CLASS,
-            MEDVIEW_DATA_EDIT_DELETE,
+            MEDVIEW_SELECTOR_DATA_EDIT_DELETE,
             1,
             self._delete_request(),
             5,
@@ -4440,7 +4428,7 @@ class TestMEDVIEWDataEdit(unittest.TestCase):
         self.assertEqual(reply, b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
 
     def test_data_edit_delete_refuses_anonymous_writes(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
 
         reply = handler._handle_data_edit_delete(1, self._delete_request())
 
@@ -4455,7 +4443,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
     def _subscribe(handler, notification_type, request_id):
         return handler.handle_request(
             0x01,
-            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
             request_id,
             bytes([0x01, notification_type, 0x85]),
             5,
@@ -4465,12 +4453,12 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
     def test_async_cache_miss_selectors_bare_ack_when_no_subscription(self):
         # Without a matching subscription the handler ships only the
         # synchronous bare ack — the push has no iterator to ride.
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         for selector in (
-            MEDVIEW_CONVERT_HASH_TO_VA,
-            MEDVIEW_CONVERT_TOPIC_TO_VA,
-            MEDVIEW_FETCH_NEARBY_TOPIC,
+            MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA,
+            MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA,
+            MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC,
         ):
             pkts = handler.handle_request(0x01, selector, 9, req_payload, 5, 5)
             self.assertIsNotNone(pkts, f"selector 0x{selector:02x} returned None")
@@ -4483,13 +4471,13 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             )
 
     def test_unknown_hash_pushes_type3_frame_with_va_zero(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._subscribe(handler, 3, 2)
         key = 0xCAFEBABE
         hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_CONVERT_HASH_TO_VA,
+            MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA,
             9,
             hash_req,
             5,
@@ -4510,7 +4498,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             ("4", 0xA7, 0),
             ("1001", 0xC930, 0x18699),
         ):
-            handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+            handler = MedviewHandler(5, "MEDVIEW", Session())
             token = f":2[{deid}]0".encode("ascii") + b"\x00"
             open_req = (
                 b"\x04"
@@ -4522,7 +4510,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             )
             handler.handle_request(
                 0x01,
-                MEDVIEW_OPEN_TITLE,
+                MEDVIEW_SELECTOR_OPEN_TITLE,
                 1,
                 open_req,
                 5,
@@ -4532,7 +4520,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             hash_req = b"\x01\x01\x03\x01\x00\x00\x00"
             pkts = handler.handle_request(
                 0x01,
-                MEDVIEW_CONVERT_HASH_TO_VA,
+                MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA,
                 9,
                 hash_req,
                 5,
@@ -4545,7 +4533,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             )
 
     def test_m14_link_hash_resolves_through_context_btree(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         token = b":2[1001]0\x00"
         open_req = (
             b"\x04"
@@ -4557,7 +4545,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         )
         handler.handle_request(
             0x01,
-            MEDVIEW_OPEN_TITLE,
+            MEDVIEW_SELECTOR_OPEN_TITLE,
             1,
             open_req,
             5,
@@ -4568,7 +4556,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_CONVERT_HASH_TO_VA,
+            MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA,
             9,
             hash_req,
             5,
@@ -4581,13 +4569,13 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         )
 
     def test_convert_topic_pushes_type3_kind_0(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._subscribe(handler, 3, 2)
         key = 0x00000005
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_CONVERT_TOPIC_TO_VA,
+            MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA,
             10,
             req,
             5,
@@ -4604,13 +4592,13 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         # that's the record HfcCache_InsertOrdered writes into HfcNear's
         # per-title cache at title+4, unblocking the 30-s retry loop.
         # No loaded title with captions → empty case-1 ("skip empty row").
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._subscribe(handler, 0, 3)
         key = 0x12345678
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_FETCH_NEARBY_TOPIC,
+            MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC,
             11,
             req,
             5,
@@ -4624,21 +4612,21 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         self.assertEqual(push[1 + 0x2A], 0x01)
 
     def test_va_resolve_pushes_native_m14_control_stream(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         open_req = (
             b"\x04\x87:2[4]0\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
-        handler.handle_request(0x01, MEDVIEW_OPEN_TITLE, 1, open_req, 5, 5)
+        handler.handle_request(0x01, MEDVIEW_SELECTOR_OPEN_TITLE, 1, open_req, 5, 5)
         self.assertIsNotNone(handler.loaded_m14)
         self._subscribe(handler, 0, 3)
         key = handler.loaded_m14.home_display.topic_pos
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_FETCH_NEARBY_TOPIC,
+            MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC,
             11,
             req,
             5,
@@ -4651,14 +4639,14 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         self.assertIn(b"MVIMG,MVIMAGE, !homed.SHG\x00", push)
 
     def test_fetch_adjacent_topic_pushes_type0_a5(self):
-        from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
+        from server.config import MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._subscribe(handler, 0, 1)
         req_payload = bytes.fromhex("01 01 03 00 00 00 00 01 00")
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_FETCH_ADJACENT_TOPIC,
+            MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC,
             11,
             req_payload,
             5,
@@ -4672,22 +4660,22 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         self.assertEqual(push[1], 0xA5)
 
     def test_m14_topic_chunks_carry_pane_bounds_and_adjacent_records(self):
-        from server.config import MEDVIEW_FETCH_ADJACENT_TOPIC
+        from server.config import MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         token = b":2[1001]0\x00"
         open_req = (
             b"\x04" + bytes([0x80 | len(token)]) + token + b"\x03\x00\x00\x00\x00"
             b"\x03\x00\x00\x00\x00"
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
-        handler.handle_request(0x01, MEDVIEW_OPEN_TITLE, 1, open_req, 5, 5)
+        handler.handle_request(0x01, MEDVIEW_SELECTOR_OPEN_TITLE, 1, open_req, 5, 5)
         self._subscribe(handler, 0, 1)
 
         req_payload = b"\x01\x01\x03" + struct.pack("<I", 0x4696) + b"\x01\x01"
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_FETCH_ADJACENT_TOPIC,
+            MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC,
             11,
             req_payload,
             5,
@@ -4711,7 +4699,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         req_payload = b"\x01\x01\x03" + struct.pack("<I", 0x46D3) + b"\x01\x01"
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_FETCH_ADJACENT_TOPIC,
+            MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC,
             12,
             req_payload,
             5,
@@ -4733,11 +4721,11 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         # count = 12 bytes total. Static section: bare `0x87 0x86`
         # (no leading scalar) so the recv loop knows the dynamic body
         # follows.
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_LOAD_TOPIC_HIGHLIGHTS,
+            MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS,
             9,
             req_payload,
             5,
@@ -4758,7 +4746,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
     def _subscribe(handler, notification_type, request_id):
         handler.handle_request(
             0x01,
-            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
             request_id,
             bytes([0x01, notification_type, 0x85]),
             5,
@@ -4798,10 +4786,10 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
     def test_pre_notify_reply_is_end_static_only(self):
         # TitlePreNotify binds no receive-side fields. The synchronous
         # response is only the end-of-static acknowledgement.
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # Request: 0x01 0x00, 0x02 0x0a 0x00 (opcode=10), 0x04 with 6 bytes.
         req_payload = bytes.fromhex("01 00 02 0a 00 04 86 00 00 00 00 00 00")
-        pkts = handler.handle_request(0x01, MEDVIEW_PRE_NOTIFY_TITLE, 3, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE, 3, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -4814,16 +4802,16 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         # It declares no receive fields and uses the same bare ack.
         # (Use a small req_id so the VLI-encoded request_id fits in 1
         # byte — the `[8:]` slice assumes that.)
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # Request: 0x01 0x01, 0x02 0x08 0x00 (opcode=8), 0x04 0x81 0x91 (1-byte heartbeat).
         req_payload = bytes.fromhex("01 01 02 08 00 04 81 91")
-        pkts = handler.handle_request(0x01, MEDVIEW_PRE_NOTIFY_TITLE, 7, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE, 7, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_picture_start_pushes_status_then_file_bytes(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         picture = b"BM" + b"\x00" * 12 + struct.pack("<Iii", 40, 113, 95) + b"\x00" * 12
         handler.baggage_map = {"albi.bmp": picture}
         self._subscribe(handler, 3, 3)
@@ -4831,7 +4819,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(transfer_id=0x12345678),
             10,
@@ -4858,14 +4846,14 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         self.assertEqual(chunk_push[13:], picture)
 
     def test_picture_chunks_wait_for_type4_subscription(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         picture = b"BMresume-data"
         handler.baggage_map = {"albi.bmp": picture}
         self._subscribe(handler, 3, 3)
 
         start_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(
                 transfer_id=7,
@@ -4884,7 +4872,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         subscribe_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
             4,
             b"\x01\x04\x85",
             20,
@@ -4926,14 +4914,14 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         picture = dib(16, 400)
         self.assertEqual(len(picture), 400)
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         handler.baggage_map = {"albi.bmp": picture}
         self._subscribe(handler, 3, 3)
         self._subscribe(handler, 4, 4)
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(transfer_id=7, mode=0),
             10,
@@ -5010,7 +4998,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         self.assertIs(_widen_low_bpp_dib(b"lp\x01\x00shg"), b"lp\x01\x00shg")
 
     def test_open_title_widens_the_titles_low_bpp_baggage(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         handler._handle_open_title(1, TestMEDVIEWOSR2TitleOpen._OPEN)
 
         # HANDBOOK.M14 authors mail.bmp and smokes.bmp at 4bpp.
@@ -5029,7 +5017,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         # stateFlags bit 0 (object already valid). It reports currentSize 0 but
         # already holds the finished bytes, so re-pushing them writes a second
         # copy into a buffer it has finished with. Status record only.
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         picture = b"BMalready-delivered"
         handler.baggage_map = {"albi.bmp": picture}
         self._subscribe(handler, 3, 3)
@@ -5037,7 +5025,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(
                 transfer_id=7,
@@ -5060,7 +5048,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         # mode 1 on a not-yet-valid object still needs the bytes, but the
         # type-4 subscriber is going down. Hold them until opcode 0x07 reports
         # the stream enabled again.
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         picture = b"BMheld-until-enabled"
         handler.baggage_map = {"albi.bmp": picture}
         self._subscribe(handler, 3, 3)
@@ -5068,7 +5056,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         start_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(transfer_id=7, mode=1),
             10,
@@ -5080,7 +5068,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         # The client's own disable report must not release them either.
         disable_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             6,
             self._subscriber_state_request(4, False),
             20,
@@ -5090,7 +5078,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         enable_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             7,
             self._subscriber_state_request(4, True),
             30,
@@ -5108,14 +5096,14 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
     def test_online_start_after_disable_report_holds_chunks(self):
         # Once the client reports type 4 disabled, an online-mode start must
         # not push into the dead stream.
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         picture = b"BMno-live-stream"
         handler.baggage_map = {"albi.bmp": picture}
         self._subscribe(handler, 3, 3)
         self._subscribe(handler, 4, 4)
         handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             5,
             self._subscriber_state_request(4, False),
             10,
@@ -5124,7 +5112,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             6,
             self._picture_start_request(transfer_id=7, mode=0),
             20,
@@ -5145,12 +5133,12 @@ class TestMEDVIEWSubscribeNotification(unittest.TestCase):
         # Using 0x86 instead would fire SignalRequestCompletion which
         # sets request +0x18=1, suppressing ResetEvent in WaitForMessage
         # and causing a ~30%-CPU MsgWaitForSingleObject spin per request.
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         for notification_type in range(5):
             req_payload = bytes([0x01, notification_type, 0x85])
             pkts = handler.handle_request(
                 0x01,
-                MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+                MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
                 notification_type,
                 req_payload,
                 5,
@@ -5165,7 +5153,7 @@ class TestMEDVIEWSubscribeNotification(unittest.TestCase):
 
 class TestMEDVIEWOneway(unittest.TestCase):
     def test_oneway_continuation_returns_none(self):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # class=0xE6 → one-way continuation, no reply expected.
         pkt = handler.handle_request(0xE6, 0x01, 0, b"\x00" * 16, 5, 5)
         self.assertIsNone(pkt)
@@ -5183,48 +5171,48 @@ class TestMEDVIEWTitleService(unittest.TestCase):
         req = (
             b"\x04\x84:2[]0\x00\x03\x00\x00\x00\x00\x03\x00\x00\x00\x00\x81\x81\x83\x83\x83\x83\x83"
         )
-        from server.config import MEDVIEW_OPEN_TITLE
+        from server.config import MEDVIEW_SELECTOR_OPEN_TITLE
 
-        handler.handle_request(0x01, MEDVIEW_OPEN_TITLE, 1, req, 5, 5)
+        handler.handle_request(0x01, MEDVIEW_SELECTOR_OPEN_TITLE, 1, req, 5, 5)
 
     def test_validate_title_returns_zero_when_no_title_open(self):
-        from server.config import MEDVIEW_VALIDATE_TITLE
+        from server.config import MEDVIEW_SELECTOR_VALIDATE_TITLE
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 01 81")
-        pkts = handler.handle_request(0x01, MEDVIEW_VALIDATE_TITLE, 1, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_VALIDATE_TITLE, 1, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         # 0x81 <byte=0> 0x87
         self.assertEqual(reply, bytes([0x81, 0x00, TAG_END_STATIC]))
 
     def test_validate_title_returns_nonzero_after_open(self):
-        from server.config import MEDVIEW_VALIDATE_TITLE
+        from server.config import MEDVIEW_SELECTOR_VALIDATE_TITLE
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._open_title(handler)
         req_payload = bytes.fromhex("01 01 81")
-        pkts = handler.handle_request(0x01, MEDVIEW_VALIDATE_TITLE, 2, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_VALIDATE_TITLE, 2, req_payload, 5, 5)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply[0], 0x81)
         self.assertEqual(reply[1], 0x01)  # is_valid != 0
         self.assertEqual(reply[2], TAG_END_STATIC)
 
     def test_close_title_acks(self):
-        from server.config import MEDVIEW_CLOSE_TITLE
+        from server.config import MEDVIEW_SELECTOR_CLOSE_TITLE
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         self._open_title(handler)
         req_payload = bytes.fromhex("01 01")
-        pkts = handler.handle_request(0x01, MEDVIEW_CLOSE_TITLE, 3, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_CLOSE_TITLE, 3, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_query_topics_returns_empty_session(self):
-        from server.config import MEDVIEW_QUERY_TOPICS
+        from server.config import MEDVIEW_SELECTOR_QUERY_TOPICS
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # Minimal request: titleSlot, queryClass, primaryText, queryFlags=0,
         # queryMode. We only care that the handler survives and emits the
         # documented static fields.
@@ -5235,7 +5223,7 @@ class TestMEDVIEWTitleService(unittest.TestCase):
             + bytes.fromhex("01 00")
             + bytes.fromhex("02 00 00")
         )
-        pkts = handler.handle_request(0x01, MEDVIEW_QUERY_TOPICS, 4, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_QUERY_TOPICS, 4, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         # 0x81 <highlightContext=0> 0x83 <logicalCount=0> 0x83 <secondary=0> 0x87 0x86
@@ -5255,11 +5243,11 @@ class TestMEDVIEWWordWheelService(unittest.TestCase):
     let the wrapper's recv loop decode cleanly."""
 
     def test_open_word_wheel_empty_session(self):
-        from server.config import MEDVIEW_OPEN_WORD_WHEEL
+        from server.config import MEDVIEW_SELECTOR_OPEN_WORD_WHEEL
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 01") + b"\x04\x82wheel\x00" + bytes.fromhex("81 83")
-        pkts = handler.handle_request(0x01, MEDVIEW_OPEN_WORD_WHEEL, 1, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_OPEN_WORD_WHEEL, 1, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         # 0x81 <wheel_id=0> 0x83 <count=0> 0x87
@@ -5270,11 +5258,11 @@ class TestMEDVIEWWordWheelService(unittest.TestCase):
         self.assertEqual(reply[7], TAG_END_STATIC)
 
     def test_query_word_wheel_zero_status(self):
-        from server.config import MEDVIEW_QUERY_WORD_WHEEL
+        from server.config import MEDVIEW_SELECTOR_QUERY_WORD_WHEEL
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 01 02 00 00") + b"\x04\x81q\x00" + bytes.fromhex("82")
-        pkts = handler.handle_request(0x01, MEDVIEW_QUERY_WORD_WHEEL, 1, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_QUERY_WORD_WHEEL, 1, req_payload, 5, 5)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         # 0x82 <word=0> 0x87
         self.assertEqual(reply[0], 0x82)
@@ -5282,21 +5270,23 @@ class TestMEDVIEWWordWheelService(unittest.TestCase):
         self.assertEqual(reply[3], TAG_END_STATIC)
 
     def test_close_word_wheel_acks(self):
-        from server.config import MEDVIEW_CLOSE_WORD_WHEEL
+        from server.config import MEDVIEW_SELECTOR_CLOSE_WORD_WHEEL
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkts = handler.handle_request(
-            0x01, MEDVIEW_CLOSE_WORD_WHEEL, 1, bytes.fromhex("01 00"), 5, 5
+            0x01, MEDVIEW_SELECTOR_CLOSE_WORD_WHEEL, 1, bytes.fromhex("01 00"), 5, 5
         )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_count_key_matches_zero(self):
-        from server.config import MEDVIEW_COUNT_KEY_MATCHES
+        from server.config import MEDVIEW_SELECTOR_COUNT_KEY_MATCHES
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 00") + b"\x04\x81k\x00" + bytes.fromhex("82")
-        pkts = handler.handle_request(0x01, MEDVIEW_COUNT_KEY_MATCHES, 1, req_payload, 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_COUNT_KEY_MATCHES, 1, req_payload, 5, 5
+        )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply[0], 0x82)
         self.assertEqual(struct.unpack("<H", reply[1:3])[0], 0)
@@ -5308,42 +5298,48 @@ class TestMEDVIEWAddressHighlightService(unittest.TestCase):
     covered above)."""
 
     def test_convert_address_to_va_acks_then_pushes(self):
-        from server.config import MEDVIEW_CONVERT_ADDRESS_TO_VA
+        from server.config import MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
-        pkts = handler.handle_request(0x01, MEDVIEW_CONVERT_ADDRESS_TO_VA, 1, req_payload, 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA, 1, req_payload, 5, 5
+        )
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_find_highlight_address_zero(self):
-        from server.config import MEDVIEW_FIND_HIGHLIGHT_ADDRESS
+        from server.config import MEDVIEW_SELECTOR_FIND_HIGHLIGHT_ADDRESS
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 00 03 11 11 11 11 03 22 22 22 22")
-        pkts = handler.handle_request(0x01, MEDVIEW_FIND_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_FIND_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5
+        )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply[0], 0x83)
         self.assertEqual(struct.unpack("<I", reply[1:5])[0], 0)
         self.assertEqual(reply[5], TAG_END_STATIC)
 
     def test_release_highlight_context_acks(self):
-        from server.config import MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT
+        from server.config import MEDVIEW_SELECTOR_RELEASE_HIGHLIGHT_CONTEXT
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkts = handler.handle_request(
-            0x01, MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT, 1, bytes.fromhex("01 01"), 5, 5
+            0x01, MEDVIEW_SELECTOR_RELEASE_HIGHLIGHT_CONTEXT, 1, bytes.fromhex("01 01"), 5, 5
         )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
     def test_refresh_highlight_address_acks(self):
-        from server.config import MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS
+        from server.config import MEDVIEW_SELECTOR_REFRESH_HIGHLIGHT_ADDRESS
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         req_payload = bytes.fromhex("01 01 03 01 00 00 00")
-        pkts = handler.handle_request(0x01, MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5)
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_REFRESH_HIGHLIGHT_ADDRESS, 1, req_payload, 5, 5
+        )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
 
@@ -5355,19 +5351,19 @@ class TestMEDVIEWSessionService(unittest.TestCase):
 
     def test_unsubscribe_acks_and_drops_state(self):
         from server.config import (
-            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
-            MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_SELECTOR_UNSUBSCRIBE_NOTIFICATIONS,
         )
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # First subscribe to type 0 so there's state to drop.
         sub_payload = bytes.fromhex("01 00 85")
-        handler.handle_request(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 1, sub_payload, 5, 5)
+        handler.handle_request(0x01, MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS, 1, sub_payload, 5, 5)
         self.assertIn(0, handler._subscriptions)
         # Then unsubscribe.
         unsub_payload = bytes.fromhex("01 00")
         pkts = handler.handle_request(
-            0x01, MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS, 2, unsub_payload, 5, 5
+            0x01, MEDVIEW_SELECTOR_UNSUBSCRIBE_NOTIFICATIONS, 2, unsub_payload, 5, 5
         )
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
@@ -5377,15 +5373,15 @@ class TestMEDVIEWSessionService(unittest.TestCase):
     def test_iterator_cancel_clears_subscription_state(self):
         """`handle_iterator_cancel(class, sel, req_id)` drops the one
         subscription whose `(class, req_id)` matches and leaves the rest."""
-        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        from server.config import MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # Subscribe types 0..4 with distinct req_ids 1..5.
         for n_type, req_id in enumerate(range(1, 6)):
             sub_payload = bytes([0x01, n_type, 0x85])
             handler.handle_request(
                 0x01,
-                MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+                MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
                 req_id,
                 sub_payload,
                 5,
@@ -5394,16 +5390,16 @@ class TestMEDVIEWSessionService(unittest.TestCase):
         self.assertEqual(set(handler._subscriptions.keys()), {0, 1, 2, 3, 4})
 
         # Cancel the type=2 iterator (req_id=3).
-        handler.handle_iterator_cancel(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 3)
+        handler.handle_iterator_cancel(0x01, MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS, 3)
         self.assertNotIn(2, handler._subscriptions)
         self.assertEqual(set(handler._subscriptions.keys()), {0, 1, 3, 4})
 
     def test_iterator_cancel_with_no_subscription_is_idempotent(self):
-        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        from server.config import MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         # No state, no exception.
-        handler.handle_iterator_cancel(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 42)
+        handler.handle_iterator_cancel(0x01, MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS, 42)
         self.assertEqual(handler._subscriptions, {})
 
 
@@ -5428,19 +5424,19 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
             pass
 
     def _make_conn(self):
-        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        from server.config import MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS
         from server.connection import ConnectionState
 
         sock = self._FakeSocket()
         conn = ConnectionState(sock)
-        handler = MEDVIEWHandler(self.PIPE_IDX, "MEDVIEW", Session())
+        handler = MedviewHandler(self.PIPE_IDX, "MEDVIEW", Session())
         # Seed 5 subscriptions matching the engine's `MVAsyncNotifyDispatch`
         # slot allocation: types 0..4 with req_ids 1..5.
         for n_type, req_id in enumerate(range(1, 6)):
             sub_payload = bytes([0x01, n_type, 0x85])
             handler.handle_request(
                 0x01,
-                MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+                MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
                 req_id,
                 sub_payload,
                 5,
@@ -5480,12 +5476,12 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
         return hb
 
     def test_cancel_frame_emits_canonical_ack_and_clears_state(self):
-        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        from server.config import MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS
         from server.mpc import ITERATOR_CANCEL_ACK
 
         conn, handler, sock = self._make_conn()
         # Cancel the type=2 iterator (req_id=3 from the seed loop).
-        frame = self._build_cancel_frame(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 3)
+        frame = self._build_cancel_frame(0x01, MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS, 3)
 
         with self.assertLogs("server.services.medview.handler", level="INFO") as medview_logs:
             with self.assertLogs("server.connection", level="INFO") as conn_logs:
@@ -5494,7 +5490,7 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
         # (a) Reply payload is the canonical iterator-cancel ack.
         hb = self._parse_wire(bytes(sock.sent))
         self.assertEqual(hb.msg_class, 0x01)
-        self.assertEqual(hb.selector, MEDVIEW_SUBSCRIBE_NOTIFICATIONS)
+        self.assertEqual(hb.selector, MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS)
         self.assertEqual(hb.request_id, 3)
         self.assertEqual(hb.payload, ITERATOR_CANCEL_ACK)
 
@@ -5518,11 +5514,11 @@ class TestConnectionIteratorCancelDispatch(unittest.TestCase):
         )
 
     def test_cancel_frame_on_pipe_without_handler_is_ignored(self):
-        from server.config import MEDVIEW_SUBSCRIBE_NOTIFICATIONS
+        from server.config import MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS
 
         conn, _handler, sock = self._make_conn()
         bare_pipe = self.PIPE_IDX + 1  # not registered
-        frame = self._build_cancel_frame(0x01, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, 99)
+        frame = self._build_cancel_frame(0x01, MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS, 99)
 
         with self.assertLogs("server.connection", level="INFO") as conn_logs:
             conn._handle_service_data(bare_pipe, frame)
@@ -5538,11 +5534,11 @@ class TestMEDVIEWRemoteFsError(unittest.TestCase):
     """Spec selector 0x1D GetRemoteFsError — synchronous u16."""
 
     def test_get_remote_fs_error_returns_zero(self):
-        from server.config import MEDVIEW_GET_REMOTE_FS_ERROR
+        from server.config import MEDVIEW_SELECTOR_GET_REMOTE_FS_ERROR
 
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkts = handler.handle_request(
-            0x01, MEDVIEW_GET_REMOTE_FS_ERROR, 1, bytes.fromhex("82"), 5, 5
+            0x01, MEDVIEW_SELECTOR_GET_REMOTE_FS_ERROR, 1, bytes.fromhex("82"), 5, 5
         )
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         # 0x82 <word=0> 0x87
@@ -5571,7 +5567,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
     _OPEN_REQ_PIPE_BM0 = bytes.fromhex("01 01 04 85 7c 62 6d 30 00 01 02 81 83")
 
     def _decode_reply(self, selector, req_id, payload):
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         pkts = handler.handle_request(0x01, selector, req_id, payload, 5, 5)
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
@@ -5585,7 +5581,9 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
     def test_hfs_open_pipe_bm0_is_rejected(self):
         # MVTTL14C's first probe is `|bm0` (`wsprintfA("|bm%d", idx)`);
         # rejection causes the wrapper to retry with the canonical name.
-        reply = self._decode_reply(MEDVIEW_OPEN_REMOTE_HFS_FILE, 10, self._OPEN_REQ_PIPE_BM0)
+        reply = self._decode_reply(
+            MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE, 10, self._OPEN_REQ_PIPE_BM0
+        )
         self.assertEqual(reply[0], TAG_END_STATIC)
         self.assertEqual(reply[1], 0x81)
         self.assertEqual(reply[2], 0x00)  # handle = 0 → reject
@@ -5593,7 +5591,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertEqual(struct.unpack("<I", reply[4:8])[0], 0)
 
     def test_hfs_open_bm0_declares_container_size(self):
-        reply = self._decode_reply(MEDVIEW_OPEN_REMOTE_HFS_FILE, 11, self._OPEN_REQ_BM0)
+        reply = self._decode_reply(MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE, 11, self._OPEN_REQ_BM0)
         self.assertEqual(reply[0], TAG_END_STATIC)
         self.assertEqual(reply[1], 0x81)
         self.assertEqual(reply[2], 0x42)
@@ -5608,7 +5606,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         # kind5 header. Bitmap begins at offset 8; first byte must be 5
         # to clear MVDecodeBitmapBaggage's `kind < 5` gate.
         read_req = bytes.fromhex("01 42 03 40 00 00 00 03 00 00 00 00 81 85")
-        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 12, read_req)
+        reply = self._decode_reply(MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE, 12, read_req)
         self.assertEqual(reply[0], 0x81)
         self.assertEqual(reply[1], 0x00)
         self.assertEqual(reply[2], TAG_END_STATIC)
@@ -5619,7 +5617,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
     def test_hfs_read_bm0_preamble_and_header_byte_sequence(self):
         # 38B = 8 preamble + 30 kind=5 header (wide-form pixel_byte_count).
         read_req = bytes.fromhex("01 42 03 26 00 00 00 03 00 00 00 00 81 85")
-        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 12, read_req)
+        reply = self._decode_reply(MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE, 12, read_req)
         chunk = reply[4 : 4 + 38]
         expected_header = bytes.fromhex(
             "00 00"  # container reserved
@@ -5640,7 +5638,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
     def test_hfs_read_bm0_pixel_data_is_solid_white(self):
         # Pixel data starts at container-offset 38 (= 8 preamble + 30 header).
         read_req = bytes.fromhex("01 42 03 20 00 00 00 03 26 00 00 00 81 85")
-        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 13, read_req)
+        reply = self._decode_reply(MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE, 13, read_req)
         chunk = reply[4 : 4 + 32]
         self.assertEqual(chunk, b"\xff" * 32)
 
@@ -5654,7 +5652,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
             + struct.pack("<I", offset)
             + b"\x81\x85"
         )
-        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 14, read_req)
+        reply = self._decode_reply(MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE, 14, read_req)
         chunk = reply[4 : 4 + 7]
         self.assertEqual(chunk, b"\x00" * 7)
 
@@ -5668,8 +5666,10 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
             + b"\x03\x00\x00\x00\x00"
             + b"\x81\x85"
         )
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
-        pkts = handler.handle_request(0x01, MEDVIEW_READ_REMOTE_HFS_FILE, 12, read_req, 5, 5)
+        handler = MedviewHandler(5, "MEDVIEW", Session())
+        pkts = handler.handle_request(
+            0x01, MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE, 12, read_req, 5, 5
+        )
         self.assertIsNotNone(pkts)
         self.assertGreater(len(pkts), 1)
         self.assertTrue(all(len(pkt) <= 1024 for pkt in pkts))
@@ -5678,7 +5678,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
 class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
     @staticmethod
     def _open_handler():
-        handler = MEDVIEWHandler(5, "MEDVIEW", Session())
+        handler = MedviewHandler(5, "MEDVIEW", Session())
         open_req = (
             b"\x04\x87:2[4]0\x00"
             b"\x03\x00\x00\x00\x00"
@@ -5687,7 +5687,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         )
         handler.handle_request(
             0x01,
-            MEDVIEW_OPEN_TITLE,
+            MEDVIEW_SELECTOR_OPEN_TITLE,
             1,
             open_req,
             5,
@@ -5707,7 +5707,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         open_req = b"\x01\x01\x04" + bytes([0x80 | len(name)]) + name + b"\x01\x02\x81\x83"
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_OPEN_REMOTE_HFS_FILE,
+            MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE,
             21,
             open_req,
             5,
@@ -5731,7 +5731,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         )
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_READ_REMOTE_HFS_FILE,
+            MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE,
             22,
             read_req,
             5,
@@ -5749,7 +5749,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         open_req = b"\x01\x01\x04" + bytes([0x80 | len(name)]) + name + b"\x01\x02\x81\x83"
         open_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_OPEN_REMOTE_HFS_FILE,
+            MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE,
             21,
             open_req,
             5,
@@ -5769,7 +5769,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         )
         packets = handler.handle_request(
             0x01,
-            MEDVIEW_READ_REMOTE_HFS_FILE,
+            MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE,
             22,
             read_req,
             5,
@@ -5837,10 +5837,10 @@ class TestBBIRService(unittest.TestCase):
 
     def test_service_name_resolves_handler(self):
         # The pipe-open carries "BBIRService"; the registry keys on casefold().
-        self.assertIs(SERVICE_HANDLERS["BBIRService".casefold()], BBIRServiceHandler)
+        self.assertIs(SERVICE_HANDLERS["BBIRService".casefold()], BbirHandler)
 
     def test_discovery_packet_is_well_formed(self):
-        handler = BBIRServiceHandler(1, "BBIRService", Session())
+        handler = BbirHandler(1, "BBIRService", Session())
         pkts = handler.build_discovery_packet(3, 3)
         self.assertIsInstance(pkts, list)
         parsed = parse_packet(pkts[0][:-1])
@@ -5849,7 +5849,7 @@ class TestBBIRService(unittest.TestCase):
 
     def _get_sources_reply_payloads(self):
         """The two host-block payloads a GetSrcs call answers with."""
-        handler = BBIRServiceHandler(1, "BBIRService", Session())
+        handler = BbirHandler(1, "BBIRService", Session())
         pkts = handler.handle_request(
             0x01, BBIR_SELECTOR_GET_SOURCES, 7, b"\x03\x00\x00\x00\x00", 5, 5
         )
@@ -5894,19 +5894,19 @@ class TestBBIRService(unittest.TestCase):
             BBIR_SELECTOR_QUERY,
         ):
             with self.subTest(selector=selector):
-                handler = BBIRServiceHandler(1, "BBIRService", Session())
+                handler = BbirHandler(1, "BBIRService", Session())
                 pkts = handler.handle_request(0x01, selector, 1, b"", 5, 5)
                 self.assertEqual(len(pkts), 2)
 
     def test_unknown_selector_returns_none(self):
-        handler = BBIRServiceHandler(1, "BBIRService", Session())
+        handler = BbirHandler(1, "BBIRService", Session())
         self.assertIsNone(handler.handle_request(0x01, 0x09, 1, b"", 5, 5))
 
     def test_query_head_waits_for_its_chunked_spec(self):
         # Observed head, 2026-08-13: u32, chunked ref (stream 1, 0x21d bytes),
         # u32, 0x85. The IQuerySpec is not inline, so answering on the head
         # completes the request while the client is still streaming.
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         head = bytes.fromhex("030000000005011d020000030000000085")
         self.assertIsNone(handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5))
 
@@ -5916,7 +5916,7 @@ class TestBBIRService(unittest.TestCase):
         self.assertEqual(len(pkts), 2)
 
     def test_continuation_frames_reassemble_in_order(self):
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         head = bytes.fromhex("030000000005010600000085")
         handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5)
         with patch.object(handler, "_capture") as capture:
@@ -5928,7 +5928,7 @@ class TestBBIRService(unittest.TestCase):
     def test_unclaimed_stream_is_not_answered(self):
         # No head quoted stream 3, so closing it must not fabricate a reply
         # against a request id nobody is waiting on.
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         with patch.object(handler, "_capture"):
             self.assertIsNone(handler.handle_request(0xE7, 0x03, 0, b"\x00", 5, 5))
 
@@ -5942,7 +5942,7 @@ class TestBBIRService(unittest.TestCase):
             + struct.pack("<I", len(blob))
             + b"\x03\x00\x00\x00\x00\x85"
         )
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         with patch.object(handler, "_capture"):
             self.assertIsNone(handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5))
             with self.assertLogs("server.services.bbir", level="INFO") as logs:
@@ -5974,7 +5974,7 @@ class TestBBIRService(unittest.TestCase):
                 text="Blackbird title\nStory text yadda yadda yadda",
             )
         ]
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         head = (
             b"\x03\x00\x00\x00\x00\x05\x01"
             + struct.pack("<I", len(blob))
@@ -6058,7 +6058,7 @@ class TestBBIRService(unittest.TestCase):
                 modified=datetime.datetime(2026, 8, 12, 16, 8),
             )
         ]
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         head = (
             b"\x03\x00\x00\x00\x00\x05\x01"
             + struct.pack("<I", len(blob))
@@ -6107,7 +6107,7 @@ class TestBBIRService(unittest.TestCase):
         blob = (
             pathlib.Path(__file__).resolve().parent / "assets" / "bbir_queryspec.bin"
         ).read_bytes()
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         head = (
             b"\x03\x00\x00\x00\x00\x05\x01"
             + struct.pack("<I", len(blob))
@@ -6134,7 +6134,7 @@ class TestBBIRService(unittest.TestCase):
         self.assertEqual(tags, [TAG_PROP_INFOS, TAG_SORT_INFOS, 0x23])
 
     def test_undecodable_query_still_gets_an_answer(self):
-        handler = BBIRServiceHandler(7, "BBIRService", Session())
+        handler = BbirHandler(7, "BBIRService", Session())
         head = b"\x03\x00\x00\x00\x00\x05\x01\x04\x00\x00\x00\x03\x00\x00\x00\x00\x85"
         with patch.object(handler, "_capture"):
             handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5)

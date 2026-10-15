@@ -1,3 +1,3 @@
-from .handler import MEDVIEWHandler
+from .handler import MedviewHandler
 
-__all__ = ["MEDVIEWHandler"]
+__all__ = ["MedviewHandler"]

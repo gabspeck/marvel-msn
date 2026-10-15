@@ -42,7 +42,7 @@ OLREGSRV_SELECTOR_PRECHECK = 0x02
 OLREGSRV_MSG_CLASS_CALL = 0x01
 
 
-class OLREGSRVHandler(ServiceHandler):
+class OlregsrvHandler(ServiceHandler):
     GUIDS = OLREGSRV_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

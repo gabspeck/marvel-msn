@@ -97,7 +97,7 @@ LOGIN_RESULT_BAD_PASSWORD = 3
 PASSWORD_CHANGE_REFUSED = 1
 
 
-class LOGSRVHandler(ServiceHandler):
+class LogsrvHandler(ServiceHandler):
     """Handles LOGSRV service requests on a logical pipe."""
 
     GUIDS = LOGSRV_INTERFACE_GUIDS

@@ -22,17 +22,17 @@ from server.services.bbs import (
     BBS_SELECTOR_POST_APPEND,
     BBS_SELECTOR_POST_COMMIT,
     BBS_SELECTOR_POST_START,
-    BBSHandler,
+    BbsHandler,
+    bbs_article_reply,
+    bbs_get_children_reply,
+    bbs_get_properties_reply,
     build_bbs_article,
-    build_bbs_article_reply_payload,
-    build_bbs_get_children_reply_payload,
-    build_bbs_get_properties_reply_payload,
     decode_post_chunk_request,
     decode_post_start_request,
     encode_body,
     parse_article_headers,
 )
-from server.services.dirsrv import DIRSRVHandler
+from server.services.dirsrv import DirsrvHandler
 from server.session import Session
 from server.store import app_store, reset_app_store
 from server.transport import parse_packet
@@ -210,8 +210,8 @@ class TestBBSDiscovery(unittest.TestCase):
         # CreateTnc("BBS", 3) when a message is opened (BBSNAV FUN_7F5FCD1A).
         # Without it that negotiation returns E_NOINTERFACE and the reader
         # reports "Cannot open message" before any request reaches the wire.
-        bbs_pkts = BBSHandler(1, "BBS", Session()).build_discovery_packet(3, 3)
-        dirsrv_pkts = DIRSRVHandler(1, "DIRSRV", Session()).build_discovery_packet(3, 3)
+        bbs_pkts = BbsHandler(1, "BBS", Session()).build_discovery_packet(3, 3)
+        dirsrv_pkts = DirsrvHandler(1, "DIRSRV", Session()).build_discovery_packet(3, 3)
         self.assertIsInstance(bbs_pkts, list)
         parsed = parse_packet(bbs_pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -233,7 +233,7 @@ class TestBBSDiscovery(unittest.TestCase):
 class TestBBSGetProperties(unittest.TestCase):
     def test_board_self_record_carries_subject_and_app_id(self):
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00c\x00e\x00_F")
-        payload = build_bbs_get_properties_reply_payload(request)
+        payload = bbs_get_properties_reply(request)
         records = _walk_records(payload)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["e"], "Climbing BBS")
@@ -252,7 +252,7 @@ class TestBBSGetProperties(unittest.TestCase):
         # "Rich text (MSN formatted text)" per dialog 124 radio 0x67.
         for node_id in (_BOARD, _YOSEMITE, _RE_YOSEMITE):
             request = DirsrvRequest(node_ids=[node_id], prop_group="a\x00e\x00_F")
-            record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+            record = _walk_records(bbs_get_properties_reply(request))[0]
             flags = record["_F"]
             self.assertEqual(flags & 0x0007, 0x0001, record["e"])
             # Radio 0x69 "This is an MSN bulletin board".
@@ -301,7 +301,7 @@ class TestBBSAttachmentFixture(unittest.TestCase):
 
     def test_tree_record_marks_the_message_for_attached_files_view(self):
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="e\x00_t")
-        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        records = _walk_records(bbs_get_children_reply(request))
         counts = {record["e"]: record["_t"] for record in records}
         self.assertEqual(
             counts,
@@ -318,7 +318,7 @@ class TestBBSAttachmentFixture(unittest.TestCase):
         # FUN_7F5FC919 addresses the single MOSAF object as message id + 1 and
         # reads `z` and `_r` off it.
         request = DirsrvRequest(node_ids=[_ATTACHMENT_FILE], prop_group="z\x00_r")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         self.assertEqual((record["z"], record["_r"]), (0, 0))
 
     def test_the_object_mnid_exposes_its_download_count(self):
@@ -333,7 +333,7 @@ class TestBBSAttachmentFixture(unittest.TestCase):
         )
 
         request = DirsrvRequest(node_ids=[_ATTACHMENT_FILE], prop_group="z\x00_r")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         self.assertEqual((record["z"], record["_r"]), (0, 7))
 
     def test_priced_attachment_has_a_nonzero_price(self):
@@ -341,7 +341,7 @@ class TestBBSAttachmentFixture(unittest.TestCase):
         self.assertEqual(message.content.bbs.attachment_count, 1)
 
         request = DirsrvRequest(node_ids=[_PRICED_ATTACHMENT_FILE], prop_group="z\x00_r")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         self.assertEqual((record["z"], record["_r"]), ((250 << 8) | 3, 0))
 
     def test_the_uploaded_file_is_kept_off_the_body(self):
@@ -361,7 +361,7 @@ class TestBBSGetChildren(unittest.TestCase):
         # parent would never reach the list. Order puts a reply after the
         # message it answers.
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e\x00_a")
-        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        records = _walk_records(bbs_get_children_reply(request))
         self.assertEqual(
             [r["e"] for r in records],
             [
@@ -381,7 +381,7 @@ class TestBBSGetChildren(unittest.TestCase):
         # compares that record's `g` against the board's own cached `g`. Leading
         # with a child would line the board up against its first message.
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e\x00g", flags=1)
-        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        records = _walk_records(bbs_get_children_reply(request))
         self.assertEqual(
             [r["e"] for r in records],
             [
@@ -399,11 +399,11 @@ class TestBBSGetChildren(unittest.TestCase):
         # after a delete, must differ or the row survives the refresh.
         self.addCleanup(reset_app_store)
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e\x00g", flags=1)
-        before = _walk_records(build_bbs_get_children_reply_payload(request))[0]["g"]
+        before = _walk_records(bbs_get_children_reply(request))[0]["g"]
 
         app_store.content.remove_node(_YOSEMITE)
 
-        after = _walk_records(build_bbs_get_children_reply_payload(request))[0]["g"]
+        after = _walk_records(bbs_get_children_reply(request))[0]["g"]
         self.assertNotEqual(after, before)
 
     def test_every_message_carries_an_author_and_a_date(self):
@@ -411,7 +411,7 @@ class TestBBSGetChildren(unittest.TestCase):
         # entirely, which truncated the record; a missing date now still ships
         # as 0, but the fixtures should not rely on that.
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e\x00_a\x00_D")
-        for record in _walk_records(build_bbs_get_children_reply_payload(request)):
+        for record in _walk_records(bbs_get_children_reply(request)):
             self.assertTrue(record["_a"], record["e"])
             self.assertGreater(record["_D"], 0, record["e"])
 
@@ -420,7 +420,7 @@ class TestBBSGetChildren(unittest.TestCase):
         # (0x100). GetThreadParent copies the reply's own mnid and overwrites
         # field_8 with _P, so the two must differ in nothing else.
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e\x00_P")
-        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        records = _walk_records(bbs_get_children_reply(request))
         by_name = {r["e"]: r for r in records}
         self.assertEqual(by_name["RE: Yosemite"]["_P"], 0x100)
         self.assertEqual(by_name["Yosemite"]["_P"], 0)
@@ -436,13 +436,13 @@ class TestBBSGetChildren(unittest.TestCase):
         # one, and an unlisted node would answer with the fallback sentinel.
         for node_id in (_YOSEMITE, _RE_YOSEMITE, "257:1"):
             request = DirsrvRequest(node_ids=[node_id], prop_group="a\x00e")
-            payload = build_bbs_get_children_reply_payload(request)
+            payload = bbs_get_children_reply(request)
             self.assertEqual(_walk_records(payload), [], node_id)
 
     def test_dispatch_via_handler_returns_packet(self):
         # Full read path: wire request (board mnid = message id 0, board id 1 +
         # propList "a,e") → decode → GetChildren reply → framed packet.
-        handler = BBSHandler(1, "BBS", Session())
+        handler = BbsHandler(1, "BBS", Session())
         wire = (
             b"\x04"
             + bytes([0x80 | 8])
@@ -464,7 +464,7 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
         # "Sports, Health and Fitness" (1:266) lists the board over DIRSRV; the
         # board's c=2 (APP_BBS_SERVICE) is what routes the client into bbsnav.
         request = DirsrvRequest(node_ids=[_SPORTS_CATEGORY], prop_group="a\x00c\x00b\x00e")
-        payload = dirsrv.build_get_children_reply_payload(request)
+        payload = dirsrv.get_children_reply(request)
         records = _walk_records(payload)
         board = next((r for r in records if r["e"] == "Climbing BBS"), None)
         self.assertIsNotNone(board, "Climbing BBS missing from Sports category listing")
@@ -479,7 +479,7 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
         request = DirsrvRequest(
             node_ids=[_SPORTS_CATEGORY], prop_group="a\x00c\x00b\x00e\x00l\x00i"
         )
-        records = _walk_records(dirsrv.build_get_children_reply_payload(request))
+        records = _walk_records(dirsrv.get_children_reply(request))
         board = next(r for r in records if r["e"] == "Climbing BBS")
         self.assertEqual(board["b"] & 0x04, 0x04)
         self.assertEqual(board["c"], APP_BBS_SERVICE)
@@ -492,7 +492,7 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
         request = DirsrvRequest(
             node_ids=[_SPORTS_CATEGORY], prop_group="a\x00c\x00b\x00e\x00l\x00i"
         )
-        records = _walk_records(dirsrv.build_get_children_reply_payload(request))
+        records = _walk_records(dirsrv.get_children_reply(request))
         for record in (r for r in records if r["e"] != "Climbing BBS"):
             self.assertEqual(record["b"] & 0x04, 0)
 
@@ -502,7 +502,7 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
         # string 0xBF "<unknown type>". DSNED's GETPMTE table names app_id 2
         # "Bulletin Board Folder" (docs/DSNED.md §2.1).
         request = DirsrvRequest(node_ids=[_SPORTS_CATEGORY], prop_group="e\x00tp")
-        records = _walk_records(dirsrv.build_get_children_reply_payload(request))
+        records = _walk_records(dirsrv.get_children_reply(request))
         board = next(r for r in records if r["e"] == "Climbing BBS")
         self.assertEqual(board["tp"], "Bulletin Board Folder")
 
@@ -517,7 +517,7 @@ class TestBBSBoardWiredIntoCategory(unittest.TestCase):
             prop_group="e\x00j\x00k\x00ca\x00tp\x00z\x00o",
             recv_descriptors=[0x83, 0x83, 0x85],
         )
-        payload = dirsrv.build_get_properties_reply_payload(request)
+        payload = dirsrv.get_properties_reply(request)
         self.assertIn(b"\x0btp\x00\x01Bulletin Board Folder\x00", payload)
 
 
@@ -543,11 +543,11 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
         # container (0x00) and every message a leaf (0x01) — including a
         # conversation head that has replies.
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00b\x00e")
-        board = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        board = _walk_records(bbs_get_properties_reply(request))[0]
         self.assertEqual(board["b"] & 0x01, 0x00)
 
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00b\x00e\x00_F")
-        for record in _walk_records(build_bbs_get_children_reply_payload(request)):
+        for record in _walk_records(bbs_get_children_reply(request)):
             self.assertEqual(record["b"] & 0x01, 0x01, record["e"])
             # And every message is a leaf in the tree too — replies hang off
             # `_P`, not off the message. OkToGetChildren (0x7F5F1427) forces
@@ -558,14 +558,14 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
         # The board has no author, topic or date — every one of those must
         # still ship a value.
         request = DirsrvRequest(node_ids=[_BOARD], prop_group=self.BBS_TAGS)
-        records = _walk_records(build_bbs_get_properties_reply_payload(request))
+        records = _walk_records(bbs_get_properties_reply(request))
         self.assertEqual(len(records), 1)
         self.assertEqual(set(records[0]), set(self.BBS_TAGS.split("\x00")))
 
     def test_bbs_undated_message_record_has_no_gaps(self):
         # "British Climbers" carries an author but no date.
         request = DirsrvRequest(node_ids=[_BOARD], prop_group=self.BBS_TAGS)
-        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        records = _walk_records(bbs_get_children_reply(request))
         self.assertTrue(records)
         for record in records:
             self.assertEqual(set(record), set(self.BBS_TAGS.split("\x00")))
@@ -574,14 +574,14 @@ class TestEveryRequestedTagIsReturned(unittest.TestCase):
         # The delegate row has an empty `tp` and no `w`; both must still ship,
         # or `l`/`i` get stripped and HrSetupDelegate cannot build the mnid.
         request = DirsrvRequest(node_ids=[_SPORTS_CATEGORY], prop_group=self.DIRSRV_TAGS)
-        records = _walk_records(dirsrv.build_get_children_reply_payload(request))
+        records = _walk_records(dirsrv.get_children_reply(request))
         self.assertTrue(records)
         for record in records:
             self.assertEqual(set(record), set(self.DIRSRV_TAGS.split("\x00")))
 
     def test_dirsrv_category_rows_have_no_gaps(self):
         request = DirsrvRequest(node_ids=["1:16"], prop_group=self.DIRSRV_TAGS)
-        records = _walk_records(dirsrv.build_get_children_reply_payload(request))
+        records = _walk_records(dirsrv.get_children_reply(request))
         self.assertGreater(len(records), 1)
         for record in records:
             self.assertEqual(set(record), set(self.DIRSRV_TAGS.split("\x00")))
@@ -603,21 +603,19 @@ class TestBBSMnidLayout(unittest.TestCase):
 
     def test_board_carries_message_id_zero(self):
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         field_8, field_c = self._mnid(record)
         self.assertEqual(field_8, 0)
         self.assertNotEqual(field_c, 0)
 
     def test_messages_share_the_board_id_and_zeroing_field_8_reaches_the_board(self):
         board = _walk_records(
-            build_bbs_get_properties_reply_payload(
-                DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e")
-            )
+            bbs_get_properties_reply(DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e"))
         )[0]
         _, board_id = self._mnid(board)
 
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e")
-        for record in _walk_records(build_bbs_get_children_reply_payload(request)):
+        for record in _walk_records(bbs_get_children_reply(request)):
             field_8, field_c = self._mnid(record)
             self.assertNotEqual(field_8, 0, record["e"])
             self.assertEqual(field_c, board_id, record["e"])
@@ -628,14 +626,12 @@ class TestBBSMnidLayout(unittest.TestCase):
         # `_P` goes into field_8, so it must equal the parent's message id while
         # the board id stays put.
         yosemite = _walk_records(
-            build_bbs_get_properties_reply_payload(
-                DirsrvRequest(node_ids=[_YOSEMITE], prop_group="a\x00e")
-            )
+            bbs_get_properties_reply(DirsrvRequest(node_ids=[_YOSEMITE], prop_group="a\x00e"))
         )[0]
         parent_msg_id, board_id = self._mnid(yosemite)
 
         reply = _walk_records(
-            build_bbs_get_properties_reply_payload(
+            bbs_get_properties_reply(
                 DirsrvRequest(node_ids=[_RE_YOSEMITE], prop_group="a\x00e\x00_P")
             )
         )[0]
@@ -659,7 +655,7 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
         # 0x04/0x08 falls to wsprintfA("%u:%u", …) — the "Language: 0:0" bug.
         # The LCID sits at +4 either way, so MCM's browse-language read is safe.
         request = DirsrvRequest(node_ids=[_YOSEMITE], prop_group="q\x00g")
-        payload = build_bbs_get_properties_reply_payload(request)
+        payload = bbs_get_properties_reply(request)
         self.assertIn(b"\x10q\x00", payload)
         self.assertNotIn(b"\x04q\x00", payload)
         self.assertNotIn(b"\x03q\x00", payload)
@@ -667,7 +663,7 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
 
     def test_created_and_modified_carry_the_post_date(self):
         request = DirsrvRequest(node_ids=[_YOSEMITE], prop_group="v\x00w\x00g")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         self.assertEqual(record["v"], "May 16, 1995 10:12 AM")
         self.assertEqual(record["w"], "May 16, 1995 10:12 AM")
 
@@ -682,7 +678,7 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
         import datetime
 
         request = DirsrvRequest(node_ids=[_YOSEMITE], prop_group="v\x00_D")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
         as_client_shows_it = (
             datetime.datetime.fromtimestamp(record["_D"], datetime.UTC).replace(tzinfo=None)
@@ -695,7 +691,7 @@ class TestBBSPropertiesDialogTags(unittest.TestCase):
         # Every string-shaped dialog tag must arrive as 0x0B, not DWORD 0.
         tags = ["j", "k", "ca", "r", "s", "t", "u", "n", "on", "v", "w"]
         request = DirsrvRequest(node_ids=[_YOSEMITE], prop_group="\x00".join(tags))
-        payload = build_bbs_get_properties_reply_payload(request)
+        payload = bbs_get_properties_reply(request)
         for tag in tags:
             self.assertIn(bytes([0x0B]) + tag.encode() + b"\x00", payload, tag)
 
@@ -708,7 +704,7 @@ class TestBBSClassDispatch(unittest.TestCase):
         # message-content channel (IID 00028B2F). Dispatching on `selector`
         # alone routed the article fetch into the tree serialiser, which
         # answered with a record the reader cannot use — and the client ACKed it.
-        handler = BBSHandler(1, "BBS", Session())
+        handler = BbsHandler(1, "BBS", Session())
         wire = _ARTICLE_REQUEST
         article = handler.handle_request(BBS_CLASS_MESSAGE, 0x00, 0, wire, 5, 5)
         tree = handler.handle_request(BBS_CLASS_TREE, 0x00, 0, wire, 5, 5)
@@ -717,7 +713,7 @@ class TestBBSClassDispatch(unittest.TestCase):
         self.assertNotEqual(article, tree)
 
     def test_unknown_method_on_the_message_class_stays_unanswered(self):
-        handler = BBSHandler(1, "BBS", Session())
+        handler = BbsHandler(1, "BBS", Session())
         with self.assertLogs("server.services.bbs", level="WARNING"):
             self.assertIsNone(
                 handler.handle_request(BBS_CLASS_MESSAGE, 0x01, 0, _ARTICLE_REQUEST, 5, 5)
@@ -729,7 +725,7 @@ class TestBBSArticle(unittest.TestCase):
 
     def _article(self, msg_id=0x100, board_id=1):
         wire = b"\x04" + bytes([0x80 | 8]) + struct.pack("<II", msg_id, board_id) + b"\x83\x85"
-        return build_bbs_article_reply_payload(wire)
+        return bbs_article_reply(wire)
 
     def test_reply_is_a_zero_status_then_a_dynamic_complete_section(self):
         # `0x83 [status] 0x87 0x86 [bytes]`. The 0x86 tag matters: MPCCL
@@ -845,7 +841,7 @@ class TestBBSArticle(unittest.TestCase):
         # Both land on MAPI tag 0x68030003, so the header and the list pane's
         # Size column must not disagree.
         request = DirsrvRequest(node_ids=[_YOSEMITE], prop_group="p")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         head = self._article()[7:].partition(b"\n\n")[0]
         self.assertIn(f"X-MOS-Size: {record['p']}\n".encode(), head)
 
@@ -856,7 +852,7 @@ class TestBBSArticle(unittest.TestCase):
         import datetime
 
         request = DirsrvRequest(node_ids=[_YOSEMITE], prop_group="_D")
-        record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+        record = _walk_records(bbs_get_properties_reply(request))[0]
         offset = datetime.datetime.now().astimezone().utcoffset() or datetime.timedelta(0)
         as_client_shows_it = (
             datetime.datetime.fromtimestamp(record["_D"], datetime.UTC).replace(tzinfo=None)
@@ -938,7 +934,7 @@ class TestBBSEditChannel(unittest.TestCase):
         return request
 
     def test_get_ticket_is_answered_on_the_bbs_pipe(self):
-        handler = BBSHandler(1, "BBS", signed_in())
+        handler = BbsHandler(1, "BBS", signed_in())
         packets = handler.handle_request(
             msg_class=0x04,
             selector=0x0C,
@@ -948,12 +944,10 @@ class TestBBSEditChannel(unittest.TestCase):
             client_ack=0,
         )
 
-        self.assertEqual(
-            self._reply_payload(packets), dirsrv.build_get_ticket_reply_payload(signed_in(ADMIN))
-        )
+        self.assertEqual(self._reply_payload(packets), dirsrv.get_ticket_reply(signed_in(ADMIN)))
 
     def test_add_node_creates_a_bbs_folder_and_returns_its_mnid(self):
-        handler = BBSHandler(1, "BBS", signed_in())
+        handler = BbsHandler(1, "BBS", signed_in())
         before = {node.node_id for node in app_store.content.get_children(_BOARD)}
 
         packets = handler.handle_request(
@@ -984,7 +978,7 @@ class TestBBSEditChannel(unittest.TestCase):
         )
 
     def test_apply_updates_the_bbs_folder_and_completes(self):
-        handler = BBSHandler(1, "BBS", signed_in())
+        handler = BbsHandler(1, "BBS", signed_in())
         handler.handle_request(
             msg_class=0x04,
             selector=0x02,
@@ -1011,7 +1005,7 @@ class TestBBSEditChannel(unittest.TestCase):
         self.assertEqual(app_store.content.get_node("0:2").content.name, "New BBS")
 
     def test_delete_node_drops_the_message_from_the_board(self):
-        handler = BBSHandler(1, "BBS", signed_in())
+        handler = BbsHandler(1, "BBS", signed_in())
         before = [n.node_id for n in app_store.content.get_children(_BOARD)]
         self.assertIn(_RE_YOSEMITE, before)
 
@@ -1036,7 +1030,7 @@ class TestBBSEditChannel(unittest.TestCase):
 
     def test_unmapped_edit_selector_stays_unanswered(self):
         # Lock/Unlock/LinkNode and the rest of the edit table are not served.
-        handler = BBSHandler(1, "BBS", Session())
+        handler = BbsHandler(1, "BBS", Session())
         with self.assertLogs("server.services.bbs", level="WARNING") as cap:
             result = handler.handle_request(
                 msg_class=0x04,
@@ -1057,7 +1051,7 @@ class PostChannelTestCase(unittest.TestCase):
         reset_app_store()
         # A post is stamped with the account the connection signed in as.
         self.session = signed_in()
-        self.handler = BBSHandler(5, "BBS", self.session)
+        self.handler = BbsHandler(5, "BBS", self.session)
         # A commit writes the upload to disk; keep the test run out of the repo.
         self._captures = tempfile.TemporaryDirectory()
         self._capture_dir = bbs._POST_CAPTURE_DIR
@@ -1383,7 +1377,7 @@ class TestBBSPostCommit(PostChannelTestCase):
     def test_committed_post_survives_a_board_enumeration(self):
         node = self.post(_POST_HEAD, _POST_BODY)
         request = DirsrvRequest(node_ids=[_BOARD], prop_group="e\x00_P\x00_D")
-        records = _walk_records(build_bbs_get_children_reply_payload(request))
+        records = _walk_records(bbs_get_children_reply(request))
         self.assertIn(node.content.name, [r["e"] for r in records])
 
     def test_a_post_with_no_subject_still_names_its_row(self):
@@ -1404,7 +1398,7 @@ class TestBBSPostCommit(PostChannelTestCase):
         self.assertEqual(app_store.member.get_member(display_name).display_name, display_name)
 
     def test_a_different_account_signs_its_own_posts(self):
-        self.handler = BBSHandler(5, "BBS", signed_in(SUBSCRIBER))
+        self.handler = BbsHandler(5, "BBS", signed_in(SUBSCRIBER))
         node = self.post(_POST_HEAD, _POST_BODY)
         self.assertEqual(node.content.bbs.author, seed_user(SUBSCRIBER).display_name)
 
@@ -1448,7 +1442,7 @@ class TestBBSPostedAttachments(PostChannelTestCase):
             with self.subTest(attachment=k):
                 key = f"{int(msg_id) + k}:{board_id}"
                 request = DirsrvRequest(node_ids=[key], prop_group="z\x00_r")
-                record = _walk_records(build_bbs_get_properties_reply_payload(request))[0]
+                record = _walk_records(bbs_get_properties_reply(request))[0]
                 self.assertEqual(record["z"], 0)
                 self.assertEqual(record["_r"], 0)
 
@@ -1502,7 +1496,7 @@ class TestBBSPostedBodyRoundTrip(PostChannelTestCase):
             + struct.pack("<II", int(msg_id), int(board_id))
             + b"\x83\x85"
         )
-        article = build_bbs_article_reply_payload(wire)[7:]
+        article = bbs_article_reply(wire)[7:]
         head, sep, body = article.partition(b"\n\n")
         self.assertEqual(sep, b"\n\n")
         self.assertIn(b"Subject: RE: RE: Yosemite\n", head)

@@ -173,7 +173,7 @@ def _read_signup_file(filename):
     return path.read_bytes()
 
 
-class FTMHandler(ServiceHandler):
+class FtmHandler(ServiceHandler):
     GUIDS = FTM_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

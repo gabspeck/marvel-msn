@@ -190,7 +190,7 @@ def _row_values(doc, columns):
     return values
 
 
-class BBIRServiceHandler(ServiceHandler):
+class BbirHandler(ServiceHandler):
     GUIDS = BBIR_INTERFACE_GUIDS
 
     def __init__(self, pipe_idx, svc_name, session):

@@ -36,41 +36,41 @@ from ...blackbird.wire import (
     build_type4_transfer_chunk_frame,
 )
 from ...config import (
-    MEDVIEW_ATTACH_SESSION,
-    MEDVIEW_CLOSE_REMOTE_HFS_FILE,
-    MEDVIEW_CLOSE_TITLE,
-    MEDVIEW_CLOSE_WORD_WHEEL,
-    MEDVIEW_CONVERT_ADDRESS_TO_VA,
-    MEDVIEW_CONVERT_HASH_TO_VA,
-    MEDVIEW_CONVERT_TOPIC_TO_VA,
-    MEDVIEW_COUNT_KEY_MATCHES,
-    MEDVIEW_DATA_EDIT_ADD,
     MEDVIEW_DATA_EDIT_CLASS,
-    MEDVIEW_DATA_EDIT_DELETE,
-    MEDVIEW_DATA_EDIT_GET_TICKET,
-    MEDVIEW_FETCH_ADJACENT_TOPIC,
-    MEDVIEW_FETCH_NEARBY_TOPIC,
-    MEDVIEW_FIND_HIGHLIGHT_ADDRESS,
-    MEDVIEW_GET_REMOTE_FS_ERROR,
-    MEDVIEW_GET_TITLE_INFO_REMOTE,
     MEDVIEW_INTERFACE_GUIDS,
-    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS,
-    MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY,
-    MEDVIEW_OPEN_REMOTE_HFS_FILE,
-    MEDVIEW_OPEN_TITLE,
-    MEDVIEW_OPEN_WORD_WHEEL,
-    MEDVIEW_PRE_NOTIFY_TITLE,
-    MEDVIEW_QUERY_TOPICS,
-    MEDVIEW_QUERY_WORD_WHEEL,
-    MEDVIEW_READ_KEY_ADDRESSES,
-    MEDVIEW_READ_REMOTE_HFS_FILE,
-    MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS,
-    MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT,
-    MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX,
-    MEDVIEW_SET_KEY_COUNT_HINT,
-    MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
-    MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS,
-    MEDVIEW_VALIDATE_TITLE,
+    MEDVIEW_SELECTOR_ATTACH_SESSION,
+    MEDVIEW_SELECTOR_CLOSE_REMOTE_HFS_FILE,
+    MEDVIEW_SELECTOR_CLOSE_TITLE,
+    MEDVIEW_SELECTOR_CLOSE_WORD_WHEEL,
+    MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA,
+    MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA,
+    MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA,
+    MEDVIEW_SELECTOR_COUNT_KEY_MATCHES,
+    MEDVIEW_SELECTOR_DATA_EDIT_ADD,
+    MEDVIEW_SELECTOR_DATA_EDIT_DELETE,
+    MEDVIEW_SELECTOR_DATA_EDIT_GET_TICKET,
+    MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC,
+    MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC,
+    MEDVIEW_SELECTOR_FIND_HIGHLIGHT_ADDRESS,
+    MEDVIEW_SELECTOR_GET_REMOTE_FS_ERROR,
+    MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE,
+    MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS,
+    MEDVIEW_SELECTOR_LOOKUP_WORD_WHEEL_ENTRY,
+    MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE,
+    MEDVIEW_SELECTOR_OPEN_TITLE,
+    MEDVIEW_SELECTOR_OPEN_WORD_WHEEL,
+    MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
+    MEDVIEW_SELECTOR_QUERY_TOPICS,
+    MEDVIEW_SELECTOR_QUERY_WORD_WHEEL,
+    MEDVIEW_SELECTOR_READ_KEY_ADDRESSES,
+    MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE,
+    MEDVIEW_SELECTOR_REFRESH_HIGHLIGHT_ADDRESS,
+    MEDVIEW_SELECTOR_RELEASE_HIGHLIGHT_CONTEXT,
+    MEDVIEW_SELECTOR_RESOLVE_WORD_WHEEL_PREFIX,
+    MEDVIEW_SELECTOR_SET_KEY_COUNT_HINT,
+    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
+    MEDVIEW_SELECTOR_UNSUBSCRIBE_NOTIFICATIONS,
+    MEDVIEW_SELECTOR_VALIDATE_TITLE,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_PARTIAL,
 )
@@ -89,7 +89,7 @@ from ...mpc import (
 )
 from .._dispatch import log_unhandled_selector
 from .._handler import ServiceHandler
-from ..dirsrv import TREEEDCL_STATUS_REFUSED, build_get_ticket_reply_payload, is_valid_ticket
+from ..dirsrv import TREEEDCL_STATUS_REFUSED, get_ticket_reply, is_valid_ticket
 from . import replies
 from .m14_loader import (
     LoadedM14,
@@ -165,50 +165,50 @@ _BF_DISPATCH_OFFSET = 4 + 0x26
 
 # Symbolic names for human-readable request/reply log lines.
 _SELECTOR_NAMES: dict[int, str] = {
-    MEDVIEW_VALIDATE_TITLE: "validate_title",
-    MEDVIEW_OPEN_TITLE: "open_title",
-    MEDVIEW_CLOSE_TITLE: "close_title",
-    MEDVIEW_GET_TITLE_INFO_REMOTE: "get_title_info_remote",
-    MEDVIEW_QUERY_TOPICS: "query_topics",
-    MEDVIEW_PRE_NOTIFY_TITLE: "pre_notify_title",
-    MEDVIEW_CONVERT_ADDRESS_TO_VA: "convert_address_to_va",
-    MEDVIEW_CONVERT_HASH_TO_VA: "convert_hash_to_va",
-    MEDVIEW_CONVERT_TOPIC_TO_VA: "convert_topic_to_va",
-    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS: "load_topic_highlights",
-    MEDVIEW_FIND_HIGHLIGHT_ADDRESS: "find_highlight_address",
-    MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT: "release_highlight_context",
-    MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS: "refresh_highlight_address",
-    MEDVIEW_QUERY_WORD_WHEEL: "query_word_wheel",
-    MEDVIEW_OPEN_WORD_WHEEL: "open_word_wheel",
-    MEDVIEW_CLOSE_WORD_WHEEL: "close_word_wheel",
-    MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX: "resolve_word_wheel_prefix",
-    MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY: "lookup_word_wheel_entry",
-    MEDVIEW_COUNT_KEY_MATCHES: "count_key_matches",
-    MEDVIEW_READ_KEY_ADDRESSES: "read_key_addresses",
-    MEDVIEW_SET_KEY_COUNT_HINT: "set_key_count_hint",
-    MEDVIEW_FETCH_NEARBY_TOPIC: "fetch_nearby_topic",
-    MEDVIEW_FETCH_ADJACENT_TOPIC: "fetch_adjacent_topic",
-    MEDVIEW_SUBSCRIBE_NOTIFICATIONS: "subscribe_notifications",
-    MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS: "unsubscribe_notifications",
-    MEDVIEW_ATTACH_SESSION: "attach_session",
-    MEDVIEW_OPEN_REMOTE_HFS_FILE: "open_remote_hfs_file",
-    MEDVIEW_READ_REMOTE_HFS_FILE: "read_remote_hfs_file",
-    MEDVIEW_CLOSE_REMOTE_HFS_FILE: "close_remote_hfs_file",
-    MEDVIEW_GET_REMOTE_FS_ERROR: "get_remote_fs_error",
+    MEDVIEW_SELECTOR_VALIDATE_TITLE: "validate_title",
+    MEDVIEW_SELECTOR_OPEN_TITLE: "open_title",
+    MEDVIEW_SELECTOR_CLOSE_TITLE: "close_title",
+    MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE: "get_title_info_remote",
+    MEDVIEW_SELECTOR_QUERY_TOPICS: "query_topics",
+    MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE: "pre_notify_title",
+    MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA: "convert_address_to_va",
+    MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA: "convert_hash_to_va",
+    MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA: "convert_topic_to_va",
+    MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS: "load_topic_highlights",
+    MEDVIEW_SELECTOR_FIND_HIGHLIGHT_ADDRESS: "find_highlight_address",
+    MEDVIEW_SELECTOR_RELEASE_HIGHLIGHT_CONTEXT: "release_highlight_context",
+    MEDVIEW_SELECTOR_REFRESH_HIGHLIGHT_ADDRESS: "refresh_highlight_address",
+    MEDVIEW_SELECTOR_QUERY_WORD_WHEEL: "query_word_wheel",
+    MEDVIEW_SELECTOR_OPEN_WORD_WHEEL: "open_word_wheel",
+    MEDVIEW_SELECTOR_CLOSE_WORD_WHEEL: "close_word_wheel",
+    MEDVIEW_SELECTOR_RESOLVE_WORD_WHEEL_PREFIX: "resolve_word_wheel_prefix",
+    MEDVIEW_SELECTOR_LOOKUP_WORD_WHEEL_ENTRY: "lookup_word_wheel_entry",
+    MEDVIEW_SELECTOR_COUNT_KEY_MATCHES: "count_key_matches",
+    MEDVIEW_SELECTOR_READ_KEY_ADDRESSES: "read_key_addresses",
+    MEDVIEW_SELECTOR_SET_KEY_COUNT_HINT: "set_key_count_hint",
+    MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC: "fetch_nearby_topic",
+    MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC: "fetch_adjacent_topic",
+    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS: "subscribe_notifications",
+    MEDVIEW_SELECTOR_UNSUBSCRIBE_NOTIFICATIONS: "unsubscribe_notifications",
+    MEDVIEW_SELECTOR_ATTACH_SESSION: "attach_session",
+    MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE: "open_remote_hfs_file",
+    MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE: "read_remote_hfs_file",
+    MEDVIEW_SELECTOR_CLOSE_REMOTE_HFS_FILE: "close_remote_hfs_file",
+    MEDVIEW_SELECTOR_GET_REMOTE_FS_ERROR: "get_remote_fs_error",
 }
 
 # Positional names for the wire send-side parameters of each selector.
 # Names mirror `docs/medview-service-contract.md`. Aligned positionally
 # with `parse_request_params` output; extras are labelled `param[N]`.
 _REQUEST_PARAM_NAMES: dict[int, list[str]] = {
-    MEDVIEW_ATTACH_SESSION: ["clientVersion", "capabilities"],
-    MEDVIEW_SUBSCRIBE_NOTIFICATIONS: ["notificationType"],
-    MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS: ["notificationType"],
-    MEDVIEW_VALIDATE_TITLE: ["titleSlot"],
-    MEDVIEW_OPEN_TITLE: ["titleToken", "cacheHint0", "cacheHint1"],
-    MEDVIEW_CLOSE_TITLE: ["titleSlot"],
-    MEDVIEW_GET_TITLE_INFO_REMOTE: ["titleSlot", "infoKind", "infoArg", "callerCookie"],
-    MEDVIEW_QUERY_TOPICS: [
+    MEDVIEW_SELECTOR_ATTACH_SESSION: ["clientVersion", "capabilities"],
+    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS: ["notificationType"],
+    MEDVIEW_SELECTOR_UNSUBSCRIBE_NOTIFICATIONS: ["notificationType"],
+    MEDVIEW_SELECTOR_VALIDATE_TITLE: ["titleSlot"],
+    MEDVIEW_SELECTOR_OPEN_TITLE: ["titleToken", "cacheHint0", "cacheHint1"],
+    MEDVIEW_SELECTOR_CLOSE_TITLE: ["titleSlot"],
+    MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE: ["titleSlot", "infoKind", "infoArg", "callerCookie"],
+    MEDVIEW_SELECTOR_QUERY_TOPICS: [
         "titleSlot",
         "queryClass",
         "primaryText",
@@ -218,38 +218,38 @@ _REQUEST_PARAM_NAMES: dict[int, list[str]] = {
         "auxTail0",
         "auxTail1",
     ],
-    MEDVIEW_PRE_NOTIFY_TITLE: ["titleSlot", "notifyOp", "notifyPayload"],
-    MEDVIEW_OPEN_WORD_WHEEL: ["titleSlot", "titleName"],
-    MEDVIEW_QUERY_WORD_WHEEL: ["wordWheelId", "queryMode", "queryText"],
-    MEDVIEW_CLOSE_WORD_WHEEL: ["wordWheelId"],
-    MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX: ["wordWheelId", "prefixText"],
-    MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY: ["wordWheelId", "ordinal", "outputLimit"],
-    MEDVIEW_COUNT_KEY_MATCHES: ["wordWheelId", "keyText"],
-    MEDVIEW_READ_KEY_ADDRESSES: ["wordWheelId", "keyText", "startIndex", "maxCount"],
-    MEDVIEW_SET_KEY_COUNT_HINT: ["wordWheelId", "keyText", "countHint"],
-    MEDVIEW_CONVERT_ADDRESS_TO_VA: ["titleSlot", "addressToken"],
-    MEDVIEW_CONVERT_HASH_TO_VA: ["titleSlot", "contextHash"],
-    MEDVIEW_CONVERT_TOPIC_TO_VA: ["titleSlot", "topicNumber"],
-    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS: ["highlightContext", "topicOrAddress"],
-    MEDVIEW_FIND_HIGHLIGHT_ADDRESS: ["highlightContext", "searchKey0", "searchKey1"],
-    MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT: ["titleSlot"],
-    MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS: ["titleSlot", "highlightId"],
-    MEDVIEW_FETCH_NEARBY_TOPIC: ["titleSlot", "addressToken"],
-    MEDVIEW_FETCH_ADJACENT_TOPIC: ["titleSlot", "currentToken", "direction"],
-    MEDVIEW_OPEN_REMOTE_HFS_FILE: ["hfsMode", "fileName", "openMode"],
-    MEDVIEW_READ_REMOTE_HFS_FILE: ["remoteHandleId", "requestedLength", "currentOffset"],
-    MEDVIEW_CLOSE_REMOTE_HFS_FILE: ["remoteHandleId"],
-    MEDVIEW_GET_REMOTE_FS_ERROR: [],
+    MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE: ["titleSlot", "notifyOp", "notifyPayload"],
+    MEDVIEW_SELECTOR_OPEN_WORD_WHEEL: ["titleSlot", "titleName"],
+    MEDVIEW_SELECTOR_QUERY_WORD_WHEEL: ["wordWheelId", "queryMode", "queryText"],
+    MEDVIEW_SELECTOR_CLOSE_WORD_WHEEL: ["wordWheelId"],
+    MEDVIEW_SELECTOR_RESOLVE_WORD_WHEEL_PREFIX: ["wordWheelId", "prefixText"],
+    MEDVIEW_SELECTOR_LOOKUP_WORD_WHEEL_ENTRY: ["wordWheelId", "ordinal", "outputLimit"],
+    MEDVIEW_SELECTOR_COUNT_KEY_MATCHES: ["wordWheelId", "keyText"],
+    MEDVIEW_SELECTOR_READ_KEY_ADDRESSES: ["wordWheelId", "keyText", "startIndex", "maxCount"],
+    MEDVIEW_SELECTOR_SET_KEY_COUNT_HINT: ["wordWheelId", "keyText", "countHint"],
+    MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA: ["titleSlot", "addressToken"],
+    MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA: ["titleSlot", "contextHash"],
+    MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA: ["titleSlot", "topicNumber"],
+    MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS: ["highlightContext", "topicOrAddress"],
+    MEDVIEW_SELECTOR_FIND_HIGHLIGHT_ADDRESS: ["highlightContext", "searchKey0", "searchKey1"],
+    MEDVIEW_SELECTOR_RELEASE_HIGHLIGHT_CONTEXT: ["titleSlot"],
+    MEDVIEW_SELECTOR_REFRESH_HIGHLIGHT_ADDRESS: ["titleSlot", "highlightId"],
+    MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC: ["titleSlot", "addressToken"],
+    MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC: ["titleSlot", "currentToken", "direction"],
+    MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE: ["hfsMode", "fileName", "openMode"],
+    MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE: ["remoteHandleId", "requestedLength", "currentOffset"],
+    MEDVIEW_SELECTOR_CLOSE_REMOTE_HFS_FILE: ["remoteHandleId"],
+    MEDVIEW_SELECTOR_GET_REMOTE_FS_ERROR: [],
 }
 
 # Positional names for the tagged static-section fields of each reply,
 # in the order emitted by `replies.py`. Dynamic-body labels follow.
 _REPLY_FIELD_NAMES: dict[int, list[str]] = {
-    MEDVIEW_ATTACH_SESSION: ["validationToken"],
-    MEDVIEW_SUBSCRIBE_NOTIFICATIONS: [],
-    MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS: [],
-    MEDVIEW_VALIDATE_TITLE: ["isValid"],
-    MEDVIEW_OPEN_TITLE: [
+    MEDVIEW_SELECTOR_ATTACH_SESSION: ["validationToken"],
+    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS: [],
+    MEDVIEW_SELECTOR_UNSUBSCRIBE_NOTIFICATIONS: [],
+    MEDVIEW_SELECTOR_VALIDATE_TITLE: ["isValid"],
+    MEDVIEW_SELECTOR_OPEN_TITLE: [
         "titleSlot",
         "fileSystemMode",
         "contentsVa",
@@ -261,41 +261,41 @@ _REPLY_FIELD_NAMES: dict[int, list[str]] = {
         "titleCacheHeader",
         "status",
     ],
-    MEDVIEW_CLOSE_TITLE: [],
-    MEDVIEW_GET_TITLE_INFO_REMOTE: ["lengthOrScalar"],
-    MEDVIEW_QUERY_TOPICS: ["highlightContext", "logicalCount", "secondaryResult"],
-    MEDVIEW_PRE_NOTIFY_TITLE: ["status"],
-    MEDVIEW_OPEN_WORD_WHEEL: ["wordWheelId", "itemCount"],
-    MEDVIEW_QUERY_WORD_WHEEL: ["status"],
-    MEDVIEW_CLOSE_WORD_WHEEL: [],
-    MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX: ["prefixResult"],
-    MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY: [],
-    MEDVIEW_COUNT_KEY_MATCHES: ["matchCount"],
-    MEDVIEW_READ_KEY_ADDRESSES: [],
-    MEDVIEW_SET_KEY_COUNT_HINT: ["success"],
-    MEDVIEW_CONVERT_ADDRESS_TO_VA: [],
-    MEDVIEW_CONVERT_HASH_TO_VA: [],
-    MEDVIEW_CONVERT_TOPIC_TO_VA: [],
-    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS: [],
-    MEDVIEW_FIND_HIGHLIGHT_ADDRESS: ["addressToken"],
-    MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT: [],
-    MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS: [],
-    MEDVIEW_FETCH_NEARBY_TOPIC: [],
-    MEDVIEW_FETCH_ADJACENT_TOPIC: [],
-    MEDVIEW_OPEN_REMOTE_HFS_FILE: ["remoteHandleId", "fileSize"],
-    MEDVIEW_READ_REMOTE_HFS_FILE: ["status"],
-    MEDVIEW_CLOSE_REMOTE_HFS_FILE: [],
-    MEDVIEW_GET_REMOTE_FS_ERROR: ["fsError"],
+    MEDVIEW_SELECTOR_CLOSE_TITLE: [],
+    MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE: ["lengthOrScalar"],
+    MEDVIEW_SELECTOR_QUERY_TOPICS: ["highlightContext", "logicalCount", "secondaryResult"],
+    MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE: ["status"],
+    MEDVIEW_SELECTOR_OPEN_WORD_WHEEL: ["wordWheelId", "itemCount"],
+    MEDVIEW_SELECTOR_QUERY_WORD_WHEEL: ["status"],
+    MEDVIEW_SELECTOR_CLOSE_WORD_WHEEL: [],
+    MEDVIEW_SELECTOR_RESOLVE_WORD_WHEEL_PREFIX: ["prefixResult"],
+    MEDVIEW_SELECTOR_LOOKUP_WORD_WHEEL_ENTRY: [],
+    MEDVIEW_SELECTOR_COUNT_KEY_MATCHES: ["matchCount"],
+    MEDVIEW_SELECTOR_READ_KEY_ADDRESSES: [],
+    MEDVIEW_SELECTOR_SET_KEY_COUNT_HINT: ["success"],
+    MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA: [],
+    MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA: [],
+    MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA: [],
+    MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS: [],
+    MEDVIEW_SELECTOR_FIND_HIGHLIGHT_ADDRESS: ["addressToken"],
+    MEDVIEW_SELECTOR_RELEASE_HIGHLIGHT_CONTEXT: [],
+    MEDVIEW_SELECTOR_REFRESH_HIGHLIGHT_ADDRESS: [],
+    MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC: [],
+    MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC: [],
+    MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE: ["remoteHandleId", "fileSize"],
+    MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE: ["status"],
+    MEDVIEW_SELECTOR_CLOSE_REMOTE_HFS_FILE: [],
+    MEDVIEW_SELECTOR_GET_REMOTE_FS_ERROR: ["fsError"],
 }
 
 # Label applied to the post-`0x86` dynamic body when one is present.
 _REPLY_BODY_NAMES: dict[int, str] = {
-    MEDVIEW_OPEN_TITLE: "payloadBlob",
-    MEDVIEW_GET_TITLE_INFO_REMOTE: "payload",
-    MEDVIEW_QUERY_TOPICS: "auxReply",
-    MEDVIEW_READ_KEY_ADDRESSES: "addressList",
-    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS: "highlightBlob",
-    MEDVIEW_READ_REMOTE_HFS_FILE: "fileBytes",
+    MEDVIEW_SELECTOR_OPEN_TITLE: "payloadBlob",
+    MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE: "payload",
+    MEDVIEW_SELECTOR_QUERY_TOPICS: "auxReply",
+    MEDVIEW_SELECTOR_READ_KEY_ADDRESSES: "addressList",
+    MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS: "highlightBlob",
+    MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE: "fileBytes",
 }
 
 
@@ -495,9 +495,9 @@ def _format_push_payload(payload: bytes) -> str:
 # Builder signature: `(handler, title_slot, key) -> bytes`.
 
 _TYPE3_KIND_BY_SELECTOR = {
-    MEDVIEW_CONVERT_ADDRESS_TO_VA: 2,
-    MEDVIEW_CONVERT_HASH_TO_VA: 1,
-    MEDVIEW_CONVERT_TOPIC_TO_VA: 0,
+    MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA: 2,
+    MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA: 1,
+    MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA: 0,
 }
 
 
@@ -507,7 +507,7 @@ def _push_type3_op4(selector: int):
     def build(handler, title_slot: int, key: int) -> bytes:
         va = addr = 0
         title = handler.loaded_m14
-        if title is not None and selector == MEDVIEW_CONVERT_HASH_TO_VA:
+        if title is not None and selector == MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA:
             if key == 1:
                 # MOSVIEW hashes the empty initial context string to 1.
                 va = title.contents_va
@@ -584,11 +584,17 @@ def _push_adjacent_topic(handler, title_slot: int, key: int) -> bytes:
 
 
 _PUSH_DISPATCH: dict[int, tuple[int, callable]] = {
-    MEDVIEW_CONVERT_ADDRESS_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_ADDRESS_TO_VA)),
-    MEDVIEW_CONVERT_HASH_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_HASH_TO_VA)),
-    MEDVIEW_CONVERT_TOPIC_TO_VA: (3, _push_type3_op4(MEDVIEW_CONVERT_TOPIC_TO_VA)),
-    MEDVIEW_FETCH_NEARBY_TOPIC: (0, _push_va_resolve),
-    MEDVIEW_FETCH_ADJACENT_TOPIC: (0, _push_adjacent_topic),
+    MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA: (
+        3,
+        _push_type3_op4(MEDVIEW_SELECTOR_CONVERT_ADDRESS_TO_VA),
+    ),
+    MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA: (3, _push_type3_op4(MEDVIEW_SELECTOR_CONVERT_HASH_TO_VA)),
+    MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA: (
+        3,
+        _push_type3_op4(MEDVIEW_SELECTOR_CONVERT_TOPIC_TO_VA),
+    ),
+    MEDVIEW_SELECTOR_FETCH_NEARBY_TOPIC: (0, _push_va_resolve),
+    MEDVIEW_SELECTOR_FETCH_ADJACENT_TOPIC: (0, _push_adjacent_topic),
 }
 
 
@@ -879,7 +885,7 @@ def _picture_status_metrics(data: bytes) -> tuple[int, int, int]:
     return 1, width, height
 
 
-class MEDVIEWHandler(ServiceHandler):
+class MedviewHandler(ServiceHandler):
     """Per-pipe MEDVIEW handler."""
 
     GUIDS = MEDVIEW_INTERFACE_GUIDS
@@ -929,12 +935,12 @@ class MEDVIEWHandler(ServiceHandler):
             return None
 
         if msg_class == MEDVIEW_DATA_EDIT_CLASS:
-            if selector == MEDVIEW_DATA_EDIT_ADD:
+            if selector == MEDVIEW_SELECTOR_DATA_EDIT_ADD:
                 reply_payload = self._handle_data_edit_add(request_id, payload)
-            elif selector == MEDVIEW_DATA_EDIT_DELETE:
+            elif selector == MEDVIEW_SELECTOR_DATA_EDIT_DELETE:
                 reply_payload = self._handle_data_edit_delete(request_id, payload)
-            elif selector == MEDVIEW_DATA_EDIT_GET_TICKET:
-                reply_payload = build_get_ticket_reply_payload(self.session)
+            elif selector == MEDVIEW_SELECTOR_DATA_EDIT_GET_TICKET:
+                reply_payload = get_ticket_reply(self.session)
             else:
                 log_unhandled_selector(
                     log,
@@ -963,7 +969,7 @@ class MEDVIEWHandler(ServiceHandler):
                 server_seq,
                 client_ack,
             )
-        if selector == MEDVIEW_PRE_NOTIFY_TITLE:
+        if selector == MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE:
             return self._handle_pre_notify(
                 msg_class,
                 request_id,
@@ -983,7 +989,7 @@ class MEDVIEWHandler(ServiceHandler):
             request_id,
             _format_reply_payload(selector, reply_payload),
         )
-        if selector == MEDVIEW_READ_REMOTE_HFS_FILE:
+        if selector == MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE:
             return self._build_hfs_read_reply_packets(
                 msg_class,
                 selector,
@@ -995,7 +1001,11 @@ class MEDVIEWHandler(ServiceHandler):
         reply_packets = self.reply(
             msg_class, selector, request_id, reply_payload, server_seq, client_ack
         )
-        if selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS and len(payload) >= 2 and payload[1] == 4:
+        if (
+            selector == MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS
+            and len(payload) >= 2
+            and payload[1] == 4
+        ):
             push_packets = self._flush_pending_picture_chunks(
                 (server_seq + len(reply_packets)) & 0x7F,
                 client_ack,
@@ -1139,62 +1149,62 @@ class MEDVIEWHandler(ServiceHandler):
 
     def _dispatch(self, msg_class, selector, request_id, payload) -> bytes | None:
         # SessionService
-        if selector == MEDVIEW_ATTACH_SESSION:
+        if selector == MEDVIEW_SELECTOR_ATTACH_SESSION:
             return self._handle_attach_session(request_id, payload)
-        if selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS:
+        if selector == MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS:
             return self._handle_subscribe(msg_class, request_id, payload)
-        if selector == MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS:
+        if selector == MEDVIEW_SELECTOR_UNSUBSCRIBE_NOTIFICATIONS:
             return self._handle_unsubscribe(request_id, payload)
 
         # TitleService
-        if selector == MEDVIEW_VALIDATE_TITLE:
+        if selector == MEDVIEW_SELECTOR_VALIDATE_TITLE:
             return self._handle_validate_title(request_id, payload)
-        if selector == MEDVIEW_OPEN_TITLE:
+        if selector == MEDVIEW_SELECTOR_OPEN_TITLE:
             return self._handle_open_title(request_id, payload)
-        if selector == MEDVIEW_CLOSE_TITLE:
+        if selector == MEDVIEW_SELECTOR_CLOSE_TITLE:
             return self._handle_close_title(request_id, payload)
-        if selector == MEDVIEW_GET_TITLE_INFO_REMOTE:
+        if selector == MEDVIEW_SELECTOR_GET_TITLE_INFO_REMOTE:
             return self._handle_get_title_info_remote(request_id, payload)
-        if selector == MEDVIEW_QUERY_TOPICS:
+        if selector == MEDVIEW_SELECTOR_QUERY_TOPICS:
             log.info("query_topics req_id=%d", request_id)
             return replies.query_topics()
 
         # WordWheelService
-        if selector == MEDVIEW_OPEN_WORD_WHEEL:
+        if selector == MEDVIEW_SELECTOR_OPEN_WORD_WHEEL:
             return replies.open_word_wheel()
-        if selector == MEDVIEW_QUERY_WORD_WHEEL:
+        if selector == MEDVIEW_SELECTOR_QUERY_WORD_WHEEL:
             return replies.query_word_wheel()
-        if selector == MEDVIEW_CLOSE_WORD_WHEEL:
+        if selector == MEDVIEW_SELECTOR_CLOSE_WORD_WHEEL:
             return replies.ack()
-        if selector == MEDVIEW_RESOLVE_WORD_WHEEL_PREFIX:
+        if selector == MEDVIEW_SELECTOR_RESOLVE_WORD_WHEEL_PREFIX:
             return replies.resolve_word_wheel_prefix()
-        if selector == MEDVIEW_LOOKUP_WORD_WHEEL_ENTRY:
+        if selector == MEDVIEW_SELECTOR_LOOKUP_WORD_WHEEL_ENTRY:
             return replies.ack()
-        if selector == MEDVIEW_COUNT_KEY_MATCHES:
+        if selector == MEDVIEW_SELECTOR_COUNT_KEY_MATCHES:
             return replies.count_key_matches()
-        if selector == MEDVIEW_READ_KEY_ADDRESSES:
+        if selector == MEDVIEW_SELECTOR_READ_KEY_ADDRESSES:
             return replies.read_key_addresses()
-        if selector == MEDVIEW_SET_KEY_COUNT_HINT:
+        if selector == MEDVIEW_SELECTOR_SET_KEY_COUNT_HINT:
             return replies.set_key_count_hint()
 
         # AddressHighlightService (sync — async-cache trio handled above)
-        if selector == MEDVIEW_LOAD_TOPIC_HIGHLIGHTS:
+        if selector == MEDVIEW_SELECTOR_LOAD_TOPIC_HIGHLIGHTS:
             return replies.load_topic_highlights()
-        if selector == MEDVIEW_FIND_HIGHLIGHT_ADDRESS:
+        if selector == MEDVIEW_SELECTOR_FIND_HIGHLIGHT_ADDRESS:
             return replies.find_highlight_address()
-        if selector == MEDVIEW_RELEASE_HIGHLIGHT_CONTEXT:
+        if selector == MEDVIEW_SELECTOR_RELEASE_HIGHLIGHT_CONTEXT:
             return replies.ack()
-        if selector == MEDVIEW_REFRESH_HIGHLIGHT_ADDRESS:
+        if selector == MEDVIEW_SELECTOR_REFRESH_HIGHLIGHT_ADDRESS:
             return replies.ack()
 
         # RemoteFileService
-        if selector == MEDVIEW_OPEN_REMOTE_HFS_FILE:
+        if selector == MEDVIEW_SELECTOR_OPEN_REMOTE_HFS_FILE:
             return self._handle_open_remote_hfs_file(request_id, payload)
-        if selector == MEDVIEW_READ_REMOTE_HFS_FILE:
+        if selector == MEDVIEW_SELECTOR_READ_REMOTE_HFS_FILE:
             return self._handle_read_remote_hfs_file(request_id, payload)
-        if selector == MEDVIEW_CLOSE_REMOTE_HFS_FILE:
+        if selector == MEDVIEW_SELECTOR_CLOSE_REMOTE_HFS_FILE:
             return self._handle_close_remote_hfs_file(request_id, payload)
-        if selector == MEDVIEW_GET_REMOTE_FS_ERROR:
+        if selector == MEDVIEW_SELECTOR_GET_REMOTE_FS_ERROR:
             return replies.get_remote_fs_error()
 
         return None
@@ -1404,13 +1414,18 @@ class MEDVIEWHandler(ServiceHandler):
         reply_payload = replies.pre_notify_title()
         log.info(
             "reply selector=%s(0x%02x) req_id=%d %s",
-            _selector_name(MEDVIEW_PRE_NOTIFY_TITLE),
-            MEDVIEW_PRE_NOTIFY_TITLE,
+            _selector_name(MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE),
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
             request_id,
-            _format_reply_payload(MEDVIEW_PRE_NOTIFY_TITLE, reply_payload),
+            _format_reply_payload(MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE, reply_payload),
         )
         packets = self.reply(
-            msg_class, MEDVIEW_PRE_NOTIFY_TITLE, request_id, reply_payload, server_seq, client_ack
+            msg_class,
+            MEDVIEW_SELECTOR_PRE_NOTIFY_TITLE,
+            request_id,
+            reply_payload,
+            server_seq,
+            client_ack,
         )
         if notify_op == 8 and len(notify_payload) > 1:
             # Opcode 0x08's long form is MOSVIEW's own failure report, not the
@@ -1556,7 +1571,7 @@ class MEDVIEWHandler(ServiceHandler):
         push_payload = bytes([TAG_DYNAMIC_PARTIAL]) + frame
         push_host = build_host_block(
             sub_class,
-            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
             sub_req_id,
             push_payload,
         )
@@ -1806,7 +1821,7 @@ class MEDVIEWHandler(ServiceHandler):
         push_payload = bytes([0x85]) + chunk
         push_host = build_host_block(
             sub_class,
-            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
             sub_req_id,
             push_payload,
         )

@@ -25,7 +25,7 @@ from server.models import (
 from server.mpc import parse_host_block, parse_tagged_params
 from server.services.onlstmt import (
     _CANCEL_ACK_PAYLOAD,
-    OnlStmtHandler,
+    OnlstmtHandler,
     _encode_record,
     _encode_timestamp,
     build_details_payload,
@@ -132,7 +132,7 @@ class TestDetailsPeriodDispatch(unittest.TestCase):
         logging.disable(logging.NOTSET)
 
     def setUp(self):
-        self.handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt", session=signed_in())
+        self.handler = OnlstmtHandler(pipe_idx=1, svc_name="OnlStmt", session=signed_in())
         self.user = seed_user()
 
     def _dispatch(self, payload):
@@ -320,7 +320,7 @@ class TestCancelAck(unittest.TestCase):
 
 class TestUnknownSelectorReturnsNone(unittest.TestCase):
     def test_unhandled_selector_returns_none(self):
-        handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt", session=Session())
+        handler = OnlstmtHandler(pipe_idx=1, svc_name="OnlStmt", session=Session())
         with self.assertLogs("server.services.onlstmt", level="WARNING") as cap:
             result = handler.handle_request(
                 msg_class=0x01,
@@ -335,7 +335,7 @@ class TestUnknownSelectorReturnsNone(unittest.TestCase):
 
     def test_oneway_continuation_returns_none(self):
         # MPC_CLASS_ONEWAY_MASK in msg_class -> drop without reply.
-        handler = OnlStmtHandler(pipe_idx=1, svc_name="OnlStmt", session=Session())
+        handler = OnlstmtHandler(pipe_idx=1, svc_name="OnlStmt", session=Session())
         logging.disable(logging.CRITICAL)
         try:
             result = handler.handle_request(

@@ -27,9 +27,9 @@ from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 from .dirsrv import (
     TREEEDCL_STATUS_REFUSED,
-    build_get_ticket_reply_payload,
     build_property_record,
     decode_property_record,
+    get_ticket_reply,
     is_valid_ticket,
 )
 from .rooms import room_for
@@ -38,11 +38,11 @@ log = logging.getLogger(__name__)
 
 CONFLOC_SELECTOR_LOCATE = 0x01
 CONFLOC_DATA_EDIT_CLASS = 0x0C
-CONFLOC_DATA_EDIT_ADD = 0x00
-CONFLOC_DATA_EDIT_DELETE = 0x01
-CONFLOC_DATA_EDIT_SET_PROPERTIES = 0x02
-CONFLOC_DATA_EDIT_GET_PROPERTIES = 0x03
-CONFLOC_DATA_EDIT_GET_TICKET = 0x05
+CONFLOC_SELECTOR_DATA_EDIT_ADD = 0x00
+CONFLOC_SELECTOR_DATA_EDIT_DELETE = 0x01
+CONFLOC_SELECTOR_DATA_EDIT_SET_PROPERTIES = 0x02
+CONFLOC_SELECTOR_DATA_EDIT_GET_PROPERTIES = 0x03
+CONFLOC_SELECTOR_DATA_EDIT_GET_TICKET = 0x05
 CONFSRV_SELECTOR_JOIN = 0x03
 CONFSRV_SELECTOR_SEND = 0x02
 
@@ -73,7 +73,7 @@ CONFSRV_EVENT_ROLE = 7
 DEFAULT_MESSAGE_LENGTH = 1000
 
 
-class CONFLOCHandler(ServiceHandler):
+class ConflocHandler(ServiceHandler):
     """Resolve a DIRSRV chat node to a CONFSRV instance."""
 
     GUIDS = CONFLOC_INTERFACE_GUIDS
@@ -84,24 +84,33 @@ class CONFLOCHandler(ServiceHandler):
         self._records = {}
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
-        if msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_GET_TICKET:
-            reply_payload = build_get_ticket_reply_payload(self.session)
-        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_ADD:
-            reply_payload = self.build_data_edit_add_reply_payload(request_id, payload)
-        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_DELETE:
-            reply_payload = self.build_data_edit_delete_reply_payload(request_id, payload)
-        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_SET_PROPERTIES:
-            reply_payload = self.build_data_edit_set_properties_reply_payload(request_id, payload)
-        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_DATA_EDIT_GET_PROPERTIES:
-            reply_payload = self.build_data_edit_get_properties_reply_payload(request_id, payload)
+        if (
+            msg_class == CONFLOC_DATA_EDIT_CLASS
+            and selector == CONFLOC_SELECTOR_DATA_EDIT_GET_TICKET
+        ):
+            reply_payload = get_ticket_reply(self.session)
+        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_SELECTOR_DATA_EDIT_ADD:
+            reply_payload = self.data_edit_add_reply(request_id, payload)
+        elif msg_class == CONFLOC_DATA_EDIT_CLASS and selector == CONFLOC_SELECTOR_DATA_EDIT_DELETE:
+            reply_payload = self.data_edit_delete_reply(request_id, payload)
+        elif (
+            msg_class == CONFLOC_DATA_EDIT_CLASS
+            and selector == CONFLOC_SELECTOR_DATA_EDIT_SET_PROPERTIES
+        ):
+            reply_payload = self.data_edit_set_props_reply(request_id, payload)
+        elif (
+            msg_class == CONFLOC_DATA_EDIT_CLASS
+            and selector == CONFLOC_SELECTOR_DATA_EDIT_GET_PROPERTIES
+        ):
+            reply_payload = self.data_edit_get_props_reply(request_id, payload)
         elif selector == CONFLOC_SELECTOR_LOCATE:
-            reply_payload = self.build_locate_reply_payload(payload)
+            reply_payload = self.locate_reply(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
         return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
-    def build_data_edit_add_reply_payload(self, request_id, payload):
+    def data_edit_add_reply(self, request_id, payload):
         """Complete DATAEDCL's CONFLOC record attached to a new chat node.
 
         The request uses CDataEditClient's generic Add layout: capability
@@ -179,7 +188,7 @@ class CONFLOCHandler(ServiceHandler):
             self._records[record_id] = properties
         return _build_data_edit_result(0)
 
-    def build_data_edit_delete_reply_payload(self, request_id, payload):
+    def data_edit_delete_reply(self, request_id, payload):
         """Complete the application-record half of a tree-node deletion.
 
         Live DIRSRV deletion shows TREEEDCL removing the node first, followed
@@ -227,7 +236,7 @@ class CONFLOCHandler(ServiceHandler):
         )
         return _build_data_edit_result(0)
 
-    def build_data_edit_set_properties_reply_payload(self, request_id, payload):
+    def data_edit_set_props_reply(self, request_id, payload):
         """Apply DATAEDCL properties to an existing conference record.
 
         CDataEditClient::PrivateSetProperties sends the capability ticket,
@@ -318,7 +327,7 @@ class CONFLOCHandler(ServiceHandler):
         )
         return _build_data_edit_result(0)
 
-    def build_data_edit_get_properties_reply_payload(self, request_id, payload):
+    def data_edit_get_props_reply(self, request_id, payload):
         """Return the property record previously attached by DATAEDCL Add.
 
         CDataEditClient::GetProperties sends table DWORD, 8-byte record id,
@@ -389,7 +398,7 @@ class CONFLOCHandler(ServiceHandler):
         )
         return _build_data_edit_properties_result(0, (selected,))
 
-    def build_locate_reply_payload(self, payload):
+    def locate_reply(self, payload):
         """Return `[instance:WORD][result:WORD]` for locator method 1.
 
         CONFAPI!FUN_7F5B14D3 sends the first DWORD from the room's launch MNID
@@ -425,7 +434,7 @@ class CONFLOCHandler(ServiceHandler):
         )
 
 
-class CONFSRVHandler(ServiceHandler):
+class ConfsrvHandler(ServiceHandler):
     """Join a text conference and service its retained event iterator.
 
     One handler is one participant. Everything the client sees after the join

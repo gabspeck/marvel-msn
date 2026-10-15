@@ -21,16 +21,16 @@ from server.services._mapi import (
 from server.services.mosrxp import (
     MOS_ENTRYID_LEN,
     MOSRXP_CLASS_XP,
-    MOSRXP_CLOSE_INBOX,
-    MOSRXP_DEL_MESSAGES,
-    MOSRXP_FLAG_SERVER_MESSAGE,
-    MOSRXP_GET_CONN_INFO,
-    MOSRXP_GET_FIRST_MESSAGE,
-    MOSRXP_GET_HEADERS,
-    MOSRXP_GET_MESSAGE,
-    MOSRXP_INIT_TRANSMIT,
-    MOSRXP_OPEN_INBOX,
-    MOSRXP_SEND_BLOCK,
+    MOSRXP_SELECTOR_CLOSE_INBOX,
+    MOSRXP_SELECTOR_DEL_MESSAGES,
+    MOSRXP_SELECTOR_FLAG_SERVER_MESSAGE,
+    MOSRXP_SELECTOR_GET_CONN_INFO,
+    MOSRXP_SELECTOR_GET_FIRST_MESSAGE,
+    MOSRXP_SELECTOR_GET_HEADERS,
+    MOSRXP_SELECTOR_GET_MESSAGE,
+    MOSRXP_SELECTOR_INIT_TRANSMIT,
+    MOSRXP_SELECTOR_OPEN_INBOX,
+    MOSRXP_SELECTOR_SEND_BLOCK,
     PR_BODY,
     PR_DISPLAY_TO,
     PR_MESSAGE_CLASS,
@@ -39,7 +39,7 @@ from server.services.mosrxp import (
     PR_SENDER_EMAIL_ADDRESS,
     PR_SENT_REPRESENTING_NAME,
     PR_SUBJECT,
-    MOSRXPHandler,
+    MosrxpHandler,
     build_header_record,
     build_message_blob,
     decode_entryid,
@@ -256,7 +256,7 @@ class SerialisationTest(unittest.TestCase):
 def signed_in(username="billg"):
     session = Session()
     session.sign_in(app_store.users.get_user(username))
-    return MOSRXPHandler(pipe_idx=4, svc_name="MOSRXP", session=session)
+    return MosrxpHandler(pipe_idx=4, svc_name="MOSRXP", session=session)
 
 
 def request(*params):
@@ -293,7 +293,7 @@ class HandlerTest(unittest.TestCase):
     def test_get_conn_info_answers_the_member_entry_id(self):
         # Observed live: the request is `83 84` — one DWORD slot and one
         # variable slot, no stream flag.
-        payload = self.call(MOSRXP_GET_CONN_INFO, b"\x83\x84")
+        payload = self.call(MOSRXP_SELECTOR_GET_CONN_INFO, b"\x83\x84")
         self.assertEqual(payload[:5], b"\x83" + struct.pack("<I", 0))
         self.assertEqual(payload[5], 0x87)
         self.assertEqual(payload[6], 0x84)
@@ -313,16 +313,18 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(blob[USR_ENTRYID_LEN - 1], 0)
 
     def test_open_inbox_answers_status_and_count(self):
-        payload = self.call(MOSRXP_OPEN_INBOX, b"\x83\x83\x85")
+        payload = self.call(MOSRXP_SELECTOR_OPEN_INBOX, b"\x83\x83\x85")
         self.assertEqual(payload[:5], b"\x83" + struct.pack("<I", 0))
         self.assertEqual(payload[5:10], b"\x83" + struct.pack("<I", 1))
         self.assertEqual(payload[10:], b"\x87")
 
     def test_close_inbox_answers_status_only(self):
-        self.assertEqual(self.call(MOSRXP_CLOSE_INBOX, b"\x83\x85"), b"\x83\x00\x00\x00\x00\x87")
+        self.assertEqual(
+            self.call(MOSRXP_SELECTOR_CLOSE_INBOX, b"\x83\x85"), b"\x83\x00\x00\x00\x00\x87"
+        )
 
     def test_get_headers_reply_shape(self):
-        payload = self.call(MOSRXP_GET_HEADERS, b"\x83\x83\x85")
+        payload = self.call(MOSRXP_SELECTOR_GET_HEADERS, b"\x83\x83\x85")
         self.assertEqual(payload[:5], b"\x83" + struct.pack("<I", 0))
         (count,) = struct.unpack_from("<I", payload, 6)
         self.assertEqual(payload[5], 0x83)
@@ -334,22 +336,24 @@ class HandlerTest(unittest.TestCase):
 
     def test_get_headers_on_an_empty_mailbox(self):
         app_store.mail.delete_messages("billg", [1])
-        payload = self.call(MOSRXP_GET_HEADERS, b"\x83\x83\x85")
+        payload = self.call(MOSRXP_SELECTOR_GET_HEADERS, b"\x83\x83\x85")
         self.assertEqual(payload, b"\x83" + b"\x00" * 4 + b"\x83" + b"\x00" * 4 + b"\x87\x86")
 
     def test_get_message_returns_the_body(self):
-        payload = self.call(MOSRXP_GET_MESSAGE, var_param(encode_entryid(1)) + b"\x83\x85")
+        payload = self.call(MOSRXP_SELECTOR_GET_MESSAGE, var_param(encode_entryid(1)) + b"\x83\x85")
         self.assertEqual(payload[:5], b"\x83" + struct.pack("<I", 0))
         self.assertEqual(payload[5:7], b"\x87\x86")
         _head, _recips, body, _att, _end = decode_message_blob(payload[7:])
         self.assertIn("Welcome to MSN.", body[PR_BODY])
 
     def test_get_message_miss_answers_not_found_with_no_blob(self):
-        payload = self.call(MOSRXP_GET_MESSAGE, var_param(encode_entryid(999)) + b"\x83\x85")
+        payload = self.call(
+            MOSRXP_SELECTOR_GET_MESSAGE, var_param(encode_entryid(999)) + b"\x83\x85"
+        )
         self.assertEqual(payload, b"\x83" + struct.pack("<I", 0x8004010F) + b"\x87")
 
     def test_get_first_message_prefixes_the_entry_id(self):
-        payload = self.call(MOSRXP_GET_FIRST_MESSAGE, b"\x83\x85")
+        payload = self.call(MOSRXP_SELECTOR_GET_FIRST_MESSAGE, b"\x83\x85")
         self.assertEqual(payload[5:7], b"\x87\x86")
         blob = payload[7:]
         self.assertEqual(decode_entryid(blob[:MOS_ENTRYID_LEN]), 1)
@@ -358,7 +362,7 @@ class HandlerTest(unittest.TestCase):
 
     def test_del_messages_removes_every_id(self):
         payload = self.call(
-            MOSRXP_DEL_MESSAGES,
+            MOSRXP_SELECTOR_DEL_MESSAGES,
             dword_param(1) + var_param(encode_entryid(1)) + b"\x83\x85",
         )
         self.assertEqual(payload, b"\x83" + b"\x00" * 4 + b"\x87")
@@ -366,7 +370,7 @@ class HandlerTest(unittest.TestCase):
 
     def test_flag_server_message_stores_the_status(self):
         payload = self.call(
-            MOSRXP_FLAG_SERVER_MESSAGE,
+            MOSRXP_SELECTOR_FLAG_SERVER_MESSAGE,
             var_param(encode_entryid(1)) + dword_param(0x2000) + b"\x83\x85",
         )
         self.assertEqual(payload, b"\x83" + b"\x00" * 4 + b"\x87")
@@ -374,7 +378,7 @@ class HandlerTest(unittest.TestCase):
 
     def test_flag_unknown_message_answers_not_found(self):
         payload = self.call(
-            MOSRXP_FLAG_SERVER_MESSAGE,
+            MOSRXP_SELECTOR_FLAG_SERVER_MESSAGE,
             var_param(encode_entryid(999)) + dword_param(0x2000) + b"\x83\x85",
         )
         self.assertEqual(payload, b"\x83" + struct.pack("<I", 0x8004010F) + b"\x87")
@@ -383,7 +387,9 @@ class HandlerTest(unittest.TestCase):
         self.assertIsNone(self.handler.handle_request(MOSRXP_CLASS_XP, 0x7F, 0, b"", 1, 1))
 
     def test_foreign_class_is_left_unanswered(self):
-        self.assertIsNone(self.handler.handle_request(0x02, MOSRXP_OPEN_INBOX, 0, b"", 1, 1))
+        self.assertIsNone(
+            self.handler.handle_request(0x02, MOSRXP_SELECTOR_OPEN_INBOX, 0, b"", 1, 1)
+        )
 
 
 class SubmitTest(unittest.TestCase):
@@ -403,7 +409,12 @@ class SubmitTest(unittest.TestCase):
 
     def send(self, blob, block_size=None):
         self.handler.handle_request(
-            MOSRXP_CLASS_XP, MOSRXP_INIT_TRANSMIT, 0, dword_param(0x1000) + b"\x83\x85", 1, 1
+            MOSRXP_CLASS_XP,
+            MOSRXP_SELECTOR_INIT_TRANSMIT,
+            0,
+            dword_param(0x1000) + b"\x83\x85",
+            1,
+            1,
         )
         size = block_size or len(blob)
         blocks = [blob[i : i + size] for i in range(0, len(blob), size)] or [b""]
@@ -411,7 +422,7 @@ class SubmitTest(unittest.TestCase):
             last = index == len(blocks) - 1
             self.handler.handle_request(
                 MOSRXP_CLASS_XP,
-                MOSRXP_SEND_BLOCK,
+                MOSRXP_SELECTOR_SEND_BLOCK,
                 index,
                 dword_param(index) + dword_param(int(last)) + var_param(block) + b"\x83\x85",
                 1,
@@ -444,14 +455,19 @@ class SubmitTest(unittest.TestCase):
             "Chunked", "body\r\n", [MailRecipient(display_name="Steve Jobs", address="sjobs")]
         )
         self.handler.handle_request(
-            MOSRXP_CLASS_XP, MOSRXP_INIT_TRANSMIT, 0, dword_param(0x1000) + b"\x83\x85", 1, 1
+            MOSRXP_CLASS_XP,
+            MOSRXP_SELECTOR_INIT_TRANSMIT,
+            0,
+            dword_param(0x1000) + b"\x83\x85",
+            1,
+            1,
         )
         # 0x05 reference: stream id 1, length follows. The bytes arrive after
         # the reply, on 0xE6/0xE7 frames.
         reference = b"\x05" + bytes([1]) + struct.pack("<I", len(blob))
         self.handler.handle_request(
             MOSRXP_CLASS_XP,
-            MOSRXP_SEND_BLOCK,
+            MOSRXP_SELECTOR_SEND_BLOCK,
             0,
             dword_param(0) + dword_param(1) + reference + b"\x83\x85",
             1,

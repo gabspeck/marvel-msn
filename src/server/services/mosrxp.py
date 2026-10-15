@@ -63,16 +63,16 @@ MOSRXP_CLASS_XP = 0x01
 
 # `enum ServiceMethod`, read off the immediate each `CConn` member pushes
 # before `HrGetMethod` @ 0x7F431967.
-MOSRXP_GET_CONN_INFO = 0x00
-MOSRXP_OPEN_INBOX = 0x01
-MOSRXP_CLOSE_INBOX = 0x02
-MOSRXP_INIT_TRANSMIT = 0x03
-MOSRXP_SEND_BLOCK = 0x04
-MOSRXP_GET_HEADERS = 0x05
-MOSRXP_DEL_MESSAGES = 0x06
-MOSRXP_GET_MESSAGE = 0x07
-MOSRXP_GET_FIRST_MESSAGE = 0x08
-MOSRXP_FLAG_SERVER_MESSAGE = 0x09
+MOSRXP_SELECTOR_GET_CONN_INFO = 0x00
+MOSRXP_SELECTOR_OPEN_INBOX = 0x01
+MOSRXP_SELECTOR_CLOSE_INBOX = 0x02
+MOSRXP_SELECTOR_INIT_TRANSMIT = 0x03
+MOSRXP_SELECTOR_SEND_BLOCK = 0x04
+MOSRXP_SELECTOR_GET_HEADERS = 0x05
+MOSRXP_SELECTOR_DEL_MESSAGES = 0x06
+MOSRXP_SELECTOR_GET_MESSAGE = 0x07
+MOSRXP_SELECTOR_GET_FIRST_MESSAGE = 0x08
+MOSRXP_SELECTOR_FLAG_SERVER_MESSAGE = 0x09
 
 # The 12 tags `MOSMUTIL!PSptaHdr` @ 0x7E991297 returns, in array order. A
 # header record carries exactly this set: `FIsHeaderProp` is a linear search
@@ -141,7 +141,7 @@ _TRANSMIT_BLOCK_BYTES = 0x1000
 MAPI_E_NOT_FOUND = 0x8004010F
 
 
-class MOSRXPHandler(ServiceHandler):
+class MosrxpHandler(ServiceHandler):
     """Handles remote-mail requests on a logical pipe."""
 
     GUIDS = MOSRXP_INTERFACE_GUIDS
@@ -176,25 +176,25 @@ class MOSRXPHandler(ServiceHandler):
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
 
-        if selector == MOSRXP_GET_CONN_INFO:
+        if selector == MOSRXP_SELECTOR_GET_CONN_INFO:
             reply_payload = self._get_conn_info(payload)
-        elif selector == MOSRXP_OPEN_INBOX:
+        elif selector == MOSRXP_SELECTOR_OPEN_INBOX:
             reply_payload = self._open_inbox(payload)
-        elif selector == MOSRXP_CLOSE_INBOX:
+        elif selector == MOSRXP_SELECTOR_CLOSE_INBOX:
             reply_payload = self._close_inbox(payload)
-        elif selector == MOSRXP_INIT_TRANSMIT:
+        elif selector == MOSRXP_SELECTOR_INIT_TRANSMIT:
             reply_payload = self._init_transmit(payload)
-        elif selector == MOSRXP_SEND_BLOCK:
+        elif selector == MOSRXP_SELECTOR_SEND_BLOCK:
             reply_payload = self._send_block(payload)
-        elif selector == MOSRXP_GET_HEADERS:
+        elif selector == MOSRXP_SELECTOR_GET_HEADERS:
             reply_payload = self._get_headers(payload)
-        elif selector == MOSRXP_DEL_MESSAGES:
+        elif selector == MOSRXP_SELECTOR_DEL_MESSAGES:
             reply_payload = self._del_messages(payload)
-        elif selector == MOSRXP_GET_MESSAGE:
+        elif selector == MOSRXP_SELECTOR_GET_MESSAGE:
             reply_payload = self._get_message(payload)
-        elif selector == MOSRXP_GET_FIRST_MESSAGE:
+        elif selector == MOSRXP_SELECTOR_GET_FIRST_MESSAGE:
             reply_payload = self._get_first_message(payload)
-        elif selector == MOSRXP_FLAG_SERVER_MESSAGE:
+        elif selector == MOSRXP_SELECTOR_FLAG_SERVER_MESSAGE:
             reply_payload = self._flag_server_message(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)

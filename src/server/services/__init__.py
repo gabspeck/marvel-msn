@@ -1,35 +1,35 @@
 from ._dispatch import log_unhandled_selector
-from .bbir import BBIRServiceHandler
-from .bbird_ob import BbirdOBHandler
-from .bbs import BBSHandler
-from .conference import CONFLOCHandler, CONFSRVHandler
-from .dirsrv import DIRSRVHandler
-from .findsvc import FindSvcHandler
-from .ftm import FTMHandler
-from .logsrv import LOGSRVHandler
-from .medview import MEDVIEWHandler
-from .mosabp import MOSABPHandler
-from .mosrxp import MOSRXPHandler
-from .olregsrv import OLREGSRVHandler
-from .onlstmt import OnlStmtHandler
-from .sasrv import SASRVHandler
+from .bbir import BbirHandler
+from .bbird_ob import BbirdObHandler
+from .bbs import BbsHandler
+from .conference import ConflocHandler, ConfsrvHandler
+from .dirsrv import DirsrvHandler
+from .findsvc import FindsvcHandler
+from .ftm import FtmHandler
+from .logsrv import LogsrvHandler
+from .medview import MedviewHandler
+from .mosabp import MosabpHandler
+from .mosrxp import MosrxpHandler
+from .olregsrv import OlregsrvHandler
+from .onlstmt import OnlstmtHandler
+from .sasrv import SasrvHandler
 
 SERVICE_HANDLERS = {
-    "logsrv": LOGSRVHandler,
-    "dirsrv": DIRSRVHandler,
-    "findsvc": FindSvcHandler,
-    "ftm": FTMHandler,
-    "olregsrv": OLREGSRVHandler,
-    "onlstmt": OnlStmtHandler,
-    "medview": MEDVIEWHandler,
-    "bbs": BBSHandler,
-    "confloc": CONFLOCHandler,
-    "confsrv": CONFSRVHandler,
-    "mosabp": MOSABPHandler,
-    "mosrxp": MOSRXPHandler,
-    "sasrv": SASRVHandler,
-    "bbird_ob": BbirdOBHandler,
-    "bbirservice": BBIRServiceHandler,
+    "logsrv": LogsrvHandler,
+    "dirsrv": DirsrvHandler,
+    "findsvc": FindsvcHandler,
+    "ftm": FtmHandler,
+    "olregsrv": OlregsrvHandler,
+    "onlstmt": OnlstmtHandler,
+    "medview": MedviewHandler,
+    "bbs": BbsHandler,
+    "confloc": ConflocHandler,
+    "confsrv": ConfsrvHandler,
+    "mosabp": MosabpHandler,
+    "mosrxp": MosrxpHandler,
+    "sasrv": SasrvHandler,
+    "bbird_ob": BbirdObHandler,
+    "bbirservice": BbirHandler,
 }
 
 __all__ = ["SERVICE_HANDLERS", "log_unhandled_selector"]

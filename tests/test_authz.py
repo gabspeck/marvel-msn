@@ -15,10 +15,10 @@ from server.mpc import build_tagged_reply_var
 from server.services import dirsrv
 from server.services.dirsrv import (
     TREEEDCL_STATUS_REFUSED,
-    build_get_children_reply_payload,
-    build_get_ticket_reply_payload,
+    get_children_reply,
+    get_ticket_reply,
 )
-from server.services.sasrv import SA_E_BAD_LIST_KIND, SASRV_LIST_KIND_TOKENS, SASRVHandler
+from server.services.sasrv import SA_E_BAD_LIST_KIND, SASRV_LIST_KIND_TOKENS, SasrvHandler
 from server.store import app_store, reset_app_store
 from server.store.records import build_bbs_post
 
@@ -53,16 +53,14 @@ class TestDirectoryRights(unittest.TestCase):
     )
 
     def test_the_admin_is_told_it_may_author(self):
-        rights = _rights_of(build_get_children_reply_payload(self.REQUEST, seed_user(ADMIN).rights))
+        rights = _rights_of(get_children_reply(self.REQUEST, seed_user(ADMIN).rights))
         self.assertTrue(rights)
         self.assertTrue(all(r == 0x70 for r in rights))
 
     def test_the_subscriber_is_told_it_may_not(self):
         # `CMosTreeNode::HasRights` succeeds on any requested bit, so 0 is what
         # keeps File > New/Delete/Unlink out of the menu.
-        rights = _rights_of(
-            build_get_children_reply_payload(self.REQUEST, seed_user(SUBSCRIBER).rights)
-        )
+        rights = _rights_of(get_children_reply(self.REQUEST, seed_user(SUBSCRIBER).rights))
         self.assertTrue(rights)
         self.assertTrue(all(r == 0 for r in rights))
 
@@ -71,18 +69,16 @@ class TestDirectoryTicket(unittest.TestCase):
     """The DIRSRV pipe hands out a write ticket only to an authoring account."""
 
     def test_the_admin_receives_a_ticket(self):
-        reply = build_get_ticket_reply_payload(signed_in(ADMIN))
+        reply = get_ticket_reply(signed_in(ADMIN))
         self.assertEqual(_status(reply), 0)
         self.assertEqual(reply[-2:], struct.pack("<H", 2))
 
     def test_the_subscriber_is_refused(self):
-        reply = build_get_ticket_reply_payload(signed_in(SUBSCRIBER))
+        reply = get_ticket_reply(signed_in(SUBSCRIBER))
         self.assertEqual(_status(reply), TREEEDCL_STATUS_REFUSED)
 
     def test_an_anonymous_connection_is_refused(self):
-        self.assertEqual(
-            _status(build_get_ticket_reply_payload(anonymous())), TREEEDCL_STATUS_REFUSED
-        )
+        self.assertEqual(_status(get_ticket_reply(anonymous())), TREEEDCL_STATUS_REFUSED)
 
 
 class TestBbsTicket(unittest.TestCase):
@@ -91,11 +87,11 @@ class TestBbsTicket(unittest.TestCase):
     def test_any_signed_in_member_receives_a_ticket(self):
         for username in (ADMIN, SUBSCRIBER):
             with self.subTest(username=username):
-                reply = build_get_ticket_reply_payload(signed_in(username), require_admin=False)
+                reply = get_ticket_reply(signed_in(username), require_admin=False)
                 self.assertEqual(_status(reply), 0)
 
     def test_an_anonymous_connection_is_still_refused(self):
-        reply = build_get_ticket_reply_payload(anonymous(), require_admin=False)
+        reply = get_ticket_reply(anonymous(), require_admin=False)
         self.assertEqual(_status(reply), TREEEDCL_STATUS_REFUSED)
 
 
@@ -108,15 +104,13 @@ class TestDirectoryWrites(unittest.TestCase):
 
     def test_add_node_is_refused_for_the_subscriber(self):
         before = len(app_store.content.get_children("1:0"))
-        reply = dirsrv.build_add_node_reply_payload(b"", signed_in(SUBSCRIBER), app_store.content)
+        reply = dirsrv.add_node_reply(b"", signed_in(SUBSCRIBER), app_store.content)
         self.assertEqual(_status(reply), TREEEDCL_STATUS_REFUSED)
         self.assertEqual(len(app_store.content.get_children("1:0")), before)
 
     def test_set_properties_is_refused_for_the_subscriber(self):
         node = app_store.content.get_node("1:256")
-        reply = dirsrv.build_set_properties_reply_payload(
-            b"", signed_in(SUBSCRIBER), app_store.content
-        )
+        reply = dirsrv.set_properties_reply(b"", signed_in(SUBSCRIBER), app_store.content)
         self.assertEqual(_status(reply), TREEEDCL_STATUS_REFUSED)
         self.assertEqual(app_store.content.get_node("1:256"), node)
 
@@ -154,9 +148,7 @@ class TestDeleteOwnership(unittest.TestCase):
 
     def _delete(self, session, msg_id):
         return _status(
-            dirsrv.build_delete_node_reply_payload(
-                self._delete_request(msg_id), session, app_store.content
-            )
+            dirsrv.delete_node_reply(self._delete_request(msg_id), session, app_store.content)
         )
 
     def _node_id(self, msg_id):
@@ -196,17 +188,15 @@ class TestSecurityTokens(unittest.TestCase):
     )
 
     def _begin(self, session):
-        handler = SASRVHandler(6, "SASRV", session)
-        return handler, handler.build_begin_enum_reply_payload(self.BEGIN_ENUM)
+        handler = SasrvHandler(6, "SASRV", session)
+        return handler, handler.begin_enum_reply(self.BEGIN_ENUM)
 
     def test_the_admin_enumerates_every_token(self):
         handler, reply = self._begin(signed_in(ADMIN))
         self.assertEqual(_status(reply), 0)
         handle = _status(reply, 6)
         count = _status(
-            handler.build_read_enum_results_reply_payload(
-                b"\x03" + struct.pack("<I", handle) + b"\x83\x83"
-            )
+            handler.read_enum_results_reply(b"\x03" + struct.pack("<I", handle) + b"\x83\x83")
         )
         self.assertEqual(count, 3)
 

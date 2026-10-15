@@ -206,7 +206,7 @@ def _load_published_objects():
     return catalog
 
 
-class BbirdOBHandler(ServiceHandler):
+class BbirdObHandler(ServiceHandler):
     GUIDS = BBIRD_OB_INTERFACE_GUIDS
 
     def __init__(self, pipe_idx, svc_name, session):

@@ -85,7 +85,7 @@ SASRV_TOKEN_NAME_MAX = 0x5C - 1
 SA_E_BAD_LIST_KIND = 0x12
 
 
-class SASRVHandler(ServiceHandler):
+class SasrvHandler(ServiceHandler):
     """Serve SACLIENT's master-list enumerator on one logical pipe.
 
     Enumeration state is per instance, which matches its lifetime on the wire:
@@ -102,19 +102,19 @@ class SASRVHandler(ServiceHandler):
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         if selector == SASRV_SELECTOR_BEGIN_ENUM:
-            reply_payload = self.build_begin_enum_reply_payload(payload)
+            reply_payload = self.begin_enum_reply(payload)
         elif selector == SASRV_SELECTOR_READ_ENUM_RESULTS:
-            reply_payload = self.build_read_enum_results_reply_payload(payload)
+            reply_payload = self.read_enum_results_reply(payload)
         elif selector == SASRV_SELECTOR_END_ENUM:
-            reply_payload = self.build_end_enum_reply_payload(payload)
+            reply_payload = self.end_enum_reply(payload)
         elif selector == SASRV_SELECTOR_GET_LIST_PAGE:
-            reply_payload = self.build_get_list_page_reply_payload(payload)
+            reply_payload = self.get_list_page_reply(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
         return self.reply(msg_class, selector, request_id, reply_payload, server_seq, client_ack)
 
-    def build_begin_enum_reply_payload(self, payload):
+    def begin_enum_reply(self, payload):
         """Open an enumeration over one master list (selector 0x02).
 
         `SaClient_BeginEnum` @ SACLIENT 0x7F341238 packs the list kind, a DWORD
@@ -159,7 +159,7 @@ class SASRVHandler(ServiceHandler):
         log.info("begin_enum status=0 kind=%d handle=%d", kind, handle)
         return _build_two_dword_reply(0, handle)
 
-    def build_read_enum_results_reply_payload(self, payload):
+    def read_enum_results_reply(self, payload):
         """Report how many rows the open enumeration holds (selector 0x04).
 
         `SaClient_ReadEnumResults` @ SACLIENT 0x7F3413C1 sends the handle and
@@ -190,7 +190,7 @@ class SASRVHandler(ServiceHandler):
         granted = self.session.user.sa_tokens
         return tuple(row for row in _LIST_KINDS.get(kind, ()) if row[0] in granted)
 
-    def build_get_list_page_reply_payload(self, payload):
+    def get_list_page_reply(self, payload):
         """Return one page of list rows (selector 0x05).
 
         Observed request, fetching row 0 of handle 1:
@@ -245,7 +245,7 @@ class SASRVHandler(ServiceHandler):
         )
         return build_blob_reply(build_tagged_reply_dword(0), blob=blob)
 
-    def build_end_enum_reply_payload(self, payload):
+    def end_enum_reply(self, payload):
         """Close an enumeration (selector 0x03).
 
         `SaClient_EndEnum` @ SACLIENT 0x7F341313 sends the handle and binds one

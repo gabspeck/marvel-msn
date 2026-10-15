@@ -161,7 +161,7 @@ log = logging.getLogger(__name__)
 _UPLOAD_DUMP_DIR = os.environ.get("MSN_UPLOAD_DUMP")
 
 
-class DIRSRVHandler(ServiceHandler):
+class DirsrvHandler(ServiceHandler):
     """Handles DIRSRV service requests on a logical pipe."""
 
     GUIDS = DIRSRV_INTERFACE_GUIDS
@@ -180,42 +180,36 @@ class DIRSRVHandler(ServiceHandler):
                 msg_class, selector, payload, server_seq, client_ack
             )
         if msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_NODE:
-            reply_payload = build_add_node_reply_payload(
-                payload, self.session, _default_store.content
-            )
+            reply_payload = add_node_reply(payload, self.session, _default_store.content)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_DELETE_NODE:
-            reply_payload = build_delete_node_reply_payload(
-                payload, self.session, _default_store.content
-            )
+            reply_payload = delete_node_reply(payload, self.session, _default_store.content)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_SET_PROPERTIES:
-            reply_payload = build_set_properties_reply_payload(
-                payload, self.session, _default_store.content
-            )
+            reply_payload = set_properties_reply(payload, self.session, _default_store.content)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_ADD_SHABBY:
             reply_payload = self._begin_add_shabby(request_id, payload)
             if reply_payload is None:
                 return None
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_TICKET:
-            reply_payload = build_get_ticket_reply_payload(self.session)
+            reply_payload = get_ticket_reply(self.session)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_INVALIDATE_TICKET:
-            reply_payload = build_invalidate_ticket_reply_payload(payload)
+            reply_payload = invalidate_ticket_reply(payload)
         elif msg_class == TREEEDCL_CLASS_EDIT and selector == TREEEDCL_SELECTOR_GET_DATASETS:
-            reply_payload = build_get_datasets_reply_payload()
+            reply_payload = get_datasets_reply()
         elif msg_class == DIRSRV_CLASS_TREE and selector == DIRSRV_SELECTOR_GET_PARENTS:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_get_parents_reply_payload(request, self.session.user.rights)
+            reply_payload = get_parents_reply(request, self.session.user.rights)
         elif selector == DIRSRV_SELECTOR_GET_PROPERTIES:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_get_properties_reply_payload(request, self.session.user.rights)
+            reply_payload = get_properties_reply(request, self.session.user.rights)
         elif selector == DIRSRV_SELECTOR_GET_CHILDREN:
             request = decode_dirsrv_request(payload)
-            reply_payload = build_get_children_reply_payload(request, self.session.user.rights)
+            reply_payload = get_children_reply(request, self.session.user.rights)
         elif selector == DIRSRV_SELECTOR_GET_DEID_FROM_GO_WORD:
-            reply_payload = build_get_deid_from_go_word_reply_payload(payload)
+            reply_payload = get_deid_from_go_word_reply(payload)
         elif selector == DIRSRV_SELECTOR_GET_SHABBY:
-            reply_payload = build_get_shabby_reply_payload(payload)
+            reply_payload = get_shabby_reply(payload)
         elif selector == DIRSRV_SELECTOR_ENUM_SHN:
-            reply_payload = build_enum_shn_reply_payload(payload)
+            reply_payload = enum_shn_reply(payload)
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
@@ -722,7 +716,7 @@ def build_props(requested_props, node, *, is_children, rights=RIGHTS_NONE):
     return out
 
 
-def build_get_properties_reply_payload(request, rights=RIGHTS_NONE):
+def get_properties_reply(request, rights=RIGHTS_NONE):
     """Build a DIRSRV GetProperties (selector 0x00) reply: one record per id.
 
     One record per id in the request's node array, in request order. Almost
@@ -776,7 +770,7 @@ def _as_find_row(props):
     ]
 
 
-def build_get_children_reply_payload(request, rights=RIGHTS_NONE):
+def get_children_reply(request, rights=RIGHTS_NONE):
     """Build a DIRSRV GetChildren (selector 0x02) reply: child records.
 
     Special cases (order matters):
@@ -803,7 +797,7 @@ def build_get_children_reply_payload(request, rights=RIGHTS_NONE):
     return build_tree_reply_wire(records_with_ids)
 
 
-def build_get_parents_reply_payload(request, rights=RIGHTS_NONE):
+def get_parents_reply(request, rights=RIGHTS_NONE):
     """Build a DIRSRV GetParents (selector 0x01) reply: direct parents."""
     requested_props = parse_prop_group(request.prop_group)
     _log_request("get_parents", request, requested_props)
@@ -909,7 +903,7 @@ def build_tree_reply_wire(records_with_ids):
     return bytes(payload)
 
 
-def build_get_deid_from_go_word_reply_payload(payload):
+def get_deid_from_go_word_reply(payload):
     """Build the reply for a DIRSRV GetDeidFromGoWord request.
 
     Request payload (from `CTreeNavClient::GetDeidFromGoWord` @
@@ -946,7 +940,7 @@ def build_get_deid_from_go_word_reply_payload(payload):
     return build_static_reply(build_tagged_reply_dword(status)) + build_tagged_reply_var(0x84, deid)
 
 
-def build_get_shabby_reply_payload(payload):
+def get_shabby_reply(payload):
     """Build the reply for a DIRSRV GetShabby request.
 
     Request payload: `03 [4-byte LE shabby_id] 83 85`
@@ -984,7 +978,7 @@ def build_get_shabby_reply_payload(payload):
     return build_blob_reply(build_tagged_reply_dword(0), blob=blob)
 
 
-def build_enum_shn_reply_payload(payload):
+def enum_shn_reply(payload):
     """Build the reply for a DIRSRV EnumShn request.
 
     Request payload (from `CTreeNavClient::EnumShn` @ TREENVCL 0x7F631D1F):
@@ -1094,7 +1088,7 @@ def is_valid_ticket(ticket):
     return len(ticket) >= 2 and struct.unpack_from("<H", ticket)[0] == len(ticket)
 
 
-def build_get_ticket_reply_payload(session, *, require_admin=True):
+def get_ticket_reply(session, *, require_admin=True):
     """Return a TREEEDCL capability ticket to an account allowed to write here.
 
     Enabling wire property `x` makes DSNAV initialize its node editors while
@@ -1129,7 +1123,7 @@ def build_get_ticket_reply_payload(session, *, require_admin=True):
     return build_blob_reply(build_tagged_reply_dword(0), blob=ticket)
 
 
-def build_invalidate_ticket_reply_payload(payload):
+def invalidate_ticket_reply(payload):
     """Release the ticket the client is handing back.
 
     `CTreeEditClient::InvalidateTicket` @ 0x7F2C2718 closes an edit session:
@@ -1167,7 +1161,7 @@ def build_invalidate_ticket_reply_payload(payload):
     return build_static_reply(build_tagged_reply_dword(0))
 
 
-def build_get_datasets_reply_payload():
+def get_datasets_reply():
     """Return an empty TREEEDCL dataset property bag.
 
     DSNED requests datasets while enumerating node-editor menu entries.
@@ -1179,7 +1173,7 @@ def build_get_datasets_reply_payload():
     return build_blob_reply(build_tagged_reply_dword(0), blob=datasets)
 
 
-def build_add_node_reply_payload(payload, session, content_store, node_factory=None):
+def add_node_reply(payload, session, content_store, node_factory=None):
     """Create one child for a TREEEDCL AddNode request.
 
     CTreeEditClient::PrivateAddNode sends three variable fields: the capability
@@ -1353,7 +1347,7 @@ _EDITABLE_PROPERTIES = {
 }
 
 
-def build_set_properties_reply_payload(payload, session, content_store):
+def set_properties_reply(payload, session, content_store):
     """Apply a TREEEDCL SetProperties request to one existing node.
 
     `CTreeEditClient::PrivateSetProperties` @ TREEEDCL 0x7F2C1CEE sends three
@@ -1453,7 +1447,7 @@ def build_set_properties_reply_payload(payload, session, content_store):
     return _build_edit_result(0)
 
 
-def build_delete_node_reply_payload(payload, session, content_store):
+def delete_node_reply(payload, session, content_store):
     """Remove one node for a TREEEDCL DeleteNode request.
 
     `CTreeEditClient::PrivateDeleteNode` @ TREEEDCL 0x7F2C1BE3 sends two

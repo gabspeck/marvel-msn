@@ -13,7 +13,7 @@ once and does not use TREENVCL for the first one:
     fills the results window's columns.
 
 So this service answers "which nodes match", and DIRSRV answers "what are
-they". The second half is why `build_get_properties_reply_payload` has to
+they". The second half is why `get_properties_reply` has to
 serve a whole mnid array, not just the first id.
 
 The query grammar lives in `findquery`; `docs/MOSFIND.md` has the dialog-side
@@ -46,7 +46,7 @@ FINDSVC_CLASS_SEARCH = 0x01
 
 # The only ServiceMethod MOSFIND asks for — the immediate pushed before
 # `service->vtbl[0x0c]` at 0x7E9B1421.
-FINDSVC_SEARCH = 0x01
+FINDSVC_SELECTOR_SEARCH = 0x01
 
 # Status dword. HrSearch returns it verbatim as its HRESULT, so a nonzero value
 # surfaces in the dialog; a query the server cannot parse answers 0 with no
@@ -60,14 +60,14 @@ FINDSVC_STATUS_OK = 0
 FINDSVC_MAX_RESULTS = 200
 
 
-class FindSvcHandler(ServiceHandler):
+class FindsvcHandler(ServiceHandler):
     """Handles directory-search requests on a logical pipe."""
 
     GUIDS = FINDSVC_INTERFACE_GUIDS
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         """Dispatch by (interface class, ServiceMethod)."""
-        if msg_class != FINDSVC_CLASS_SEARCH or selector != FINDSVC_SEARCH:
+        if msg_class != FINDSVC_CLASS_SEARCH or selector != FINDSVC_SELECTOR_SEARCH:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None
         return self.reply_blocks(
