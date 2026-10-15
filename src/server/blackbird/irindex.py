@@ -147,5 +147,4 @@ def search(terms, documents=None, limit=None):
             hits.append((sum(counts), doc))
 
     hits.sort(key=lambda pair: -pair[0])
-    ranked = [(score, doc) for score, doc in hits]
-    return ranked[:limit] if limit else ranked
+    return hits[:limit] if limit else hits

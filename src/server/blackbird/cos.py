@@ -139,7 +139,7 @@ def _parse_ref(blob, storage_id):
         return entries
     while True:
         found = blob.find(want, pos)
-        if found < 0 or found + 2 > len(blob):
+        if found < 0:
             break
         start = found - 18
         pos = found + 2
@@ -267,21 +267,21 @@ def load_title(path):
     return objects
 
 
-def build_paste_record(obj, *, moniker_kind=1):
+def build_paste_record(obj):
     """Serialize one object the way `paste_object` reads it.
 
     An object that references others carries a swizzle section, without which
     the record is a dead end: the section is what registers the monikers the
     object's serialized form resolves against, so a title served without one
-    pastes as a root with no way to reach anything else. Observed 2026-08-13 —
-    the client asked for the CTitle GUID, pasted it, and stopped.
+    pastes as a root with no way to reach anything else: the client asks for
+    the CTitle GUID, pastes it, and stops (wire traffic).
 
     The typename is written without a terminator: the writer emits the
     `CString` length from `[ptr-8]` and the reader hands the same count to
     `ReleaseBuffer`.
     """
     kind = KIND_PARTIAL_OK | KIND_OBJECT
-    status = STATUS_GUID_INLINE | (moniker_kind << STATUS_MONIKER_KIND_SHIFT)
+    status = STATUS_GUID_INLINE | (1 << STATUS_MONIKER_KIND_SHIFT)
     if obj.properties:
         kind |= KIND_PROPERTIES
         status |= STATUS_HAS_PROPERTIES
@@ -321,8 +321,8 @@ def build_object_stream(objects):
 
     It has to be a legal OLE2 storage name — no `/`, `\\`, `:` or `!`. Create
     returns NULL for an illegal one and the broker throws 0x0E before any store
-    exists, which is what a storage path like `1/0` produced: no sub-COS, no
-    super COS, and no second request. Observed 2026-08-13.
+    exists: a storage path like `1/0` yields no sub-COS, no super COS, and no
+    second request (wire traffic).
     """
     out = bytearray()
     for obj in objects:

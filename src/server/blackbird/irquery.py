@@ -125,7 +125,6 @@ class AirTerm:
     """A leaf of the Air query tree."""
 
     tag: int
-    name: str
     guid: uuid.UUID | None = None
     value: str | int | None = None
     value_type: int | None = None
@@ -136,17 +135,24 @@ class AirTerm:
     time_from: int | None = None
     time_to: int | None = None
 
+    @property
+    def name(self):
+        return _AIR_TERM_NAMES[self.tag]
+
 
 @dataclass
 class AirCombiner:
     """An interior node: `op` over `children`."""
 
     tag: int
-    name: str
     op: int
     children: list = field(default_factory=list)
     # AirMaxCountCombiner only — the cap it carries in the DWORD at +6.
     max_count: int | None = None
+
+    @property
+    def name(self):
+        return _AIR_TERM_NAMES[self.tag]
 
 
 @dataclass
@@ -371,7 +377,7 @@ def _parse_air_combiner(reader, tag):
     op = reader.byte()
     reader.byte()
     max_count = reader.dword() if tag == AIR_MAX_COUNT_COMBINER else None
-    node = AirCombiner(tag=tag, name=_AIR_TERM_NAMES[tag], op=op, max_count=max_count)
+    node = AirCombiner(tag=tag, op=op, max_count=max_count)
     node.children = [_parse_air_node(reader) for _ in range(n_children)]
     return node
 
@@ -384,7 +390,6 @@ def _parse_air_time_term(reader):
     time_to = reader.dword()
     return AirTerm(
         tag=AIR_TIME_TERM,
-        name=_AIR_TERM_NAMES[AIR_TIME_TERM],
         guid=reader.guid(),
         time_op=op,
         time_from=time_from,
@@ -399,7 +404,6 @@ def _parse_air_past_time_term(reader):
     time_from = reader.dword()
     return AirTerm(
         tag=AIR_PAST_TIME_TERM,
-        name=_AIR_TERM_NAMES[AIR_PAST_TIME_TERM],
         guid=reader.guid(),
         time_from=time_from,
     )
@@ -428,7 +432,6 @@ def _parse_air_term(reader, tag):
 
     term = AirTerm(
         tag=tag,
-        name=_AIR_TERM_NAMES[tag],
         guid=guid,
         value=value,
         value_type=value_type,

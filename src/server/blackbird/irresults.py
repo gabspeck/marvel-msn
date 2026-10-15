@@ -48,7 +48,7 @@ then reads the value from where it points:
     0x17  `AtDWORD`              the DWORD, via FUN_1001a14e
     0x13  `AtDWORD`              same function, tried after 0x17 fails
 
-Confirmed live for 0x17 under SoftICE (2026-08-14): FUN_1001a14e at
+For 0x17 (SoftICE): FUN_1001a14e at
 IRUT.DLL:0x1001a18d pushes the slot value it just read and calls `AtDWORD`
 with it.  A value written inline is therefore dereferenced as an offset —
 `CBetterByteArray::AssureGet` (0x1001b52a) throws 0x800401BF when
@@ -69,16 +69,14 @@ import struct
 import uuid
 from dataclasses import dataclass, field
 
-# Record tags, from the switch in CIRClientRcvInfo::GetObj.
+# Record tags, from the switch in CIRClientRcvInfo::GetObj. The switch also
+# takes 0x09 (server object info), 0x21 (query processing), 0x22 (command
+# cancelled) and 0x24 (approximate wait), which no reply here sends.
 TAG_RESULT_ROW = 0x01
 TAG_SORT_INFOS = 0x02
 TAG_PROP_INFOS = 0x03
 TAG_CONTEXT_INFO = 0x04
-TAG_SRVR_OBJ_INFO = 0x09
-TAG_QRY_PROCESSING = 0x21
-TAG_CMD_CANCELED = 0x22
 TAG_CMD_COMPLETED = 0x23
-TAG_CMD_APPROX_WAIT = 0x24
 
 # Column type codes, from the dispatch in FUN_1001a420.
 PROP_TYPE_WORD = 0x02
