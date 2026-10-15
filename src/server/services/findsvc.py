@@ -112,7 +112,7 @@ def build_search_reply_blocks(payload):
     so it keeps returning 0x0B0B000C ("more may come") until something sets
     `request+0x18`. Only SignalRequestCompletion does, and only `0x86` reaches
     it. Ending on `0x88` alone leaves the dialog on "Retrieving results"
-    forever with every row already resolved — observed live 2026-08-11.
+    forever with every row already resolved (client session).
 
     Same shape as FTM's download (`_build_start_download_blocks`), for the same
     reason: one 0x88-terminated message carrying the data, then a bare 0x86 to

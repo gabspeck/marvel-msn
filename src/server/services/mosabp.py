@@ -76,7 +76,7 @@ MOSABP_SELECTOR_QUERY_WW_ROWS = 0x0C
 MOSABP_SELECTOR_QUERY_RESTRICT_ROWS = 0x0D
 
 # Property tags the Member Properties sheet asks for. The master array lives at
-# MOSABP32:0x7F4E8198 with 26 entries; `FUN_7F4D307D` copies it minus six tags
+# MOSABP32:0x7F4E8198 with 26 entries; `FUN_7F4D307D` copies it minus the tags
 # it never sends (PT_NULL, 0x0FF60102, PR_ENTRYID, PR_SEARCH_KEY,
 # PR_GIVEN_NAME, PR_SURNAME, PR_TRANSMITABLE_DISPLAY_NAME) and that filtered
 # 20-tag array is what reaches the wire. The dialog field each one drives comes

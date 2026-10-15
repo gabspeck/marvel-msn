@@ -1,6 +1,6 @@
 """FTM service handler: File Transfer Manager.
 
-Two call patterns are covered:
+Four call patterns are covered:
 
 - BILLADD's billing path: client sends FtmClientFileId with name="plans.txt"
   and asks for one file. Server echoes the name and serves it through the

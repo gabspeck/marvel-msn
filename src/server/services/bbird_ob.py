@@ -33,7 +33,7 @@ execution vtable (COSCL.DLL:0x4021dda2…0x4021de74).  Slot → wire meaning:
     vt[0x28] <<(ulong)  send dword               vt[0x18] >>(ulong&)  recv dword
                                                  vt[0x20] >>(uchar&)  recv byte
 
-Observed request (2026-08-11, first live publish):
+A publish request (wire capture):
 
     03 00000000                       u32   flags/mode, 0 on a first publish
     04 9b "x2qrj4anuhas42kd2117sgjalgs"  var   title name, CString + its length
@@ -338,8 +338,8 @@ class BbirdObHandler(ServiceHandler):
         var, answered empty: no object has changed since the stored title was
         published, so there is nothing to re-fetch.
 
-        Leaving it unanswered freezes the viewer — observed 2026-08-13, the
-        window shrinks and stops repainting while it waits.
+        Left unanswered, the viewer window shrinks and stops repainting while
+        it waits (client session).
         """
         if tuple(recv_descs) != _CHANGES_SINCE_DESCRIPTORS:
             log.error(
@@ -466,8 +466,8 @@ class BbirdObHandler(ServiceHandler):
         iterator, and `WaitIncremental` @ MPCCL 0x046049BC keeps answering
         0x0B0B000C ("more may come") until SignalRequestCompletion sets
         `request+0x18`. Only 0x86 reaches it, so a reply that stops after the
-        0x88 block delivers every byte and still leaves the reader blocked —
-        observed live as a hang on the Blackbird splash, 2026-08-13.
+        0x88 block delivers every byte and still leaves the reader blocked on
+        the Blackbird splash (client session).
 
         The GUID array is echoed rather than reused verbatim, because the
         served set may be smaller than the asked-for set: `FUN_0040CD64` walks

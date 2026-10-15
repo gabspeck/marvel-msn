@@ -1,4 +1,4 @@
-"""Shabby blob protocol — DIRSRV GetShabby / AddShabby RPC.
+"""Shabby store: the blobs DIRSRV GetShabby serves and AddShabby fills.
 
 A shabby is a server-side blob addressed by a DWORD Shabby ID. Node icons are
 the main consumer, and the Download-and-Run payload rides the same store.

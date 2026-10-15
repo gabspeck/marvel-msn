@@ -1,7 +1,7 @@
 """Shared selector-dispatch helpers.
 
-Service handlers all share the same idiom: branch on wire selector, warn on
-unknowns. This module centralises the warning so every handler reports
+Service handlers all share the same idiom: branch on wire selector, log an
+error on unknowns. This module centralises that error so every handler reports
 unmapped client behaviour in the same format — including a payload hex prefix
 that lets a reader eyeball wire shapes (e.g. UTF-16LE text in a node-id field)
 without pulling a pcap.

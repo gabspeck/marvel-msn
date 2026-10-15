@@ -17,7 +17,7 @@ selector.
                                                                 IQuerySpec + u32
 
 A search from the Find UI goes straight to 0x05; 0x02 is not a prerequisite.
-Observed head (2026-08-13, the first BBIRService request to reach a server):
+A query head (wire capture):
 
     03 00000000        u32   0
     05 01 1d020000     chunked ref: stream 1, 0x21d bytes — the IQuerySpec

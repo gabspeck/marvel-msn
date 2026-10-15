@@ -700,8 +700,8 @@ def get_properties_reply(request, rights=RIGHTS_NONE):
     properties — CMosTreeNode::GetPropertyGroupRaw → CTreeNavClient::GetProperties
     feeds the stream straight to SetPropertyGroupFromPsp on the receiving
     CMosTreeNode, so an extra record there populates the receiver with the
-    wrong node (observed live as Cats US.e = 'Arts and Entertainment', mnid
-    (1,0x100) instead of (1,0x10)).
+    wrong node (client session: Categories (US) took the name of its first
+    child).
 
     MOSFIND is the exception: its result-row filler batches 20 search hits into
     one call and walks the reply with GetNthNode, so it needs all 20 records

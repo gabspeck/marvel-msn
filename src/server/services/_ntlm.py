@@ -11,9 +11,9 @@ a 4-byte header:
 
     [u16 message_type][u16 token_len] then the token in a 256-byte slot
 
-Observed 2026-08-05: on the NEGOTIATE the leading u16 and the token's own NTLM
-MessageType both read 1, and on the AUTHENTICATE both read 3. Replies mirror
-that, so the field is the message type rather than a format version.
+On the NEGOTIATE the leading u16 and the token's own NTLM MessageType both read
+1, and on the AUTHENTICATE both read 3 (wire capture). Replies mirror that, so
+the field is the message type rather than a format version.
 
 The same capture pins NegotiateFlags = 0x000082a2 — OEM | SEAL | LM_KEY | NTLM
 | ALWAYS_SIGN. UNICODE is clear, so text fields are OEM. EXTENDED_SESSION-
@@ -179,7 +179,9 @@ def password_matches(auth, server_challenge, password):
 
 
 def _client_challenge(auth):
-    """Extended session security hides the client nonce in the LM slot."""
+    """The client nonce, which extended session security carries in the LM
+    slot. compute_response_v1 reads it only when the flags negotiate ESS; the
+    captured flags do not."""
     return auth.lm_response[:8].ljust(8, b"\x00")
 
 

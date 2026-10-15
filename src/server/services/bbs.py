@@ -469,10 +469,10 @@ def build_bbs_props(requested_props, node, *, is_children):
     """Serialise a BBS tree node into (type, name, value) property tuples.
 
     BBS rides the generic TREENVCL tree but emits its own tag vocabulary
-    (docs/bbs-service-contract.md §"Property tags"). `is_children` is accepted
-    for signature parity with dirsrv.build_props; BBS tags carry one wire type
-    regardless of caller, so it is unused today. Emit only requested tags;
-    an unknown requested tag gets a DWORD-0 fallback, mirroring dirsrv.
+    (docs/bbs-service-contract.md §"Property tags"). Shared MOS tree tags go
+    through dirsrv.build_props with `is_children`; BBS tags carry one wire type
+    for every caller. Only requested tags are emitted, and an unknown one gets
+    a DWORD-0 fallback, as in dirsrv.
     """
     content = node.content
     bbs = content.bbs or _EMPTY_BBS
@@ -517,9 +517,9 @@ def build_bbs_props(requested_props, node, *, is_children):
             # `_D` DWORD time_t, always emitted — 0 when the node has no date.
             # Never skip a requested tag: CServiceProperties::FSet @ 0x7F6418FF
             # only advances the record count on success, so a dropped property
-            # also strips every property after it. Omitting `_D` here cost the
-            # board its `_F` (the OkToGetChildren gate) and stalled the thread
-            # fetch. Verified on the wire 2026-07-27.
+            # also strips every property after it: without `_D` the board
+            # loses its `_F` (the OkToGetChildren gate) and the thread fetch
+            # stalls (wire capture).
             out.append((0x03, name, struct.pack("<I", bbs.date_unix & 0xFFFFFFFF)))
         elif name == PROP_PARENT_SUBID:
             out.append((0x03, name, struct.pack("<I", bbs.parent_subid & 0xFFFFFFFF)))

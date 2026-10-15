@@ -4,7 +4,7 @@ Values mirror the `HKLM\\SOFTWARE\\Microsoft\\MOS\\Applications\\App #N` keys
 installed on the Win95 client (see `ftp/mos.reg`). The wire 'c' property on a
 DIRSRV node is the app id that CMosTreeNode::Exec dispatches into:
   - `APP_DIRECTORY_SERVICE` (1) → Browse container (child enumeration)
-  - `APP_DOWN_LOAD_AND_RUN` (7) → DnR URL worker (ExecUrlWorkerProc)
+  - `APP_DOWNLOAD_AND_RUN` (7) → DnR URL worker (ExecUrlWorkerProc)
   - other ids → CreateProcessA on the registered Filename.
 """
 
@@ -52,7 +52,6 @@ APP_BSHELFED = 27
 APP_GUIDEED = 28
 # Blackbird title. Beyond the App #1..28 range `ftp/mos.reg` covers, so its
 # registered Filename is unknown here — the id is what the client itself put on
-# the wire: creating a "Blackbird Title" node in the MSN node editor sent
-# `c=33` in the TREEEDCL AddNode property record (observed 2026-08-12,
-# `add_node parent=1:16 node=1:272 type='Blackbird Title' app_id=33`).
+# the wire: creating a "Blackbird Title" node in the MSN node editor sends `c=33`
+# in the TREEEDCL AddNode property record (wire capture).
 APP_BLACKBIRD_TITLE = 33
