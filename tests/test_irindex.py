@@ -1,4 +1,4 @@
-"""Tests for `src.server.blackbird.irindex` — the text index BBIRService searches.
+"""Tests for `server.blackbird.irindex` — the text index BBIRService searches.
 
 Matching runs over synthetic documents; the extraction path that turns a
 published `CContent` object into one is covered against the store separately.

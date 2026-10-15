@@ -7,7 +7,7 @@ import struct
 import unittest
 
 from server.blackbird.wire import (
-    build_case1_stream_bf_chunk,
+    build_case1_bf_chunk,
     decode_case1_tlv,
     encode_case1_preamble,
     encode_text_item_tlv,
@@ -290,7 +290,7 @@ class TestM14Loader(unittest.TestCase):
         title = load_m14(_HANDBOOK)
         self.assertIsNotNone(title)
         display = title.home_display
-        chunk = build_case1_stream_bf_chunk(
+        chunk = build_case1_bf_chunk(
             display.control_stream,
             display.text_data,
             title_byte=1,
@@ -401,7 +401,7 @@ class TestM14Loader(unittest.TestCase):
             },
         )
 
-        chunk = build_case1_stream_bf_chunk(
+        chunk = build_case1_bf_chunk(
             non_scroll.control_stream,
             non_scroll.text_data,
             title_byte=1,

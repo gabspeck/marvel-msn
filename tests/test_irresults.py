@@ -1,4 +1,4 @@
-"""Tests for `src.server.blackbird.irresults` — the IR result-stream encoder.
+"""Tests for `server.blackbird.irresults` — the IR result-stream encoder.
 
 Pin every byte against the serializers the client reads them back with:
 

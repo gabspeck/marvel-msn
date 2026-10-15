@@ -34,9 +34,6 @@ Format derived from RE of `MVCL14N.DLL`:
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
-
-from . import drawtext, textmetrics
 
 _NARROW_BYTE_MAX = 0x7F
 _NARROW_USHORT_MAX = 0x7FFF
@@ -73,35 +70,6 @@ def encode_ushort_or_u32_varint(value: int) -> bytes:
     if value <= _WIDE_U32_MAX:
         return struct.pack("<I", ((value << 1) | 1) & 0xFFFFFFFF)
     raise ValueError(f"ushort/u32 varint overflow: {value}")
-
-
-def build_child_record(
-    tag: int,
-    tag2: int,
-    flags: int,
-    x: int,
-    y: int,
-    w: int,
-    h: int,
-    va: int,
-) -> bytes:
-    """Build a 15-byte trailer child record (see docs/MEDVIEW.md §10.3).
-
-    `MVScaleBaggageHotspots` reads each record in this layout, applies DPI scaling
-    to x/y/w/h, then `MVBuildLayoutLine` materialises it into a `0x47`-byte
-    slot at `title+0xf6 + (parent_idx + 1 + child_idx) * 0x47`.
-    """
-    return struct.pack(
-        "<BBBhhhhI",
-        tag & 0xFF,
-        tag2 & 0xFF,
-        flags & 0xFF,
-        x,
-        y,
-        w,
-        h,
-        va & 0xFFFFFFFF,
-    )
 
 
 def build_trailer(children: list[bytes], tail: bytes) -> bytes:
@@ -205,567 +173,16 @@ def build_baggage_container(bitmap: bytes) -> bytes:
     return struct.pack("<HHI", 0, 1, 8) + bitmap
 
 
-# --------------------------------------------------------------------------
-# Win32 metafile (.WMF) — kind=8 baggage carries arbitrary GDI records
-# (TextOut, font select, etc.) that PlayMetaFile renders at the parent
-# slot's origin. This is the wire primitive for absolute-positioned text:
-# `MVCL14N!MVPaintBitmapRecord @ 0x7E887180` SetViewportOrgEx → SetMapMode
-# → PlayMetaFile; `MVCL14N!MVCreateHmetafileFromBaggage @ 0x7E8870A0` calls
-# SetMetaFileBitsEx on the bytes at parsed_baggage+0x1e.
-# --------------------------------------------------------------------------
-
-# WMF function codes (META_*) used by `build_text_metafile`.
-_META_EOF = 0x0000
-_META_SETBKMODE = 0x0102
-_META_SETTEXTCOLOR = 0x0209
-_META_SETTEXTALIGN = 0x012E
-_META_SELECTOBJECT = 0x012D
-_META_DELETEOBJECT = 0x01F0
-_META_RECTANGLE = 0x041B
-_META_TEXTOUT = 0x0521
-_META_CREATEFONTINDIRECT = 0x02FB
-_META_CREATEBRUSHINDIRECT = 0x02FC
-_META_CREATEPENINDIRECT = 0x02FA
-_META_SAVEDC = 0x001E
-_META_RESTOREDC = 0x0127
-_META_INTERSECTCLIPRECT = 0x0416
-
-_BKMODE_TRANSPARENT = 1
-
-# TA_LEFT/CENTER/RIGHT for WMF SetTextAlign. iAlignment values pinned
-# via BBCTL.OCX FUN_400083f6 (label draw): {0, 2, 1} table indexed by
-# iAlignment yields {DT_LEFT, DT_RIGHT, DT_CENTER}. Wire mapping mirrors
-# that order. The TextOut anchor x must be shifted to the rect's right
-# edge (TA_RIGHT) or horizontal centre (TA_CENTER) — see
-# `build_text_metafile`. TA_TOP baseline (0x00) is implicit.
-_TA_LEFT = 0x00
-_TA_CENTER = 0x06
-_TA_RIGHT = 0x02
-_ALIGN_TO_TA = {0: _TA_LEFT, 1: _TA_RIGHT, 2: _TA_CENTER}
-
-# BBDESIGN iAlignment {0=L, 1=R, 2=C} -> DrawText DT_* horizontal format,
-# matching BBCTL.OCX FUN_400083f6's {DT_LEFT, DT_RIGHT, DT_CENTER} table.
-# Drives DT_AdjustWhiteSpaces in the word-wrap port.
-_ALIGN_TO_DT = {
-    0: drawtext.DT_LEFT,
-    1: drawtext.DT_RIGHT,
-    2: drawtext.DT_CENTER,
-}
-
-
-def _wrap_item_lines(item: TextItem) -> list[str]:
-    """Lower one caption's text into the lines DrawText would lay out.
-
-    With `word_wrap` set (BBCTL fWordWrap → DT_WORDBREAK), runs the GDI
-    word-break port measuring with the real font; otherwise the text is
-    a single line. Mirrors BBCTL's `DT_WORDBREAK | DT_NOPREFIX | DT_*`.
-    """
-    if not item.text or not (item.word_wrap and item.rect_w > 0):
-        return [item.text]
-    px = abs(item.font_height) or 16
-    bold = item.font_weight >= 700
-    try:
-        measure = textmetrics.text_measurer(item.font_face, px, bold, item.italic)
-    except (OSError, ImportError):
-        # Fonts (binaries/fonts, obtained separately) or Pillow absent:
-        # degrade to a single line rather than crash the render path.
-        return [item.text]
-    fmt = (
-        drawtext.DT_WORDBREAK
-        | drawtext.DT_NOPREFIX
-        | _ALIGN_TO_DT.get(item.alignment, drawtext.DT_LEFT)
-    )
-    return drawtext.wrap_text(item.text, fmt, measure, item.rect_w) or [item.text]
-
-
-def _item_line_height(item: TextItem) -> int:
-    """Per-line vertical advance for a wrapped caption — GDI's tmHeight
-    (font cell height) for the item's resolved font.
-    """
-    px = abs(item.font_height) or 16
-    try:
-        return (
-            textmetrics.line_height(item.font_face, px, item.font_weight >= 700, item.italic) or px
-        )
-    except (OSError, ImportError):
-        return px
-
-
-@dataclass(frozen=True)
-class TextItem:
-    """One TextOut payload for `build_text_metafile`. Per-item font +
-    color + background + border fields let multi-caption pages render
-    each caption with its full BBDESIGN-authored styling.
-
-    `transparent` mirrors BBCTL's fTransparent: True (default) leaves the
-    caption's rect bounds unpainted so the engine's title background shows
-    through; False fills the rect with `back_color` before the text. The
-    text itself is always drawn with a transparent background regardless,
-    so it never repaints over the frame border.
-
-    `frame_style != 0` or `bevel_width > 0` triggers border drawing
-    via the WMF Rectangle record; rect bounds default to a tight box
-    around the text origin if `rect_w / rect_h` are 0.
-    """
-
-    x: int
-    y: int
-    text: str
-    font_face: str = "MS Sans Serif"
-    font_height: int = -16  # negative = points, positive = device units
-    font_weight: int = 400  # 400 = FW_NORMAL, 700 = FW_BOLD
-    italic: bool = False
-    underline: bool = False
-    strikeout: bool = False
-    charset: int = 0  # LOGFONTA lfCharSet
-    color_rgb: int = 0  # text COLORREF (RGB0 little-endian DWORD)
-    back_color: int = 0xFFFFFF  # rect-fill COLORREF (only used when not transparent)
-    transparent: bool = True
-    alignment: int = 0  # 0=left, 1=center, 2=right (BBDESIGN iAlignment)
-    rect_w: int = 0  # pixels; 0 = no rect bounds (text-only mode)
-    rect_h: int = 0
-    bevel_width: int = 0  # pixels; 0 = no bevel
-    bevel_hilight: int = 0xFFFFFF  # bevel highlight COLORREF
-    bevel_shadow: int = 0  # bevel shadow COLORREF
-    frame_style: int = 0  # 0 = no frame, non-zero = draw frame
-    frame_color: int = 0  # frame border COLORREF
-    word_wrap: bool = False  # BBCTL fWordWrap → DT_WORDBREAK pre-wrap (build_text_metafile)
-    auto_size: bool = False  # BBCTL fAutoSize → no clip; text grows past authored rect
-
-
-def _wmf_record(rd_function: int, params: bytes) -> bytes:
-    """Encode one WMF record. `rdSize` = total record size in WORDs
-    (including rdSize and rdFunction). `params` must be even-length.
-    """
-    if len(params) & 1:
-        raise ValueError("WMF record params must be even-byte length")
-    rd_size_words = (4 + 2 + len(params)) // 2  # rdSize(4) + rdFunction(2) + params
-    return struct.pack("<IH", rd_size_words, rd_function & 0xFFFF) + params
-
-
-def _wmf_setbkmode(mode: int) -> bytes:
-    return _wmf_record(_META_SETBKMODE, struct.pack("<H", mode & 0xFFFF))
-
-
-def _wmf_settextalign(mode: int) -> bytes:
-    return _wmf_record(_META_SETTEXTALIGN, struct.pack("<H", mode & 0xFFFF))
-
-
-def _wmf_selectobject(idx: int) -> bytes:
-    return _wmf_record(_META_SELECTOBJECT, struct.pack("<H", idx & 0xFFFF))
-
-
-def _wmf_deleteobject(idx: int) -> bytes:
-    return _wmf_record(_META_DELETEOBJECT, struct.pack("<H", idx & 0xFFFF))
-
-
-def _wmf_rectangle(left: int, top: int, right: int, bottom: int) -> bytes:
-    """META_RECTANGLE: bottom, right, top, left (i16) — opposite of GDI."""
-    return _wmf_record(_META_RECTANGLE, struct.pack("<hhhh", bottom, right, top, left))
-
-
-def _wmf_savedc() -> bytes:
-    return _wmf_record(_META_SAVEDC, b"")
-
-
-def _wmf_restoredc(saved_dc: int = -1) -> bytes:
-    return _wmf_record(_META_RESTOREDC, struct.pack("<h", saved_dc))
-
-
-def _wmf_intersectcliprect(left: int, top: int, right: int, bottom: int) -> bytes:
-    """META_INTERSECTCLIPRECT: bottom, right, top, left (i16) — opposite of GDI."""
-    return _wmf_record(_META_INTERSECTCLIPRECT, struct.pack("<hhhh", bottom, right, top, left))
-
-
-def _wmf_createbrushindirect(color_rgb: int, style: int = 0) -> bytes:
-    """META_CREATEBRUSHINDIRECT: LOGBRUSH = [u16 style][u32 color][u16 hatch].
-
-    `style=0` (BS_SOLID) with the color fills the brush. Caller selects
-    the brush by its object slot index before drawing.
-    """
-    logbrush = struct.pack("<HIH", style & 0xFFFF, color_rgb & 0xFFFFFFFF, 0)
-    return _wmf_record(_META_CREATEBRUSHINDIRECT, logbrush)
-
-
-def _wmf_createpenindirect(color_rgb: int, width: int = 1, style: int = 0) -> bytes:
-    """META_CREATEPENINDIRECT: LOGPEN = [u16 style][i16 w_x][i16 w_y][u32 color].
-
-    `style=0` (PS_SOLID). `width` in logical units.
-    """
-    logpen = struct.pack("<HhhI", style & 0xFFFF, width, 0, color_rgb & 0xFFFFFFFF)
-    return _wmf_record(_META_CREATEPENINDIRECT, logpen)
-
-
-def _wmf_eof() -> bytes:
-    return _wmf_record(_META_EOF, b"")
-
-
-def _wmf_textout(x: int, y: int, text: str) -> bytes:
-    """META_TEXTOUT record. WMF order is: count, string_bytes (padded to
-    even), Y, X (note: Y *before* X — opposite of typical GDI calls).
-    """
-    text_bytes = text.encode("ascii", errors="replace")
-    if len(text_bytes) & 1:
-        text_bytes += b"\x00"  # pad to even
-    params = struct.pack("<H", len(text)) + text_bytes + struct.pack("<hh", y, x)
-    return _wmf_record(_META_TEXTOUT, params)
-
-
-def _wmf_settextcolor(color_rgb: int) -> bytes:
-    """META_SETTEXTCOLOR — COLORREF DWORD parameter (BGR0 little-endian)."""
-    return _wmf_record(_META_SETTEXTCOLOR, struct.pack("<I", color_rgb & 0xFFFFFFFF))
-
-
-def _wmf_createfontindirect(
-    *,
-    height: int,
-    weight: int = 400,
-    italic: bool = False,
-    underline: bool = False,
-    strikeout: bool = False,
-    charset: int = 0,
-    face_name: str = "MS Sans Serif",
-) -> bytes:
-    """META_CREATEFONTINDIRECT record carrying a packed LOGFONTA.
-
-    Layout per MS-WMF: 18-byte LOGFONT prefix (Height, Width, Escapement,
-    Orientation, Weight as i16; Italic, Underline, StrikeOut, CharSet,
-    OutPrecision, ClipPrecision, Quality, PitchAndFamily as u8) followed
-    by a NUL-terminated ASCII face name. Record padded to even bytes.
-    """
-    face_bytes = face_name.encode("ascii", errors="replace") + b"\x00"
-    if len(face_bytes) & 1:
-        face_bytes += b"\x00"
-    logfont = struct.pack(
-        "<hhhhhBBBBBBBB",
-        height,
-        0,  # Width (= 0 → matched on aspect ratio)
-        0,  # Escapement
-        0,  # Orientation
-        weight,
-        1 if italic else 0,
-        1 if underline else 0,
-        1 if strikeout else 0,
-        charset & 0xFF,  # CharSet (0 = ANSI_CHARSET)
-        0,  # OutPrecision (default)
-        0,  # ClipPrecision (default)
-        0,  # Quality (default)
-        0,  # PitchAndFamily (default)
-    )
-    return _wmf_record(_META_CREATEFONTINDIRECT, logfont + face_bytes)
-
-
-def build_text_metafile(items: list[TextItem]) -> bytes:
-    """Build a Win32 .WMF rendering each `TextItem` with full BBDESIGN
-    styling: per-item font (face/size/weight/italic/underline/strikeout/
-    charset), text color, text alignment (TA_LEFT/CENTER/RIGHT), full-
-    rect opaque background fill (`transparent=False`), and frame border
-    (`frame_style != 0` or `bevel_width > 0`).
-
-    Per `TextItem`, the metafile may create up to 3 GDI objects:
-
-    - Font (always; 1 per item).
-    - Brush (only when `transparent=False`, for full-rect background
-      fill; created lazily before the TextOut, deleted after).
-    - Pen (only when `frame_style != 0` or `bevel_width > 0`, for the
-      border Rectangle; created and deleted around the Rectangle).
-
-    Object slot management: fonts get slots 0..N-1 (created up-front
-    so the METAHEADER's NumberOfObjects equals item count for the
-    static fonts). Brushes and pens are created on-demand inline,
-    each getting a fresh slot (N, N+1, ...) and deleted immediately
-    after use. The METAHEADER's NumberOfObjects is bumped to the
-    peak count.
-
-    Metafile layout per item:
-
-      1. SetBkMode TRANSPARENT (once, for all items).
-      2. CreateFontIndirect × N (all fonts created up-front).
-      3. For each item:
-         a. (optional) CreateBrushIndirect(back_color), SelectObject,
-            CreatePenIndirect(frame_color, 1, PS_NULL or PS_SOLID),
-            SelectObject, Rectangle(left, top, right, bottom),
-            DeleteObject(pen), DeleteObject(brush) — when border or
-            background fill is non-default. Border/background sit
-            outside the clip so they draw at the authored extent.
-         b. SetTextAlign per `alignment`.
-         c. SetTextColor.
-         d. SelectObject(font_idx).
-         e. (optional) SaveDC + IntersectClipRect(item rect) — when
-            `auto_size=False` and rect_w/rect_h > 0; clips TextOut to
-            the authored caption rect.
-         f. TextOut — one record per wrapped line (see below).
-         g. (optional) RestoreDC(-1) — matches step (e).
-      4. DeleteObject × N (fonts).
-      5. EOF.
-
-    Word-wrap: when `item.word_wrap` is set (BBCTL fWordWrap), the text
-    is pre-lowered into multiple lines by `_wrap_item_lines`, a port of
-    GDI's `DrawText DT_WORDBREAK` engine (`drawtext.py`) measuring with
-    the real font (`textmetrics.py`). This matches BBVIEW, which renders
-    captions by hosting BBCTL.OCX and letting `CDC::DrawText(... |
-    DT_WORDBREAK | DT_NOPREFIX | DT_LEFT/RIGHT/CENTER)` flow the text;
-    the MSN client only replays this WMF via `PlayMetaFile` (no layout
-    engine), so the wrap must be baked in here. Each line is emitted as a
-    separate TextOut advancing y by the font cell height. `auto_size=True`
-    skips the clip step (the control grows around its text); for fixed-
-    size captions the clip rect honours the authored bounds so overflow
-    is truncated by the GDI clip — matching BBCTL CLabelCtrl behaviour.
-
-    Coordinates are in whatever logical units MOSVIEW sets up before
-    `PlayMetaFile`. With the kind=8 baggage `mapmode=1` (MM_TEXT)
-    contract, x/y are device pixels and the metafile draws untransformed.
-    """
-    records = bytearray()
-    records += _wmf_setbkmode(_BKMODE_TRANSPARENT)
-    for item in items:
-        records += _wmf_createfontindirect(
-            height=item.font_height,
-            weight=item.font_weight,
-            italic=item.italic,
-            underline=item.underline,
-            strikeout=item.strikeout,
-            charset=item.charset,
-            face_name=item.font_face,
-        )
-
-    next_obj_slot = len(items)
-    peak_objects = len(items)
-
-    for idx, item in enumerate(items):
-        has_border = (
-            (item.frame_style != 0 or item.bevel_width > 0) and item.rect_w > 0 and item.rect_h > 0
-        )
-        has_fill = not item.transparent and item.rect_w > 0 and item.rect_h > 0
-
-        if has_border or has_fill:
-            brush_slot = next_obj_slot
-            records += _wmf_createbrushindirect(
-                item.back_color,
-                style=0 if has_fill else 1,  # 1 = BS_NULL
-            )
-            records += _wmf_selectobject(brush_slot)
-            pen_slot = brush_slot + 1
-            pen_color = item.frame_color if item.frame_style != 0 else item.bevel_shadow
-            pen_width = max(1, item.bevel_width) if item.bevel_width > 0 else 1
-            records += _wmf_createpenindirect(
-                pen_color,
-                width=pen_width,
-                style=0 if has_border else 5,  # 5 = PS_NULL
-            )
-            records += _wmf_selectobject(pen_slot)
-            records += _wmf_rectangle(
-                int(item.x),
-                int(item.y),
-                int(item.x + item.rect_w),
-                int(item.y + item.rect_h),
-            )
-            records += _wmf_deleteobject(pen_slot)
-            records += _wmf_deleteobject(brush_slot)
-            next_obj_slot = brush_slot
-            peak_objects = max(peak_objects, brush_slot + 2)
-
-        ta_mode = _ALIGN_TO_TA.get(item.alignment, _TA_LEFT)
-        records += _wmf_settextalign(ta_mode)
-        # No per-item bkMode: text draws over the global TRANSPARENT set
-        # above. An opaque control's background is the has_fill rect paint
-        # above (BBCTL FUN_400083f6 PatBlt), not a text background — emitting
-        # one would repaint back_color over the frame border.
-        records += _wmf_settextcolor(item.color_rgb)
-        records += _wmf_selectobject(idx)
-        has_clip = (not item.auto_size) and item.rect_w > 0 and item.rect_h > 0
-        if has_clip:
-            records += _wmf_savedc()
-            records += _wmf_intersectcliprect(
-                int(item.x),
-                int(item.y),
-                int(item.x + item.rect_w),
-                int(item.y + item.rect_h),
-            )
-        anchor_x = int(item.x)
-        if item.rect_w > 0:
-            if item.alignment == 1:
-                anchor_x = int(item.x + item.rect_w)
-            elif item.alignment == 2:
-                anchor_x = int(item.x + item.rect_w // 2)
-        lines = _wrap_item_lines(item)
-        line_h = _item_line_height(item) if len(lines) > 1 else 0
-        for line_idx, line in enumerate(lines):
-            # Text-less items exist to paint their rect (the Story
-            # background, a list bullet) — they emit no TextOut.
-            if not line:
-                continue
-            records += _wmf_textout(anchor_x, int(item.y) + line_idx * line_h, line)
-        if has_clip:
-            records += _wmf_restoredc(-1)
-    for idx in range(len(items)):
-        records += _wmf_deleteobject(idx)
-    records += _wmf_eof()
-
-    # METAHEADER (18 bytes = 9 WORDs):
-    #   Type (1=memory), HeaderSize (=9), Version (=0x0300),
-    #   Size (in WORDs), NumberOfObjects, MaxRecord, NumberOfMembers (=0)
-    record_word_sizes = []
-    pos = 0
-    while pos < len(records):
-        rd_size = struct.unpack_from("<I", records, pos)[0]
-        record_word_sizes.append(rd_size)
-        pos += rd_size * 2
-    max_record = max(record_word_sizes) if record_word_sizes else 0
-    total_words = 9 + len(records) // 2  # header + body
-    header = struct.pack(
-        "<HHHIHIH",
-        1,  # Type (memory)
-        9,  # HeaderSize (WORDs)
-        0x0300,  # Version
-        total_words,  # Size (WORDs)
-        max(1, peak_objects),  # NumberOfObjects (font slots + lazy brush/pen)
-        max_record,  # MaxRecord (WORDs)
-        0,  # NumberOfMembers
-    )
-    return bytes(header) + bytes(records)
-
-
-def build_kind8_baggage(
-    metafile_bytes: bytes,
-    *,
-    mapmode: int = 1,
-    viewport_w: int = 0,
-    viewport_h: int = 0,
-) -> bytes:
-    """Wrap a Win32 metafile in a kind=8 baggage container.
-
-    Layout consumed by `MVCL14N!MVDecodeBitmapBaggage` (kind=8 branch):
-      +0      u8     kind = 0x08
-      +1      u8     compression (0 = raw)
-      +2..    varint mapmode (narrow byte if mapmode <= 0x7F)
-      +...    u16    viewport_w (raw, used for SetViewportExtEx when mapmode == 7|8)
-      +...    u16    viewport_h
-      +...    varint decompressed_metafile_size
-      +...    varint compressed_metafile_size
-      +...    varint trailer_size = 0
-      +...    u32    metafile_data_offset (rel. baggage start)
-      +...    u32    trailer_offset
-      +...    metafile bytes (raw)
-
-    For `mapmode = 1` (MM_TEXT), `viewport_w/h` are unused — engine
-    skips both `SetWindowExtEx` and `SetViewportExtEx`. Logical units
-    in the metafile = device pixels.
-    """
-    mapmode_varint = encode_byte_or_ushort_varint(mapmode)
-    decompressed_size = len(metafile_bytes)
-    compressed_size = len(metafile_bytes)
-    trailer_size = 0
-
-    size_varints = (
-        encode_ushort_or_u32_varint(decompressed_size)
-        + encode_ushort_or_u32_varint(compressed_size)
-        + encode_ushort_or_u32_varint(trailer_size)
-    )
-    header_prefix = (
-        bytes([0x08, 0x00])  # kind, compression
-        + mapmode_varint
-        + struct.pack("<HH", viewport_w & 0xFFFF, viewport_h & 0xFFFF)
-        + size_varints
-    )
-    header_len = len(header_prefix) + 8  # + 2 u32 offsets
-    metafile_data_offset = header_len
-    trailer_offset = metafile_data_offset + len(metafile_bytes)
-    return header_prefix + struct.pack("<II", metafile_data_offset, trailer_offset) + metafile_bytes
-
-
-def build_case3_bf_chunk(
-    title_byte: int,
-    key: int,
-    *,
-    name_size: int = 0x40,
-) -> bytes:
-    """Build a type-0 0xBF chunk that drives the case-3 bitmap cell path.
-
-    Case 3 (`MVBuildLayoutLine`) materialises a parent cell whose bitmap is
-    loaded from baggage (`bm0` for the current zeroed descriptor fields).
-    This is the plain bitmap/background path, complementary to
-    `build_case1_bf_chunk`'s text-row path.
-    """
-    if not (0x40 <= name_size <= 0xFFFF):
-        raise ValueError(f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}")
-
-    chunk = bytearray(4 + name_size + 60)
-    chunk[0] = 0xBF
-    chunk[1] = title_byte & 0xFF
-    chunk[2:4] = struct.pack("<H", name_size)
-    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
-    chunk[4 + 0x26] = 0x03
-    _stamp_chain_terminators(chunk)
-    _stamp_no_nsr(chunk, name_size)
-    return bytes(chunk)
-
-
-def _stamp_no_nsr(chunk: bytearray, name_size: int) -> None:
-    """Write the "no NSR" sentinel into a 0xBF chunk's trailing 60-byte
-    content block.
-
-    `MVTTL14C!HfcCache_DispatchContentNotification @ 0x7e8452d3` copies
-    `chunk[4 + name_size : ... + 60]` into a per-record companion buffer
-    at `cache_record + 0x18`. `MVTTL14C!HfcNear @ 0x7e84589f` then
-    memcpy's that buffer to `viewer + 0x38 .. viewer + 0x73` on every
-    cache hit (gated by `hfcRecord[5] != 0` — slot-count or row-height
-    non-zero, true for any non-empty case-1/case-3 chunk).
-    `MVCL14N!fMVHasNSR @ 0x7e8835b0` returns `1 - (viewer+0x4c == -1)`,
-    so companion offset 0x14 (= viewer+0x4c on copy) set to 0xFFFFFFFF
-    makes `MOSVIEW!NavigateMosViewPane @ 0x7f3c3670` call
-    `ShowWindow(NSR_HWND, SW_HIDE)`.
-
-    The synthetic builders do not have a native topic header, so they
-    stamp the no-NSR sentinel.
-    """
-    nsr_off = 4 + name_size + 0x14
-    chunk[nsr_off : nsr_off + 4] = b"\xff\xff\xff\xff"
-
-
-# Sentinel contentsToken stamped into the prev/next link fields of every
-# self-contained BF chunk. It must be nonzero, not 0xFFFFFFFF, and lower
-# than every valid TOPICPOS. HfcCache_FindEntryAndPromote also treats the
-# next-token field as the cached record's upper range during near lookups.
+# contentsToken for a BF chunk's prev/next link fields when it has no
+# neighbour. It must be nonzero, not 0xFFFFFFFF, and lower than every valid
+# TOPICPOS: HfcCache_FindEntryAndPromote also treats the next-token field as
+# the cached record's upper range during near lookups. `MVTTL14C!HfcNextPrevHfc
+# @ 0x7e845abb` reads wire+0x8 (prev) for leading probes and wire+0x10 (next)
+# for trailing ones; with 0 there the probe hits the requesting chunk's own
+# key 0, re-parses it and appends a duplicate slot, so the scrollbar range
+# grows with every scroll click. With 1 the probe misses, the client sends
+# selector 0x16, and the `0xA5` status 0x3F3 reply ends the seek loop.
 CHAIN_TERMINATOR_TOKEN = 1
-
-
-def _stamp_chain_terminators(chunk: bytearray) -> None:
-    """Stamp wire+0x8 (prev contentsToken) and wire+0x10 (next contentsToken)
-    so the engine's adjacent-chunk walk terminates on the first probe.
-
-    `MVTTL14C!HfcNextPrevHfc @ 0x7e845abb` reads `name_buf[+4]` (= wire+0x8)
-    for direction=0 leading probes and `name_buf[+0xc]` (= wire+0x10) for
-    direction=1 trailing probes, then looks up that token in HfcCache.
-    Without these stamps both fields stay at 0, which collides with our
-    initial chunk's key=0 — every leading/trailing probe in
-    `MVSeekVerticalLayoutSlots` hits cache, re-parses the same chunk, and
-    appends a duplicate slot to the layout (visible as ever-growing
-    scrollbar range with each scroll click).
-
-    With wire+0x8 / wire+0x10 = 1: cache miss → 0x16 wire RPC →
-    server replies `0xA5` with status `0x3F3` → seek loop sets
-    `hitLeadingEnd = true` → `viewer[+0x84]` (V-scroll flag) is cleared
-    when `currentTailGapY < 0`.
-    """
-    chunk[8:12] = struct.pack("<I", CHAIN_TERMINATOR_TOKEN)
-    chunk[16:20] = struct.pack("<I", CHAIN_TERMINATOR_TOKEN)
-
-
-# Case-2 TOPICHEADER builder removed 2026-05-19.
-#
-# MVWalkLayoutSlots @ 0x7e894d9f has no `case 2:` arm — its switch
-# dispatches only on tag values {1, 3, 4, 5, 0x20, 0x22, 0x23, 0x24}
-# (per the decompile's plate). Tag 0x02 IS recognised by
-# MVDecodeTopicItemPrefix (the raw-pair short-circuit branch copies
-# four bytes verbatim) but the resulting prefix falls through
-# MVWalkLayoutSlots' default arm with param_6[1] (last_view_record)
-# uninitialised, triggering the AV at +0xfc.
-#
-# Per-topic NSR collapse is achieved via `_stamp_no_nsr` writing
-# 0xFFFFFFFF at the 60-byte content_block offset +0x14 of every chunk
-# (see fMVHasNSR @ 0x7e8835b0 and HfcNear's companion-buffer memcpy);
-# no TOPICHEADER record is needed.
 
 
 # --------------------------------------------------------------------------
@@ -1000,29 +417,9 @@ def build_type4_transfer_chunk_frame(
     )
 
 
-def encode_null_tlv() -> bytes:
-    """Encode the minimum-viable TLV: length=0, presence bitmap=0.
-
-    `MVDecodePackedTextHeader` consumes 6 bytes total (2-byte narrow length +
-    4-byte u32 bitmap) and leaves the output struct zeroed except
-    for `[0]=0` (length) and the formula default at `[0x22]=0x0048`.
-
-    With this TLV in front of text bytes, `slot+0x39` (text byte
-    offset into chunk content base) = 0 — i.e. text begins at the
-    text base pointer.
-
-    Equivalent to `encode_text_item_tlv({0x00: 0})`.
-    """
-    return encode_signed_int_varint(0) + struct.pack("<I", 0)
-
-
-# `encode_text_item_tlv` field map per `docs/mosview-authored-text-and-font-re.md`
-# §"Text Header Grammar". Keys match the decoded struct's offsets so
-# `decode_case1_tlv(encode_text_item_tlv(x))` round-trips.
-_TLV_OPTIONAL_INT_FIELDS = (
-    # offset, bitmap_mask
-    (0x12, 0x10000),  # text_base_or_mode (signed-int varint)
-)
+# Optional signed-short TLV fields `(struct offset, presence bit)`, per
+# `docs/mosview-authored-text-and-font-re.md` §"Text Header Grammar". Keys
+# match the decoded struct's offsets so `decode_case1_tlv` round-trips.
 _TLV_OPTIONAL_SHORT_FIELDS = (
     (0x16, 0x20000),  # space_before
     (0x18, 0x40000),  # space_after
@@ -1070,8 +467,7 @@ def encode_text_item_tlv(
     shorts at decoded-header offset +0x29 stride 4. Multi-run text
     styling is *not* encoded here — it happens via the `0x80` control
     byte in the case-1 control stream (see §5 of
-    `docs/MEDVIEW-TEXT-ENCODING.md`). Older drafts of this module
-    misnamed the field `inline_run_count`.
+    `docs/MEDVIEW-TEXT-ENCODING.md`).
 
     Tab-stop pair wire form per `MVDecodePackedTextHeader`:
       - First short: PackedUnsignedSmall (u8/u16, value range
@@ -1085,10 +481,9 @@ def encode_text_item_tlv(
     `stop_x` left clear).
 
     Args:
-      fields: dict keyed by struct offset (legacy positional API).
+      fields: dict keyed by struct offset.
       tab_stops: list of `(stop_x, stop_payload)` pairs; when present,
-        auto-sets bitmap bit 0x2000000 and `tab_stop_count = len(stops)`.
-        Mutually exclusive with `fields[0x27]`.
+        sets bitmap bit 0x2000000 and `tab_stop_count = len(stops)`.
 
     Optional fields are emitted when their key is present in `fields`
     (regardless of value — explicit zero still shows up on the wire).
@@ -1129,12 +524,6 @@ def encode_text_item_tlv(
         bitmap |= 0x1000000
         optional_payload += struct.pack("<H", f.pop(0x24) & 0xFFFF) + b"\x00"
 
-    # Optional tab_stop_count + pair list.
-    legacy_count = f.pop(0x27, None)
-    if tab_stops is not None and legacy_count is not None and legacy_count != len(tab_stops):
-        raise ValueError(
-            f"fields[0x27]={legacy_count} disagrees with tab_stops length {len(tab_stops)}"
-        )
     if tab_stops is not None:
         bitmap |= 0x2000000
         optional_payload += encode_signed_short_varint(len(tab_stops))
@@ -1150,14 +539,6 @@ def encode_text_item_tlv(
             else:
                 optional_payload += encode_byte_or_ushort_varint(stop_x | _TAB_STOP_SECOND_FLAG)
                 optional_payload += encode_byte_or_ushort_varint(stop_payload)
-    elif legacy_count is not None:
-        bitmap |= 0x2000000
-        optional_payload += encode_signed_short_varint(legacy_count)
-        if legacy_count != 0:
-            raise ValueError(
-                f"fields[0x27]={legacy_count} requires tab_stops list "
-                "(legacy positional API supports only count=0)"
-            )
 
     if f:
         raise ValueError(f"unknown TLV field keys: {sorted(f)}")
@@ -1167,338 +548,116 @@ def encode_text_item_tlv(
     )
 
 
-def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
-    """Decode bytes produced by `encode_null_tlv` (or any TLV form
-    `MVDecodePackedTextHeader` accepts) and report (struct_dict, bytes_consumed).
-
-    Mirrors `MVDecodePackedTextHeader`'s exact control flow so test cases can
-    pin the encoder against the decompiled paths.
-    """
-    pos = 0
-    fields: dict = {}
-
-    # Length field — same varint form as preamble length.
-    raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
+def _decode_signed_int(buf: bytes, pos: int) -> tuple[int, int]:
+    """Inverse of `encode_signed_int_varint`. Returns `(value, new_pos)`."""
+    raw_word = struct.unpack_from("<H", buf, pos)[0]
     if (raw_word & 1) == 0:
-        fields[0x00] = (raw_word >> 1) - 0x4000
-        pos += 2
-    else:
-        raw_dword = struct.unpack("<I", buf[pos : pos + 4])[0]
-        decoded = (raw_dword >> 1) + 0xC0000000
-        if decoded >= 0x80000000:
-            decoded -= 0x100000000
-        fields[0x00] = decoded
-        pos += 4
+        return (raw_word >> 1) - 0x4000, pos + 2
+    raw_dword = struct.unpack_from("<I", buf, pos)[0]
+    return (raw_dword >> 1) - 0x40000000, pos + 4
 
-    # Presence bitmap u32 + four unconditional flag fields.
-    bitmap = struct.unpack("<I", buf[pos : pos + 4])[0]
+
+def _decode_signed_short(buf: bytes, pos: int) -> tuple[int, int]:
+    """Inverse of `encode_signed_short_varint`. Returns `(value, new_pos)`."""
+    if (buf[pos] & 1) == 0:
+        return (buf[pos] >> 1) - 0x40, pos + 1
+    raw_word = struct.unpack_from("<H", buf, pos)[0]
+    return (raw_word >> 1) - 0x4000, pos + 2
+
+
+def _decode_unsigned_small(buf: bytes, pos: int) -> tuple[int, int]:
+    """Inverse of `encode_byte_or_ushort_varint`. Returns `(value, new_pos)`."""
+    if (buf[pos] & 1) == 0:
+        return buf[pos] >> 1, pos + 1
+    return struct.unpack_from("<H", buf, pos)[0] >> 1, pos + 2
+
+
+def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
+    """Decode a `MVDecodePackedTextHeader` TLV and report
+    `(struct_dict, bytes_consumed)`, following its control flow so tests can
+    pin the encoder against the decompiled paths."""
+    fields: dict = {}
+    fields[0x00], pos = _decode_signed_int(buf, 0)
+
+    # Presence bitmap u32 + the flag fields packed into it.
+    bitmap = struct.unpack_from("<I", buf, pos)[0]
     pos += 4
     fields[0x04] = bitmap & 0x1
     fields[0x08] = (bitmap >> 16) & 0x1
     fields[0x0A] = (bitmap >> 24) & 0x1
-    fields[0x0C] = (bitmap >> 26) & 0x3  # 2-bit field
+    fields[0x0C] = (bitmap >> 26) & 0x3
     fields[0x0E] = (bitmap >> 28) & 0x1
 
-    # Conditional signed-int field at +0x12 (gated by bit 0x10000;
-    # same gate also drives the unconditional flag at +0x08).
+    # +0x12 shares bit 0x10000 with the flag at +0x08.
+    fields[0x12] = 0
     if bitmap & 0x10000:
-        raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
-        if (raw_word & 1) == 0:
-            fields[0x12] = (raw_word >> 1) - 0x4000
-            pos += 2
-        else:
-            raw_dword = struct.unpack("<I", buf[pos : pos + 4])[0]
-            decoded = (raw_dword >> 1) + 0xC0000000
-            if decoded >= 0x80000000:
-                decoded -= 0x100000000
-            fields[0x12] = decoded
-            pos += 4
-    else:
-        fields[0x12] = 0
+        fields[0x12], pos = _decode_signed_int(buf, pos)
 
-    # Conditional signed-short fields at +0x16..+0x20.
-    for offset, bit_mask in (
-        (0x16, 0x20000),
-        (0x18, 0x40000),
-        (0x1A, 0x80000),
-        (0x1C, 0x100000),
-        (0x1E, 0x200000),
-        (0x20, 0x400000),
-    ):
+    for offset, bit_mask in _TLV_OPTIONAL_SHORT_FIELDS:
         if bitmap & bit_mask:
-            raw_byte = buf[pos]
-            if (raw_byte & 1) == 0:
-                fields[offset] = (raw_byte >> 1) - 0x40
-                pos += 1
-            else:
-                raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
-                decoded = (raw_word >> 1) + 0xC000
-                if decoded >= 0x8000:
-                    decoded -= 0x10000
-                fields[offset] = decoded
-                pos += 2
+            fields[offset], pos = _decode_signed_short(buf, pos)
+        elif offset == 0x22:
+            fields[0x22] = 0x0048 if (fields[0x12] & 1) == 0 else 0x02C6
         else:
             fields[offset] = 0
 
-    # +0x22 — same form, with formula default when absent.
-    if bitmap & 0x800000:
-        raw_byte = buf[pos]
-        if (raw_byte & 1) == 0:
-            fields[0x22] = (raw_byte >> 1) - 0x40
-            pos += 1
-        else:
-            raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
-            decoded = (raw_word >> 1) + 0xC000
-            if decoded >= 0x8000:
-                decoded -= 0x10000
-            fields[0x22] = decoded
-            pos += 2
-    else:
-        fields[0x22] = 0x0048 if (fields[0x12] & 1) == 0 else 0x02C6
-
-    # +0x24 — 3-byte read, low 2 bytes stored. Parser advances 3 bytes
-    # but writes only the low 2 to the struct (third byte discarded).
+    # +0x24: the parser reads 3 bytes and stores the low 2.
+    fields[0x24] = 0
     if bitmap & 0x1000000:
-        fields[0x24] = struct.unpack("<H", buf[pos : pos + 2])[0]
+        fields[0x24] = struct.unpack_from("<H", buf, pos)[0]
         pos += 3
-    else:
-        fields[0x24] = 0
 
-    # +0x27 — count of trailing pairs.
+    fields[0x27] = 0
     if bitmap & 0x2000000:
-        raw_byte = buf[pos]
-        if (raw_byte & 1) == 0:
-            fields[0x27] = (raw_byte >> 1) - 0x40
-            pos += 1
-        else:
-            raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
-            decoded = (raw_word >> 1) + 0xC000
-            if decoded >= 0x8000:
-                decoded -= 0x10000
-            fields[0x27] = decoded
-            pos += 2
-    else:
-        fields[0x27] = 0
+        fields[0x27], pos = _decode_signed_short(buf, pos)
 
-    # Trailing tab-stop pair list per `MVDecodePackedTextHeader` (count at
-    # +0x27, payload at +0x29 stride 4). Each pair is `(stop_x,
-    # stop_payload)` PackedUnsignedSmall varints; bit 14 of the raw
-    # first short flags whether the second follows.
+    # Tab stops at +0x29, stride 4: bit 14 of the raw `stop_x` flags a
+    # following `stop_payload`, and the parser clears it after the read.
     tab_stops: list[tuple[int, int]] = []
     for _ in range(max(0, fields[0x27])):
-        raw_byte = buf[pos]
-        if (raw_byte & 1) == 0:
-            stop_x = raw_byte >> 1
-            pos += 1
-        else:
-            raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
-            stop_x = raw_word >> 1
-            pos += 2
+        stop_x, pos = _decode_unsigned_small(buf, pos)
+        stop_payload = 0
         if stop_x & _TAB_STOP_SECOND_FLAG:
-            raw_byte = buf[pos]
-            if (raw_byte & 1) == 0:
-                stop_payload = raw_byte >> 1
-                pos += 1
-            else:
-                raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
-                stop_payload = raw_word >> 1
-                pos += 2
-        else:
-            stop_payload = 0
-        stop_x &= ~_TAB_STOP_SECOND_FLAG  # parser clears bit 14 post-read
-        tab_stops.append((stop_x, stop_payload))
+            stop_payload, pos = _decode_unsigned_small(buf, pos)
+        tab_stops.append((stop_x & ~_TAB_STOP_SECOND_FLAG, stop_payload))
     fields["tab_stops"] = tab_stops
 
     return (fields, pos)
 
 
-# Default name_size for the case-1 chunk. The original RE pinned the
-# minimum-viable shape at name_size=0x40 (16-byte text region after
-# the case-1 dispatch + preamble + null TLV + 0xFF control byte).
-# Authored stories on the reference .ttl exceed that — Homepage.bdf
-# alone is 119 bytes — so the wire-mode default grows name_size to
-# 0x100 (256 B), giving room for ASCII text + NUL well past 200 B.
-# Per `docs/MEDVIEW.md` §10.5, the engine memcpy's `name_size` bytes
-# from the chunk into the cache entry's name_buf; larger values are
-# accepted up to u16 capacity.
-_CASE1_DEFAULT_NAME_SIZE = 0x100
-
-
-def case1_text_budget(
-    name_size: int = _CASE1_DEFAULT_NAME_SIZE,
-    tlv_size: int = 6,
-    initial_font_style: int | None = 0,
-) -> int:
-    """Maximum text+NUL bytes that fit in a case-1 chunk's name_buf.
-
-    Formula: `name_size - 0x29 (skipped pad) - 3 (preamble) -
-    tlv_size - len(control stream) - len(text prefix)`. The default
-    primes style 0 with a `0x80 <u16 style>` control before the first
-    printable byte, so `text_prefix` is one leading NUL that forces the
-    control walker to run before the text run is emitted. Pass
-    `initial_font_style=None` for the old `0xFF`-only stream.
-
-    Within the chunk, name_buf starts at offset +0x04 and the case-1
-    dispatch byte sits at name_buf+0x26 = chunk+0x2A. The 0xFF byte
-    sits at end_of_TLV (= name_buf[0x29 + tlv_size]) so the control
-    walker (`template[+0x14]` in MVTextLayoutFSM, initialised to end_of_TLV
-    by MVBuildTextItem) finds an end-of-chunk marker once the text
-    walker hits the NUL terminator. Without it, MVDispatchControlRun's
-    default case treats the first text byte as a link tag and reads
-    `*(ushort *)(first+1)`, advancing the walker out of bounds and
-    triggering the "service is not available" dialog. Live SoftIce
-    trace 2026-04-29 at MVEmitTextRunSlot confirmed.
-    """
-    control_len = 1 if initial_font_style is None else 4
-    text_prefix_len = 0 if initial_font_style is None else 1
-    return name_size - 0x29 - 3 - tlv_size - control_len - text_prefix_len
-
-
-# Legacy constant retained for the existing 0x40-shape tests. New
-# callers should use `case1_text_budget(name_size)`.
-_CASE1_NAME_BUF_TEXT_BUDGET = case1_text_budget(0x40, initial_font_style=None)
-
-
 def build_case1_bf_chunk(
-    text: str,
-    title_byte: int,
-    key: int,
-    *,
-    name_size: int = _CASE1_DEFAULT_NAME_SIZE,
-    tlv_fields: dict[int, int] | None = None,
-    initial_font_style: int | None = 0,
-) -> bytes:
-    """Build a 128-byte type-0 0xBF chunk that drives the case-1 path.
-
-    Wire layout (all offsets are within the chunk; the first 4 bytes
-    are stripped before the cache stores `name_buf` + content_block at
-    `entry+0x00`):
-
-        +0x00  0xBF                                cache opcode
-        +0x01  title_byte                          per-title routing
-        +0x02  name_size = 0x40 (LE u16)           memcpy length into entry
-        +0x04..0x0B  zero padding                  name_buf[0..7]
-        +0x0C  key (LE u32)                        HfcCache_DispatchContentNotification reads here
-        +0x10..0x29  zero padding                  name_buf[12..0x25]
-        +0x2A  0x01                                name_buf[0x26] — case-1 dispatch
-        +0x2B..0x2C  preamble length raw           narrow varint, decoded = 10 by default
-        +0x2D..0x32  null TLV (6 bytes)            length=0, bitmap=0
-        +0x33..      control stream                default: 0x80, style u16, 0xFF
-        +...         text prefix                   default: leading NUL to run 0x80 before text
-        +...         ASCII text + NUL
-        +...         zero padding to 0x44
-        +0x44..0x7F  60-byte content block         zeros (HGLOBAL slots NULL)
-
-    With the default font-control stream:
-      - control walker starts at end_of_TLV and reads 0x80, style 0, then 0xFF
-      - text base starts after the control stream
-      - text_base[0] is NUL so `MVDispatchControlRun` applies style 0 before the first
-        printable run
-      - text walk then reads from text_base[1] until NUL and emits slot tag 1
-      - next loop iteration: text byte at idx N is NUL → `MVLayoutTextRunStream`
-        calls `MVDispatchControlRun`, which reads 0xFF at control walker → case
-        0xFF → return 5 → loop exits cleanly
-      - paint loop's `DrawTextSlot` calls `ExtTextOutA(hdc, x, y, …,
-        text, len, …)` with the bytes shipped here.
-    """
-    # Empty text is intentional for the "no authored content" fallback:
-    # `MVTextLayoutFSM`'s pre-test treats first text byte == 0 (with
-    # end-of-TLV byte == 0xFF) as "skip this row" → return 5 → caller's
-    # do-while loop terminates without emitting tag 1. The chunk still
-    # populates HfcNear's per-title cache (so `fMVSetAddress` completes
-    # and the client clears its hourglass) without producing a visible
-    # slot. Used by `services/medview._push_case1_text` when the title
-    # has no topic-source entries.
-
-    if not (0x40 <= name_size <= 0xFFFF):
-        raise ValueError(f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}")
-
-    tlv = encode_null_tlv() if tlv_fields is None else encode_text_item_tlv(tlv_fields)
-    if len(tlv) < 6:
-        raise AssertionError(f"TLV must be >= 6 bytes, got {len(tlv)}")
-
-    if initial_font_style is not None and not -0x8000 <= initial_font_style <= 0xFFFF:
-        raise ValueError(f"initial_font_style out of int16/u16 range: {initial_font_style}")
-
-    control_stream = b"\xff"
-    text_prefix = b""
-    if initial_font_style is not None:
-        control_stream = b"\x80" + struct.pack("<H", initial_font_style & 0xFFFF) + b"\xff"
-        text_prefix = b"\x00"
-
-    text_bytes = text_prefix + text.encode("ascii", errors="replace") + b"\x00"
-    budget = case1_text_budget(
-        name_size,
-        tlv_size=len(tlv),
-        initial_font_style=initial_font_style,
-    )
-    if len(text_bytes) > budget:
-        raise ValueError(
-            f"text payload = {len(text_bytes)} bytes; in-name_buf form caps "
-            f"at {budget} bytes (name_size=0x{name_size:x}, "
-            f"tlv_size={len(tlv)})"
-        )
-
-    # Preamble length value skips past TLV + control stream so text_base lands
-    # on the leading NUL (default) or the first text byte (legacy).
-    preamble_length_value = len(tlv) + len(control_stream)
-
-    chunk = bytearray(4 + name_size + 60)  # 4-byte header + name_buf + content_block
-    chunk[0] = 0xBF
-    chunk[1] = title_byte & 0xFF
-    chunk[2:4] = struct.pack("<H", name_size)
-    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
-
-    case_offset = 4 + 0x26  # = 0x2A
-    chunk[case_offset] = 0x01
-
-    preamble = encode_case1_preamble(length_value=preamble_length_value, type_tag=0x01)
-    if len(preamble) != 3:
-        raise AssertionError(
-            f"non-narrow case-1 preamble not implemented for length_value={preamble_length_value}"
-        )
-    chunk[case_offset + 1 : case_offset + 3] = preamble[1:3]
-
-    chunk[case_offset + 3 : case_offset + 3 + len(tlv)] = tlv
-
-    # Control stream at end_of_TLV — read by MVDispatchControlRun when the text
-    # walker sees NUL. The default stream selects style 0 before text.
-    control_offset = case_offset + 3 + len(tlv)
-    chunk[control_offset : control_offset + len(control_stream)] = control_stream
-
-    text_offset = case_offset + 3 + len(tlv) + len(control_stream)
-    chunk[text_offset : text_offset + len(text_bytes)] = text_bytes
-
-    _stamp_chain_terminators(chunk)
-    _stamp_no_nsr(chunk, name_size)
-    return bytes(chunk)
-
-
-def build_case1_stream_bf_chunk(
     control_stream: bytes,
     text_data: bytes,
     title_byte: int,
     key: int,
     *,
-    topic_length: int,
+    topic_length: int | None = None,
     tlv_fields: dict[int, int] | None = None,
     tab_stops: list[tuple[int, int]] | None = None,
+    name_size: int | None = None,
     non_scroll: int = -1,
     scroll: int = -1,
     previous: int = CHAIN_TERMINATOR_TOKEN,
     following: int = CHAIN_TERMINATOR_TOKEN,
 ) -> bytes:
-    """Wrap one native Media View display record in a type-0 0xBF chunk.
+    """Wrap one Media View display record in a type-0 0xBF chunk.
 
-    Compiled Media View titles already store the bytecode consumed by
-    `MVDispatchControlRun`: LinkData1 ends with the control stream and
-    LinkData2 carries its NUL-separated text strings. Only the paragraph
-    header differs from the online cache representation, so callers pass
-    its decoded fields for re-encoding as the wire TLV. The widened 0x20
-    item prefix preserves the display's TopicLength, which the client uses
-    to admit the resulting slot to point hit-testing. The companion block
-    carries the topic's non-scroll and scroll bounds; the name buffer links
-    adjacent display records within the topic.
+    Layout: `[0xBF][title_byte][u16 name_size]`, then `name_size` bytes of
+    name buffer and a 60-byte companion block. In the name buffer, +0x04 and
+    +0x0C carry the previous and following contentsTokens, +0x08 the key,
+    and +0x26 the item prefix (`MVDecodeTopicItemPrefix`), followed by the
+    TLV, the control stream and the text. The companion block's +0x14/+0x18
+    hold the non-scroll and scroll bounds; `HfcNear @ 0x7e84589f` copies it
+    to viewer+0x38, so a non-scroll value of -1 lands on viewer+0x4c and
+    `fMVHasNSR @ 0x7e8835b0` reports no NSR pane.
+
+    Compiled titles already store the bytecode `MVDispatchControlRun`
+    consumes: LinkData1 ends with the control stream and LinkData2 holds its
+    NUL-separated strings. Only the paragraph header is re-encoded, as the
+    TLV. With `topic_length` the item prefix is the widened tag 0x20, which
+    carries the TopicLength the client needs to admit the slot to point
+    hit-testing; without it the prefix is the narrow text tag 0x01.
+    `name_size` defaults to the smallest 4-aligned buffer that fits.
     """
     if not control_stream or control_stream[-1] != 0xFF:
         raise ValueError("Media View control stream must end with 0xFF")
@@ -1507,14 +666,20 @@ def build_case1_stream_bf_chunk(
 
     tlv = encode_text_item_tlv(tlv_fields, tab_stops=tab_stops)
     preamble_length_value = len(tlv) + len(control_stream)
-    preamble = encode_case1_preamble(
-        length_value=preamble_length_value,
-        type_tag=0x20,
-        prefix_u16=topic_length,
-    )
+    if topic_length is None:
+        preamble = encode_case1_preamble(length_value=preamble_length_value, type_tag=0x01)
+    else:
+        preamble = encode_case1_preamble(
+            length_value=preamble_length_value,
+            type_tag=0x20,
+            prefix_u16=topic_length,
+        )
 
     required_name_size = 0x26 + len(preamble) + len(tlv) + len(control_stream) + len(text_data)
-    name_size = max(0x40, (required_name_size + 3) & ~3)
+    if name_size is None:
+        name_size = max(0x40, (required_name_size + 3) & ~3)
+    elif name_size < required_name_size:
+        raise ValueError(f"name_size 0x{name_size:x} cannot hold 0x{required_name_size:x} bytes")
     if name_size > 0xFFFF:
         raise ValueError(f"Media View display record exceeds 0xFFFF-byte name buffer: {name_size}")
 
@@ -1541,141 +706,4 @@ def build_case1_stream_bf_chunk(
         non_scroll & 0xFFFFFFFF,
         scroll & 0xFFFFFFFF,
     )
-    return bytes(chunk)
-
-
-@dataclass(frozen=True)
-class StyledSegment:
-    """One styled run of text in a case-1 chunk.
-
-    Each segment paints with a single CStyleSheet `style_id`; multi-
-    segment chunks switch styles via `0x80 <style u16>` controls in the
-    case-1 control stream (the only multi-run styling primitive — see
-    `docs/MEDVIEW-TEXT-ENCODING.md` §5.1).
-    """
-
-    text: str
-    style_id: int
-
-
-def build_styled_case1_chunk(
-    segments: list[StyledSegment | tuple[str, int]],
-    title_byte: int,
-    key: int,
-    *,
-    name_size: int = _CASE1_DEFAULT_NAME_SIZE,
-    tlv_fields: dict[int, int] | None = None,
-    tab_stops: list[tuple[int, int]] | None = None,
-) -> bytes:
-    """Build a case-1 0xBF chunk with multi-segment styled text.
-
-    Wire interleaving (one `0x80` control per segment + one trailing
-    `0xFF`):
-
-      Text region:    `\x00 seg0 \x00 seg1 \x00 ... \x00 segN \x00`
-      Control region: `\x80 <s0> \x80 <s1> ... \x80 <sN> \xff`
-
-    Walker model (per `MVDispatchControlRun @ 0x7e894ec0` §5.1 +
-    `MVTextLayoutFSM @ 0x7e891810`): the text walker reads printable
-    bytes; on NUL it yields to the control walker which consumes one
-    control (3 B for `0x80 <style u16>` or 1 B for `0xFF`). After a
-    style switch, the text walker resumes the next printable run with
-    the new style applied.
-
-    For a single segment, the wire shape is identical to
-    `build_case1_bf_chunk(text=segments[0].text,
-    initial_font_style=segments[0].style_id)`.
-
-    Args:
-      segments: ordered list of `StyledSegment` (or plain `(text,
-        style_id)` tuples). Empty list raises; pass at least one
-        segment.
-      title_byte / key: same as `build_case1_bf_chunk`.
-      name_size: case-1 chunk's name_buf size (default
-        `_CASE1_DEFAULT_NAME_SIZE` = 0x100).
-      tlv_fields: forwarded to `encode_text_item_tlv` (alignment,
-        indents, etc.).
-      tab_stops: forwarded to `encode_text_item_tlv` (TLV bit
-        `0x2000000` pair list per §4.3).
-    """
-    if not segments:
-        raise ValueError("segments must contain at least one styled run")
-    normalised: list[StyledSegment] = []
-    for s in segments:
-        if isinstance(s, StyledSegment):
-            normalised.append(s)
-        else:
-            text, style_id = s
-            normalised.append(StyledSegment(text=text, style_id=style_id))
-
-    for seg in normalised:
-        if not -0x8000 <= seg.style_id <= 0xFFFF:
-            raise ValueError(f"segment style_id out of int16/u16 range: {seg.style_id}")
-        if "\x00" in seg.text:
-            raise ValueError(f"segment text must not contain embedded NUL: {seg.text!r}")
-
-    if not (0x40 <= name_size <= 0xFFFF):
-        raise ValueError(f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}")
-
-    tlv = (
-        encode_text_item_tlv(tlv_fields, tab_stops=tab_stops)
-        if tlv_fields is not None or tab_stops is not None
-        else encode_null_tlv()
-    )
-    if len(tlv) < 6:
-        raise AssertionError(f"TLV must be >= 6 bytes, got {len(tlv)}")
-
-    # Control stream: one `0x80 <style>` per segment, then 0xFF EOF.
-    control_stream = (
-        b"".join(b"\x80" + struct.pack("<H", seg.style_id & 0xFFFF) for seg in normalised) + b"\xff"
-    )
-
-    # Text stream: leading NUL + segments separated by NUL + trailing NUL.
-    # Total NULs = len(segments) + 1; one consumed by the control walker
-    # per pop (matches len(segments) `0x80` controls + the final 0xFF).
-    text_bytes = (
-        b"\x00"
-        + b"\x00".join(seg.text.encode("ascii", errors="replace") for seg in normalised)
-        + b"\x00"
-    )
-
-    # Budget check: name_size - 0x29 pad - 3 preamble - len(tlv) -
-    # len(control_stream) - len(text_bytes) ≥ 0.
-    capacity = name_size - 0x29 - 3 - len(tlv) - len(control_stream)
-    if len(text_bytes) > capacity:
-        raise ValueError(
-            f"styled payload = {len(text_bytes)} text bytes + "
-            f"{len(control_stream)} control bytes; in-name_buf form caps "
-            f"at {capacity} text bytes (name_size=0x{name_size:x}, "
-            f"tlv_size={len(tlv)}, segments={len(normalised)})"
-        )
-
-    preamble_length_value = len(tlv) + len(control_stream)
-
-    chunk = bytearray(4 + name_size + 60)
-    chunk[0] = 0xBF
-    chunk[1] = title_byte & 0xFF
-    chunk[2:4] = struct.pack("<H", name_size)
-    chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
-
-    case_offset = 4 + 0x26
-    chunk[case_offset] = 0x01
-
-    preamble = encode_case1_preamble(length_value=preamble_length_value, type_tag=0x01)
-    if len(preamble) != 3:
-        raise AssertionError(
-            f"non-narrow case-1 preamble not implemented for length_value={preamble_length_value}"
-        )
-    chunk[case_offset + 1 : case_offset + 3] = preamble[1:3]
-
-    chunk[case_offset + 3 : case_offset + 3 + len(tlv)] = tlv
-
-    control_offset = case_offset + 3 + len(tlv)
-    chunk[control_offset : control_offset + len(control_stream)] = control_stream
-
-    text_offset = control_offset + len(control_stream)
-    chunk[text_offset : text_offset + len(text_bytes)] = text_bytes
-
-    _stamp_chain_terminators(chunk)
-    _stamp_no_nsr(chunk, name_size)
     return bytes(chunk)

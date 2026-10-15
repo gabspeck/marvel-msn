@@ -30,7 +30,6 @@ from collections.abc import Callable
 
 from ...blackbird.wire import (
     build_case1_bf_chunk,
-    build_case1_stream_bf_chunk,
     build_type0_status_record,
     build_type3_op4_frame,
     build_type3_transfer_status_frame,
@@ -515,7 +514,7 @@ def _push_va_resolve(handler, _selector: int, title_slot: int, key: int) -> byte
         display = title.display_at(key)
         if display is not None:
             previous, following = title.display_neighbors(key)
-            return build_case1_stream_bf_chunk(
+            return build_case1_bf_chunk(
                 display.control_stream,
                 display.text_data,
                 title_slot,
@@ -528,12 +527,9 @@ def _push_va_resolve(handler, _selector: int, title_slot: int, key: int) -> byte
                 previous=previous,
                 following=following,
             )
-    return build_case1_bf_chunk(
-        text="",
-        title_byte=title_slot,
-        key=key,
-        initial_font_style=None,
-    )
+    # Empty cache fill: a lone NUL ahead of the 0xFF control ends the row
+    # before it emits a slot, so HfcNear terminates without painting.
+    return build_case1_bf_chunk(b"\xff", b"\x00", title_slot, key, name_size=0x100, scroll=0)
 
 
 def _push_type0_a5_status(title_slot: int, key: int) -> bytes:
@@ -544,11 +540,9 @@ def _push_type0_a5_status(title_slot: int, key: int) -> bytes:
     return NULL with this status, it sets `hitLeadingEnd=true` (or the
     trailing equivalent), exits the slot-append loop, and — when both
     edges report 0x3F3 and `currentTailGapY < 0` — clears
-    `viewer[+0x84]` so the V-scroll bar disappears. The companion-side
-    of this contract is `_stamp_chain_terminators` in `blackbird/wire.py`,
-    which writes `1` into BF chunks' prev/next contentsToken
-    fields so the engine's HfcNextPrevHfc path misses cache and reaches
-    this 0x16 reply."""
+    `viewer[+0x84]` so the V-scroll bar disappears. BF chunks reach this
+    reply through `wire.CHAIN_TERMINATOR_TOKEN` in their prev/next link
+    fields."""
     return build_type0_status_record(
         title_byte=title_slot,
         status=0x3F3,

@@ -1,4 +1,4 @@
-"""Tests for `src.server.blackbird.irquery` — the IQuerySpec decoder.
+"""Tests for `server.blackbird.irquery` — the IQuerySpec decoder.
 
 The fixture is the first BBIRService query ever captured (2026-08-13): a search
 for "search term!" issued from the Blackbird Find UI against the published
