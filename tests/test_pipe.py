@@ -73,7 +73,7 @@ class TestPipeFrameHasLength(unittest.TestCase):
 
 
 class TestParseMultipleFrames(unittest.TestCase):
-    def test_a_continuation_frame_leaves_the_rest_of_the_packet_alone(self):
+    def test_continuation_frame_leaves_rest_of_packet(self):
         # A continuation frame owns its declared content, not the rest of the
         # packet. Consuming everything dropped whatever followed it — the tail
         # of a chunked post body lost 6 bytes that way and its compressed RTF

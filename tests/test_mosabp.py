@@ -561,7 +561,7 @@ class TestMemberBlobLayout(unittest.TestCase):
         blob = build_member_blob(MemberProfile(member_id="abc", display_name="abc"), [0x3003001E])
         self.assertEqual(blob, struct.pack("<I", 1) + struct.pack("<I", 3) + b"abc")
 
-    def test_every_requested_tag_gets_a_value_even_for_an_empty_profile(self):
+    def test_empty_profile_answers_every_requested_tag(self):
         blob = build_member_blob(MemberProfile(member_id="nobody"), _SHEET_TAGS)
         count, values, consumed = _parse_blob(blob, _SHEET_TAGS)
         self.assertEqual(count, len(_SHEET_TAGS))

@@ -120,7 +120,7 @@ class TestSplitEscapeReceive(unittest.TestCase):
         def sendall(self, data):
             self.sent.append(data)
 
-    def test_escape_split_across_crc_valid_packets_survives_reassembly(self):
+    def test_escape_split_across_packets_reassembles(self):
         pipe_idx = 4
         body = b"SVC!" + b"A" * 233 + b"\x0b" + b"B" * 229
         message = struct.pack("<H", pipe_idx) + body

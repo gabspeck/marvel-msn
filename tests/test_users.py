@@ -78,7 +78,7 @@ class TestSeededRights(unittest.TestCase):
         self.assertNotEqual(admin.transactions, subscriber.transactions)
         self.assertNotEqual(admin.subscriptions, subscriber.subscriptions)
 
-    def test_each_account_has_a_member_profile_under_its_display_name(self):
+    def test_each_account_has_a_profile_by_display_name(self):
         # The Member Properties sheet resolves on the display name, because
         # that is what a post's From: header carries.
         for username in (ADMIN, SUBSCRIBER):

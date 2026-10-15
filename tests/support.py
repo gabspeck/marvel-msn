@@ -7,9 +7,10 @@ accounts so a test says which member it is acting as and nothing more.
 
 import struct
 
-from server.mpc import build_service_packet
+from server.mpc import build_service_packet, parse_host_block
 from server.session import Session
 from server.store import app_store, default_seed
+from server.transport import parse_packet, reframe_as_straight
 
 # The two seeded accounts, by username. `ADMIN` holds authoring rights and the
 # whole SASRV token list; `SUBSCRIBER` holds neither.
@@ -36,6 +37,23 @@ def signed_in(username=ADMIN):
 def anonymous():
     """A session that never signed in."""
     return Session()
+
+
+def host_payload(packet):
+    """The host-block payload of one single-frame service packet."""
+    parsed = parse_packet(packet[:-1])
+    assert parsed.crc_ok, "service packet fails its CRC"
+    # Pipe frame: header byte, u16 content length, u16 routing, host block.
+    return parse_host_block(parsed.payload[5:]).payload
+
+
+def reply_payload(packets):
+    """The host-block payload of the first service message in `packets`,
+    reassembled when it spans several packets."""
+    for packet in packets:
+        assert parse_packet(packet[:-1]).crc_ok, "service packet fails its CRC"
+    # A Straight record: u16 length, command byte, u16 routing, host block.
+    return parse_host_block(reframe_as_straight(packets)[0][5:]).payload
 
 
 class RecordingConnection:

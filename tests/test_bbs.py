@@ -37,7 +37,7 @@ from server.session import Session
 from server.store import app_store, reset_app_store
 from server.transport import parse_packet
 
-from .support import ADMIN, SUBSCRIBER, seed_user, signed_in
+from .support import ADMIN, SUBSCRIBER, reply_payload, seed_user, signed_in
 
 # Sample-board node ids, decimal wire form `field_8:field_c` = message id : board
 # id. The board itself carries message id 0 — GetParent (0x7F5F12CE) reaches it by
@@ -101,15 +101,6 @@ def _var(data):
     if len(data) < 0x80:
         return b"\x04" + bytes([0x80 | len(data)]) + data
     return b"\x04" + bytes([len(data) >> 8, len(data) & 0xFF]) + data
-
-
-def _reply_payload(packets):
-    """The host-block payload out of a one-packet service reply.
-
-    Frame is `header byte | u16 content length | u16 pipe routing | host block`.
-    """
-    frame = parse_packet(packets[0][:-1]).payload
-    return parse_host_block(frame[5:]).payload
 
 
 def _node_with_format(body_format):
@@ -608,7 +599,7 @@ class TestBBSMnidLayout(unittest.TestCase):
         self.assertEqual(field_8, 0)
         self.assertNotEqual(field_c, 0)
 
-    def test_messages_share_the_board_id_and_zeroing_field_8_reaches_the_board(self):
+    def test_zeroing_field_8_of_a_message_reaches_the_board(self):
         board = _walk_records(
             bbs_get_properties_reply(DirsrvRequest(node_ids=[_BOARD], prop_group="a\x00e"))
         )[0]
@@ -845,7 +836,7 @@ class TestBBSArticle(unittest.TestCase):
         head = self._article()[7:].partition(b"\n\n")[0]
         self.assertIn(f"X-MOS-Size: {record['p']}\n".encode(), head)
 
-    def test_date_header_shows_the_same_wall_clock_as_the_date_column(self):
+    def test_date_header_matches_the_date_column(self):
         # Windows 95 applies its current timezone rule to every timestamp, so
         # `_D` and this line must agree under the CURRENT offset, not the 1995
         # one. Europe/Lisbon ran +0200 in 1995 and +0100 today.
@@ -888,10 +879,6 @@ class TestBBSEditChannel(unittest.TestCase):
 
     def tearDown(self):
         reset_app_store()
-
-    @staticmethod
-    def _reply_payload(packets):
-        return parse_packet(packets[0][:-1]).payload[8:]
 
     def _request(self, node_id):
         msg_id, _sep, board_id = node_id.partition(":")
@@ -944,7 +931,7 @@ class TestBBSEditChannel(unittest.TestCase):
             client_ack=0,
         )
 
-        self.assertEqual(self._reply_payload(packets), dirsrv.get_ticket_reply(signed_in(ADMIN)))
+        self.assertEqual(reply_payload(packets), dirsrv.get_ticket_reply(signed_in(ADMIN)))
 
     def test_add_node_creates_a_bbs_folder_and_returns_its_mnid(self):
         handler = BbsHandler(1, "BBS", signed_in())
@@ -973,7 +960,7 @@ class TestBBSEditChannel(unittest.TestCase):
         self.assertEqual(message_id, 0)
         self.assertNotEqual(board_id, 1)
         self.assertEqual(
-            self._reply_payload(packets),
+            reply_payload(packets),
             b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87\x84\x88" + node.mnid_a,
         )
 
@@ -999,7 +986,7 @@ class TestBBSEditChannel(unittest.TestCase):
         )
 
         self.assertEqual(
-            self._reply_payload(packets),
+            reply_payload(packets),
             b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
         )
         self.assertEqual(app_store.content.get_node("0:2").content.name, "New BBS")
@@ -1020,9 +1007,7 @@ class TestBBSEditChannel(unittest.TestCase):
 
         # status 0 + operation id 0, no variable field — the client polls
         # GetStatus while the status DWORD reads 1.
-        self.assertEqual(
-            self._reply_payload(packets), b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87"
-        )
+        self.assertEqual(reply_payload(packets), b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87")
         self.assertNotIn(
             _RE_YOSEMITE,
             [n.node_id for n in app_store.content.get_children(_BOARD)],
@@ -1087,7 +1072,7 @@ class PostChannelTestCase(unittest.TestCase):
     def send(self, selector, payload):
         packets = self.handler.handle_request(BBS_CLASS_MESSAGE, selector, 1, payload, 5, 5)
         self.assertIsNotNone(packets, f"selector 0x{selector:02x} left the client waiting")
-        return _reply_payload(packets)
+        return reply_payload(packets)
 
     def post(self, head, body, **kwargs):
         """A whole two-segment post; returns the committed node.
@@ -1367,7 +1352,7 @@ class TestBBSPostCommit(PostChannelTestCase):
         node = self.post(_POST_HEAD, _POST_BODY)
         self.assertEqual(node.content.bbs.parent_subid, 0x200)
 
-    def test_post_is_a_message_not_a_container_and_reports_no_children(self):
+    def test_post_is_a_childless_message(self):
         # `b` bit 0x01 SET is bbsnav's conversation test, and `_F` bit 0x1000
         # stops OkToGetChildren asking a message for children it has none of.
         node = self.post(_POST_HEAD, _POST_BODY)
@@ -1474,7 +1459,7 @@ class TestBBSPostedBodyRoundTrip(PostChannelTestCase):
         article = build_bbs_article(node)
         self.assertEqual(article.partition(b"\n\n")[2], compressed)
 
-    def test_format_header_is_echoed_so_the_reader_picks_the_same_stream(self):
+    def test_format_header_is_echoed_to_the_reader(self):
         head = _POST_HEAD.replace(b"X-MOS-Format: TEXT\n", b"X-MOS-Format: RTFCOMP\n")
         node = self.post(head, b"x")
         self.assertIn(b"X-MOS-Format: RTFCOMP\n", build_bbs_article(node))

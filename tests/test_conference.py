@@ -45,13 +45,14 @@ from server.store import (
     app_store,
     reset_app_store,
 )
-from server.transport import parse_packet
 
 from .support import (
     ADMIN,
     SUBSCRIBER,
     AddNodeContentStore,
     RecordingConnection,
+    host_payload,
+    reply_payload,
     signed_in,
 )
 
@@ -115,7 +116,7 @@ def _set_role(handler, target_id, role, request_id=9, msg_class=0x01):
 
 def _pushed_payloads(connection):
     """The host-block payload of every packet the connection has been given."""
-    return [parse_packet(pkt[:-1]).payload[8:] for pkt in connection.packets]
+    return [host_payload(pkt) for pkt in connection.packets]
 
 
 def _parse_participants(payload):
@@ -221,8 +222,7 @@ class TestConferenceStartup(unittest.TestCase):
             0,
             0,
         )
-        parsed = parse_packet(packets[0][:-1])
-        self.assertEqual(parsed.payload[8:], get_ticket_reply(handler.session))
+        self.assertEqual(reply_payload(packets), get_ticket_reply(handler.session))
 
     def test_data_edit_add_completes_the_chat_record(self):
         handler = ConflocHandler(10, "CONFLOC", signed_in())
@@ -249,10 +249,9 @@ class TestConferenceStartup(unittest.TestCase):
             0,
             0,
         )
-        parsed = parse_packet(packets[0][:-1])
 
         self.assertEqual(
-            parsed.payload[8:],
+            reply_payload(packets),
             b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
         )
 
@@ -278,13 +277,12 @@ class TestConferenceStartup(unittest.TestCase):
             0,
         )
 
-        parsed = parse_packet(packets[0][:-1])
         self.assertEqual(
-            parsed.payload[8:],
+            reply_payload(packets),
             b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
         )
 
-    def test_data_edit_get_properties_round_trips_the_authored_record(self):
+    def test_data_edit_get_props_round_trips_record(self):
         handler = ConflocHandler(10, "CONFLOC", signed_in())
         ticket = b"\x02\x00"
         record_id = struct.pack("<II", 1, 275)
@@ -327,7 +325,6 @@ class TestConferenceStartup(unittest.TestCase):
             0,
             0,
         )
-        parsed = parse_packet(packets[0][:-1])
         selected = build_property_record(
             [
                 (0x03, "ds", struct.pack("<I", 1)),
@@ -337,7 +334,7 @@ class TestConferenceStartup(unittest.TestCase):
         )
 
         self.assertEqual(
-            parsed.payload[8:],
+            reply_payload(packets),
             b"\x83\x00\x00\x00\x00\x83\x01\x00\x00\x00\x87\x86" + selected,
         )
 
@@ -363,7 +360,6 @@ class TestConferenceStartup(unittest.TestCase):
             0,
             0,
         )
-        parsed = parse_packet(packets[0][:-1])
         selected = build_property_record(
             [
                 (0x03, "mm", struct.pack("<I", 10)),
@@ -373,11 +369,11 @@ class TestConferenceStartup(unittest.TestCase):
         )
 
         self.assertEqual(
-            parsed.payload[8:],
+            reply_payload(packets),
             b"\x83\x00\x00\x00\x00\x83\x01\x00\x00\x00\x87\x86" + selected,
         )
 
-    def test_data_edit_set_properties_applies_the_conversation_values(self):
+    def test_data_edit_set_props_applies_room_values(self):
         store = AddNodeContentStore()
         parent = store.get_node("1:16")
         chat = parent.__class__(
@@ -419,10 +415,9 @@ class TestConferenceStartup(unittest.TestCase):
             0,
             0,
         )
-        parsed = parse_packet(packets[0][:-1])
 
         self.assertEqual(
-            parsed.payload[8:],
+            reply_payload(packets),
             b"\x83\x00\x00\x00\x00\x83\x00\x00\x00\x00\x87",
         )
         self.assertNotIn(record_id, handler._records)

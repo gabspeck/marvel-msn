@@ -85,7 +85,7 @@ class TestM14Loader(unittest.TestCase):
             [topic.title for topic in title.topics],
         )
 
-    def test_handbook_home_topic_contains_native_mediaview_image_command(self):
+    def test_handbook_home_topic_has_native_image_command(self):
         title = load_m14(_HANDBOOK)
         self.assertIsNotNone(title)
         self.assertEqual(title.title, "Employee Handbook Example")
@@ -286,7 +286,7 @@ class TestM14Loader(unittest.TestCase):
             popup_background,
         )
 
-    def test_native_display_stream_is_preserved_in_case1_cache_record(self):
+    def test_native_display_stream_survives_in_case1(self):
         title = load_m14(_HANDBOOK)
         self.assertIsNotNone(title)
         display = title.home_display

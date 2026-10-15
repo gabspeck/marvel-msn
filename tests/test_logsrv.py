@@ -154,7 +154,7 @@ class TestLOGSRVLogin(unittest.TestCase):
         self.assertEqual(result, LOGIN_RESULT_BAD_MEMBER_ID)
         self.assertFalse(session.is_authenticated)
 
-    def test_the_reply_shape_is_the_same_whether_accepted_or_rejected(self):
+    def test_reply_shape_same_when_accepted_or_rejected(self):
         # The client unmarshals seven dwords and a 16-byte variable either way;
         # only the first dword differs.
         accepted = _handle_login(_login_request(), Session())

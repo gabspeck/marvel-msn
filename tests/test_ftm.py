@@ -335,7 +335,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         _, content = _resolve_ftm_target(_make_dirsrv_file_request(self.NODE_ID, prop="mf"))
         self.assertEqual(content, b"")
 
-    def test_request_download_clears_fast_path_and_keeps_the_local_name(self):
+    def test_request_download_skips_fast_path_and_name(self):
         handler = FtmHandler(5, "FTM", Session())
         pkts = handler.handle_request(
             0x01, 0x00, 1, _make_dirsrv_file_request(self.NODE_ID), 10, 10
@@ -379,7 +379,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         for pkt in pkts:
             self.assertTrue(parse_packet(pkt[:-1]).crc_ok)
 
-    def test_stream_raises_all_three_signals_within_the_receive_buffer(self):
+    def test_stream_raises_all_three_signals(self):
         """ProcessTaggedServiceReply @ MPCCL 0x04604F26 pins every rule here.
 
         It allocates the dynamic receive state with a 0x4000 capacity, and
@@ -424,7 +424,7 @@ class TestFTMDownloadAndRun(unittest.TestCase):
         self.assertEqual(struct.unpack_from("<I", reply, 0x0C)[0], len(self.blob))
         self.assertEqual(mos2_original_size(self.blob), self.ORIGINAL_SIZE)
 
-    def test_seeded_test_node_serves_its_payload_without_an_unpack_step(self):
+    def test_seeded_node_serves_payload_without_unpack(self):
         """The generated payload is plain text, so it must reach disk as-is.
 
         HrMos2DecompFile @ FTMAPI 0x7F6B34A8 rejects anything that does not

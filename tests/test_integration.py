@@ -60,6 +60,7 @@ from .support import (
     ADMIN_PASSWORD,
     SUBSCRIBER,
     SUBSCRIBER_PASSWORD,
+    host_payload,
     seed_user,
 )
 
@@ -828,7 +829,7 @@ class TestChatBroadcast(unittest.TestCase):
 
     @staticmethod
     def _events(sock):
-        return [parse_packet(pkt[:-1]).payload[8:] for pkt in sock.packets]
+        return [host_payload(pkt) for pkt in sock.packets]
 
     def test_a_second_member_is_announced_and_heard(self):
         alice, alice_sock = self._connection(1, ADMIN)

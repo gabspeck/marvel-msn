@@ -55,6 +55,7 @@ from .support import (
     ADMIN,
     SUBSCRIBER,
     AddNodeContentStore,
+    reply_payload,
     signed_in,
 )
 
@@ -286,7 +287,7 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = get_properties_reply(request)
         self.assertIn(b"MSN Today", payload)
 
-    def test_explicit_leaf_children_do_not_fall_back_to_unknown_sentinel(self):
+    def test_explicit_leaves_skip_the_fallback_sentinel(self):
         request = DirsrvRequest(
             node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
@@ -460,7 +461,7 @@ class TestDIRSRVReply(unittest.TestCase):
         payload = get_properties_reply(request)
         self.assertIn(b"Worldwide Member Assistance", payload)
 
-    def test_worldwide_member_assistance_children_return_locale_wrappers(self):
+    def test_worldwide_member_assistance_lists_locales(self):
         request = DirsrvRequest(
             node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
@@ -473,7 +474,7 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Member Assistance (US)", payload)
         self.assertIn(b"Assistencia ao Associado (BR)", payload)
 
-    def test_member_assistance_us_children_emit_nine_entries_with_msn_today_link(self):
+    def test_member_assistance_us_lists_nine_with_msn_today(self):
         # 1:17 = Member Assistance (US). Its children include the live 4:0
         # MSN Today leaf so clicking the in-MA entry launches MOSVIEW exactly
         # as the HOMEBASE MSN Today button does.
@@ -521,7 +522,7 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Coming Attractions", payload)
         self.assertNotIn(struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF), payload)
 
-    def test_filter_on_locale_scopes_worldwide_children_to_matching_lcid(self):
+    def test_filter_on_scopes_worldwide_children_to_lcid(self):
         # filter_on=1, lcid=pt-BR → WW MA's children (server "1:0") drop
         # MA (US) and keep only MA (BR).
         request = DirsrvRequest(
@@ -552,7 +553,7 @@ class TestDIRSRVReply(unittest.TestCase):
         self.assertIn(b"Member Assistance (US)", payload)
         self.assertIn(b"Assistencia ao Associado (BR)", payload)
 
-    def test_filter_on_locale_picks_localized_categories_under_msn_root(self):
+    def test_filter_on_picks_localized_categories(self):
         # LJUMP 1:0:0:0 (HOMEBASE Categories) targets MSN root and the client
         # calls GetLocalizedNode with filter_on=1. The first locale-matching
         # child must be Categorias (BR) under pt-BR — without the localized
@@ -779,7 +780,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # g still DWORD 0 (purpose unresolved).
         self.assertIn(b"\x03g\x00" + struct.pack("<I", 0), payload)
 
-    def test_msn_today_properties_dialog_request_uses_dialog_wire_types(self):
+    def test_msn_today_dialog_uses_dialog_wire_types(self):
         """Properties dialog (is_children=False) gets 0x0B tp and 0x0B w string."""
         request = DirsrvRequest(
             node_ids=["4:0"],
@@ -817,7 +818,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # Regression guard: the old 4-byte DWORD emit must be gone.
         self.assertNotIn(b"\x03q\x00" + struct.pack("<I", 1033), payload)
 
-    def test_language_list_request_returns_one_record_per_supported_locale(self):
+    def test_language_list_has_one_record_per_locale(self):
         # The MCM browse-language worker opens a DIRSRV pipe with
         # ver_param="U" and asks for `q` on node 0:0 with a 4-byte zero
         # locale. Observed on the wire as selector 0x02 (dword_0=0,
@@ -866,7 +867,7 @@ class TestDIRSRVGetParents(unittest.TestCase):
         "04880400000000000000010003000000000302000000048463006100048400000000838385"
     )
 
-    def test_exact_msn_today_request_returns_member_assistance_parent(self):
+    def test_msn_today_parent_is_member_assistance(self):
         request = decode_dirsrv_request(self.REQUEST)
         self.assertEqual(request.node_id, "4:0")
         self.assertEqual(request.prop_group, "c\x00a")
@@ -892,10 +893,8 @@ class TestDIRSRVGetParents(unittest.TestCase):
         )
 
         self.assertIsNotNone(packets)
-        parsed = parse_packet(packets[0][:-1])
-        self.assertTrue(parsed.crc_ok)
         self.assertEqual(
-            parsed.payload[8:],
+            reply_payload(packets),
             get_parents_reply(decode_dirsrv_request(self.REQUEST)),
         )
 
@@ -1025,9 +1024,7 @@ class TestDIRSRVEnumShn(unittest.TestCase):
         )
 
         self.assertIsNotNone(packets)
-        parsed = parse_packet(packets[0][:-1])
-        self.assertTrue(parsed.crc_ok)
-        self.assertEqual(parsed.payload[8:], enum_shn_reply(self.REQUEST))
+        self.assertEqual(reply_payload(packets), enum_shn_reply(self.REQUEST))
 
     def test_key_constant_matches_the_observed_request(self):
         self.assertEqual(self.REQUEST[1], ENUM_SHN_KEY_ICONS)
@@ -1060,7 +1057,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         frames = parse_pipe_frames(parsed.payload)
         return parse_host_block(frames[0].content[2:])
 
-    def test_live_chunked_icon_upload_replies_after_the_closing_frame(self):
+    def test_chunked_icon_upload_replies_after_last_frame(self):
         from server.services import shabby as shabby_mod
 
         blob = shabby_mod.load_shabby_bytes(0x059A)
@@ -1114,7 +1111,7 @@ class TestDIRSRVAddShabby(unittest.TestCase):
         shabby_id = struct.unpack_from("<I", host_block.payload, 11)[0]
         self.assertEqual(shabby_mod.load_shabby_bytes(shabby_id), blob)
 
-    def test_non_authoring_account_is_refused_before_upload_state_is_created(self):
+    def test_non_author_refused_before_upload_starts(self):
         handler = DirsrvHandler(4, "DIRSRV", signed_in(SUBSCRIBER))
 
         packets = handler.handle_request(0x04, 0x07, 4, self.TRACE_HEAD, 0, 0)
@@ -1189,10 +1186,8 @@ class TestDIRSRVGetTicket(unittest.TestCase):
         )
 
         self.assertIsNotNone(packets)
-        parsed = parse_packet(packets[0][:-1])
-        self.assertTrue(parsed.crc_ok)
         # header + size prefix + routing + class + selector + one-byte VLI
-        self.assertEqual(parsed.payload[8:], get_ticket_reply(handler.session))
+        self.assertEqual(reply_payload(packets), get_ticket_reply(handler.session))
 
 
 class TestDIRSRVGetDataSets(unittest.TestCase):
@@ -1214,10 +1209,8 @@ class TestDIRSRVGetDataSets(unittest.TestCase):
         )
 
         self.assertIsNotNone(packets)
-        parsed = parse_packet(packets[0][:-1])
-        self.assertTrue(parsed.crc_ok)
         # header + size prefix + routing + class + selector + one-byte VLI
-        self.assertEqual(parsed.payload[8:], get_datasets_reply())
+        self.assertEqual(reply_payload(packets), get_datasets_reply())
 
 
 class TestDIRSRVAddNode(unittest.TestCase):
@@ -1371,7 +1364,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
         self.assertEqual(properties["a"], struct.pack("<I", 8) + node.mnid_a)
         self.assertEqual(properties["l"], inner_mnid)
 
-    def test_edit_class_selector_two_does_not_fall_through_to_get_children(self):
+    def test_edit_selector_2_is_add_node_not_get_children(self):
         handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         with patch(
             "server.services.dirsrv.add_node_reply",
@@ -1387,8 +1380,7 @@ class TestDIRSRVAddNode(unittest.TestCase):
             )
 
         build_reply.assert_called_once_with(b"add-node", handler.session, app_store.content)
-        parsed = parse_packet(packets[0][:-1])
-        self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
+        self.assertEqual(reply_payload(packets), b"\x83\x00\x00\x00\x00")
 
 
 class _SetPropertiesContentStore:
@@ -1561,7 +1553,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             [(0x0E, "bbix", struct.pack("<I", 0))],
         )
 
-    def test_download_and_run_page_writes_survive_the_next_property_read(self):
+    def test_dnr_page_writes_survive_the_next_read(self):
         """The four writes DSNED 0x7F5723BE makes after AddShabby returns."""
         store = _SetPropertiesContentStore()
         shabby_id = 0x85000001
@@ -1663,7 +1655,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
 
         self.assertEqual(struct.unpack_from("<I", reply, 1)[0], 0x101)
 
-    def test_edit_class_selector_four_does_not_fall_through_to_get_shabby(self):
+    def test_edit_selector_4_is_set_props_not_get_shabby(self):
         handler = DirsrvHandler(pipe_idx=1, svc_name="DIRSRV", session=Session())
         with patch(
             "server.services.dirsrv.set_properties_reply",
@@ -1679,8 +1671,7 @@ class TestDIRSRVSetProperties(unittest.TestCase):
             )
 
         build_reply.assert_called_once_with(b"set-properties", handler.session, app_store.content)
-        parsed = parse_packet(packets[0][:-1])
-        self.assertEqual(parsed.payload[8:], b"\x83\x00\x00\x00\x00")
+        self.assertEqual(reply_payload(packets), b"\x83\x00\x00\x00\x00")
 
 
 class _DeleteNodeContentStore:
