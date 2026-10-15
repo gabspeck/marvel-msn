@@ -7,20 +7,22 @@ from dataclasses import replace
 from ..config import (
     CONFLOC_INTERFACE_GUIDS,
     CONFSRV_INTERFACE_GUIDS,
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ..models import DwordParam, VarParam, WordParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
+    build_blob_reply,
     build_host_block,
+    build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_word,
     parse_request_params,
 )
 from ..store import ConferenceFields
 from ..store import app_store as _default_store
+from ..store.records import node_id_of
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 from .dirsrv import (
@@ -28,6 +30,7 @@ from .dirsrv import (
     _decode_property_record,
     build_get_ticket_reply_payload,
     build_property_record,
+    is_valid_ticket,
 )
 from .rooms import room_for
 
@@ -129,8 +132,7 @@ class CONFLOCHandler(ServiceHandler):
         properties = send_params[4].data
         valid_payload = (
             self.session.is_admin
-            and len(ticket) >= 2
-            and struct.unpack_from("<H", ticket)[0] == len(ticket)
+            and is_valid_ticket(ticket)
             and len(record_id) == 8
             and len(properties) >= 4
             and struct.unpack_from("<I", properties)[0] == len(properties)
@@ -205,12 +207,7 @@ class CONFLOCHandler(ServiceHandler):
 
         ticket = send_params[0].data
         record_id = send_params[2].data
-        if not (
-            self.session.is_admin
-            and len(ticket) >= 2
-            and struct.unpack_from("<H", ticket)[0] == len(ticket)
-            and len(record_id) == 8
-        ):
+        if not (self.session.is_admin and is_valid_ticket(ticket) and len(record_id) == 8):
             log.warning(
                 "data_edit_delete refused req_id=%d user=%s ticket_len=%d record_id_len=%d",
                 request_id,
@@ -261,13 +258,11 @@ class CONFLOCHandler(ServiceHandler):
         properties = send_params[4].data
         known_record = record_id in self._records
         if len(record_id) == 8:
-            field_0, field_8 = struct.unpack("<II", record_id)
-            node = self.content_store.get_node(f"{field_0}:{field_8}")
+            node = self.content_store.find_node(node_id_of(record_id))
             known_record = known_record or (node is not None and node.app_id == APP_TEXT_CONFERENCE)
         valid_payload = (
             self.session.is_admin
-            and len(ticket) >= 2
-            and struct.unpack_from("<H", ticket)[0] == len(ticket)
+            and is_valid_ticket(ticket)
             and len(record_id) == 8
             and known_record
         )
@@ -425,10 +420,8 @@ class CONFLOCHandler(ServiceHandler):
         instance = room_id & 0xFFFF if found else 0
         result = CONFLOC_RESULT_FOUND if found else CONFLOC_RESULT_NOT_FOUND
         log.info("locate room=%s instance=%d result=%d", room_id, instance, result)
-        return (
-            build_tagged_reply_word(instance)
-            + build_tagged_reply_word(result)
-            + bytes([TAG_END_STATIC])
+        return build_static_reply(
+            build_tagged_reply_word(instance), build_tagged_reply_word(result)
         )
 
 
@@ -612,7 +605,7 @@ class CONFSRVHandler(ServiceHandler):
         it shows error 0x24 and closes the chat window. A record the server
         refuses is dropped, not failed.
         """
-        self._push(msg_class, request_id, bytes([TAG_END_STATIC]), "send_ack", ack=True)
+        self._push(msg_class, request_id, build_static_reply(), "send_ack", ack=True)
         record = self._parse_record(request_id, payload)
         if record is None:
             return
@@ -858,8 +851,7 @@ def _participant_role(node, conference, user):
 def _build_stored_conference_properties(content_store, record_id):
     if len(record_id) != 8:
         return None
-    field_0, field_8 = struct.unpack("<II", record_id)
-    node_id = f"{field_0}:{field_8}"
+    node_id = node_id_of(record_id)
     node = content_store.find_node(node_id)
     if node is None or node.app_id != APP_TEXT_CONFERENCE or node.content.conference is None:
         return None
@@ -877,8 +869,7 @@ def _apply_conference_properties(content_store, record_id, properties):
     """Commit CONFLOC's room settings to the shared directory node."""
     if len(record_id) != 8:
         return False
-    field_0, field_8 = struct.unpack("<II", record_id)
-    node_id = f"{field_0}:{field_8}"
+    node_id = node_id_of(record_id)
     node = content_store.find_node(node_id)
     if node is None or node.app_id != APP_TEXT_CONFERENCE:
         return False
@@ -920,15 +911,14 @@ def _apply_conference_properties(content_store, record_id, properties):
 
 
 def _build_data_edit_result(status):
-    return build_tagged_reply_dword(status) + build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+    return build_static_reply(build_tagged_reply_dword(status), build_tagged_reply_dword(0))
 
 
 def _build_data_edit_properties_result(status, records):
-    return (
-        build_tagged_reply_dword(status)
-        + build_tagged_reply_dword(len(records))
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + b"".join(records)
+    return build_blob_reply(
+        build_tagged_reply_dword(status),
+        build_tagged_reply_dword(len(records)),
+        blob=b"".join(records),
     )
 
 

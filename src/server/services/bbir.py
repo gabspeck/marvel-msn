@@ -80,7 +80,6 @@ reassembled query spec included.
 """
 
 import logging
-import pathlib
 import time
 import uuid
 
@@ -106,9 +105,9 @@ from ..config import (
 from ..models import ChunkedParam
 from ..mpc import (
     is_oneway,
-    parse_request_params,
 )
-from ._dispatch import describe_param, log_unhandled_selector
+from ._capture import BLACKBIRD_CAPTURE_DIR, log_request_params, write_capture
+from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
@@ -122,8 +121,6 @@ _SELECTOR_NAMES = {
     BBIR_SELECTOR_GET_SEARCH_OBJECTS: "get_search_objects",
     BBIR_SELECTOR_QUERY: "query",
 }
-
-_CAPTURE_DIR = pathlib.Path(__file__).resolve().parents[3] / "captures" / "blackbird"
 
 
 def _schema_for(spec):
@@ -358,38 +355,12 @@ class BBIRServiceHandler(ServiceHandler):
         return self.reply_blocks(msg_class, selector, request_id, blocks, server_seq, client_ack)
 
     def _log_payload(self, tag, payload):
-        """Decode a request head's tagged parameters, log them, keep the bytes.
-
-        Heads only. A continuation payload is raw stream bytes whose first byte
-        would decode as a receive descriptor, so it goes to `_capture` instead.
-
-        Returns the decode so the caller can find the chunked field.
-        """
-        if not payload:
-            log.info("bbir_payload %s len=0", tag)
-            return [], []
-        send_params, recv_descs = parse_request_params(payload)
-        log.info(
-            "bbir_params %s send=%s recv=%s",
-            tag,
-            " ".join(describe_param(p) for p in send_params) or "-",
-            ",".join(f"0x{d:02x}" for d in recv_descs) or "-",
-        )
-        log.info("bbir_payload %s len=%d hex=%s", tag, len(payload), payload[:256].hex())
-        self._capture(tag, payload)
+        """Log a request head and keep its bytes: the IQuerySpec and the other
+        methods' parameters have no other record."""
+        send_params, recv_descs = log_request_params(log, "bbir", tag, payload)
+        if payload:
+            self._capture(tag, payload)
         return send_params, recv_descs
 
     def _capture(self, tag, payload):
-        """Persist raw request bytes.
-
-        The IQuerySpec the query streams and the parameters the other two
-        methods send are the only record of this protocol — no BBIRService
-        request had ever reached a server before this handler existed.
-        """
-        try:
-            _CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-            path = _CAPTURE_DIR / f"{self._capture_stamp}_bbir_{tag}.bin"
-            path.write_bytes(payload)
-            log.info("bbir_capture %s bytes=%d", path, len(payload))
-        except OSError as exc:
-            log.warning("bbir_capture_failed tag=%s err=%s", tag, exc)
+        write_capture(BLACKBIRD_CAPTURE_DIR / f"{self._capture_stamp}_bbir_{tag}.bin", payload)

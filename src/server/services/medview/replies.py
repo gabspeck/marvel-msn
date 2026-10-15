@@ -9,11 +9,11 @@ Wire shapes per `docs/medview-service-contract.md` and `docs/MEDVIEW.md` §9.
 from __future__ import annotations
 
 from ...config import (
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
 from ...mpc import (
+    build_blob_reply,
     build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
@@ -55,7 +55,7 @@ def data_edit_result(status: int = 0, operation_id: int = 0) -> bytes:
 
 def _dynamic_complete(static_fields: bytes, dyn: bytes = b"") -> bytes:
     """Static section + `0x87` end-static + `0x86` dynamic-complete + bytes."""
-    return static_fields + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + dyn
+    return build_blob_reply(static_fields, blob=dyn)
 
 
 # --------------------------------------------------------------------------

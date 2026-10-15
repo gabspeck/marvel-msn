@@ -14,7 +14,6 @@ from ..config import (
     DIRSRV_BROWSE_FLAGS_LEAF,
     DIRSRV_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
 )
@@ -22,6 +21,7 @@ from ..log import TRACE
 from ..models import ByteParam, ChunkedParam, DwordParam, VarParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
+    build_blob_reply,
     build_discovery_payload,
     build_static_reply,
     build_tagged_reply_dword,
@@ -33,7 +33,9 @@ from ..mpc import (
 )
 from ..store import RIGHTS_NONE, DirectoryNode, NodeContent, blackbird_state
 from ..store import app_store as _default_store
+from ..store.records import node_id_of
 from . import shabby
+from ._capture import write_capture
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 from .rooms import room_population
@@ -157,22 +159,6 @@ log = logging.getLogger(__name__)
 # Debug aid: when set, every completed AddShabby upload is written here, so
 # two uploads of the same file can be diffed against each other.
 _UPLOAD_DUMP_DIR = os.environ.get("MSN_UPLOAD_DUMP")
-
-
-def _dump_debug_bytes(path, blob):
-    """Write a diagnostic copy of `blob`, never failing the caller.
-
-    This runs inside a request handler, so letting an I/O error escape would
-    tear down the client's connection — a missing dump directory once did
-    exactly that mid-upload.
-    """
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(blob)
-    except OSError as exc:
-        log.warning("debug_dump_failed path=%s error=%s", path, exc)
-        return
-    log.info("debug_dump path=%s bytes=%d", path, len(blob))
 
 
 class DIRSRVHandler(ServiceHandler):
@@ -957,11 +943,7 @@ def build_get_deid_from_go_word_reply_payload(payload):
         status,
     )
 
-    return (
-        build_tagged_reply_dword(status)
-        + bytes([TAG_END_STATIC])
-        + build_tagged_reply_var(0x84, deid)
-    )
+    return build_static_reply(build_tagged_reply_dword(status)) + build_tagged_reply_var(0x84, deid)
 
 
 def build_get_shabby_reply_payload(payload):
@@ -999,7 +981,7 @@ def build_get_shabby_reply_payload(payload):
     )
     log.info("get_shabby_reply status=0 blob_len=%d", len(blob))
 
-    return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + blob
+    return build_blob_reply(build_tagged_reply_dword(0), blob=blob)
 
 
 def build_enum_shn_reply_payload(payload):
@@ -1056,11 +1038,10 @@ def build_enum_shn_reply_payload(payload):
         ",".join(f"0x{i:04x}" for i in ids) or "-",
     )
 
-    return (
-        build_tagged_reply_dword(0)
-        + build_tagged_reply_word(len(ids))
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + b"".join(struct.pack("<I", i) for i in ids)
+    return build_blob_reply(
+        build_tagged_reply_dword(0),
+        build_tagged_reply_word(len(ids)),
+        blob=b"".join(struct.pack("<I", i) for i in ids),
     )
 
 
@@ -1081,7 +1062,7 @@ def _add_shabby_result(fmt, blob, declared_size):
         return _build_add_shabby_result(TREEEDCL_STATUS_REFUSED, 0)
 
     if _UPLOAD_DUMP_DIR:
-        _dump_debug_bytes(
+        write_capture(
             Path(_UPLOAD_DUMP_DIR) / f"upload_{time.strftime('%H%M%S')}_{len(blob)}.bin",
             blob,
         )
@@ -1101,12 +1082,16 @@ def _add_shabby_result(fmt, blob, declared_size):
 
 def _build_add_shabby_result(status, shabby_id):
     """Build AddShabby's status, operation ID, and assigned shabby ID."""
-    return (
-        build_tagged_reply_dword(status)
-        + build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(shabby_id)
-        + bytes([TAG_END_STATIC])
+    return build_static_reply(
+        build_tagged_reply_dword(status),
+        build_tagged_reply_dword(0),
+        build_tagged_reply_dword(shabby_id),
     )
+
+
+def is_valid_ticket(ticket):
+    """A TREEEDCL ticket is opaque bytes led by its own u16 length."""
+    return len(ticket) >= 2 and struct.unpack_from("<H", ticket)[0] == len(ticket)
 
 
 def build_get_ticket_reply_payload(session, *, require_admin=True):
@@ -1138,16 +1123,10 @@ def build_get_ticket_reply_payload(session, *, require_admin=True):
             require_admin,
             TREEEDCL_STATUS_REFUSED,
         )
-        return (
-            build_tagged_reply_dword(TREEEDCL_STATUS_REFUSED)
-            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-            + b""
-        )
+        return build_blob_reply(build_tagged_reply_dword(TREEEDCL_STATUS_REFUSED))
 
     ticket = struct.pack("<H", 2)
-    return (
-        build_tagged_reply_dword(0) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + ticket
-    )
+    return build_blob_reply(build_tagged_reply_dword(0), blob=ticket)
 
 
 def build_invalidate_ticket_reply_payload(payload):
@@ -1180,7 +1159,7 @@ def build_invalidate_ticket_reply_payload(payload):
         return build_static_reply(build_tagged_reply_dword(TREEEDCL_STATUS_REFUSED))
 
     ticket = fields[0]
-    if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket):
+    if not is_valid_ticket(ticket):
         log.warning("invalidate_ticket invalid ticket=%s", ticket.hex())
         return build_static_reply(build_tagged_reply_dword(TREEEDCL_STATUS_REFUSED))
 
@@ -1197,11 +1176,7 @@ def build_get_datasets_reply_payload():
     property record even when no datasets are available.
     """
     datasets = build_property_record([])
-    return (
-        build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + datasets
-    )
+    return build_blob_reply(build_tagged_reply_dword(0), blob=datasets)
 
 
 def build_add_node_reply_payload(payload, session, content_store, node_factory=None):
@@ -1236,11 +1211,7 @@ def build_add_node_reply_payload(payload, session, content_store, node_factory=N
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
     ticket, parent_mnid, property_record = fields
-    if (
-        len(ticket) < 2
-        or struct.unpack_from("<H", ticket)[0] != len(ticket)
-        or len(parent_mnid) != 8
-    ):
+    if not is_valid_ticket(ticket) or len(parent_mnid) != 8:
         log.warning(
             "add_node invalid ticket_or_parent ticket=%s parent=%s",
             ticket.hex(),
@@ -1248,8 +1219,7 @@ def build_add_node_reply_payload(payload, session, content_store, node_factory=N
         )
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
-    parent_f0, parent_f8 = struct.unpack("<II", parent_mnid)
-    parent_id = f"{parent_f0}:{parent_f8}"
+    parent_id = node_id_of(parent_mnid)
     parent = content_store.find_node(parent_id)
     if parent is None:
         log.warning("add_node unknown parent=%s", parent_id)
@@ -1295,9 +1265,8 @@ def _build_dirsrv_child_node(content_store, parent, properties):
         or _property_text(properties, PROP_NAME)
         or "New Item"
     )
-    new_field_0, new_field_8 = struct.unpack("<II", new_mnid)
     return DirectoryNode(
-        node_id=f"{new_field_0}:{new_field_8}",
+        node_id=node_id_of(new_mnid),
         is_container=not bool(browse_flags & DIRSRV_BROWSE_FLAGS_LEAF),
         app_id=app_id,
         mnid_a=new_mnid,
@@ -1331,12 +1300,9 @@ def _build_dirsrv_child_node(content_store, parent, properties):
 
 
 def _build_add_node_result(status, new_mnid):
-    return (
-        build_tagged_reply_dword(status)
-        + build_tagged_reply_dword(0)
-        + bytes([TAG_END_STATIC])
-        + build_tagged_reply_var(0x84, new_mnid)
-    )
+    return build_static_reply(
+        build_tagged_reply_dword(status), build_tagged_reply_dword(0)
+    ) + build_tagged_reply_var(0x84, new_mnid)
 
 
 # Properties-sheet write map: wire tag -> (NodeContent field, decoder).
@@ -1418,7 +1384,7 @@ def build_set_properties_reply_payload(payload, session, content_store):
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     ticket, mnid, property_record = fields
-    if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket) or len(mnid) != 8:
+    if not is_valid_ticket(ticket) or len(mnid) != 8:
         log.warning(
             "set_properties invalid ticket_or_mnid ticket=%s mnid=%s",
             ticket.hex(),
@@ -1426,8 +1392,7 @@ def build_set_properties_reply_payload(payload, session, content_store):
         )
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
-    field_0, field_8 = struct.unpack("<II", mnid)
-    node_id = f"{field_0}:{field_8}"
+    node_id = node_id_of(mnid)
     node = content_store.find_node(node_id)
     if node is None:
         # Log the record too: a write to a node the tree does not hold is how
@@ -1522,7 +1487,7 @@ def build_delete_node_reply_payload(payload, session, content_store):
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
     ticket, mnid = fields
-    if len(ticket) < 2 or struct.unpack_from("<H", ticket)[0] != len(ticket) or len(mnid) != 8:
+    if not is_valid_ticket(ticket) or len(mnid) != 8:
         log.warning(
             "delete_node invalid ticket_or_mnid ticket=%s mnid=%s",
             ticket.hex(),
@@ -1530,8 +1495,7 @@ def build_delete_node_reply_payload(payload, session, content_store):
         )
         return _build_edit_result(TREEEDCL_STATUS_REFUSED)
 
-    field_0, field_8 = struct.unpack("<II", mnid)
-    node_id = f"{field_0}:{field_8}"
+    node_id = node_id_of(mnid)
     node = content_store.find_node(node_id)
     name = node.content.name if node is not None else ""
     if node is not None and not _may_delete(session, node):
@@ -1569,7 +1533,7 @@ def _may_delete(session, node):
 
 def _build_edit_result(status):
     """Build the `status` + `operation id` pair every completed edit op returns."""
-    return build_tagged_reply_dword(status) + build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+    return build_static_reply(build_tagged_reply_dword(status), build_tagged_reply_dword(0))
 
 
 def _decode_property_record(record):

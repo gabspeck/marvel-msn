@@ -34,11 +34,11 @@ from dataclasses import dataclass
 
 from ..config import (
     MOSABP_INTERFACE_GUIDS,
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
-    TAG_END_STATIC,
 )
 from ..models import DwordParam, VarParam
 from ..mpc import (
+    build_blob_reply,
+    build_static_reply,
     build_tagged_reply_dword,
     parse_request_params,
 )
@@ -264,11 +264,8 @@ def build_get_ab_containers_reply_payload():
     containers = _ab_containers()
     blob = b"".join(build_ab_container(c) for c in containers)
     log.info("mosabp_get_ab_containers count=%d blob_bytes=%d", len(containers), len(blob))
-    return (
-        build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(len(containers))
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + blob
+    return build_blob_reply(
+        build_tagged_reply_dword(0), build_tagged_reply_dword(len(containers)), blob=blob
     )
 
 
@@ -414,14 +411,13 @@ def build_row_reply(row_count, blob):
     zero slot 3 leaves the cursor and bound at zero, so QueryRows returns an
     empty rowset without consulting the successfully parsed cache entry.
     """
-    return (
-        build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(row_count)
-        + build_tagged_reply_dword(row_count)
-        + build_tagged_reply_dword(row_count)
-        + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-        + blob
+    return build_blob_reply(
+        build_tagged_reply_dword(0),
+        build_tagged_reply_dword(0),
+        build_tagged_reply_dword(row_count),
+        build_tagged_reply_dword(row_count),
+        build_tagged_reply_dword(row_count),
+        blob=blob,
     )
 
 
@@ -444,7 +440,7 @@ def build_close_table_reply_payload(payload):
     dwords = [p.value for p in send_params if isinstance(p, DwordParam)]
     handle = dwords[0] if dwords else 0
     log.info("mosabp_close_table handle=%d", handle)
-    return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+    return build_static_reply(build_tagged_reply_dword(0))
 
 
 def build_query_restrict_rows_reply_payload(payload):
@@ -658,7 +654,7 @@ def build_get_user_details_reply_payload(payload):
         len(tags),
         len(blob),
     )
-    return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + blob
+    return build_blob_reply(build_tagged_reply_dword(0), blob=blob)
 
 
 def _decode_get_user_details_request(payload):

@@ -46,10 +46,10 @@ import struct
 
 from ..config import (
     ONLSTMT_INTERFACE_GUIDS,
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
-    TAG_END_STATIC,
 )
 from ..mpc import (
+    build_blob_reply,
+    build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
     build_tagged_reply_var,
@@ -224,13 +224,10 @@ def build_details_payload(period_index, user):
         "" if len(txns) <= 3 else f",...+{len(txns) - 3}",
     )
     blob = _DETAILS_HEADER + b"".join(records)
-    return b"".join(
-        [
-            build_tagged_reply_word(len(records)),
-            build_tagged_reply_word(currency),  # slot-10 currency
-            bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]),
-            blob,  # dynamic-complete: no length prefix
-        ]
+    return build_blob_reply(
+        build_tagged_reply_word(len(records)),
+        build_tagged_reply_word(currency),  # slot-10 currency
+        blob=blob,
     )
 
 
@@ -359,21 +356,18 @@ def build_subscriptions_payload(user):
         sample,
         "" if len(subs) <= 3 else f",...+{len(subs) - 3}",
     )
-    return b"".join(
-        [
-            build_tagged_reply_byte(len(subs)),
-            build_tagged_reply_var(0x84, records_blob),
-            build_tagged_reply_dword(statement.balance_cents),
-            build_tagged_reply_word(statement.currency_iso),
-            build_tagged_reply_byte(1),
-            build_tagged_reply_word(expires.year),
-            build_tagged_reply_byte(expires.month),
-            build_tagged_reply_byte(expires.day),
-            build_tagged_reply_word(effective.year),
-            build_tagged_reply_byte(effective.month),
-            build_tagged_reply_byte(effective.day),
-            bytes([TAG_END_STATIC]),
-        ]
+    return build_static_reply(
+        build_tagged_reply_byte(len(subs)),
+        build_tagged_reply_var(0x84, records_blob),
+        build_tagged_reply_dword(statement.balance_cents),
+        build_tagged_reply_word(statement.currency_iso),
+        build_tagged_reply_byte(1),
+        build_tagged_reply_word(expires.year),
+        build_tagged_reply_byte(expires.month),
+        build_tagged_reply_byte(expires.day),
+        build_tagged_reply_word(effective.year),
+        build_tagged_reply_byte(effective.month),
+        build_tagged_reply_byte(effective.day),
     )
 
 
@@ -431,12 +425,8 @@ def build_plans_payload():
         sample,
         "" if len(plans) <= 3 else f",...+{len(plans) - 3}",
     )
-    return b"".join(
-        [
-            build_tagged_reply_byte(len(plans)),
-            build_tagged_reply_var(0x84, blob),
-            bytes([TAG_END_STATIC]),
-        ]
+    return build_static_reply(
+        build_tagged_reply_byte(len(plans)), build_tagged_reply_var(0x84, blob)
     )
 
 
@@ -448,12 +438,7 @@ def build_plans_payload():
 # DLGPROC's Remove-button handler (FUN_7f353c4e at the cVar1==2
 # branch), which treats `== 1` as success (refresh list) and anything
 # else as failure (string 0x2d "Cannot remove subscription").
-_CANCEL_ACK_PAYLOAD = b"".join(
-    [
-        build_tagged_reply_byte(1),
-        bytes([TAG_END_STATIC]),
-    ]
-)
+_CANCEL_ACK_PAYLOAD = build_static_reply(build_tagged_reply_byte(1))
 
 
 class OnlStmtHandler(ServiceHandler):

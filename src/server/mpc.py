@@ -14,6 +14,7 @@ from .config import (
     MPC_TAG_CHUNKED_COMPRESSED,
     MPC_TAG_VARIABLE,
     MPC_TAG_VARIABLE_COMPRESSED,
+    TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
     TRANSPORT_PACKET_SIZE,
@@ -142,6 +143,14 @@ def is_iterator_cancel(payload):
     descriptor has bit 7 set.  See `docs/MEDVIEW.md` §6d.0.
     """
     return payload == bytes([MPCCL_ITERATOR_CANCEL_TAG])
+
+
+class ChunkStream:
+    """Bytes of one chunked field, gathered from its class-0xE6/0xE7 frames."""
+
+    def __init__(self):
+        self.data = b""
+        self.complete = False
 
 
 # --- Tagged Parameter Parsing ---
@@ -360,7 +369,13 @@ def build_static_reply(*tagged_fields):
     Used by selectors whose spec return is a static section with no
     dynamic body — e.g. `0x83 <dword> 0x87`, `0x81 <byte> 0x83 <dword> 0x87`.
     """
-    return b"".join(tagged_fields) + b"\x87"
+    return b"".join(tagged_fields) + bytes([TAG_END_STATIC])
+
+
+def build_blob_reply(*tagged_fields, blob=b""):
+    """Tagged fields, `0x87` end-static, `0x86` dynamic-complete, then `blob`
+    raw to the end of the host block."""
+    return b"".join(tagged_fields) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + blob
 
 
 # --- Service Packet Assembly ---

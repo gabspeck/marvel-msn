@@ -29,10 +29,12 @@ value, and raises string 0xDE on failure. Discovery alone satisfies that call.
 import logging
 import struct
 
-from ..config import SASRV_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE_SIGNAL, TAG_END_STATIC
+from ..config import SASRV_INTERFACE_GUIDS
 from ..models import DwordParam
 from ..mpc import (
+    build_blob_reply,
     build_discovery_payload,
+    build_static_reply,
     build_tagged_reply_dword,
     parse_request_params,
 )
@@ -241,11 +243,7 @@ class SASRVHandler(ServiceHandler):
             len(page),
             len(blob),
         )
-        return (
-            build_tagged_reply_dword(0)
-            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-            + blob
-        )
+        return build_blob_reply(build_tagged_reply_dword(0), blob=blob)
 
     def build_end_enum_reply_payload(self, payload):
         """Close an enumeration (selector 0x03).
@@ -265,13 +263,11 @@ class SASRVHandler(ServiceHandler):
 
         kind = self._enums.pop(handle, None)
         log.info("end_enum status=0 handle=%s kind=%s", handle, kind if kind is not None else "-")
-        return build_tagged_reply_dword(0) + bytes([TAG_END_STATIC])
+        return build_static_reply(build_tagged_reply_dword(0))
 
 
 def _build_two_dword_reply(first, second):
-    return (
-        build_tagged_reply_dword(first) + build_tagged_reply_dword(second) + bytes([TAG_END_STATIC])
-    )
+    return build_static_reply(build_tagged_reply_dword(first), build_tagged_reply_dword(second))
 
 
 def build_sasrv_service_map_payload():

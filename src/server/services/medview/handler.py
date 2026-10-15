@@ -89,7 +89,7 @@ from ...mpc import (
 )
 from .._dispatch import log_unhandled_selector
 from .._handler import ServiceHandler
-from ..dirsrv import TREEEDCL_STATUS_REFUSED, build_get_ticket_reply_payload
+from ..dirsrv import TREEEDCL_STATUS_REFUSED, build_get_ticket_reply_payload, is_valid_ticket
 from . import replies
 from .m14_loader import (
     LoadedM14,
@@ -1028,8 +1028,7 @@ class MEDVIEWHandler(ServiceHandler):
         properties = send_params[4].data
         valid_payload = (
             self.session.is_admin
-            and len(ticket) >= 2
-            and struct.unpack_from("<H", ticket)[0] == len(ticket)
+            and is_valid_ticket(ticket)
             and len(record_id) == 8
             and len(properties) >= 4
             and struct.unpack_from("<I", properties)[0] == len(properties)
@@ -1079,12 +1078,7 @@ class MEDVIEWHandler(ServiceHandler):
 
         ticket = send_params[0].data
         record_id = send_params[2].data
-        if not (
-            self.session.is_admin
-            and len(ticket) >= 2
-            and struct.unpack_from("<H", ticket)[0] == len(ticket)
-            and len(record_id) == 8
-        ):
+        if not (self.session.is_admin and is_valid_ticket(ticket) and len(record_id) == 8):
             log.warning(
                 "data_edit_delete refused req_id=%d user=%s ticket_len=%d record_id_len=%d",
                 request_id,

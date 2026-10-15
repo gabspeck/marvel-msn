@@ -18,17 +18,16 @@ is not the TREEEDCL write channel.
 
 import datetime
 import logging
-import pathlib
 import struct
 
 from ..config import (
     BBS_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
-    TAG_END_STATIC,
 )
 from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
 from ..mpc import (
+    ChunkStream,
+    build_blob_reply,
     build_static_reply,
     build_tagged_reply_byte,
     build_tagged_reply_dword,
@@ -38,8 +37,9 @@ from ..mpc import (
 )
 from ..store import app_store as _default_store
 from ..store.base import BbsFields
-from ..store.records import bbs_node, build_bbs_attachment_nodes, build_bbs_post
+from ..store.records import bbs_node, build_bbs_attachment_nodes, build_bbs_post, node_id_of
 from . import dirsrv
+from ._capture import CAPTURE_ROOT, write_capture
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 
@@ -421,7 +421,7 @@ class BBSHandler(ServiceHandler):
         handle = request.handle if request else None
         dropped = self._uploads.pop(handle, None)
         log.info("bbs_post_abort handle=%s known=%s", handle, dropped is not None)
-        return bytes([TAG_END_STATIC])
+        return build_static_reply()
 
     def _take_handle(self):
         handle = self._next_handle
@@ -676,9 +676,7 @@ def build_bbs_article_reply_payload(payload):
     node = _default_store.content.get_node(node_id)
     article = build_bbs_article(node)
     log.info("bbs_get_article node=%s article_bytes=%d", node_id, len(article))
-    return (
-        build_tagged_reply_dword(0) + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL]) + article
-    )
+    return build_blob_reply(build_tagged_reply_dword(0), blob=article)
 
 
 def _article_request_node_id(payload):
@@ -691,8 +689,7 @@ def _article_request_node_id(payload):
     send_params, _recv = parse_request_params(payload)
     for p in send_params:
         if isinstance(p, VarParam) and len(p.data) >= 8:
-            msg_id, board_id = struct.unpack("<II", p.data[:8])
-            return f"{msg_id}:{board_id}"
+            return node_id_of(p.data[:8])
     return ""
 
 
@@ -904,14 +901,6 @@ def _chunk_len(chunk):
     return len(chunk)
 
 
-class ChunkStream:
-    """Bytes of one chunked field, gathered from its class-0xE6/0xE7 frames."""
-
-    def __init__(self):
-        self.data = b""
-        self.complete = False
-
-
 class PostUpload:
     """One in-flight post: where it goes, and the chunks received so far.
 
@@ -1094,29 +1083,20 @@ def commit_post(upload, author):
     return node
 
 
-# Uploaded posts land here as three files — the header block, the body as the
-# reader will stream it, and whatever followed the body. A post is the only way
-# to obtain a body carrying a real MOSAF attachment object, so the capture is
-# what turns one into a fixture.
-_CAPTURE_DIR = pathlib.Path("captures/bbs")
+_POST_CAPTURE_DIR = CAPTURE_ROOT / "bbs"
 
 
 def _write_post_capture(node, header_block, body, attachments):
-    """Write one committed upload to `captures/bbs/<node>-<subject>/`."""
+    """Keep one committed upload under `captures/bbs/<node>-<subject>/`: the
+    header block, the body as the reader will stream it, and whatever followed
+    the body. A post is the only source of a body carrying a real MOSAF
+    attachment object, so the capture is what turns one into a fixture."""
     slug = "".join(c if c.isalnum() else "-" for c in node.content.name).strip("-").lower()
-    directory = _CAPTURE_DIR / f"{node.node_id.replace(':', '-')}-{slug}"
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / "headers.txt").write_bytes(header_block)
-    (directory / "body.bin").write_bytes(body)
+    directory = _POST_CAPTURE_DIR / f"{node.node_id.replace(':', '-')}-{slug}"
+    write_capture(directory / "headers.txt", header_block)
+    write_capture(directory / "body.bin", body)
     if attachments:
-        (directory / "attachments.bin").write_bytes(attachments)
-    log.info(
-        "bbs_post_capture dir=%s header_bytes=%d body_bytes=%d attachment_bytes=%d",
-        directory,
-        len(header_block),
-        len(body),
-        len(attachments),
-    )
+        write_capture(directory / "attachments.bin", attachments)
 
 
 def parse_article_headers(header_block):

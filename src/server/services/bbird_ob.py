@@ -75,7 +75,6 @@ Reassembled, the stream is an OLE2 compound file (`D0 CF 11 E0 A1 B1 1A E1`).
 """
 
 import logging
-import pathlib
 import time
 
 from ..blackbird import cos
@@ -94,10 +93,10 @@ from ..mpc import (
     build_tagged_reply_var,
     build_tagged_reply_word,
     is_oneway,
-    parse_request_params,
 )
 from ..store import blackbird_state
-from ._dispatch import describe_param, log_unhandled_selector
+from ._capture import BLACKBIRD_CAPTURE_DIR, log_request_params, write_capture
+from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
@@ -188,8 +187,6 @@ _PUBLISH_MODE_FULL = 0x00
 # The dword every method-5 call waits on. MSN failures are 0x8B0Bxxxx, which
 # COSCL's file-write path treats as fatal; 0 lets the copy loop continue.
 _STATUS_OK = 0x00000000
-
-_CAPTURE_DIR = pathlib.Path(__file__).resolve().parents[3] / "captures" / "blackbird"
 
 
 def _load_published_objects():
@@ -590,10 +587,8 @@ class BbirdOBHandler(ServiceHandler):
         """
         if not self._blob:
             return
-        try:
-            _CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-            path = _CAPTURE_DIR / f"{self._capture_stamp}_publish.ttl"
-            path.write_bytes(bytes(self._blob))
+        path = BLACKBIRD_CAPTURE_DIR / f"{self._capture_stamp}_publish.ttl"
+        if write_capture(path, bytes(self._blob)):
             log.info(
                 "bbird_publish_stored %s title=%r bytes=%d ole2=%s",
                 path,
@@ -601,8 +596,6 @@ class BbirdOBHandler(ServiceHandler):
                 len(self._blob),
                 self._blob[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
             )
-        except OSError as exc:
-            log.warning("bbird_publish_store_failed err=%s", exc)
             return
         # The timestamped copy above accumulates one per publish for
         # inspection. This is the one the retrieval leg serves from, so it
@@ -689,31 +682,9 @@ class BbirdOBHandler(ServiceHandler):
         return self._ack_file_write(request_id, server_seq, client_ack, recv_descs)
 
     def _log_payload(self, tag, payload):
-        """Log the decoded parameters and persist the raw bytes.
-
-        Both halves matter: the tagged decode is what a reader scans in the
-        log, and the file is what a parser gets pointed at once the shape is
-        understood. Payloads run to megabytes on the file-write leg, so the
-        log line carries a bounded prefix and the file carries everything.
-
-        Returns the decode so a caller can build a reply from it.
-        """
-        if not payload:
-            return [], []
-        send_params, recv_descs = parse_request_params(payload)
-        log.info(
-            "bbird_params %s send=%s recv=%s",
-            tag,
-            " ".join(describe_param(p) for p in send_params) or "-",
-            ",".join(f"0x{d:02x}" for d in recv_descs) or "-",
-        )
-        log.info("bbird_payload %s len=%d hex=%s", tag, len(payload), payload[:256].hex())
-
-        try:
-            _CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
-            path = _CAPTURE_DIR / f"{self._capture_stamp}_{tag}.bin"
-            path.write_bytes(payload)
-            log.info("bbird_capture %s bytes=%d", path, len(payload))
-        except OSError as exc:
-            log.warning("bbird_capture_failed tag=%s err=%s", tag, exc)
+        """Log a request head and keep its bytes. File-write payloads run to
+        megabytes, so the log carries a prefix and the file everything."""
+        send_params, recv_descs = log_request_params(log, "bbird", tag, payload)
+        if payload:
+            write_capture(BLACKBIRD_CAPTURE_DIR / f"{self._capture_stamp}_{tag}.bin", payload)
         return send_params, recv_descs

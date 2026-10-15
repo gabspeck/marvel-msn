@@ -28,6 +28,12 @@ def mnid_key(f0, f8):
     return f"{f0}:{f8}", struct.pack("<II", f0, f8)
 
 
+def node_id_of(mnid):
+    """The wire-form node_id for an 8-byte mnid; the inverse of `mnid_key`."""
+    f0, f8 = struct.unpack("<II", mnid)
+    return f"{f0}:{f8}"
+
+
 def bbs_date_to_unix(s):
     """Parse a `%B %d, %Y %I:%M %p` timestamp into a Unix time_t.
 

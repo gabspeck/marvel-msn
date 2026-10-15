@@ -1060,11 +1060,11 @@ class PostChannelTestCase(unittest.TestCase):
         self.handler = BBSHandler(5, "BBS", self.session)
         # A commit writes the upload to disk; keep the test run out of the repo.
         self._captures = tempfile.TemporaryDirectory()
-        self._capture_dir = bbs._CAPTURE_DIR
-        bbs._CAPTURE_DIR = pathlib.Path(self._captures.name)
+        self._capture_dir = bbs._POST_CAPTURE_DIR
+        bbs._POST_CAPTURE_DIR = pathlib.Path(self._captures.name)
 
     def tearDown(self):
-        bbs._CAPTURE_DIR = self._capture_dir
+        bbs._POST_CAPTURE_DIR = self._capture_dir
         self._captures.cleanup()
         reset_app_store()
 

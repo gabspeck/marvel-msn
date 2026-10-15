@@ -34,15 +34,16 @@ from ..config import (
     FTM_INTERFACE_GUIDS,
     TAG_DYNAMIC_COMPLETE_SIGNAL,
     TAG_DYNAMIC_STREAM_END,
-    TAG_END_STATIC,
 )
 from ..models import VarParam
 from ..mpc import (
+    build_static_reply,
     build_tagged_reply_var,
     parse_request_params,
 )
 from ..store import app_store as _default_store
 from . import shabby
+from ._capture import write_capture
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 
@@ -113,21 +114,6 @@ _DOWNLOAD_DUMP_PATH = os.environ.get("MSN_DNR_DUMP")
 # the compressed bytes straight to disk instead of decompressing them. That
 # turns "did the compressed stream arrive intact?" into a plain file compare.
 _DNR_FORCE_RAW = bool(os.environ.get("MSN_DNR_FORCE_RAW"))
-
-
-def _dump_debug_bytes(path, blob):
-    """Write a diagnostic copy of `blob`, never failing the caller.
-
-    This runs inside a request handler, so an I/O error escaping here would
-    drop the client's connection.
-    """
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(blob)
-    except OSError as exc:
-        log.warning("debug_dump_failed path=%s error=%s", path, exc)
-        return
-    log.info("debug_dump path=%s bytes=%d", path, len(blob))
 
 
 # SIGNUP.EXE!FUN_004029d8 opens these four in order and fails if any
@@ -251,7 +237,7 @@ class FTMHandler(ServiceHandler):
                 list(range(_DYNAMIC_BLOCK_MAX, len(content), _DYNAMIC_BLOCK_MAX)),
             )
             if _DOWNLOAD_DUMP_PATH:
-                _dump_debug_bytes(Path(_DOWNLOAD_DUMP_PATH), content)
+                write_capture(Path(_DOWNLOAD_DUMP_PATH), content)
             return self._build_start_download_packets(
                 msg_class, selector, request_id, content, server_seq, client_ack
             )
@@ -334,7 +320,7 @@ def _build_start_download_blocks(content):
         chunk = content[start : start + _DYNAMIC_BLOCK_MAX]
         prefix = b""
         if not blocks:
-            prefix = build_tagged_reply_var(0x84, _START_DOWNLOAD_STATUS) + bytes([TAG_END_STATIC])
+            prefix = build_static_reply(build_tagged_reply_var(0x84, _START_DOWNLOAD_STATUS))
         blocks.append(prefix + bytes([TAG_DYNAMIC_STREAM_END]) + chunk)
     blocks.append(bytes([TAG_DYNAMIC_COMPLETE_SIGNAL]))
     return blocks

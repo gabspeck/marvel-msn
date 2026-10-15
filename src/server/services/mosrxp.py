@@ -26,11 +26,12 @@ import struct
 from ..config import (
     MOSRXP_INTERFACE_GUIDS,
     MPC_CLASS_CONTINUATION_LAST,
-    TAG_DYNAMIC_COMPLETE_SIGNAL,
-    TAG_END_STATIC,
 )
 from ..models import ChunkedParam, DwordParam, VarParam
 from ..mpc import (
+    ChunkStream,
+    build_blob_reply,
+    build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_var,
     is_oneway,
@@ -177,14 +178,6 @@ _TRANSMIT_BLOCK_BYTES = 0x1000
 MAPI_E_NOT_FOUND = 0x8004010F
 
 
-class ChunkStream:
-    """Bytes of one chunked field, gathered from its class-0xE6/0xE7 frames."""
-
-    def __init__(self):
-        self.data = b""
-        self.complete = False
-
-
 class MOSRXPHandler(ServiceHandler):
     """Handles remote-mail requests on a logical pipe."""
 
@@ -261,10 +254,8 @@ class MOSRXPHandler(ServiceHandler):
         user = self.session.user
         blob = build_conninfo(user.display_name, user.username)
         log.info("mosrxp_get_conn_info member=%r bytes=%d", user.username, len(blob))
-        return (
-            build_tagged_reply_dword(0)
-            + bytes([TAG_END_STATIC])
-            + build_tagged_reply_var(TAG_REPLY_VAR, blob)
+        return build_static_reply(build_tagged_reply_dword(0)) + build_tagged_reply_var(
+            TAG_REPLY_VAR, blob
         )
 
     def _open_inbox(self, _payload):
@@ -277,9 +268,7 @@ class MOSRXPHandler(ServiceHandler):
         """
         count = len(_default_store.mail.list_messages(self.mailbox))
         log.info("mosrxp_open_inbox mailbox=%r messages=%d", self.mailbox, count)
-        return (
-            build_tagged_reply_dword(0) + build_tagged_reply_dword(count) + bytes([TAG_END_STATIC])
-        )
+        return build_static_reply(build_tagged_reply_dword(0), build_tagged_reply_dword(count))
 
     def _close_inbox(self, _payload):
         """Method 2. Reply `83 [status] 87`."""
@@ -337,11 +326,8 @@ class MOSRXPHandler(ServiceHandler):
             len(messages),
             len(blob),
         )
-        return (
-            build_tagged_reply_dword(0)
-            + build_tagged_reply_dword(len(messages))
-            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-            + blob
+        return build_blob_reply(
+            build_tagged_reply_dword(0), build_tagged_reply_dword(len(messages)), blob=blob
         )
 
     def _del_messages(self, payload):
@@ -388,11 +374,7 @@ class MOSRXPHandler(ServiceHandler):
             message.subject,
             len(blob),
         )
-        return (
-            build_tagged_reply_dword(0)
-            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-            + blob
-        )
+        return build_blob_reply(build_tagged_reply_dword(0), blob=blob)
 
     def _get_first_message(self, _payload):
         """Method 8. Same as method 7 with the entry id prefixed to the blob."""
@@ -409,11 +391,7 @@ class MOSRXPHandler(ServiceHandler):
             message.message_id,
             len(blob),
         )
-        return (
-            build_tagged_reply_dword(0)
-            + bytes([TAG_END_STATIC, TAG_DYNAMIC_COMPLETE_SIGNAL])
-            + blob
-        )
+        return build_blob_reply(build_tagged_reply_dword(0), blob=blob)
 
     def _flag_server_message(self, payload):
         """Method 9. Store the PR_MSG_STATUS the client pushes."""
@@ -558,7 +536,7 @@ def resolve_mailbox(recipient):
 
 
 def _status_reply(status):
-    return build_tagged_reply_dword(status) + bytes([TAG_END_STATIC])
+    return build_static_reply(build_tagged_reply_dword(status))
 
 
 # --- Entry ids ---
