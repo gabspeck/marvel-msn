@@ -68,7 +68,7 @@ Per service, the IID set the discovery reply has to cover:
 |---|---|
 | `LOGSRV` | `00028BC2` |
 | `DIRSRV` | `00028B27`, `00028B28` |
-| `BBS` | `00028B27`, `00028B2F` |
+| `BBS` | `00028B27`, `00028B28`, `00028B2F` |
 | `FTM` | `00028B25` |
 | `OLREGSRV` | `00028B73` |
 | `OnlStmt` | `00028B8D` |
