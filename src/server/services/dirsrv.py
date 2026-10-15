@@ -1267,8 +1267,8 @@ def build_add_node_reply_payload(payload, content_store=None, session=None, node
 
     parent_f0, parent_f8 = struct.unpack("<II", parent_mnid)
     parent_id = f"{parent_f0}:{parent_f8}"
-    parent = content_store.get_node(parent_id)
-    if parent is None or parent.node_id != parent_id:
+    parent = content_store.find_node(parent_id)
+    if parent is None:
         log.warning("add_node unknown parent=%s", parent_id)
         return _build_add_node_result(TREEEDCL_STATUS_REFUSED, b"\x00" * 8)
 
@@ -1447,8 +1447,8 @@ def build_set_properties_reply_payload(payload, content_store=None, session=None
 
     field_0, field_8 = struct.unpack("<II", mnid)
     node_id = f"{field_0}:{field_8}"
-    node = content_store.get_node(node_id)
-    if node is None or node.node_id != node_id:
+    node = content_store.find_node(node_id)
+    if node is None:
         # Log the record too: a write to a node the tree does not hold is how
         # a client tells us what it believes exists, and the property bag names
         # what it wanted to put there.

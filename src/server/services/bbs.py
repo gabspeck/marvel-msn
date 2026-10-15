@@ -651,8 +651,7 @@ def _allocate_bbs_folder_mnid(content_store, parent_mnid):
     board_id = parent_board_id + 1
     while board_id <= 0xFFFFFFFF:
         node_id = f"0:{board_id}"
-        existing = content_store.get_node(node_id)
-        if existing is None or existing.node_id != node_id:
+        if content_store.find_node(node_id) is None:
             return struct.pack("<II", 0, board_id)
         board_id += 1
     raise ValueError("no free BBS board id remains")

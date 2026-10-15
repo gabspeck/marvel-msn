@@ -874,13 +874,8 @@ def _build_stored_conference_properties(content_store, record_id):
         return None
     field_0, field_8 = struct.unpack("<II", record_id)
     node_id = f"{field_0}:{field_8}"
-    node = content_store.get_node(node_id)
-    if (
-        node is None
-        or node.node_id != node_id
-        or node.app_id != APP_TEXT_CONFERENCE
-        or node.content.conference is None
-    ):
+    node = content_store.find_node(node_id)
+    if node is None or node.app_id != APP_TEXT_CONFERENCE or node.content.conference is None:
         return None
     conference = node.content.conference
     return build_property_record(
@@ -898,8 +893,8 @@ def _apply_conference_properties(content_store, record_id, properties):
         return False
     field_0, field_8 = struct.unpack("<II", record_id)
     node_id = f"{field_0}:{field_8}"
-    node = content_store.get_node(node_id)
-    if node is None or node.node_id != node_id or node.app_id != APP_TEXT_CONFERENCE:
+    node = content_store.find_node(node_id)
+    if node is None or node.app_id != APP_TEXT_CONFERENCE:
         return False
 
     values = {}

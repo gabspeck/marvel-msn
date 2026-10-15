@@ -44,11 +44,10 @@ from server.services.mosrxp import (
     encode_entryid,
     encode_prop_list,
     encode_recip_list,
-    from_filetime,
-    to_filetime,
 )
 from server.session import Session
 from server.store import MailMessage, MailRecipient, app_store, reset_app_store
+from server.store.records import from_filetime, to_filetime
 from server.transport import parse_packet
 
 _FIXED_WIDTHS = {0x02: 2, 0x03: 4, 0x04: 4, 0x05: 8, 0x06: 8, 0x07: 8, 0x0B: 2, 0x14: 8, 0x40: 8}

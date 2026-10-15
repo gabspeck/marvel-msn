@@ -2560,6 +2560,8 @@ class _AddNodeContentStore:
     def get_node(self, node_id):
         return self.nodes.get(node_id)
 
+    find_node = get_node
+
     def is_node_id_free(self, node_id):
         return node_id not in self.nodes and node_id not in self.retired
 
@@ -2763,6 +2765,8 @@ class _SetPropertiesContentStore:
 
     def get_node(self, node_id):
         return self.nodes.get(node_id)
+
+    find_node = get_node
 
     def add_node(self, node):
         self.nodes[node.node_id] = node

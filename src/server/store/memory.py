@@ -1,4 +1,4 @@
-"""In-memory implementations of the store protocols, seeded from fixtures.
+"""In-memory stores, seeded from fixtures.
 
 These objects own every byte of server state that a request can change. The
 state is volatile — it lives for the process and nothing writes it to disk —
@@ -8,9 +8,9 @@ and `load` is how it is (re)seeded, in place, from a `DefaultSeed`.
 from __future__ import annotations
 
 import struct
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
-from .base import AppStore, MemberProfile
+from .base import MemberProfile
 
 
 class InMemoryContentStore:
@@ -24,7 +24,12 @@ class InMemoryContentStore:
         self._retired = set()
 
     def get_node(self, node_id):
+        """The node, or the fallback sentinel when `node_id` is not registered."""
         return self._nodes.get(node_id, self._fallback)
+
+    def find_node(self, node_id):
+        """The node, or None when `node_id` is not registered."""
+        return self._nodes.get(node_id)
 
     def all_nodes(self):
         """Every registered node, for whole-directory scans.
@@ -336,6 +341,31 @@ class InMemoryMailStore:
         self._next_id += 1
         self._mailboxes.setdefault(message.mailbox.casefold(), []).append(stored)
         return stored
+
+
+@dataclass
+class AppStore:
+    content: InMemoryContentStore
+    users: InMemoryUserStore
+    catalog: InMemoryCatalogStore
+    member: InMemoryMemberStore
+    mail: InMemoryMailStore
+
+    def reset(self, seed) -> None:
+        """Re-seed every store in place, dropping all runtime changes.
+
+        In place, not rebuilt: each service binds `app_store` at import time, so
+        swapping in a new AppStore would leave them reading the old state.
+        """
+        self.content.load(
+            seed.directory_nodes,
+            seed.directory_children,
+            seed.directory_fallback,
+        )
+        self.users.load(seed.users)
+        self.catalog.load(seed.plans)
+        self.member.load(seed.member_profiles)
+        self.mail.load(seed.mail_messages)
 
 
 def build_app_store(seed):

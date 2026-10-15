@@ -47,6 +47,15 @@ def _path_for(node_id):
     return STATE_DIR / f"{node_id.replace(':', '_')}{_SUFFIX}"
 
 
+def _write_atomic(path, data):
+    """Write through a temporary file and rename, so a restart mid-write finds
+    either the old file or the new one, never a truncated one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
 def load_site_records():
     """Every stored record, as `{node_id: blob}`.
 
@@ -68,21 +77,14 @@ def load_site_records():
 
 
 def save_site_record(node_id, blob):
-    """Persist one node's record, or drop it when the record is empty.
-
-    Written through a temporary file and renamed, so a restart during the write
-    finds either the old record or the new one — never a truncated blob that
-    would read back as NODEEXEC's "version is incorrect".
-    """
+    """Persist one node's record, or drop it when the record is empty. A
+    truncated record would read back as NODEEXEC's "version is incorrect"."""
     path = _path_for(node_id)
     try:
         if not blob:
             path.unlink(missing_ok=True)
             return
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f"{_SUFFIX}.tmp")
-        tmp.write_bytes(blob)
-        tmp.replace(path)
+        _write_atomic(path, blob)
     except OSError as exc:
         log.warning("blackbird_site_save_failed node=%s path=%s err=%s", node_id, path, exc)
 
@@ -97,10 +99,7 @@ def save_title(name, data):
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name) or "title"
     path = TITLE_DIR / f"{safe}{_TITLE_SUFFIX}"
     try:
-        TITLE_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(f"{_TITLE_SUFFIX}.tmp")
-        tmp.write_bytes(data)
-        tmp.replace(path)
+        _write_atomic(path, data)
         return path
     except OSError as exc:
         log.warning("blackbird_title_save_failed name=%s path=%s err=%s", name, path, exc)

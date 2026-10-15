@@ -493,10 +493,8 @@ def _resolve_dirsrv_property_file(cfi):
         log.warning("resolve_dirsrv_file unsupported property=%r", prop)
         return b""
 
-    # An unknown id yields a placeholder node, not None — match on the id it
-    # came back with, the same way SetProperties does.
-    node = _default_store.content.get_node(node_id)
-    if node is None or node.node_id != node_id:
+    node = _default_store.content.find_node(node_id)
+    if node is None:
         log.warning("resolve_dirsrv_file unknown node=%s", node_id)
         return b""
 

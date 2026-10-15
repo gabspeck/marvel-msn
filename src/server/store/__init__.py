@@ -6,27 +6,21 @@ from .base import (
     ANONYMOUS_USER,
     RIGHTS_AUTHORING,
     RIGHTS_NONE,
-    AppStore,
     BillingProfile,
-    CatalogStore,
     ConferenceFields,
-    ContentStore,
     DirectoryNode,
     MailMessage,
     MailRecipient,
-    MailStore,
     MemberProfile,
-    MemberStore,
     NodeContent,
     Plan,
     StatementSummary,
     Subscription,
     TransactionRecord,
     User,
-    UserStore,
 )
 from .fixtures import default_seed
-from .memory import build_app_store
+from .memory import AppStore, build_app_store
 from .records import build_bbs_attachment_nodes, build_bbs_post
 
 log = logging.getLogger("server.store")
@@ -42,8 +36,8 @@ def _restore_published_titles(store):
     be redone by hand.
     """
     for node_id, blob in blackbird_state.load_site_records().items():
-        node = store.content.get_node(node_id)
-        if node is None or node.node_id != node_id:
+        node = store.content.find_node(node_id)
+        if node is None:
             log.warning("blackbird_site_orphaned node=%s bytes=%d", node_id, len(blob))
             continue
         store.content.add_node(replace(node, content=replace(node.content, blackbird_site=blob)))
@@ -64,27 +58,22 @@ def reset_app_store():
 
 
 __all__ = [
+    "AppStore",
     "ANONYMOUS_USER",
     "RIGHTS_AUTHORING",
     "RIGHTS_NONE",
-    "AppStore",
     "BillingProfile",
-    "CatalogStore",
     "ConferenceFields",
-    "ContentStore",
     "DirectoryNode",
     "MailMessage",
     "MailRecipient",
-    "MailStore",
     "MemberProfile",
-    "MemberStore",
     "NodeContent",
     "Plan",
     "StatementSummary",
     "Subscription",
     "TransactionRecord",
     "User",
-    "UserStore",
     "app_store",
     "build_app_store",
     "build_bbs_attachment_nodes",

@@ -57,14 +57,24 @@ def bbs_date_to_unix(s):
     return int((naive - offset).replace(tzinfo=datetime.UTC).timestamp())
 
 
-def unix_to_wire_filetime(seconds):
-    """Unix time_t → Windows FILETIME, the wire form of `w`.
+FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
 
-    Zero in stays zero out: it is the "no date" sentinel both directions.
-    """
+
+def to_filetime(when):
+    """A UTC datetime as a Windows FILETIME (100 ns ticks since 1601)."""
+    return int((when - FILETIME_EPOCH).total_seconds() * 10_000_000)
+
+
+def from_filetime(ticks):
+    return FILETIME_EPOCH + datetime.timedelta(microseconds=ticks // 10)
+
+
+def unix_to_wire_filetime(seconds):
+    """Unix time_t → FILETIME, the wire form of `w`. Zero, the "no date"
+    sentinel, stays zero."""
     if not seconds:
         return 0
-    return (seconds + 11644473600) * 10_000_000
+    return to_filetime(datetime.datetime.fromtimestamp(seconds, datetime.UTC))
 
 
 def bbs_node(
@@ -127,8 +137,6 @@ def bbs_node(
         delegate=delegate,
         content=NodeContent(
             name=name,
-            go_word="",
-            category="",
             # `tp` is free server text — the client keeps it as an opaque cache
             # slot for the Type column and the General page's item 1011. Only
             # the board is a DIRSRV row, and DSNED names app_id 2 "Bulletin
@@ -138,16 +146,6 @@ def bbs_node(
             # shared MOS tree tags — and an empty string there stays honest.
             # Blank on the board rendered as "<unknown type>" (string 0xBF).
             type_str="Bulletin Board Folder" if is_container else "",
-            price_dword=0,
-            rating_dword=0,
-            description="",
-            language=0,
-            topics="",
-            people="",
-            place="",
-            u_value="",
-            forum_mgr="",
-            vendor_id=0,
             owner=author,
             # The Properties dialog fetches the shared MOS tree tags one at a
             # time (`q,g` then `v,g` …), and build_bbs_props hands those to

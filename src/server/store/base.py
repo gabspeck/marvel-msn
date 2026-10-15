@@ -1,10 +1,9 @@
-"""Domain model and store protocols for the MSN95 server."""
+"""Domain records for the MSN95 server."""
 
 from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import Protocol
 
 # Wire DIRSRV property `x`. `CMosViewWnd::AddMenus` asks
 # `CMosTreeNode::HasRights` for mask 0x70 before merging File >
@@ -74,23 +73,23 @@ class ConferenceFields:
 @dataclass(frozen=True)
 class NodeContent:
     name: str
-    go_word: str
-    category: str
-    type_str: str
-    price_dword: int
-    rating_dword: int
-    description: str
-    language: int
-    topics: str
-    people: str
-    place: str
-    u_value: str
-    forum_mgr: str
-    vendor_id: int
-    owner: str
-    created: str
-    modified: str
-    size_bytes: int
+    go_word: str = ""
+    category: str = ""
+    type_str: str = ""
+    price_dword: int = 0
+    rating_dword: int = 0
+    description: str = ""
+    language: int = 0
+    topics: str = ""
+    people: str = ""
+    place: str = ""
+    u_value: str = ""
+    forum_mgr: str = ""
+    vendor_id: int = 0
+    owner: str = ""
+    created: str = ""
+    modified: str = ""
+    size_bytes: int = 0
     # 64-bit FILETIME (100-ns intervals since 1601-01-01 UTC) for the DSNAV
     # "Date Modified" listview column. Wire type 0x0C — MOSSHELL 0x7F3FBC12
     # case 0xC passes the 8-byte value straight to FileTimeToSz, which runs
@@ -339,76 +338,3 @@ class User:
 # session is a real state, and giving it a User keeps `if user is None` out of
 # every handler.
 ANONYMOUS_USER = User(username="", password="", display_name="")
-
-
-class ContentStore(Protocol):
-    def load(self, nodes: list, children: dict, fallback: DirectoryNode) -> None: ...
-    def get_node(self, node_id: str) -> DirectoryNode | None: ...
-    def all_nodes(self) -> list: ...
-    def is_node_id_free(self, node_id: str) -> bool: ...
-    def get_children(self, node_id: str) -> list: ...
-    def get_parents(self, node_id: str) -> list: ...
-    def has_children(self, node_id: str) -> bool: ...
-    def count_children(self, node_id: str) -> int: ...
-    def count_parents(self, node_id: str) -> int: ...
-    def find_by_go_word(self, go_word: str) -> DirectoryNode | None: ...
-    def find_app_instance(self, app_id: int, instance_id: int) -> DirectoryNode | None: ...
-    def add_child(self, parent_id: str, node: DirectoryNode) -> None: ...
-    def add_node(self, node: DirectoryNode) -> None: ...
-    def remove_node(self, node_id: str) -> bool: ...
-
-
-class UserStore(Protocol):
-    def load(self, users: list) -> None: ...
-    def authenticate(self, username: str, password: str) -> User | None: ...
-    def get_user(self, username: str) -> User | None: ...
-    def find_by_display_name(self, display_name: str) -> User | None: ...
-    def set_password(self, username: str, password: str) -> bool: ...
-    def set_billing(self, username: str, profile: BillingProfile) -> bool: ...
-
-
-class MemberStore(Protocol):
-    def load(self, profiles: list) -> None: ...
-    def get_member(self, member_id: str) -> MemberProfile: ...
-    def list_members(self) -> list: ...
-
-
-class CatalogStore(Protocol):
-    """The subscription plans on offer — a catalogue, the same for every member."""
-
-    def load(self, plans: list) -> None: ...
-    def get_plans(self) -> list: ...
-
-
-class MailStore(Protocol):
-    def load(self, messages: list) -> None: ...
-    def list_messages(self, mailbox: str) -> list: ...
-    def get_message(self, mailbox: str, message_id: int) -> MailMessage | None: ...
-    def delete_messages(self, mailbox: str, message_ids) -> int: ...
-    def set_status(self, mailbox: str, message_id: int, status: int) -> bool: ...
-    def deliver(self, message: MailMessage) -> MailMessage: ...
-
-
-@dataclass
-class AppStore:
-    content: ContentStore
-    users: UserStore
-    catalog: CatalogStore
-    member: MemberStore
-    mail: MailStore
-
-    def reset(self, seed) -> None:
-        """Re-seed every store in place, dropping all runtime changes.
-
-        In place, not rebuilt: each service binds `app_store` at import time, so
-        swapping in a new AppStore would leave them reading the old state.
-        """
-        self.content.load(
-            seed.directory_nodes,
-            seed.directory_children,
-            seed.directory_fallback,
-        )
-        self.users.load(seed.users)
-        self.catalog.load(seed.plans)
-        self.member.load(seed.member_profiles)
-        self.mail.load(seed.mail_messages)

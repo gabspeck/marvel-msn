@@ -42,6 +42,7 @@ from ..mpc import (
 from ..session import Session
 from ..store import MailMessage, MailRecipient
 from ..store import app_store as _default_store
+from ..store.records import to_filetime
 from ._dispatch import log_unhandled_selector
 from ._handler import ServiceHandler
 
@@ -176,7 +177,6 @@ MOS_ENTRYID_VERSION = 1
 # record-aligned, so only the concatenation parses.
 _TRANSMIT_BLOCK_BYTES = 0x1000
 
-_FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
 
 MAPI_E_NOT_FOUND = 0x8004010F
 
@@ -661,15 +661,6 @@ def encode_recip_list(recipients):
             )
         )
     return b"".join(out)
-
-
-def to_filetime(when):
-    """A UTC datetime as a Windows FILETIME (100 ns ticks since 1601)."""
-    return int((when - _FILETIME_EPOCH).total_seconds() * 10_000_000)
-
-
-def from_filetime(ticks):
-    return _FILETIME_EPOCH + datetime.timedelta(microseconds=ticks // 10)
 
 
 def header_props(message, size):

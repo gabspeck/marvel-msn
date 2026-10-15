@@ -37,9 +37,10 @@ from .base import (
     TransactionRecord,
     User,
 )
-from .records import bbs_node, build_bbs_attachment_nodes, mnid_key
+from .records import bbs_node, build_bbs_attachment_nodes, mnid_key, to_filetime
 
-_FILETIME_EPOCH = datetime.datetime(1601, 1, 1, tzinfo=datetime.UTC)
+_LCID_EN_US = 0x0409
+_LCID_PT_BR = 0x0416
 
 
 def _date_string_to_wire_filetime(s):
@@ -56,9 +57,7 @@ def _date_string_to_wire_filetime(s):
     """
     if not s:
         return 0
-    dt = datetime.datetime.strptime(s, "%B %d, %Y").replace(tzinfo=datetime.UTC)
-    delta = dt - _FILETIME_EPOCH
-    return delta.days * 86400 * 10_000_000 + delta.seconds * 10_000_000
+    return to_filetime(datetime.datetime.strptime(s, "%B %d, %Y").replace(tzinfo=datetime.UTC))
 
 
 MSN_TODAY_CONTENT = NodeContent(
@@ -66,14 +65,11 @@ MSN_TODAY_CONTENT = NodeContent(
     go_word="today",
     category="News",
     type_str="News & Features",
-    price_dword=0,
-    rating_dword=0,
     description="Your daily window to MSN.",
-    language=1033,
+    language=_LCID_EN_US,
     topics="News, Weather, Entertainment",
     people="Microsoft editorial staff",
     place="Redmond, WA, USA",
-    u_value="",
     forum_mgr="MSN Editorial",
     vendor_id=1,
     owner="The Microsoft Network",
@@ -84,10 +80,6 @@ MSN_TODAY_CONTENT = NodeContent(
 )
 
 
-_LCID_EN_US = 0x0409
-_LCID_PT_BR = 0x0416
-
-
 # Every directory row carries a last-changed date. MOSFIND's Find results
 # window has no blank-cell branch for `w` — CFindNav_FillResultRow hands the
 # value straight to FileTimeToLocalFileTime — so a node with no timestamp shows
@@ -96,29 +88,14 @@ _LCID_PT_BR = 0x0416
 _CONTENT_DROP_DATE = "July 19, 1995"
 
 
-def _container_content(
-    name, type_str="Directory", language=_LCID_EN_US, modified=_CONTENT_DROP_DATE
-):
+def _container_content(name, type_str="Directory", language=_LCID_EN_US, **fields):
     return NodeContent(
         name=name,
-        go_word="",
-        category="",
         type_str=type_str,
-        price_dword=0,
-        rating_dword=0,
-        description="",
         language=language,
-        topics="",
-        people="",
-        place="",
-        u_value="",
-        forum_mgr="",
-        vendor_id=0,
-        owner="",
-        created="",
-        modified=modified,
-        size_bytes=0,
-        modified_filetime=_date_string_to_wire_filetime(modified),
+        modified=_CONTENT_DROP_DATE,
+        modified_filetime=_date_string_to_wire_filetime(_CONTENT_DROP_DATE),
+        **fields,
     )
 
 
@@ -135,10 +112,9 @@ def _container_content(
 #   special 0  (1,0,0) → wire "0:0" → id 0x8E → "Worldwide Categories"
 #   special 1  (1,1,0) → wire "1:0" → id 0x8F → "Worldwide Member Assistance"
 #
-# So "0:0" IS the Worldwide Categories hub. Whatever `e` we send for it is
-# overwritten client-side. Serving a separate Worldwide Categories node at an
-# ordinary mnid produced a duplicate: the address-bar row named "Worldwide
-# Categories" is this node, so selecting it listed this node's children.
+# So "0:0" is the Worldwide Categories hub, and whatever `e` we send for it is
+# overwritten client-side. A separate Worldwide Categories node at an ordinary
+# mnid would show up twice: the address-bar row of that name is this node.
 #
 # The HOMEBASE buttons follow from the same pairing — LJUMP takes the hub's
 # localized child (docs/MSN_CENTRAL_HOMEBASE_MENU_MAPPING.md):
@@ -155,8 +131,6 @@ _CATEGORIES_US_KEY, _CATEGORIES_US_MNID = mnid_key(1, 0x10)
 _MEMBER_ASSISTANCE_US_KEY, _MEMBER_ASSISTANCE_US_MNID = mnid_key(1, 0x11)
 _CATEGORIES_BR_KEY, _CATEGORIES_BR_MNID = mnid_key(1, 0x13)
 _MEMBER_ASSISTANCE_BR_KEY, _MEMBER_ASSISTANCE_BR_MNID = mnid_key(1, 0x14)
-
-ROOT_CONTENT = _container_content("Root")
 
 # Localized wrappers. `language=0` on the Worldwide hubs marks them as
 # locale-neutral so a `filter_on=1` request with any LCID still accepts them.
@@ -323,26 +297,8 @@ def _medview_sample_leaf(f0, name, size_bytes):
         is_container=False,
         app_id=APP_MEDIA_VIEWER,
         mnid_a=mnid,
-        content=NodeContent(
-            name=name,
-            go_word="",
-            category="Media View samples",
-            type_str="MedView Title",
-            price_dword=0,
-            rating_dword=0,
-            description="",
-            language=_LCID_EN_US,
-            topics="",
-            people="",
-            place="",
-            u_value="",
-            forum_mgr="",
-            vendor_id=0,
-            owner="",
-            created="",
-            modified=_CONTENT_DROP_DATE,
-            size_bytes=size_bytes,
-            modified_filetime=_date_string_to_wire_filetime(_CONTENT_DROP_DATE),
+        content=_container_content(
+            name, "MedView Title", category="Media View samples", size_bytes=size_bytes
         ),
     )
 
@@ -379,26 +335,8 @@ def _blackbird_publish_target():
         is_container=False,
         app_id=APP_BLACKBIRD_TITLE,
         mnid_a=mnid,
-        content=NodeContent(
-            name="Blackbird Publish Target",
-            go_word="",
-            category="Media View samples",
-            type_str="Blackbird Title",
-            price_dword=0,
-            rating_dword=0,
-            description="",
-            language=_LCID_EN_US,
-            topics="",
-            people="",
-            place="",
-            u_value="",
-            forum_mgr="",
-            vendor_id=0,
-            owner="",
-            created="",
-            modified=_CONTENT_DROP_DATE,
-            size_bytes=0,
-            modified_filetime=_date_string_to_wire_filetime(_CONTENT_DROP_DATE),
+        content=_container_content(
+            "Blackbird Publish Target", "Blackbird Title", category="Media View samples"
         ),
     )
 
@@ -416,6 +354,24 @@ _BLACKBIRD_PUBLISH_TARGET = _blackbird_publish_target()
 DNR_TEST_LINE_COUNT = 4096
 
 
+def _dnr_node(f8, name, shabby_id, file_name, compression, size_bytes):
+    key, mnid = mnid_key(1, f8)
+    return DirectoryNode(
+        node_id=key,
+        is_container=False,
+        app_id=APP_DOWNLOAD_AND_RUN,
+        mnid_a=mnid,
+        content=_container_content(
+            name,
+            "Download-and-Run File",
+            dnr_shabby_id=shabby_id,
+            dnr_file_name=file_name,
+            dnr_compression=compression,
+            size_bytes=size_bytes,
+        ),
+    )
+
+
 def _build_dnr_test_payload():
     lines = [
         f"line {n:06d} offset {n * 48:08d} {'.' * 9}{(n % 10)}{'.' * 8}\r\n".encode("ascii")
@@ -429,19 +385,8 @@ DNR_TEST_PAYLOAD = _build_dnr_test_payload()
 DNR_TEST_SHABBY_ID = 0x00FF0001
 DNR_TEST_FILE_NAME = "dnrtest.txt"
 
-_DNR_TEST_KEY, _DNR_TEST_MNID = mnid_key(1, 0x111)
-_DNR_TEST_NODE = DirectoryNode(
-    node_id=_DNR_TEST_KEY,
-    is_container=False,
-    app_id=APP_DOWNLOAD_AND_RUN,
-    mnid_a=_DNR_TEST_MNID,
-    content=replace(
-        _container_content("DnR Transfer Test", type_str="Download-and-Run File"),
-        dnr_shabby_id=DNR_TEST_SHABBY_ID,
-        dnr_file_name=DNR_TEST_FILE_NAME,
-        dnr_compression=0,
-        size_bytes=len(DNR_TEST_PAYLOAD),
-    ),
+_DNR_TEST_NODE = _dnr_node(
+    0x111, "DnR Transfer Test", DNR_TEST_SHABBY_ID, DNR_TEST_FILE_NAME, 0, len(DNR_TEST_PAYLOAD)
 )
 
 # The same test, one step further along: a real MOS2 container captured from a
@@ -453,19 +398,13 @@ DNR_MOS2_SHABBY_ID = 0x00FF0002
 DNR_MOS2_FILE_NAME = "WINDIFF.EXE"
 DNR_MOS2_COMPRESSED_SIZE = 51700
 
-_DNR_MOS2_KEY, _DNR_MOS2_MNID = mnid_key(1, 0x112)
-_DNR_MOS2_NODE = DirectoryNode(
-    node_id=_DNR_MOS2_KEY,
-    is_container=False,
-    app_id=APP_DOWNLOAD_AND_RUN,
-    mnid_a=_DNR_MOS2_MNID,
-    content=replace(
-        _container_content("DnR Compressed Test", type_str="Download-and-Run File"),
-        dnr_shabby_id=DNR_MOS2_SHABBY_ID,
-        dnr_file_name=DNR_MOS2_FILE_NAME,
-        dnr_compression=3,
-        size_bytes=DNR_MOS2_COMPRESSED_SIZE,
-    ),
+_DNR_MOS2_NODE = _dnr_node(
+    0x112,
+    "DnR Compressed Test",
+    DNR_MOS2_SHABBY_ID,
+    DNR_MOS2_FILE_NAME,
+    3,
+    DNR_MOS2_COMPRESSED_SIZE,
 )
 
 # A second captured container, kept because its first chunk decodes wrong
@@ -479,19 +418,13 @@ DNR_MOS2B_SHABBY_ID = 0x00FF0003
 DNR_MOS2B_FILE_NAME = "CDPLAYER.EXE"
 DNR_MOS2B_COMPRESSED_SIZE = 40748
 
-_DNR_MOS2B_KEY, _DNR_MOS2B_MNID = mnid_key(1, 0x113)
-_DNR_MOS2B_NODE = DirectoryNode(
-    node_id=_DNR_MOS2B_KEY,
-    is_container=False,
-    app_id=APP_DOWNLOAD_AND_RUN,
-    mnid_a=_DNR_MOS2B_MNID,
-    content=replace(
-        _container_content("DnR Compressed Test B", type_str="Download-and-Run File"),
-        dnr_shabby_id=DNR_MOS2B_SHABBY_ID,
-        dnr_file_name=DNR_MOS2B_FILE_NAME,
-        dnr_compression=3,
-        size_bytes=DNR_MOS2B_COMPRESSED_SIZE,
-    ),
+_DNR_MOS2B_NODE = _dnr_node(
+    0x113,
+    "DnR Compressed Test B",
+    DNR_MOS2B_SHABBY_ID,
+    DNR_MOS2B_FILE_NAME,
+    3,
+    DNR_MOS2B_COMPRESSED_SIZE,
 )
 
 # The same WINDIFF.EXE, but with the container built here by
@@ -507,19 +440,13 @@ DNR_MOS2OK_SHABBY_ID = 0x00FF0004
 DNR_MOS2OK_FILE_NAME = "WINDIFF.EXE"
 DNR_MOS2OK_COMPRESSED_SIZE = 51759
 
-_DNR_MOS2OK_KEY, _DNR_MOS2OK_MNID = mnid_key(1, 0x114)
-_DNR_MOS2OK_NODE = DirectoryNode(
-    node_id=_DNR_MOS2OK_KEY,
-    is_container=False,
-    app_id=APP_DOWNLOAD_AND_RUN,
-    mnid_a=_DNR_MOS2OK_MNID,
-    content=replace(
-        _container_content("DnR Server-Compressed", type_str="Download-and-Run File"),
-        dnr_shabby_id=DNR_MOS2OK_SHABBY_ID,
-        dnr_file_name=DNR_MOS2OK_FILE_NAME,
-        dnr_compression=3,
-        size_bytes=DNR_MOS2OK_COMPRESSED_SIZE,
-    ),
+_DNR_MOS2OK_NODE = _dnr_node(
+    0x114,
+    "DnR Server-Compressed",
+    DNR_MOS2OK_SHABBY_ID,
+    DNR_MOS2OK_FILE_NAME,
+    3,
+    DNR_MOS2OK_COMPRESSED_SIZE,
 )
 
 _DEFAULT_CHAT_KEY, _DEFAULT_CHAT_MNID = mnid_key(1, 0x10F)
@@ -635,8 +562,8 @@ _BBS_RE_YOSEMITE = bbs_node(
     parent_subid=0x100,
 )
 
-# A message carrying one attachment, captured verbatim from the Compose window
-# on 2026-07-28. Both files are the client's own upload bytes:
+# A message carrying one attachment, captured verbatim from the Compose window.
+# Both files are the client's own upload bytes:
 #
 #   attachment-post.rtfcomp  the body as X-MOS-Format "RTFCOMP" names it —
 #       MAPI compressed RTF (`LZFu`, 1282 compressed / 6717 raw), carrying
@@ -736,7 +663,7 @@ DIRECTORY_NODES = [
     # FGetCmdLineInfo, derives a MedView title selector from the 4:0 mnid
     # (docs/MOSVIEW.md §3.3), and opens the title through MVCL14N.
     DirectoryNode(
-        node_id="4:0",
+        node_id=_MSN_TODAY_KEY,
         is_container=False,
         app_id=APP_MEDIA_VIEWER,
         mnid_a=_MSN_TODAY_SPECIAL_MNID,
@@ -840,7 +767,7 @@ DIRECTORY_CHILDREN = {
     _MEMBER_ASSISTANCE_US_KEY: [
         f"1:{0x300}",  # The MSN Member Lobby
         f"1:{0x301}",  # MSN Beta Center
-        "4:0",  # MSN Today — reuse existing MOSVIEW leaf
+        _MSN_TODAY_KEY,  # MSN Today, the MOSVIEW leaf
         f"1:{0x303}",  # Member Assistance Kiosk - July 19
         f"1:{0x304}",  # First-Time-User Experience
         f"1:{0x305}",  # Member Guidelines (MOSVIEW)
@@ -868,8 +795,6 @@ DIRECTORY_CHILDREN = {
     # BBS board "Climbing BBS" listed under "Sports, Health and Fitness"
     # (c=2 = APP_BBS_SERVICE, b bit 0x04 = delegate). Opening it hands the
     # folder to bbsnav, which enumerates the thread list over svc "BBS".
-    # Threading is the tree itself — replies are children of the message they
-    # answer, so recursive GetChildren yields the indented thread view.
     _SPORTS_HEALTH_FITNESS_KEY: [_CLIMBING_BBS.node_id],
     # Every message is a direct child of the board, replies included. The
     # reader enumerates the board once and never asks a message for children,
@@ -889,10 +814,9 @@ DIRECTORY_CHILDREN = {
     _BBS_BRITISH_CLIMBERS.node_id: [],
     _BBS_ATTACHMENT.node_id: [],
     _BBS_PRICED_ATTACHMENT.node_id: [],
-    # Explicit empty children for the `4:0` startup node — avoids the
-    # sentinel fallback path that previously introduced `FFFFFFFF:FFFFFFFF`
-    # into the rendered hierarchy. Favorite Places (`3:1`) is client-side.
-    "4:0": [],
+    # Explicit empty children keep the fallback sentinel out of the startup
+    # node's hierarchy. Favorite Places (`3:1`) is client-side.
+    _MSN_TODAY_KEY: [],
     "3:1": [],
     _DEFAULT_CHAT_ROOM.node_id: [],
     # Every remaining category/A&E/MA leaf is terminal — explicit empty list
@@ -922,7 +846,7 @@ _FALLBACK_MNID = struct.pack("<II", 0xFFFFFFFF, 0xFFFFFFFF)
 DIRECTORY_FALLBACK_NODE = DirectoryNode(
     node_id="4294967295:4294967295",
     is_container=True,
-    app_id=1,
+    app_id=APP_DIRECTORY_SERVICE,
     mnid_a=_FALLBACK_MNID,
     content=_container_content(""),
 )
