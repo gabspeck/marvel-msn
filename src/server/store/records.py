@@ -71,10 +71,6 @@ def to_filetime(when):
     return int((when - FILETIME_EPOCH).total_seconds() * 10_000_000)
 
 
-def from_filetime(ticks):
-    return FILETIME_EPOCH + datetime.timedelta(microseconds=ticks // 10)
-
-
 def unix_to_wire_filetime(seconds):
     """Unix time_t → FILETIME, the wire form of `w`. Zero, the "no date"
     sentinel, stays zero."""

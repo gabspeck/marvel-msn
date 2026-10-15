@@ -29,7 +29,7 @@ class _Room:
         self.next_participant_id = 1
 
 
-_rooms = {}
+_rooms: dict[int, _Room] = {}
 _rooms_lock = threading.Lock()
 
 

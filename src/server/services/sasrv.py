@@ -33,7 +33,6 @@ from ..config import SASRV_INTERFACE_GUIDS
 from ..models import DwordParam
 from ..mpc import (
     build_blob_reply,
-    build_discovery_payload,
     build_static_reply,
     build_tagged_reply_dword,
     parse_request_params,
@@ -270,7 +269,3 @@ class SasrvHandler(ServiceHandler):
 
 def _build_two_dword_reply(first, second):
     return build_static_reply(build_tagged_reply_dword(first), build_tagged_reply_dword(second))
-
-
-def build_sasrv_service_map_payload():
-    return build_discovery_payload(SASRV_INTERFACE_GUIDS)

@@ -70,7 +70,6 @@ FTM_BILL_CLIENT_PAYLOAD_SIZE_OFFSET = 0x10
 FTM_FLAG_HAS_UNPACK_METHOD = 0x01
 FTM_FLAG_FAST_PATH = 0x02
 FTM_FLAG_HAS_FILENAME = 0x08
-FTM_REQUEST_REPLY_FLAGS = FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH | FTM_FLAG_HAS_FILENAME
 
 FTM_FALLBACK_FILENAME = "plans.txt"
 FTM_BBS_SOURCE = "BBS"
@@ -243,7 +242,6 @@ class FtmHandler(ServiceHandler):
             _, content = _resolve_ftm_target(payload, record_download=True)
             log.info("bill_client content_len=%d", len(content))
             reply_payload = _build_bill_client_reply(content)
-            log.info("bill_client_reply status=0 payload_len=%d", len(content))
         else:
             log_unhandled_selector(log, msg_class, selector, request_id, payload)
             return None

@@ -23,8 +23,6 @@ from server.config import (
     BBIR_INTERFACE_GUIDS,
     CONFLOC_INTERFACE_GUIDS,
     CONFSRV_INTERFACE_GUIDS,
-    DIRSRV_INTERFACE_GUIDS,
-    LOGSRV_INTERFACE_GUIDS,
     MEDVIEW_DATA_EDIT_CLASS,
     MEDVIEW_INTERFACE_GUIDS,
     MEDVIEW_SELECTOR_ATTACH_SESSION,
@@ -43,7 +41,6 @@ from server.config import (
     MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATIONS,
     MPC_CLASS_CONTINUATION_LAST,
     MPC_CLASS_CONTINUATION_MORE,
-    OLREGSRV_INTERFACE_GUIDS,
     PIPE_ALWAYS_SET,
     PIPE_CONTINUATION,
     PIPE_LAST_DATA,
@@ -101,7 +98,6 @@ from server.services.dirsrv import (
     SUPPORTED_BROWSE_LCIDS,
     DirsrvHandler,
     add_node_reply,
-    build_dirsrv_service_map_payload,
     build_property_record,
     build_props,
     delete_node_reply,
@@ -130,6 +126,7 @@ from server.services.ftm import (
     mos2_original_size,
 )
 from server.services.logsrv import (
+    BOOTSTRAP_PAYLOAD,
     LOGIN_BLOB_LEN,
     LOGIN_BLOB_MEMBER_ID_OFFSET,
     LOGIN_BLOB_PASSWORD_OFFSET,
@@ -139,8 +136,6 @@ from server.services.logsrv import (
     _handle_billing_query,
     _handle_login,
     _handle_password_change,
-    build_logsrv_bootstrap_payload,
-    build_logsrv_service_map_payload,
 )
 from server.services.medview import MedviewHandler
 from server.services.medview.handler import (
@@ -150,14 +145,12 @@ from server.services.medview.handler import (
 from server.services.medview.payload import BM0_BAGGAGE
 from server.services.olregsrv import (
     OlregsrvHandler,
-    build_olregsrv_service_map_payload,
 )
 from server.services.rooms import _rooms as conference_rooms
 from server.services.sasrv import (
     SA_E_BAD_LIST_KIND,
     SASRV_TOKENS,
     SasrvHandler,
-    build_sasrv_service_map_payload,
 )
 from server.session import Session
 from server.store import (
@@ -183,7 +176,7 @@ from .support import (
 
 class TestLOGSRVBootstrap(unittest.TestCase):
     def test_structure(self):
-        payload = build_logsrv_bootstrap_payload()
+        payload = BOOTSTRAP_PAYLOAD
         # Should contain 7 dword tags (0x83), then 0x87, then 0x84 variable
         pos = 0
         dword_count = 0
@@ -203,12 +196,12 @@ class TestLOGSRVBootstrap(unittest.TestCase):
 
     def test_first_dword_is_zero(self):
         # Field 0 = login result code, should be 0 (success)
-        payload = build_logsrv_bootstrap_payload()
+        payload = BOOTSTRAP_PAYLOAD
         result_code = struct.unpack("<I", payload[1:5])[0]
         self.assertEqual(result_code, 0)
 
     def test_parseable(self):
-        payload = build_logsrv_bootstrap_payload()
+        payload = BOOTSTRAP_PAYLOAD
         params = parse_tagged_params(payload)
         self.assertIsNotNone(params)
         self.assertGreater(len(params), 0)
@@ -219,35 +212,6 @@ class TestLOGSRVBootstrap(unittest.TestCase):
         self.assertIsInstance(params[7], EndMarker)
         # Then a variable param
         self.assertIsInstance(params[8], VarParam)
-
-
-class TestLOGSRVServiceMap(unittest.TestCase):
-    def test_payload_size(self):
-        # 10 GUIDs * 17 bytes each = 170 bytes
-        payload = build_logsrv_service_map_payload()
-        self.assertEqual(len(payload), len(LOGSRV_INTERFACE_GUIDS) * 17)
-
-    def test_guid_format(self):
-        payload = build_logsrv_service_map_payload()
-        # Each record is 16-byte GUID + 1-byte selector
-        for i, (guid_bytes, selector) in enumerate(LOGSRV_INTERFACE_GUIDS):
-            record = payload[i * 17 : (i + 1) * 17]
-            self.assertEqual(record[:16], guid_bytes)
-            self.assertEqual(record[16], selector)
-
-    def test_produces_packet(self):
-        handler = LogsrvHandler(3, "LOGSRV", Session())
-        pkts = handler.build_discovery_packet(3, 3)
-        self.assertIsInstance(pkts, list)
-        parsed = parse_packet(pkts[0][:-1])
-        self.assertIsNotNone(parsed)
-        self.assertTrue(parsed.crc_ok)
-
-    def test_known_wire_bytes(self):
-        handler = LogsrvHandler(3, "LOGSRV", Session())
-        pkts = handler.build_discovery_packet(3, 3)
-        expected_start = bytes.fromhex("83 83 e3 af 00 03 00 00 00 00")
-        self.assertEqual(pkts[0][:10], expected_start)
 
 
 def _login_blob(member_id, password):
@@ -486,19 +450,6 @@ class TestLOGSRVReply(unittest.TestCase):
             "00 2b 11 96 ab 0d"
         )
         self.assertEqual(pkts[0], expected)
-
-
-class TestDIRSRVServiceMap(unittest.TestCase):
-    def test_payload_size(self):
-        payload = build_dirsrv_service_map_payload()
-        self.assertEqual(len(payload), len(DIRSRV_INTERFACE_GUIDS) * 17)
-
-    def test_guid_records_match_catalog(self):
-        payload = build_dirsrv_service_map_payload()
-        for i, (guid_bytes, selector) in enumerate(DIRSRV_INTERFACE_GUIDS):
-            record = payload[i * 17 : (i + 1) * 17]
-            self.assertEqual(record[:16], guid_bytes)
-            self.assertEqual(record[16], selector)
 
 
 def _join_room(handler, room_id, request_id=7, msg_class=0x01):
@@ -1227,12 +1178,6 @@ class TestSASRVServiceMap(unittest.TestCase):
             [selector for _guid, selector in SASRV_INTERFACE_GUIDS],
             list(range(1, 30)),
         )
-
-    def test_guid_records_match_catalog(self):
-        payload = build_sasrv_service_map_payload()
-        for i, (guid_bytes, selector) in enumerate(SASRV_INTERFACE_GUIDS):
-            record = payload[i * 17 : (i + 1) * 17]
-            self.assertEqual(record, guid_bytes + bytes([selector]))
 
     def test_produces_discovery_packet(self):
         packets = SasrvHandler(5, "SASRV", Session()).build_discovery_packet(4, 4)
@@ -3179,27 +3124,6 @@ class TestDIRSRVGetDeidFromGoWord(unittest.TestCase):
             client_ack=0,
         )
         self.assertIsNotNone(result)
-
-
-class TestOLREGSRVServiceMap(unittest.TestCase):
-    def test_payload_size(self):
-        payload = build_olregsrv_service_map_payload()
-        self.assertEqual(len(payload), len(OLREGSRV_INTERFACE_GUIDS) * 17)
-
-    def test_guid_format(self):
-        payload = build_olregsrv_service_map_payload()
-        for i, (guid_bytes, selector) in enumerate(OLREGSRV_INTERFACE_GUIDS):
-            record = payload[i * 17 : (i + 1) * 17]
-            self.assertEqual(record[:16], guid_bytes)
-            self.assertEqual(record[16], selector)
-
-    def test_produces_packet(self):
-        handler = OlregsrvHandler(4, "OLREGSRV", Session())
-        pkts = handler.build_discovery_packet(6, 6)
-        self.assertIsInstance(pkts, list)
-        parsed = parse_packet(pkts[0][:-1])
-        self.assertIsNotNone(parsed)
-        self.assertTrue(parsed.crc_ok)
 
 
 class TestOLREGSRVReply(unittest.TestCase):

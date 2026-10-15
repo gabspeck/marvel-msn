@@ -470,12 +470,9 @@ class OnlstmtHandler(ServiceHandler):
             log.info("subscriptions user=%s", user.username or "-")
             reply_payload = build_subscriptions_payload(user)
         elif selector == ONLSTMT_SELECTOR_MANAGE_SUBSCRIPTION:
-            log.info("manage_subscription")
             reply_payload = build_plans_payload()
         elif selector == ONLSTMT_SELECTOR_CANCEL_SUBSCRIPTION:
-            log.info("cancel_subscription")
             reply_payload = _CANCEL_ACK_PAYLOAD
-            log.info("cancel_subscription_reply status=1")
         elif selector == ONLSTMT_SELECTOR_GET_DETAILS:
             # Request payload: `01 NN ...` — first send param is the
             # period index byte.  Fall back to 0 (current) if absent.

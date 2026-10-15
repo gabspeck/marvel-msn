@@ -108,7 +108,6 @@ MAPI_MESSAGE = 5
 MSGFLAG_UNMODIFIED = 0x02
 IMPORTANCE_NORMAL = 1
 SENSITIVITY_NONE = 0
-MESSAGE_CLASS_NOTE = "IPM.Note"
 
 # PR_MSG_STATUS bit the client sets through FlagServerMessage to queue a
 # server-side delete for the next connection. `FUN_7F4361BB` @ 0x7F4361BB

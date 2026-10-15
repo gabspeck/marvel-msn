@@ -49,7 +49,7 @@ from server.services.mosrxp import (
 )
 from server.session import Session
 from server.store import MailMessage, MailRecipient, app_store, reset_app_store
-from server.store.records import from_filetime, to_filetime
+from server.store.records import to_filetime
 from server.transport import parse_packet
 
 FIXED_WIDTHS = {0x02: 2, 0x03: 4, 0x04: 4, 0x05: 8, 0x06: 8, 0x07: 8, 0x0B: 2, 0x14: 8, 0x40: 8}
@@ -156,10 +156,6 @@ class EntryIdTest(unittest.TestCase):
 
 
 class FiletimeTest(unittest.TestCase):
-    def test_round_trip(self):
-        when = datetime.datetime(1995, 8, 24, 9, 0, tzinfo=datetime.UTC)
-        self.assertEqual(from_filetime(to_filetime(when)), when)
-
     def test_known_value(self):
         # 1601-01-01 + 1 s
         self.assertEqual(
@@ -203,7 +199,7 @@ class SerialisationTest(unittest.TestCase):
         self.assertEqual(props[PR_SENT_REPRESENTING_NAME], "Steve Jobs")
         self.assertEqual(props[PR_DISPLAY_TO], "Bill Gates")
         self.assertEqual(props[PR_MESSAGE_CLASS], "IPM.Note")
-        self.assertEqual(from_filetime(props[PR_MESSAGE_DELIVERY_TIME]), MESSAGE.delivered)
+        self.assertEqual(props[PR_MESSAGE_DELIVERY_TIME], to_filetime(MESSAGE.delivered))
 
     def test_header_record_carries_the_psptahdr_set(self):
         _records, _end = decode_header_blob(build_header_record(MESSAGE), 1)

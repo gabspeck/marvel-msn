@@ -56,7 +56,6 @@ from ._mapi import (
     PT_BINARY,
     PT_STRING8,
     PT_UNICODE,
-    UEID_PROVIDER_UID,
     build_usr_entryid,
 )
 
@@ -71,15 +70,10 @@ MOSABP_CLASS_AB = 0x01
 # the account handle at `ueid+0x1C`, chosen by `ueid+0x18 == 4`. BBSNAV always
 # builds EIDTYPE 1, so the reader's sheet takes method 2.
 MOSABP_SELECTOR_GET_AB_CONTAINERS = 0x00
-MOSABP_SELECTOR_GET_VALIDATION_LIST = 0x01
 MOSABP_SELECTOR_GET_USER_DETAILS = 0x02
 MOSABP_SELECTOR_CLOSE_TABLE = 0x09
-MOSABP_SELECTOR_GET_USER_DETAILS_BY_HACCT = 0x0A
-MOSABP_SELECTOR_UPDATE_USER_DETAILS = 0x0B
 MOSABP_SELECTOR_QUERY_WW_ROWS = 0x0C
 MOSABP_SELECTOR_QUERY_RESTRICT_ROWS = 0x0D
-MOSABP_SELECTOR_ENUM_DIST_LIST = 0x0E
-MOSABP_SELECTOR_QUERY_ROWS_MORE = 0x0F
 
 # Property tags the Member Properties sheet asks for. The master array lives at
 # MOSABP32:0x7F4E8198 with 26 entries; `FUN_7F4D307D` copies it minus six tags
@@ -129,12 +123,6 @@ AB_ALT_NAME_OFFSET = 0x49
 AB_ALT_NAME_MAX = 0x87
 AB_CONTENT_COUNT_OFFSET = 0xD0
 AB_DISPLAY_TYPE_OFFSET = 0xD8
-
-# `_cont_entryid` — the container entry id, built client-side by
-# `MOSMUTIL!HrBuildCeid` from the record's id field. Same provider MAPIUID as
-# `_usr_entryid`, version 2, type 0, container id at +0x1C.
-CONT_ENTRYID_LEN = 0x20
-CONT_ENTRYID_VERSION = 2
 
 # PR_DISPLAY_TYPE for a server-side global list.
 DT_GLOBAL = 0x00020000
@@ -273,20 +261,6 @@ def build_ab_container(container):
 def build_search_key(member_id):
     """`MSN:<MEMBER ID>` — the `ADDRTYPE:ADDRESS` form, uppercased."""
     return f"{MSN_ADDRTYPE}:{member_id}".upper().encode("cp1252", errors="replace") + b"\x00"
-
-
-def build_cont_entryid(container_id):
-    """The 0x20-byte `_cont_entryid` for a container.
-
-    Built client-side by `MOSMUTIL!HrBuildCeid` (`0x7E99108C`) from the id at
-    `+0x00` of the record, so this server never puts one on the wire. It is
-    here because `FUN_7F4D39CB` keys the container's own GetProps on it and
-    reads the id back from `+0x1C` — the shape a future method has to match.
-    """
-    blob = bytearray(CONT_ENTRYID_LEN)
-    blob[0x04:0x14] = UEID_PROVIDER_UID
-    struct.pack_into("<III", blob, 0x14, CONT_ENTRYID_VERSION, 0, container_id)
-    return bytes(blob)
 
 
 def query_ww_rows_reply(payload):

@@ -22,7 +22,6 @@ import logging
 
 from ..config import OLREGSRV_INTERFACE_GUIDS
 from ..mpc import (
-    build_discovery_payload,
     build_tagged_reply_dword,
     is_oneway,
     parse_request_params,
@@ -71,7 +70,3 @@ class OlregsrvHandler(ServiceHandler):
         reply_body = build_tagged_reply_dword(0)
         log.info("commit_reply status=0 class=0x%02x selector=0x%02x", msg_class, selector)
         return self.reply(msg_class, selector, request_id, reply_body, server_seq, client_ack)
-
-
-def build_olregsrv_service_map_payload():
-    return build_discovery_payload(OLREGSRV_INTERFACE_GUIDS)

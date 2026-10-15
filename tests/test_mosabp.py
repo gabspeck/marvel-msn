@@ -18,11 +18,9 @@ from server.services._mapi import (
 )
 from server.services.mosabp import (
     ABCONTAINER_LEN,
-    CONT_ENTRYID_LEN,
     DT_GLOBAL,
     MOSABP_CLASS_AB,
     MOSABP_SELECTOR_GET_USER_DETAILS,
-    MOSABP_SELECTOR_UPDATE_USER_DETAILS,
     PR_ANR,
     PR_ENTRYID,
     PR_SEARCH_KEY,
@@ -31,7 +29,6 @@ from server.services.mosabp import (
     AbContainer,
     MosabpHandler,
     build_ab_container,
-    build_cont_entryid,
     build_member_blob,
     build_ww_row_blob,
     close_table_reply,
@@ -211,15 +208,6 @@ class TestGetAbContainers(unittest.TestCase):
             struct.unpack_from("<I", blob, 0xD0)[0],
             len(app_store.member.list_members()),
         )
-
-    def test_container_entryid_layout(self):
-        # HrBuildCeid @ 0x7E99108C: abFlags, provider MAPIUID, version 2,
-        # type 0, container id at +0x1C.
-        ceid = build_cont_entryid(9)
-        self.assertEqual(len(ceid), CONT_ENTRYID_LEN)
-        self.assertEqual(ceid[:4], b"\x00\x00\x00\x00")
-        self.assertEqual(ceid[0x04:0x14], UEID_PROVIDER_UID)
-        self.assertEqual(struct.unpack_from("<III", ceid, 0x14), (2, 0, 9))
 
     def test_handler_answers_class_1_method_0(self):
         handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
@@ -543,7 +531,7 @@ class TestGetUserDetailsFraming(unittest.TestCase):
     def test_other_methods_are_left_unanswered(self):
         handler = MosabpHandler(pipe_idx=6, svc_name="MOSABP", session=Session())
         for msg_class, selector in (
-            (MOSABP_CLASS_AB, MOSABP_SELECTOR_UPDATE_USER_DETAILS),
+            (MOSABP_CLASS_AB, 0x0B),
             (MOSABP_CLASS_AB, 0x01),
             (0x02, MOSABP_SELECTOR_GET_USER_DETAILS),
         ):

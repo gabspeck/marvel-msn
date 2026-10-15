@@ -174,7 +174,6 @@ PROP_LANGUAGE = "q"
 #              Reply (1303) via FUN_7F600D56 @ 0x7F600D56.
 #   0x4000     "No messages with attachments are allowed." FUN_7F600D84.
 #   0x8000     "Attachments are automatically approved."
-BBS_F_FORMAT_PLAIN_TEXT = 0x0000
 BBS_F_FORMAT_RICH_TEXT = 0x0001
 BBS_F_MSN_BULLETIN_BOARD = 0x0800
 BBS_F_NO_CHILDREN = 0x1000

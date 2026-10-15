@@ -11,7 +11,6 @@ from ..config import (
 from ..log import TRACE
 from ..models import DwordParam, VarParam
 from ..mpc import (
-    build_discovery_payload,
     build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_var,
@@ -170,7 +169,7 @@ def _build_bootstrap_payload(result):
     return bytes(payload)
 
 
-_BOOTSTRAP_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_OK)
+BOOTSTRAP_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_OK)
 _BAD_MEMBER_ID_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_BAD_MEMBER_ID)
 _BAD_PASSWORD_PAYLOAD = _build_bootstrap_payload(LOGIN_RESULT_BAD_PASSWORD)
 
@@ -273,7 +272,7 @@ def _handle_login(request_payload, session):
         user.display_name,
         user.rights,
     )
-    return _BOOTSTRAP_PAYLOAD
+    return BOOTSTRAP_PAYLOAD
 
 
 def _decode_login_blob(blob):
@@ -315,7 +314,6 @@ def _handle_pm_commit(request_payload, session):
         len(request_payload),
     )
     log.log(TRACE, "pm_commit payload=%s", request_payload.hex())
-    log.info("pm_commit_reply status=0")
     return _COMMIT_OK_REPLY
 
 
@@ -335,7 +333,6 @@ def _handle_billing_commit(request_payload, session):
         len(request_payload),
     )
     log.log(TRACE, "billing_commit payload=%s", request_payload.hex())
-    log.info("billing_commit_reply status=0")
     return _COMMIT_OK_REPLY
 
 
@@ -424,7 +421,6 @@ def _handle_signed_pm_commit(request_payload, session, security):
         intact,
     )
     log.log(TRACE, "signed_pm_commit plaintext=%s", buf.hex())
-    log.info("signed_pm_commit_reply status=0")
     return _COMMIT_OK_REPLY
 
 
@@ -501,7 +497,6 @@ def _handle_signup_post_transfer(request_payload):
     that satisfies the unmarshaller so we can see what the client does next.
     """
     log.info("signup_post_transfer payload_len=%d", len(request_payload))
-    log.info("signup_post_transfer_reply var_len=0")
     return build_tagged_reply_var(0x84, b"")
 
 
@@ -520,7 +515,6 @@ def _handle_post_signup_query(request_payload):
         send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else None
     )
     log.info("post_signup_query country_id=%s", country if country is not None else "?")
-    log.info("post_signup_query_reply var_len=0")
     return build_tagged_reply_var(0x84, b"")
 
 
@@ -538,7 +532,6 @@ def _handle_existing_member_phonebook_query(request_payload):
     send_params, _ = parse_request_params(request_payload)
     dw = send_params[0].value if send_params and isinstance(send_params[0], DwordParam) else None
     log.info("existing_member_phonebook dword=%s", dw if dw is not None else "?")
-    log.info("existing_member_phonebook_reply dword=0")
     return build_tagged_reply_dword(0)
 
 
@@ -555,7 +548,6 @@ def _handle_signup_query(request_payload):
     on a modal box so the connection goes silent.
     """
     log.info("signup_query payload_len=%d", len(request_payload))
-    log.info("signup_query_reply params=0")
     return b""
 
 
@@ -650,7 +642,6 @@ def _handle_ntlm_authenticate(request_payload, session):
 def _handle_ntlm_bootstrap(session):
     """LOGSRV selector 0x11 — the account record the accepted sign-in reads."""
     log.info("ntlm_bootstrap user=%s", session.user.username or "-")
-    log.info("ntlm_bootstrap_reply dwords=5 var_len=16 dwords=5")
     return _NTLM_BOOTSTRAP_PAYLOAD
 
 
@@ -743,14 +734,3 @@ def _handle_password_change(request_payload, session):
     session.sign_in(_default_store.users.get_user(user.username))
     log.info("password_change_reply status=0 user=%s", user.username)
     return build_tagged_reply_dword(0)
-
-
-# --- Payload builders used by tests ---
-
-
-def build_logsrv_bootstrap_payload():
-    return _BOOTSTRAP_PAYLOAD
-
-
-def build_logsrv_service_map_payload():
-    return build_discovery_payload(LOGSRV_INTERFACE_GUIDS)

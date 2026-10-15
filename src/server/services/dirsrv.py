@@ -22,7 +22,6 @@ from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
     build_blob_reply,
-    build_discovery_payload,
     build_static_reply,
     build_tagged_reply_dword,
     build_tagged_reply_var,
@@ -1699,7 +1698,3 @@ def property_mnid(properties, name):
 
 
 # --- Payload builders used by tests ---
-
-
-def build_dirsrv_service_map_payload():
-    return build_discovery_payload(DIRSRV_INTERFACE_GUIDS)
