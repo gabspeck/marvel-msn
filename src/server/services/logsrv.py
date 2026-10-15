@@ -45,6 +45,7 @@ LOGSRV_SELECTOR_NTLM_BOOTSTRAP = 0x11  # account record fetch once the context i
 # under the pipe's NTLM context. The plaintext originals stay for the RTM
 # client, which reaches the same dialogs on 0x0A and 0x0B. Only the address
 # commit is shared: BILLADD submits it on 0x0C, in the clear, in both builds.
+LOGSRV_SELECTOR_SIGNED_PASSWORD_CHANGE = 0x12
 LOGSRV_SELECTOR_SIGNED_BILLING_QUERY = 0x13
 LOGSRV_SELECTOR_SIGNED_PM_COMMIT = 0x14
 
@@ -128,6 +129,8 @@ class LogsrvHandler(ServiceHandler):
             reply_payload = _handle_ntlm_bootstrap(self.session)
         elif selector == LOGSRV_SELECTOR_PASSWORD_CHANGE:
             reply_payload = _handle_password_change(payload, self.session)
+        elif selector == LOGSRV_SELECTOR_SIGNED_PASSWORD_CHANGE:
+            reply_payload = _handle_signed_password_change(payload, self.session, self.security)
         elif selector == LOGSRV_SELECTOR_SIGNUP_POST_TRANSFER:
             reply_payload = _handle_signup_post_transfer(payload)
         elif selector == LOGSRV_SELECTOR_SIGNUP_QUERY:
@@ -710,16 +713,56 @@ def _handle_password_change(request_payload, session):
     if len(send_params) > 1 and isinstance(send_params[1], VarParam):
         new_pw = send_params[1].data.split(b"\x00", 1)[0].decode("ascii", errors="replace")
 
+    return _change_password(old_pw, new_pw, session)
+
+
+def _handle_signed_password_change(request_payload, session, security):
+    """OSR2 selector 0x12: sealed current/new ASCIIZ passwords, then a seal token.
+
+    MCM.DLL's ChangePassword dialog @ 0x7f642c4b copies both strings including
+    their terminators into one buffer (@ 0x7f642ead), seals their combined
+    length (@ 0x7f642efa), and requests an unsealed status DWORD (@ 0x7f642f3f).
+    Each password edit permits 16 characters.
+    """
+    send_params, _ = parse_request_params(request_payload)
+    if (
+        security is None
+        or len(send_params) != 2
+        or not all(isinstance(p, VarParam) for p in send_params)
+    ):
+        log.warning("signed_password_change refused reason=missing_context_or_params")
+        return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
+
+    sealed, token = (p.data for p in send_params)
+    if (
+        not 2 <= len(sealed) <= 34
+        or len(token) != _ntlm.SEAL_TOKEN_LEN
+        or token[:4] != b"\x01\x00\x00\x00"
+    ):
+        log.warning("signed_password_change refused reason=malformed")
+        return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
+
+    plaintext, intact = security.unseal(sealed, token)
+    if not intact:
+        log.warning("signed_password_change refused reason=invalid_seal")
+        return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
+
+    fields = plaintext.split(b"\x00")
+    if len(fields) != 3 or fields[2] or any(len(p) > 16 for p in fields[:2]):
+        log.warning("signed_password_change refused reason=malformed_passwords")
+        return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
+
+    old_pw, new_pw = (p.decode("ascii", errors="replace") for p in fields[:2])
+    return _change_password(old_pw, new_pw, session)
+
+
+def _change_password(old_pw, new_pw, session):
     user = session.user
     if not session.is_authenticated:
         log.warning("password_change_reply status=%d reason=not_signed_in", PASSWORD_CHANGE_REFUSED)
         return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
     if old_pw is None or new_pw is None:
-        log.warning(
-            "password_change_reply status=%d reason=malformed params=%d",
-            PASSWORD_CHANGE_REFUSED,
-            len(send_params),
-        )
+        log.warning("password_change_reply status=%d reason=malformed", PASSWORD_CHANGE_REFUSED)
         return build_tagged_reply_dword(PASSWORD_CHANGE_REFUSED)
     if old_pw != user.password:
         log.info(

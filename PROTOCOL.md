@@ -592,6 +592,7 @@ All LOGSRV methods below run on selector **0x06**. Opcodes:
 | 0x0C | OI commit (billing Name and Address OK) | 0x2FC OI buffer fragmented as 0x06 head + 0xE6/0xE7 continuations | `0x84` var, first dword = status (see 7.1.3) |
 | 0x0D | Post-signup query | 3 dwords (country_id, 0, 0) + recv `0x84` | empty `0x84` |
 | 0x0E | Phone-book update | `0x03` dword=8, recv `0x83` | `0x83` dword=0 stub (see Open Questions) |
+| 0x12 | OSR2 change password | `0x04` sealed old/new ASCIIZ strings + `0x04` 16-byte seal token; recv `0x83` | unsealed `0x83` result (0 = success; see 7.1.6) |
 
 #### 7.1.0 Login credential blob (selector 0x00) — 0x58 bytes
 
@@ -743,6 +744,25 @@ After login reply:
 
 DIRSRV pipes close first, LOGSRV last. Server does not reply to any of
 these — client tears down unilaterally.
+
+#### 7.1.6 OSR2 password change (0x12)
+
+Source: static analysis of the OSR2 VM's `WINDOWS\SYSTEM\MCM.DLL`, image base
+`0x7f640000`, ChangePassword dialog procedure `0x7f642c4b`.
+
+The dialog opens LOGSRV and runs `CAuthenticator::StAuthenticate`
+(`0x7f644d2b`) on that pipe before requesting opcode `0x12` (`0x7f642e8b`).
+At `0x7f642ead..0x7f642ef2`, it concatenates the current and new passwords,
+including both NUL terminators: `old_password\0new_password\0`. Both edit
+controls permit 16 characters, so the plaintext spans 2–34 bytes. Its length
+is `strlen(old) + strlen(new) + 2`; there are no fixed-width password slots.
+
+At `0x7f642efa`, `FProcessMessage` seals the combined buffer using the pipe's
+NTLM context. The request sends ciphertext first (`0x7f642f1b`), then the
+16-byte seal token (`0x7f642f2e`). It requests one status DWORD
+(`0x7f642f3f`); the reply is not sealed. Status 0 takes the success path at
+`0x7f642ffe`. The server verifies the seal and current password before updating
+the signed-in account; failures return nonzero status.
 
 ### 7.2 DIRSRV
 

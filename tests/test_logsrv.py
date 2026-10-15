@@ -3,11 +3,15 @@
 import struct
 import unittest
 
+from spnego._ntlm_raw.crypto import compute_response_v1, lmowfv1, ntowfv1
+from spnego._ntlm_raw.messages import Challenge, Negotiate
+
 from server.models import DwordParam, EndMarker, VarParam
 from server.mpc import (
     build_tagged_reply_var,
     parse_tagged_params,
 )
+from server.services import _ntlm
 from server.services.logsrv import (
     BOOTSTRAP_PAYLOAD,
     LOGIN_BLOB_LEN,
@@ -15,6 +19,7 @@ from server.services.logsrv import (
     LOGIN_BLOB_PASSWORD_OFFSET,
     LOGIN_RESULT_BAD_MEMBER_ID,
     LOGIN_RESULT_BAD_PASSWORD,
+    LOGSRV_SELECTOR_SIGNED_PASSWORD_CHANGE,
     LogsrvHandler,
     _handle_billing_query,
     _handle_login,
@@ -32,6 +37,7 @@ from .support import (
     ADMIN_PASSWORD,
     SUBSCRIBER,
     SUBSCRIBER_PASSWORD,
+    reply_payload,
     signed_in,
 )
 
@@ -194,6 +200,163 @@ class TestLOGSRVPasswordChange(unittest.TestCase):
         reply = _handle_password_change(self._request(ADMIN_PASSWORD, "newpass"), Session())
         self.assertNotEqual(struct.unpack_from("<I", reply, 1)[0], 0)
         self.assertIsNotNone(app_store.users.authenticate(ADMIN, ADMIN_PASSWORD))
+
+
+class TestLOGSRVSignedPasswordChange(unittest.TestCase):
+    def setUp(self):
+        reset_app_store()
+        self.addCleanup(reset_app_store)
+        self.handler, self.client = self._authenticate(ADMIN_PASSWORD)
+
+    def _call(self, handler, selector, payload):
+        return reply_payload(handler.handle_request(0x06, selector, 0, payload, 1, 0))
+
+    def _authenticate(self, password):
+        handler = LogsrvHandler(3, "LOGSRV", Session())
+        flags = 0x82A2
+        request = build_tagged_reply_var(0x04, _ntlm.wrap_token(Negotiate(flags=flags).pack()))
+        reply = self._call(handler, 0x0F, request + b"\x84")
+        _, token = _ntlm.unwrap_token(parse_tagged_params(reply)[0].data)
+        challenge = Challenge.unpack(token).server_challenge
+        _, lm_response, _ = compute_response_v1(
+            flags,
+            ntowfv1(password),
+            lmowfv1(password),
+            challenge,
+            b"\x00" * 8,
+            no_lm_response=False,
+        )
+        # The OSR2 AUTHENTICATE stops at byte 52 and fills only the LM slot.
+        fields = (lm_response, b"", b"", ADMIN.encode(), b"WIN95")
+        token = b"NTLMSSP\x00" + struct.pack("<I", 3)
+        offset = 52
+        for field in fields:
+            token += struct.pack("<HHI", len(field), len(field), offset)
+            offset += len(field)
+        token += b"".join(fields)
+        request = build_tagged_reply_var(0x04, _ntlm.wrap_token(token)) + b"\x82\x83"
+        result = parse_tagged_params(self._call(handler, 0x10, request))
+        if result[0].value != 4:
+            return handler, None
+        auth = _ntlm.parse_authenticate(token, flags)
+        return handler, _ntlm.establish(auth, challenge, password)
+
+    def _request(self, plaintext):
+        sealed, token = self.client.seal(plaintext)
+        return self._params(sealed, token)
+
+    @staticmethod
+    def _params(sealed, token):
+        return build_tagged_reply_var(0x04, sealed) + build_tagged_reply_var(0x04, token) + b"\x83"
+
+    def _change(self, request):
+        reply = self._call(self.handler, LOGSRV_SELECTOR_SIGNED_PASSWORD_CHANGE, request)
+        self.assertEqual(len(reply), 5)
+        self.assertEqual(reply[0], 0x83)
+        return struct.unpack_from("<I", reply, 1)[0]
+
+    def _assert_unchanged(self, request):
+        self.assertNotEqual(self._change(request), 0)
+        self.assertEqual(app_store.users.get_user(ADMIN).password, ADMIN_PASSWORD)
+        self.assertEqual(self.handler.session.user.password, ADMIN_PASSWORD)
+
+    def test_change_updates_store_session_and_next_ntlm_sign_in(self):
+        self.assertIsNotNone(self.client)
+        self.assertEqual(
+            self._change(self._request(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00")), 0
+        )
+        self.assertEqual(self.handler.session.user.password, "newpass1")
+        self.assertIsNotNone(app_store.users.authenticate(ADMIN, "newpass1"))
+        self.assertIsNone(app_store.users.authenticate(ADMIN, ADMIN_PASSWORD))
+        old_handler, old_client = self._authenticate(ADMIN_PASSWORD)
+        self.assertIsNone(old_client)
+        self.assertFalse(old_handler.session.is_authenticated)
+        new_handler, new_client = self._authenticate("newpass1")
+        self.assertIsNotNone(new_client)
+        self.assertTrue(new_handler.session.is_authenticated)
+
+    def test_wrong_current_password_is_refused_and_stream_remains_usable(self):
+        self._assert_unchanged(self._request(b"wrong\x00newpass1\x00"))
+        self.assertEqual(
+            self._change(self._request(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00")), 0
+        )
+
+    def test_missing_context_is_refused(self):
+        self.handler.security = None
+        self._assert_unchanged(self._request(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00"))
+
+    def test_anonymous_session_is_refused(self):
+        self.handler.session.sign_out()
+        self.assertNotEqual(
+            self._change(self._request(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00")), 0
+        )
+        self.assertEqual(app_store.users.get_user(ADMIN).password, ADMIN_PASSWORD)
+        self.assertFalse(self.handler.session.is_authenticated)
+
+    def test_malformed_parameters_are_refused(self):
+        for request in (
+            b"",
+            b"\x83",
+            build_tagged_reply_var(0x04, b"x" * 16) + b"\x83",
+            self._params(b"x" * 16, b"x" * 15),
+            self._params(b"x" * 16, b"x" * 17),
+            self._params(b"x" * 16, b"\x02" + b"\x00" * 15),
+            self._params(b"x" * 35, b"\x01" + b"\x00" * 15),
+            self._params(b"", b"\x01" + b"\x00" * 15),
+            b"\x03\x00\x00\x00\x00" + build_tagged_reply_var(0x04, b"x" * 16),
+        ):
+            with self.subTest(request=request):
+                self._assert_unchanged(request)
+
+    def test_sealed_malformed_password_buffers_are_refused(self):
+        for plaintext in (
+            b"old\x00new",
+            b"oldnew",
+            b"old\x00new\x00extra",
+            b"old\x00new\x00\x00",
+            b"x" * 17 + b"\x00new\x00",
+            b"old\x00" + b"x" * 17 + b"\x00",
+        ):
+            with self.subTest(plaintext=plaintext):
+                self._assert_unchanged(self._request(plaintext))
+
+    def test_corrupt_ciphertext_is_refused(self):
+        sealed, token = self.client.seal(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00")
+        sealed = bytes([sealed[0] ^ 1]) + sealed[1:]
+        self._assert_unchanged(self._params(sealed, token))
+
+    def test_corrupt_checksum_is_refused(self):
+        sealed, token = self.client.seal(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00")
+        token = token[:8] + bytes([token[8] ^ 1]) + token[9:]
+        self._assert_unchanged(self._params(sealed, token))
+
+    def test_wrong_sequence_is_refused(self):
+        self.client.seal(b"skipped message")
+        self._assert_unchanged(self._request(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00"))
+
+    def test_password_change_preserves_the_existing_context(self):
+        security = self.handler.security
+        self.assertEqual(
+            self._change(self._request(ADMIN_PASSWORD.encode() + b"\x00newpass1\x00")), 0
+        )
+        self.assertIs(self.handler.security, security)
+        self.assertEqual(self._change(self._request(b"newpass1\x00anotherpass\x00")), 0)
+        reply = parse_tagged_params(self._call(self.handler, 0x13, b"\x84\x84"))
+        plaintext, intact = self.client.unseal(reply[0].data, reply[1].data)
+        self.assertTrue(intact)
+        self.assertEqual(len(plaintext), 0x41C)
+
+    def test_sixteen_character_passwords_fit(self):
+        password = "0123456789abcdef"
+        self.assertEqual(
+            self._change(
+                self._request(ADMIN_PASSWORD.encode() + b"\x00" + password.encode() + b"\x00")
+            ),
+            0,
+        )
+        self.assertEqual(
+            self._change(self._request(password.encode() + b"\x00fedcba9876543210\x00")), 0
+        )
 
 
 class TestLOGSRVBillingQuery(unittest.TestCase):
