@@ -252,7 +252,7 @@ class TestIteratorCancel(unittest.TestCase):
     """
 
     def test_is_iterator_cancel_recognizes_single_0f(self):
-        self.assertTrue(is_iterator_cancel(b"\x0F"))
+        self.assertTrue(is_iterator_cancel(b"\x0f"))
 
     def test_is_iterator_cancel_rejects_empty(self):
         self.assertFalse(is_iterator_cancel(b""))
@@ -262,10 +262,10 @@ class TestIteratorCancel(unittest.TestCase):
         self.assertFalse(is_iterator_cancel(b"\x01\x00\x85"))
 
     def test_is_iterator_cancel_rejects_two_byte_0f(self):
-        self.assertFalse(is_iterator_cancel(b"\x0F\x00"))
+        self.assertFalse(is_iterator_cancel(b"\x0f\x00"))
 
     def test_is_iterator_cancel_rejects_other_single_byte(self):
-        for b in (b"\x01", b"\xFF", b"\x87", b"\x00", b"\x10"):
+        for b in (b"\x01", b"\xff", b"\x87", b"\x00", b"\x10"):
             self.assertFalse(is_iterator_cancel(b), msg=f"false-positive on {b!r}")
 
 

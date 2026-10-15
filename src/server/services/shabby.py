@@ -29,11 +29,11 @@ from ..store import fixtures
 # Format byte values — top byte of the Shabby ID DWORD.
 # Used by MOSSHELL LoadShabbyIconForNode switch (mf path) and by us to
 # namespace the SHABBY_REGISTRY (h path doesn't care).
-FORMAT_EMF = 0x01            # GetEnhMetaFileA
-FORMAT_ICO = 0x02            # ExtractIconExA (ICO/EXE/DLL) — h property
-FORMAT_WMF_RAW = 0x03        # LoadAndCallW Meta_init/add/play/close
+FORMAT_EMF = 0x01  # GetEnhMetaFileA
+FORMAT_ICO = 0x02  # ExtractIconExA (ICO/EXE/DLL) — h property
+FORMAT_WMF_RAW = 0x03  # LoadAndCallW Meta_init/add/play/close
 FORMAT_WMF_PLACEABLE = 0x04  # magic 0x9AC6CDD7
-FORMAT_BMP = 0x05            # LoadImageA(IMAGE_BITMAP, LR_LOADFROMFILE | LR_DEFAULTSIZE)
+FORMAT_BMP = 0x05  # LoadImageA(IMAGE_BITMAP, LR_LOADFROMFILE | LR_DEFAULTSIZE)
 
 # Not an image. The DSNED Download-and-Run page (DLRed, App #22) uploads the
 # authored file under this format after running it through

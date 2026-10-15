@@ -188,7 +188,9 @@ class QuerySpec:
         (IRCS.DLL) and emits one term per token, so this is the token list the
         user actually typed.
         """
-        return [n.value for n in self._walk() if isinstance(n, AirTerm) and isinstance(n.value, str)]
+        return [
+            n.value for n in self._walk() if isinstance(n, AirTerm) and isinstance(n.value, str)
+        ]
 
     def time_properties(self):
         """GUIDs of the properties a time term filters on.

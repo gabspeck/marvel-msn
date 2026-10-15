@@ -276,7 +276,9 @@ def load_title(path):
         available = {"/".join(entry) for entry in ole.listdir(streams=True)}
         refs = {}
         for storage_id in names:
-            for guid, sub_id, flags in _parse_ref(_stream(ole, f"\x03ref_{storage_id}"), storage_id):
+            for guid, sub_id, flags in _parse_ref(
+                _stream(ole, f"\x03ref_{storage_id}"), storage_id
+            ):
                 refs[(storage_id, sub_id)] = (guid, flags)
 
         for (storage_id, sub_id), (guid, flags) in sorted(refs.items()):

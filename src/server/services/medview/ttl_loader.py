@@ -52,16 +52,17 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class FaceEntry:
-    slot: int                                # CStyleSheet font key (u16)
-    face_name: str                           # LOGFONTA lfFaceName
+    slot: int  # CStyleSheet font key (u16)
+    face_name: str  # LOGFONTA lfFaceName
 
 
 @dataclass(frozen=True)
 class Control:
     """Base BBCTL site record. `name` is the raw site name from the
     descriptor (e.g. "Caption1", "Shortcut1=R", "CaptionButton1R")."""
-    seq: int                                 # 1-based descriptor sequence
-    flags: int                               # descriptor flags u32
+
+    seq: int  # 1-based descriptor sequence
+    flags: int  # descriptor flags u32
     name: str
 
 
@@ -128,29 +129,30 @@ class CaptionControl(Control):
     `back_color`. Default observed value `0xC8D0D8` = COLOR_3DFACE.
     Probe variants exhibit `0x0000FF` (red) and `0xFFF0FF` (ivory) for
     Caption 2 / 3 of `captions_test.ttl` page 0."""
+
     text: str
     font_name: str
-    size_pt: int                             # font_size_cy_lo // 10000
-    weight: int                              # 400 = FW_NORMAL
-    rect_himetric: tuple[int, int, int, int] # (L, T, R, B) HIMETRIC (0.01mm)
+    size_pt: int  # font_size_cy_lo // 10000
+    weight: int  # 400 = FW_NORMAL
+    rect_himetric: tuple[int, int, int, int]  # (L, T, R, B) HIMETRIC (0.01mm)
     italic: bool = False
     underline: bool = False
     strikeout: bool = False
-    charset: int = 0                         # LOGFONTA lfCharSet (WORD)
-    back_color: int = 0xC8D0D8               # COLORREF stock prop (font_pre_clsid)
-    bevel_width: int = 0                     # LONG
-    frame_style: int = 0                     # LONG
-    bevel_hilight: int = 0xFFFFFF            # COLORREF (v ≥ 3)
-    bevel_shadow: int = 0                    # COLORREF (v ≥ 3)
-    frame_color: int = 0                     # COLORREF (v ≥ 2)
-    id_tag: int = -1                         # LONG; -1 = plain caption,
-                                             # 0x1900..0x1903 = dynamic tag,
-                                             # else script binding
-    word_wrap: bool = False                  # BOOL (post-strCaption, default-only)
-    auto_size: bool = False                  # BOOL (post-strCaption, default-only)
-    alignment: int = 0                       # LONG (post-strCaption, default-only)
-    transparent: bool = True                 # LONG (post-strCaption, default-only)
-    color_rgb: int = 0                       # back_color alias (back-compat)
+    charset: int = 0  # LOGFONTA lfCharSet (WORD)
+    back_color: int = 0xC8D0D8  # COLORREF stock prop (font_pre_clsid)
+    bevel_width: int = 0  # LONG
+    frame_style: int = 0  # LONG
+    bevel_hilight: int = 0xFFFFFF  # COLORREF (v ≥ 3)
+    bevel_shadow: int = 0  # COLORREF (v ≥ 3)
+    frame_color: int = 0  # COLORREF (v ≥ 2)
+    id_tag: int = -1  # LONG; -1 = plain caption,
+    # 0x1900..0x1903 = dynamic tag,
+    # else script binding
+    word_wrap: bool = False  # BOOL (post-strCaption, default-only)
+    auto_size: bool = False  # BOOL (post-strCaption, default-only)
+    alignment: int = 0  # LONG (post-strCaption, default-only)
+    transparent: bool = True  # LONG (post-strCaption, default-only)
+    color_rgb: int = 0  # back_color alias (back-compat)
 
 
 @dataclass(frozen=True)
@@ -162,6 +164,7 @@ class _CompoundControl(Control):
     `inline_tail[0..16]` — the same landmark `_decode_caption` reads.
     `raw_block` is the descriptor's inline tail (decoders that aren't
     yet RE'd carry the bytes through for offline inspection)."""
+
     rect_himetric: tuple[int, int, int, int]
     raw_block: bytes
 
@@ -176,6 +179,7 @@ class StoryControl(_CompoundControl):
     name match — content_proxy_ref is sourced from the matched proxy
     entry rather than RE'd from the persist stream; deeper per-field
     decoding remains TODO (see `docs/re-passes/BBCTL.OCX.md`)."""
+
     content_proxy_ref: int | None = None
     content: TextRunsContent | TextTreeContent | None = None
 
@@ -242,6 +246,7 @@ class PrintPsfControl(_CompoundControl):
 class UnknownControl(Control):
     """Fallback when neither CLSID nor name prefix matches a known BBCTL
     kind. Carries `raw_block` + `clsid` for offline inspection."""
+
     raw_block: bytes
     clsid: bytes | None = None
 
@@ -250,15 +255,16 @@ class UnknownControl(Control):
 class LoadedPage:
     """One CBForm-rooted page. Per-page state lives here; title-level
     state (caption / window_rect / font_table) stays on `LoadedTitle`."""
-    name: str                                # CBForm.<table>/<slot> properties.name
-    section_name: str                        # owning CSection name; CTitle name at root
+
+    name: str  # CBForm.<table>/<slot> properties.name
+    section_name: str  # owning CSection name; CTitle name at root
     cbform_table: int
     cbform_slot: int
     cvform_handle: int | None
-    page_bg: int                             # CVForm Page background COLORREF (u32 LE)
-    page_pixel_w: int                        # CVForm Page width  (px)
-    page_pixel_h: int                        # CVForm Page height (px)
-    scrollbar_flags: int                     # CVForm Page +0x18; bit0=H, bit1=V
+    page_bg: int  # CVForm Page background COLORREF (u32 LE)
+    page_pixel_w: int  # CVForm Page width  (px)
+    page_pixel_h: int  # CVForm Page height (px)
+    scrollbar_flags: int  # CVForm Page +0x18; bit0=H, bit1=V
     controls: tuple[Control, ...]
 
     @property
@@ -275,9 +281,10 @@ class LoadedTitle:
     `title.pages[i].page_bg`, etc.). The two lowering helpers
     (`lower_to_payload`, `build_all_bm_baggage`) emit per-page output.
     """
-    title_name: str                          # CTitle properties["name"]
-    caption: str                             # CBFrame caption — host window title
-    window_rect: tuple[int, int, int, int]   # CBFrame (left, top, width, height) pixels
+
+    title_name: str  # CTitle properties["name"]
+    caption: str  # CBFrame caption — host window title
+    window_rect: tuple[int, int, int, int]  # CBFrame (left, top, width, height) pixels
     font_table: tuple[FaceEntry, ...]
     pages: tuple[LoadedPage, ...] = field(default_factory=tuple)
 
@@ -306,14 +313,14 @@ def _parse_title_name(stream: bytes) -> str:
     for _ in range(count):
         namelen = stream[pos]
         pos += 1
-        prop_name = stream[pos:pos + namelen].decode("ascii", errors="replace")
+        prop_name = stream[pos : pos + namelen].decode("ascii", errors="replace")
         pos += namelen
         ptype = struct.unpack_from("<H", stream, pos)[0]
         pos += 2
-        if ptype == 0x0008:                                # VT_STRING
+        if ptype == 0x0008:  # VT_STRING
             slen = struct.unpack_from("<I", stream, pos)[0]
             pos += 4
-            data = stream[pos:pos + slen]
+            data = stream[pos : pos + slen]
             pos += slen
             if prop_name == "name":
                 return data.rstrip(b"\x00").decode("ascii", errors="replace")
@@ -337,7 +344,7 @@ def _parse_cbframe(buf: bytes) -> tuple[str, tuple[int, int, int, int]]:
     pos += 1 + name_len
     cap_len = buf[pos]
     pos += 1
-    caption = buf[pos:pos + cap_len].decode("ascii", errors="replace")
+    caption = buf[pos : pos + cap_len].decode("ascii", errors="replace")
     pos += cap_len
     rect = struct.unpack_from("<IIII", buf, pos)
     return caption, rect
@@ -368,7 +375,7 @@ def _parse_cstylesheet(buf: bytes) -> tuple[FaceEntry, ...]:
         pos += 2
         namelen = buf[pos]
         pos += 1
-        name = buf[pos:pos + namelen].decode("ascii", errors="replace")
+        name = buf[pos : pos + namelen].decode("ascii", errors="replace")
         pos += namelen
         faces.append(FaceEntry(slot=slot, face_name=name))
     return tuple(faces)
@@ -376,10 +383,10 @@ def _parse_cstylesheet(buf: bytes) -> tuple[FaceEntry, ...]:
 
 @dataclass(frozen=True)
 class _CVFormPage:
-    background: int                          # COLORREF at +0x10
-    scrollbar_flags: int                     # u32 at +0x18 (bit0=H, bit1=V)
-    width_px: int                            # u32 at +0x1C
-    height_px: int                           # u32 at +0x20
+    background: int  # COLORREF at +0x10
+    scrollbar_flags: int  # u32 at +0x18 (bit0=H, bit1=V)
+    width_px: int  # u32 at +0x1C
+    height_px: int  # u32 at +0x20
 
 
 def _parse_cvform_page(buf: bytes) -> _CVFormPage:
@@ -390,7 +397,9 @@ def _parse_cvform_page(buf: bytes) -> _CVFormPage:
     the +0x18 dword toggles between the variants.
     """
     background, _mouse_cursor, scrollbar_flags, width_px, height_px = struct.unpack_from(
-        "<IIIII", buf, 0x10,
+        "<IIIII",
+        buf,
+        0x10,
     )
     return _CVFormPage(
         background=background,
@@ -416,15 +425,16 @@ class _SiteDescriptor:
     `clsid` is the looked-up 16-B class CLSID (or None when the form
     has no matching slot).
     """
+
     seq: int
     flags: int
     name: str
-    size: int                                # descriptor.size — semantic open
+    size: int  # descriptor.size — semantic open
     descriptor_off: int
-    name_end: int                            # offset of trailing NUL
+    name_end: int  # offset of trailing NUL
     inline_tail: bytes
-    class_index: int                         # `flags & 0xFF`
-    clsid: bytes | None                      # `class_table[class_index]` or None
+    class_index: int  # `flags & 0xFF`
+    clsid: bytes | None  # `class_table[class_index]` or None
 
 
 # `0e f1 28 57` = first 4 bytes of MS Forms 1.0 Form CLSID
@@ -488,7 +498,7 @@ def _parse_cvform_class_table(raw: bytes) -> tuple[bytes, ...]:
     out: list[bytes] = []
     pos = _CVFORM_CLASS_TABLE_OFF
     while pos + 16 <= len(raw):
-        candidate = bytes(raw[pos:pos + 16])
+        candidate = bytes(raw[pos : pos + 16])
         if candidate not in _BBCTL_CLSIDS:
             break
         out.append(candidate)
@@ -505,9 +515,9 @@ def _parse_cvform_class_table(raw: bytes) -> tuple[bytes, ...]:
 # wire because the remaining bytes hold per-control inline data.
 _SITE_FIXED_TAIL = 28
 
-_SITE_NAME_FALLBACK_SLOT = 8                       # last-desc fallback
-_SITE_NAME_MAX = 64                                # safety cap for NUL scan
-_SITE_RECT_MAX_HIMETRIC = 50000                    # ~520 mm — exceeds Win95 page extents
+_SITE_NAME_FALLBACK_SLOT = 8  # last-desc fallback
+_SITE_NAME_MAX = 64  # safety cap for NUL scan
+_SITE_RECT_MAX_HIMETRIC = 50000  # ~520 mm — exceeds Win95 page extents
 
 
 def _scan_site_name_in_slot(raw: bytes, name_off: int, slot_end: int) -> int:
@@ -519,7 +529,7 @@ def _scan_site_name_in_slot(raw: bytes, name_off: int, slot_end: int) -> int:
     Names whose user-set length exactly fills the slot (no NUL,
     rect.left LSB starts at slot end) extend to `slot_end`."""
     end = name_off
-    while end < slot_end and 0x20 <= raw[end] <= 0x7e:
+    while end < slot_end and 0x20 <= raw[end] <= 0x7E:
         end += 1
     return end
 
@@ -594,7 +604,7 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
             pos = m + 4
             continue
         marker_offs.append(seq_off)
-        pos = seq_off + 16 + 1                     # past header; name handled below
+        pos = seq_off + 16 + 1  # past header; name handled below
 
     # Pass 2: build descriptors using inter-marker distance for slot size.
     descriptors: list[_SiteDescriptor] = []
@@ -603,9 +613,7 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
         name_off = seq_off + 16
         if idx + 1 < len(marker_offs):
             next_seq_off = marker_offs[idx + 1]
-            slot_size = (
-                next_seq_off - seq_off - 16 - _SITE_FIXED_TAIL
-            )
+            slot_size = next_seq_off - seq_off - 16 - _SITE_FIXED_TAIL
         else:
             next_seq_off = end_of_list
             slot_size = _last_descriptor_slot(raw, name_off, end_of_list)
@@ -620,17 +628,19 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
             clsid = class_table[class_index]
         if clsid is None:
             clsid = sole_clsid
-        descriptors.append(_SiteDescriptor(
-            seq=seq,
-            flags=flags,
-            name=name,
-            size=size,
-            descriptor_off=seq_off,
-            name_end=slot_end,                     # inline_tail starts at rect
-            inline_tail=raw[slot_end:next_seq_off],
-            class_index=class_index,
-            clsid=clsid,
-        ))
+        descriptors.append(
+            _SiteDescriptor(
+                seq=seq,
+                flags=flags,
+                name=name,
+                size=size,
+                descriptor_off=seq_off,
+                name_end=slot_end,  # inline_tail starts at rect
+                inline_tail=raw[slot_end:next_seq_off],
+                class_index=class_index,
+                clsid=clsid,
+            )
+        )
     return tuple(descriptors)
 
 
@@ -639,15 +649,15 @@ def _walk_cbform(raw: bytes) -> tuple[_SiteDescriptor, ...]:
 # decompile + byte-trace against tests/assets/{captions_test,all_controls,
 # multi_page_title}.ttl fixtures.
 
-_FONT_PRE_CLSID_BYTES = 6                                  # 6-B wrapper before CLSID
-_FONT_PRE_CLSID_COLORREF_OFF = -5                          # COLORREF inside font_pre_clsid
-_FONT_BODY_VERSION_OFF = 0x10                              # u8 = 1
-_FONT_BODY_CHARSET_OFF = 0x11                              # u16
-_FONT_BODY_ATTRS_OFF = 0x13                                # u8: italic 0x02, underline 0x04, strikeout 0x08
-_FONT_BODY_WEIGHT_OFF = 0x14                               # u16
-_FONT_BODY_CY_LO_OFF = 0x16                                # u32 = pt * 10000
-_FONT_BODY_NAME_LEN_OFF = 0x1A                             # u8
-_FONT_BODY_NAME_OFF = 0x1B                                 # N B ASCII
+_FONT_PRE_CLSID_BYTES = 6  # 6-B wrapper before CLSID
+_FONT_PRE_CLSID_COLORREF_OFF = -5  # COLORREF inside font_pre_clsid
+_FONT_BODY_VERSION_OFF = 0x10  # u8 = 1
+_FONT_BODY_CHARSET_OFF = 0x11  # u16
+_FONT_BODY_ATTRS_OFF = 0x13  # u8: italic 0x02, underline 0x04, strikeout 0x08
+_FONT_BODY_WEIGHT_OFF = 0x14  # u16
+_FONT_BODY_CY_LO_OFF = 0x16  # u32 = pt * 10000
+_FONT_BODY_NAME_LEN_OFF = 0x1A  # u8
+_FONT_BODY_NAME_OFF = 0x1B  # N B ASCII
 
 # Border / class-specific props directly after Font name (no padding).
 # Offsets relative to (font_off + 0x1B + name_len).
@@ -727,24 +737,31 @@ def _decode_label_persist(
     if body_start + _FONT_BODY_NAME_LEN_OFF >= len(buf):
         return out
     out["charset"] = struct.unpack_from(
-        "<H", buf, font_off + _FONT_BODY_CHARSET_OFF,
+        "<H",
+        buf,
+        font_off + _FONT_BODY_CHARSET_OFF,
     )[0]
     attrs = buf[font_off + _FONT_BODY_ATTRS_OFF]
     out["italic"] = bool(attrs & _ATTR_ITALIC)
     out["underline"] = bool(attrs & _ATTR_UNDERLINE)
     out["strikeout"] = bool(attrs & _ATTR_STRIKEOUT)
     out["weight"] = struct.unpack_from(
-        "<H", buf, font_off + _FONT_BODY_WEIGHT_OFF,
+        "<H",
+        buf,
+        font_off + _FONT_BODY_WEIGHT_OFF,
     )[0]
     out["size_cy"] = struct.unpack_from(
-        "<I", buf, font_off + _FONT_BODY_CY_LO_OFF,
+        "<I",
+        buf,
+        font_off + _FONT_BODY_CY_LO_OFF,
     )[0]
     nlen = buf[font_off + _FONT_BODY_NAME_LEN_OFF]
     name_off = font_off + _FONT_BODY_NAME_OFF
     if name_off + nlen > len(buf):
         return out
-    out["font_name"] = buf[name_off:name_off + nlen].decode(
-        "ascii", errors="replace",
+    out["font_name"] = buf[name_off : name_off + nlen].decode(
+        "ascii",
+        errors="replace",
     )
 
     # Border + idTag + strCaption — pinned positionally.
@@ -752,22 +769,34 @@ def _decode_label_persist(
     if post_name + 0x18 > len(buf):
         return out
     out["bevel_width"] = struct.unpack_from(
-        "<i", buf, post_name + _BORDER_BEVEL_WIDTH_OFF,
+        "<i",
+        buf,
+        post_name + _BORDER_BEVEL_WIDTH_OFF,
     )[0]
     out["frame_style"] = struct.unpack_from(
-        "<i", buf, post_name + _BORDER_FRAME_STYLE_OFF,
+        "<i",
+        buf,
+        post_name + _BORDER_FRAME_STYLE_OFF,
     )[0]
     out["bevel_hilight"] = struct.unpack_from(
-        "<I", buf, post_name + _BORDER_BEVEL_HILIGHT_OFF,
+        "<I",
+        buf,
+        post_name + _BORDER_BEVEL_HILIGHT_OFF,
     )[0]
     out["bevel_shadow"] = struct.unpack_from(
-        "<I", buf, post_name + _BORDER_BEVEL_SHADOW_OFF,
+        "<I",
+        buf,
+        post_name + _BORDER_BEVEL_SHADOW_OFF,
     )[0]
     out["frame_color"] = struct.unpack_from(
-        "<I", buf, post_name + _BORDER_FRAME_COLOR_OFF,
+        "<I",
+        buf,
+        post_name + _BORDER_FRAME_COLOR_OFF,
     )[0]
     out["id_tag"] = struct.unpack_from(
-        "<i", buf, post_name + _CLABEL_ID_TAG_OFF,
+        "<i",
+        buf,
+        post_name + _CLABEL_ID_TAG_OFF,
     )[0]
 
     text_off = post_name + _CLABEL_STR_CAPTION_OFF
@@ -777,7 +806,8 @@ def _decode_label_persist(
     text_start = text_off + 1
     text_end = min(text_start + cap_len, len(buf))
     out["str_caption"] = buf[text_start:text_end].decode(
-        "ascii", errors="replace",
+        "ascii",
+        errors="replace",
     )
 
     # Post-strCaption fields. Block size = 0x0A, fits exactly into the
@@ -789,11 +819,17 @@ def _decode_label_persist(
     out["word_wrap"] = bool(buf[post_text + _POST_TEXT_WORD_WRAP_OFF])
     out["auto_size"] = bool(buf[post_text + _POST_TEXT_AUTO_SIZE_OFF])
     out["alignment"] = struct.unpack_from(
-        "<I", buf, post_text + _POST_TEXT_ALIGNMENT_OFF,
+        "<I",
+        buf,
+        post_text + _POST_TEXT_ALIGNMENT_OFF,
     )[0]
-    out["transparent"] = bool(struct.unpack_from(
-        "<I", buf, post_text + _POST_TEXT_TRANSPARENT_OFF,
-    )[0])
+    out["transparent"] = bool(
+        struct.unpack_from(
+            "<I",
+            buf,
+            post_text + _POST_TEXT_TRANSPARENT_OFF,
+        )[0]
+    )
 
     return out
 
@@ -816,8 +852,13 @@ def _decode_caption(
     buf = desc.inline_tail
     if len(buf) < 16:
         return CaptionControl(
-            seq=desc.seq, flags=desc.flags, name=desc.name,
-            text="", font_name="", size_pt=0, weight=0,
+            seq=desc.seq,
+            flags=desc.flags,
+            name=desc.name,
+            text="",
+            font_name="",
+            size_pt=0,
+            weight=0,
             rect_himetric=(0, 0, 0, 0),
         )
     rect = struct.unpack_from("<iiii", buf, 0x00)
@@ -834,8 +875,13 @@ def _decode_caption(
                 break
         else:
             return CaptionControl(
-                seq=desc.seq, flags=desc.flags, name=desc.name,
-                text="", font_name="", size_pt=0, weight=0,
+                seq=desc.seq,
+                flags=desc.flags,
+                name=desc.name,
+                text="",
+                font_name="",
+                size_pt=0,
+                weight=0,
                 rect_himetric=rect,
             )
 
@@ -888,11 +934,7 @@ def _decode_compound(
     region) until BBCTL.OCX persist functions are RE'd."""
     buf = desc.inline_tail
     base = 1 if buf[:1] == b"\x00" else 0
-    rect = (
-        struct.unpack_from("<iiii", buf, base)
-        if len(buf) >= base + 16
-        else (0, 0, 0, 0)
-    )
+    rect = struct.unpack_from("<iiii", buf, base) if len(buf) >= base + 16 else (0, 0, 0, 0)
     return ctor(
         seq=desc.seq,
         flags=desc.flags,
@@ -919,7 +961,7 @@ def _decode_unknown(desc: _SiteDescriptor, property_block: bytes) -> UnknownCont
 # checked before Caption.
 _BBCTL_CTOR: dict[str, type[_CompoundControl] | None] = {
     "Story": StoryControl,
-    "Caption": None,                                       # handled by _decode_caption
+    "Caption": None,  # handled by _decode_caption
     "Audio": AudioControl,
     "CaptionButton": CaptionButtonControl,
     "Outline": OutlineControl,
@@ -934,8 +976,16 @@ _BBCTL_CTOR: dict[str, type[_CompoundControl] | None] = {
 # `CaptionButton` not `Caption`, and "PictureButton1" matches
 # `PictureButton` not `Picture`. Only used when CLSID dispatch fails.
 _NAME_PREFIX_ORDER: tuple[str, ...] = (
-    "CaptionButton", "Caption", "Story", "Audio", "Outline", "Shortcut",
-    "PictureButton", "Picture", "PrintPsf", "Psf",
+    "CaptionButton",
+    "Caption",
+    "Story",
+    "Audio",
+    "Outline",
+    "Shortcut",
+    "PictureButton",
+    "Picture",
+    "PrintPsf",
+    "Psf",
 )
 
 
@@ -958,7 +1008,7 @@ def _slice_property_region(
     blocks: dict[int, bytes] = {}
     pos = 0
     for desc in sorted(descriptors, key=lambda d: d.seq):
-        blocks[desc.seq] = bytes(available[pos:pos + desc.size])
+        blocks[desc.seq] = bytes(available[pos : pos + desc.size])
         pos += desc.size
     return blocks
 
@@ -990,7 +1040,10 @@ def _decode_descriptor(
     ctor = _BBCTL_CTOR[cls]
     if ctor is None:
         return _decode_caption(
-            desc, property_block, shared_record_buf, shared_record_off,
+            desc,
+            property_block,
+            shared_record_buf,
+            shared_record_off,
         )
     return _decode_compound(desc, ctor, property_block)
 
@@ -1032,8 +1085,10 @@ def _decode_controls(raw: bytes) -> tuple[Control, ...]:
     shared_buf, clsid_offsets = _caption_record_offsets(descriptors)
     return tuple(
         _decode_descriptor(
-            d, blocks.get(d.seq, b""),
-            shared_buf, clsid_offsets.get(d.seq),
+            d,
+            blocks.get(d.seq, b""),
+            shared_buf,
+            clsid_offsets.get(d.seq),
         )
         for d in descriptors
     )
@@ -1077,6 +1132,7 @@ class _CBFormRef:
     that owns it (for content-proxy lookups). `owning_section_path` is
     `(table, slot)` for the CSection (or `None` when the form is hung
     directly off CTitle.base_forms, as in captions_test.ttl)."""
+
     table: int
     slot: int
     owning_section_path: tuple[int, int] | None
@@ -1099,7 +1155,8 @@ def _ole_path(path: tuple[int, int], suffix: str) -> list[str]:
 
 
 def _read_section(
-    ole, handles_by_storage: dict[tuple[int, int], tuple[int, ...]],
+    ole,
+    handles_by_storage: dict[tuple[int, int], tuple[int, ...]],
     path: tuple[int, int],
 ) -> SectionRecord:
     section_bytes = ole.openstream(_ole_path(path, "\x03object")).read()
@@ -1138,13 +1195,19 @@ def _enumerate_cbforms(
         except Exception as exc:
             log.info(
                 "section_parse path=%d/%d failed=%r",
-                section_path[0], section_path[1], exc,
+                section_path[0],
+                section_path[1],
+                exc,
             )
             continue
         for table, slot in _refs_to_paths(section.forms):
-            out.append(_CBFormRef(
-                table=table, slot=slot, owning_section_path=section_path,
-            ))
+            out.append(
+                _CBFormRef(
+                    table=table,
+                    slot=slot,
+                    owning_section_path=section_path,
+                )
+            )
         for sub_path in reversed(_refs_to_paths(section.sections)):
             stack.append(sub_path)
     return out
@@ -1266,13 +1329,18 @@ def _chase_story_content(
         except (OSError, ValueError) as exc:
             log.info(
                 "story_chase section=%d/%d proxy=%s parse_failed=%r",
-                section_path[0], section_path[1], proxy_name, exc,
+                section_path[0],
+                section_path[1],
+                proxy_name,
+                exc,
             )
             return story
         if target is None:
             log.info(
                 "story_chase section=%d/%d proxy=%s no_text_target",
-                section_path[0], section_path[1], proxy_name,
+                section_path[0],
+                section_path[1],
+                proxy_name,
             )
             return story
         proxy_key, content_path = target
@@ -1285,27 +1353,41 @@ def _chase_story_content(
                 log.info(
                     "story_chase section=%d/%d proxy=%s content=%d/%d "
                     "is_texttree=1 segments=%d pictures=%d",
-                    section_path[0], section_path[1], proxy_name,
-                    content_path[0], content_path[1],
-                    len(decoded.segments), len(decoded.picture_refs),
+                    section_path[0],
+                    section_path[1],
+                    proxy_name,
+                    content_path[0],
+                    content_path[1],
+                    len(decoded.segments),
+                    len(decoded.picture_refs),
                 )
             else:
                 decoded = decode_textruns(content_raw)
         except (OSError, ValueError, NotImplementedError) as exc:
             log.info(
                 "story_chase section=%d/%d proxy=%s content=%d/%d decode_failed=%r",
-                section_path[0], section_path[1], proxy_name,
-                content_path[0], content_path[1], exc,
+                section_path[0],
+                section_path[1],
+                proxy_name,
+                content_path[0],
+                content_path[1],
+                exc,
             )
             return story
         return StoryControl(
-            seq=story.seq, flags=story.flags, name=story.name,
-            rect_himetric=story.rect_himetric, raw_block=story.raw_block,
-            content_proxy_ref=proxy_key, content=decoded,
+            seq=story.seq,
+            flags=story.flags,
+            name=story.name,
+            rect_himetric=story.rect_himetric,
+            raw_block=story.raw_block,
+            content_proxy_ref=proxy_key,
+            content=decoded,
         )
     log.info(
         "story_chase section=%d/%d proxy=%s no_matching_proxy_table",
-        section_path[0], section_path[1], proxy_name,
+        section_path[0],
+        section_path[1],
+        proxy_name,
     )
     return story
 
@@ -1412,7 +1494,9 @@ def _attach_story_content(
         else:
             try:
                 section = _read_section(
-                    ole, handles_by_storage, ref.owning_section_path,
+                    ole,
+                    handles_by_storage,
+                    ref.owning_section_path,
                 )
             except (OSError, ValueError):
                 out.append(page)
@@ -1420,24 +1504,32 @@ def _attach_story_content(
         new_controls: list[Control] = []
         for c in page.controls:
             if isinstance(c, StoryControl):
-                new_controls.append(_chase_story_content(
-                    ole, section_path, section,
-                    handles_by_storage, content_class_table, c,
-                ))
+                new_controls.append(
+                    _chase_story_content(
+                        ole,
+                        section_path,
+                        section,
+                        handles_by_storage,
+                        content_class_table,
+                        c,
+                    )
+                )
             else:
                 new_controls.append(c)
-        out.append(LoadedPage(
-            name=page.name,
-            section_name=page.section_name,
-            cbform_table=page.cbform_table,
-            cbform_slot=page.cbform_slot,
-            cvform_handle=page.cvform_handle,
-            page_bg=page.page_bg,
-            page_pixel_w=page.page_pixel_w,
-            page_pixel_h=page.page_pixel_h,
-            scrollbar_flags=page.scrollbar_flags,
-            controls=tuple(new_controls),
-        ))
+        out.append(
+            LoadedPage(
+                name=page.name,
+                section_name=page.section_name,
+                cbform_table=page.cbform_table,
+                cbform_slot=page.cbform_slot,
+                cvform_handle=page.cvform_handle,
+                page_bg=page.page_bg,
+                page_pixel_w=page.page_pixel_w,
+                page_pixel_h=page.page_pixel_h,
+                scrollbar_flags=page.scrollbar_flags,
+                controls=tuple(new_controls),
+            )
+        )
     return out
 
 
@@ -1501,20 +1593,32 @@ def load_title(path: pathlib.Path) -> LoadedTitle | None:
             # form anywhere in the section tree — defensive only;
             # captions_test / msn_today / showcase all populate the tree).
             cbform_table = class_to_table["CBForm"]
-            cbform_refs = [_CBFormRef(
-                table=cbform_table, slot=0, owning_section_path=None,
-            )]
+            cbform_refs = [
+                _CBFormRef(
+                    table=cbform_table,
+                    slot=0,
+                    owning_section_path=None,
+                )
+            ]
 
         pages = [
             _build_page(
-                ole, ref, handles_by_storage, cvform_table,
+                ole,
+                ref,
+                handles_by_storage,
+                cvform_table,
                 _section_name(ole, ref.owning_section_path, title_name),
             )
             for ref in cbform_refs
         ]
         pages = _attach_story_content(
-            ole, pages, cbform_refs, handles_by_storage, content_class_table,
-            (title_table, 0), base_section,
+            ole,
+            pages,
+            cbform_refs,
+            handles_by_storage,
+            content_class_table,
+            (title_table, 0),
+            base_section,
         )
     except Exception as exc:
         log.info("load_title path=%s parse_failed=%r", path, exc)
@@ -1575,11 +1679,7 @@ def _title_captions(title: LoadedTitle) -> tuple[CaptionControl, ...]:
     """All CaptionControls across every page, in page order. Used by
     section 0 — the font/style table needs one descriptor per Caption
     (regardless of which page it lives on)."""
-    return tuple(
-        cap
-        for page in title.pages
-        for cap in page.captions
-    )
+    return tuple(cap for page in title.pages for cap in page.captions)
 
 
 def _build_section0(title: LoadedTitle) -> bytes:
@@ -1588,7 +1688,7 @@ def _build_section0(title: LoadedTitle) -> bytes:
     for face in title.font_table:
         encoded = face.face_name.encode("ascii", errors="replace")
         off = face.slot * _SEC0_FACE_ENTRY_SIZE
-        face_table[off:off + len(encoded)] = encoded
+        face_table[off : off + len(encoded)] = encoded
 
     captions = _title_captions(title)
     descriptors = bytearray()
@@ -1618,10 +1718,10 @@ def _build_section0(title: LoadedTitle) -> bytes:
             0,
             cap.weight,
         )
-        descriptor[0x20] = 1 if cap.italic else 0           # lfItalic
-        descriptor[0x21] = 1 if cap.underline else 0        # lfUnderline
-        descriptor[0x22] = 1 if cap.strikeout else 0        # lfStrikeOut
-        descriptor[0x23] = cap.charset & 0xFF               # lfCharSet
+        descriptor[0x20] = 1 if cap.italic else 0  # lfItalic
+        descriptor[0x21] = 1 if cap.underline else 0  # lfUnderline
+        descriptor[0x22] = 1 if cap.strikeout else 0  # lfStrikeOut
+        descriptor[0x23] = cap.charset & 0xFF  # lfCharSet
         descriptors += descriptor
 
     pointer_table = b"\x00" * (face_count * _SEC0_POINTER_ENTRY_SIZE)
@@ -1637,13 +1737,13 @@ def _build_section0(title: LoadedTitle) -> bytes:
         "<HHHHHHH",
         header,
         0x00,
-        0,                                                 # +0x00 reserved
+        0,  # +0x00 reserved
         descriptor_count,
         face_off,
         descriptor_off,
-        0,                                                 # +0x08 override_count
+        0,  # +0x08 override_count
         pointer_off,
-        0,                                                 # +0x0C reserved
+        0,  # +0x0C reserved
     )
     struct.pack_into("<H", header, 0x10, pointer_off)
     return bytes(header) + bytes(face_table) + bytes(descriptors) + pointer_table
@@ -1663,9 +1763,9 @@ def _scrollbar_flags_to_sec06_flag(scrollbar_flags: int) -> int:
     """
     if scrollbar_flags == 0:
         return _SEC06_FLAG_OUTER_RECT_ABSOLUTE | _SEC06_FLAG_NSR_ANCHOR_BOTTOM
-    if scrollbar_flags & 0x02:                             # V (or V|H)
+    if scrollbar_flags & 0x02:  # V (or V|H)
         return _SEC06_FLAG_OUTER_RECT_ABSOLUTE
-    if scrollbar_flags & 0x01:                             # H only — degrade to V
+    if scrollbar_flags & 0x01:  # H only — degrade to V
         log.info(
             "scrollbar_flags=H_only is unmodeled by MOSVIEW; degrading to V",
         )
@@ -1688,7 +1788,7 @@ def _build_sec06_record(page: LoadedPage, title: LoadedTitle) -> bytes:
     """
     record = bytearray(_SEC06_RECORD_SIZE)
     caption_bytes = title.caption.encode("ascii", errors="replace") + b"\x00"
-    record[0x15:0x15 + len(caption_bytes)] = caption_bytes
+    record[0x15 : 0x15 + len(caption_bytes)] = caption_bytes
     record[0x48] = _scrollbar_flags_to_sec06_flag(page.scrollbar_flags)
     left, top, width, height = title.window_rect
     struct.pack_into("<iiii", record, 0x49, left, top, width, height)
@@ -1710,13 +1810,13 @@ def lower_to_payload(title: LoadedTitle) -> bytes:
     """
     if len(title.pages) > _SEC06_MAX_RECORDS:
         raise ValueError(
-            f"title has {len(title.pages)} pages; sec06 record table "
-            f"caps at {_SEC06_MAX_RECORDS}",
+            f"title has {len(title.pages)} pages; sec06 record table caps at {_SEC06_MAX_RECORDS}",
         )
     section0 = _build_section0(title)
     sec06 = b"".join(_build_sec06_record(p, title) for p in title.pages)
     caption_text = (title.caption or title.title_name).encode(
-        "ascii", errors="replace",
+        "ascii",
+        errors="replace",
     ) + b"\x00"
     return b"".join(
         [
@@ -1753,7 +1853,7 @@ def _empty_kind5_raster(width: int, height: int) -> bytes:
         width=width,
         height=height,
         bpp=1,
-        pixel_data=b"\xFF" * pixel_byte_count,
+        pixel_data=b"\xff" * pixel_byte_count,
         trailer=build_trailer([], b""),
     )
     return build_baggage_container(raster)
@@ -1803,20 +1903,33 @@ _TAG_CURRENT_TIME = 0x1903
 # `dd` picture would have clipped to "Sunday, May 0" at the 103 px caption
 # width. TIME_NOSECONDS drops the seconds group from "h:mm:ss tt".
 _WEEKDAY_NAMES = (
-    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
 )
 _MONTH_NAMES = (
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 )
 
 
 def _format_long_date(now: datetime.datetime) -> str:
     """`GetDateFormatA(LOCALE_USER_DEFAULT, DATE_LONGDATE, …)`, en-US."""
-    return (
-        f"{_WEEKDAY_NAMES[now.weekday()]}, {_MONTH_NAMES[now.month - 1]} "
-        f"{now.day}, {now.year}"
-    )
+    return f"{_WEEKDAY_NAMES[now.weekday()]}, {_MONTH_NAMES[now.month - 1]} {now.day}, {now.year}"
 
 
 def _format_short_time(now: datetime.datetime) -> str:
@@ -1880,41 +1993,45 @@ def build_bm_baggage(
         top = _himetric_to_pixels(cap.rect_himetric[1])
         right = _himetric_to_pixels(cap.rect_himetric[2])
         bottom = _himetric_to_pixels(cap.rect_himetric[3])
-        items.append(TextItem(
-            x=left,
-            y=top,
-            text=_resolve_caption_text(cap, page, first_section_name, now),
-            font_face=cap.font_name or "Times New Roman",
-            font_height=-(cap.size_pt * 96 // 72) if cap.size_pt else -16,
-            font_weight=cap.weight or 400,
-            italic=cap.italic,
-            underline=cap.underline,
-            strikeout=cap.strikeout,
-            charset=cap.charset,
-            color_rgb=cap.color_rgb,
-            back_color=cap.back_color,
-            transparent=cap.transparent,
-            alignment=cap.alignment,
-            rect_w=max(0, right - left),
-            rect_h=max(0, bottom - top),
-            bevel_width=cap.bevel_width,
-            bevel_hilight=cap.bevel_hilight,
-            bevel_shadow=cap.bevel_shadow,
-            frame_style=cap.frame_style,
-            frame_color=cap.frame_color,
-            word_wrap=cap.word_wrap,
-            auto_size=cap.auto_size,
-        ))
+        items.append(
+            TextItem(
+                x=left,
+                y=top,
+                text=_resolve_caption_text(cap, page, first_section_name, now),
+                font_face=cap.font_name or "Times New Roman",
+                font_height=-(cap.size_pt * 96 // 72) if cap.size_pt else -16,
+                font_weight=cap.weight or 400,
+                italic=cap.italic,
+                underline=cap.underline,
+                strikeout=cap.strikeout,
+                charset=cap.charset,
+                color_rgb=cap.color_rgb,
+                back_color=cap.back_color,
+                transparent=cap.transparent,
+                alignment=cap.alignment,
+                rect_w=max(0, right - left),
+                rect_h=max(0, bottom - top),
+                bevel_width=cap.bevel_width,
+                bevel_hilight=cap.bevel_hilight,
+                bevel_shadow=cap.bevel_shadow,
+                frame_style=cap.frame_style,
+                frame_color=cap.frame_color,
+                word_wrap=cap.word_wrap,
+                auto_size=cap.auto_size,
+            )
+        )
 
     font_map = {face.slot: face.face_name for face in font_table}
     for c in page.controls:
         if not isinstance(c, StoryControl) or c.element_tree is None:
             continue
-        items.extend(story_layout.layout_story(
-            c.element_tree,
-            tuple(_himetric_to_pixels(v) for v in c.rect_himetric),
-            font_map,
-        ))
+        items.extend(
+            story_layout.layout_story(
+                c.element_tree,
+                tuple(_himetric_to_pixels(v) for v in c.rect_himetric),
+                font_map,
+            )
+        )
 
     if not items:
         return _empty_kind5_raster(page.page_pixel_w, page.page_pixel_h)
@@ -1944,7 +2061,10 @@ def build_all_bm_baggage(
     now = now or datetime.datetime.now()
     return {
         f"bm{i}": build_bm_baggage(
-            page, title.font_table, title.first_section_name, now,
+            page,
+            title.font_table,
+            title.first_section_name,
+            now,
         )
         for i, page in enumerate(title.pages)
     }

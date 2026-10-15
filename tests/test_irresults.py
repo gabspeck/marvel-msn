@@ -176,9 +176,7 @@ class TestResultRow(unittest.TestCase):
             PropInfo(_GUID_A, "a", PROP_TYPE_STRING),
             PropInfo(_GUID_B, "b", PROP_TYPE_STRING),
         ]
-        _tag, body = _split_records(
-            encode_result_row(ResultRow(1, 0, ["one", "two"]), columns)
-        )[0]
+        _tag, body = _split_records(encode_result_row(ResultRow(1, 0, ["one", "two"]), columns))[0]
         array = body[12:]
         first, second = struct.unpack_from("<II", array)
         # The slot table is 4 bytes per column, so payloads start after it.
@@ -265,9 +263,7 @@ class TestContexts(unittest.TestCase):
         record = encode_context(Context(guid_04=_GUID_A, value=7))
         tag, body = _split_records(record)[0]
         self.assertEqual(tag, TAG_CONTEXT_INFO)
-        self.assertEqual(
-            body, struct.pack("<H", 0x4) + struct.pack("<I", 7) + _GUID_A.bytes_le
-        )
+        self.assertEqual(body, struct.pack("<H", 0x4) + struct.pack("<I", 7) + _GUID_A.bytes_le)
 
     def test_flags_report_which_guids_are_present(self):
         self.assertEqual(Context().flags, 0)
@@ -281,7 +277,7 @@ class TestContexts(unittest.TestCase):
         ctx = Context(guid_04=_GUID_A, guid_14=_GUID_B, guid_24=_GUID_A)
         _tag, body = _split_records(encode_context(ctx))[0]
         guids = body[6:]
-        self.assertEqual(guids[0:16], _GUID_A.bytes_le)   # +0x24
+        self.assertEqual(guids[0:16], _GUID_A.bytes_le)  # +0x24
         self.assertEqual(guids[16:32], _GUID_B.bytes_le)  # +0x14
         self.assertEqual(guids[32:48], _GUID_A.bytes_le)  # +0x04
 

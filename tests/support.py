@@ -52,7 +52,10 @@ class RecordingConnection:
 
     def push_service_data(self, pipe_idx, host_block, label):
         packets = build_service_packet(
-            pipe_idx, host_block, self.server_seq, self.client_ack,
+            pipe_idx,
+            host_block,
+            self.server_seq,
+            self.client_ack,
         )
         self.server_seq = (self.server_seq + len(packets)) & 0x7F
         self.packets.extend(packets)

@@ -367,9 +367,7 @@ class TestQueryWWRows(unittest.TestCase):
 
     def test_handler_answers_class_1_method_12(self):
         handler = MOSABPHandler(pipe_idx=6, svc_name="MOSABP")
-        packets = handler.handle_request(
-            MOSABP_CLASS_AB, 0x0C, 0, _ww_request("", _WW_TAGS), 1, 1
-        )
+        packets = handler.handle_request(MOSABP_CLASS_AB, 0x0C, 0, _ww_request("", _WW_TAGS), 1, 1)
         self.assertIsNotNone(packets)
 
 
@@ -427,8 +425,10 @@ class TestRestrictionParsing(unittest.TestCase):
         self.assertEqual(terms, [(4, PR_ANR, "billg")])
 
     def test_res_and_wraps_a_counted_list(self):
-        raw = struct.pack("<II", RES_AND, 2) + _res_property(PR_ANR, "bill") + _res_property(
-            PR_ANR, "b"
+        raw = (
+            struct.pack("<II", RES_AND, 2)
+            + _res_property(PR_ANR, "bill")
+            + _res_property(PR_ANR, "b")
         )
         terms = parse_restriction(raw)
         self.assertEqual([t[2] for t in terms], ["bill", "b"])

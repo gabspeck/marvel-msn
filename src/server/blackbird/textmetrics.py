@@ -36,35 +36,72 @@ _DEFAULT_FACE = "arial"
 
 # Font directory: repo `binaries/fonts/`, overridable for deploys/tests.
 _FONT_DIR = Path(
-    os.environ.get(
-        "MSN_FONT_DIR", str(Path(__file__).resolve().parents[3] / "binaries" / "fonts")
-    )
+    os.environ.get("MSN_FONT_DIR", str(Path(__file__).resolve().parents[3] / "binaries" / "fonts"))
 )
 
 # face name (lowercased) -> {(bold, italic): filename}. Raster .FON faces
 # have only a regular strike set; bold/italic fall back to regular.
 _FONT_FILES: dict[str, dict[tuple[bool, bool], str]] = {
-    "arial": {(False, False): "ARIAL.TTF", (True, False): "ARIALBD.TTF",
-              (False, True): "ARIALI.TTF", (True, True): "ARIALBI.TTF"},
-    "helvetica": {(False, False): "ARIAL.TTF", (True, False): "ARIALBD.TTF",
-                  (False, True): "ARIALI.TTF", (True, True): "ARIALBI.TTF"},
-    "times new roman": {(False, False): "TIMES.TTF", (True, False): "TIMESBD.TTF",
-                        (False, True): "TIMESI.TTF", (True, True): "TIMESBI.TTF"},
-    "times": {(False, False): "TIMES.TTF", (True, False): "TIMESBD.TTF",
-              (False, True): "TIMESI.TTF", (True, True): "TIMESBI.TTF"},
-    "courier new": {(False, False): "COUR.TTF", (True, False): "COURBD.TTF",
-                    (False, True): "COURI.TTF", (True, True): "COURBI.TTF"},
-    "courier": {(False, False): "COUR.TTF", (True, False): "COURBD.TTF",
-                (False, True): "COURI.TTF", (True, True): "COURBI.TTF"},
+    "arial": {
+        (False, False): "ARIAL.TTF",
+        (True, False): "ARIALBD.TTF",
+        (False, True): "ARIALI.TTF",
+        (True, True): "ARIALBI.TTF",
+    },
+    "helvetica": {
+        (False, False): "ARIAL.TTF",
+        (True, False): "ARIALBD.TTF",
+        (False, True): "ARIALI.TTF",
+        (True, True): "ARIALBI.TTF",
+    },
+    "times new roman": {
+        (False, False): "TIMES.TTF",
+        (True, False): "TIMESBD.TTF",
+        (False, True): "TIMESI.TTF",
+        (True, True): "TIMESBI.TTF",
+    },
+    "times": {
+        (False, False): "TIMES.TTF",
+        (True, False): "TIMESBD.TTF",
+        (False, True): "TIMESI.TTF",
+        (True, True): "TIMESBI.TTF",
+    },
+    "courier new": {
+        (False, False): "COUR.TTF",
+        (True, False): "COURBD.TTF",
+        (False, True): "COURI.TTF",
+        (True, True): "COURBI.TTF",
+    },
+    "courier": {
+        (False, False): "COUR.TTF",
+        (True, False): "COURBD.TTF",
+        (False, True): "COURI.TTF",
+        (True, True): "COURBI.TTF",
+    },
     "comic sans ms": {(False, False): "COMIC.TTF", (True, False): "COMICBD.TTF"},
-    "garamond": {(False, False): "Gara.ttf", (True, False): "Garabd.ttf",
-                 (False, True): "Garait.ttf"},
-    "verdana": {(False, False): "VERDANA.TTF", (True, False): "VERDANAB.TTF",
-                (False, True): "VERDANAI.TTF", (True, True): "VERDANAZ.TTF"},
-    "georgia": {(False, False): "Georgia.TTF", (True, False): "Georgiab.TTF",
-                (False, True): "Georgiai.TTF", (True, True): "Georgiaz.TTF"},
-    "trebuchet ms": {(False, False): "Trebuc.TTF", (True, False): "Trebucbd.TTF",
-                     (False, True): "Trebucit.TTF", (True, True): "Trebucbi.TTF"},
+    "garamond": {
+        (False, False): "Gara.ttf",
+        (True, False): "Garabd.ttf",
+        (False, True): "Garait.ttf",
+    },
+    "verdana": {
+        (False, False): "VERDANA.TTF",
+        (True, False): "VERDANAB.TTF",
+        (False, True): "VERDANAI.TTF",
+        (True, True): "VERDANAZ.TTF",
+    },
+    "georgia": {
+        (False, False): "Georgia.TTF",
+        (True, False): "Georgiab.TTF",
+        (False, True): "Georgiai.TTF",
+        (True, True): "Georgiaz.TTF",
+    },
+    "trebuchet ms": {
+        (False, False): "Trebuc.TTF",
+        (True, False): "Trebucbd.TTF",
+        (False, True): "Trebucit.TTF",
+        (True, True): "Trebucbi.TTF",
+    },
     "lucida handwriting": {(False, False): "LHANDW.TTF"},
     "impact": {(False, False): "IMPACT.TTF"},
     "symbol": {(False, False): "SYMBOL.TTF"},
@@ -97,8 +134,9 @@ class _BitmapStrike:
 
     __slots__ = ("widths", "default_width", "pix_height", "ascent")
 
-    def __init__(self, widths: dict[int, int], default_width: int,
-                 pix_height: int, ascent: int = 0):
+    def __init__(
+        self, widths: dict[int, int], default_width: int, pix_height: int, ascent: int = 0
+    ):
         self.widths = widths
         self.default_width = default_width
         self.pix_height = pix_height
@@ -121,7 +159,7 @@ def _parse_fon(path: str) -> dict[int, _BitmapStrike]:
     if data[:2] != b"MZ":
         return {}
     ne = struct.unpack_from("<I", data, 0x3C)[0]
-    if data[ne:ne + 2] != b"NE":
+    if data[ne : ne + 2] != b"NE":
         return {}
     res_tbl = ne + struct.unpack_from("<H", data, ne + 0x24)[0]
     shift = struct.unpack_from("<H", data, res_tbl)[0]
@@ -142,14 +180,14 @@ def _parse_fon(path: str) -> dict[int, _BitmapStrike]:
     for off in offsets:
         ver = struct.unpack_from("<H", data, off)[0]
         points = struct.unpack_from("<H", data, off + 0x44)[0]
-        ascent = struct.unpack_from("<H", data, off + 0x4A)[0]   # dfAscent
+        ascent = struct.unpack_from("<H", data, off + 0x4A)[0]  # dfAscent
         pix_height = struct.unpack_from("<H", data, off + 0x58)[0]
         first = data[off + 0x5F]
         last = data[off + 0x60]
         default_char = data[off + 0x61]
-        if ver == 0x200:        # FNT 2.0: table at 0x76, entries (u16 w, u16 off)
+        if ver == 0x200:  # FNT 2.0: table at 0x76, entries (u16 w, u16 off)
             tbl, stride = 0x76, 4
-        elif ver == 0x300:      # FNT 3.0: table at 0x94, entries (u16 w, u32 off)
+        elif ver == 0x300:  # FNT 3.0: table at 0x94, entries (u16 w, u32 off)
             tbl, stride = 0x94, 6
         else:
             continue
@@ -182,8 +220,9 @@ def _load(face: str, px_height: int, bold: bool, italic: bool):
             points = max(1, round(px * 72 / 96))  # inverse of -(pt*96//72)
             best = strikes.get(points)
             if best is None:
-                best = min(strikes.values(),
-                           key=lambda s: abs(round(s.pix_height * 72 / 96) - points))
+                best = min(
+                    strikes.values(), key=lambda s: abs(round(s.pix_height * 72 / 96) - points)
+                )
             return best, best.pix_height, best.ascent
         # Unparseable .FON → fall back to the default scalable face.
         path = str(_FONT_DIR / _FONT_FILES[_DEFAULT_FACE][(False, False)])
@@ -221,8 +260,7 @@ def ascent(face: str, px_height: int, bold: bool, italic: bool) -> int:
     return round(asc)
 
 
-def text_measurer(face: str, px_height: int, bold: bool,
-                  italic: bool) -> Callable[[str], int]:
+def text_measurer(face: str, px_height: int, bold: bool, italic: bool) -> Callable[[str], int]:
     """A `measure(s) -> int` closure bound to one font, for `drawtext`."""
     font, _, _ = _load(face, px_height, bold, italic)
 

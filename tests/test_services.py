@@ -4234,9 +4234,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         b"\x03\x00\x00\x00\x00"
         b"\x03\x00\x00\x00\x00"
         b"\x03\x00\x00\x00\x00"
-        b"\x81\x81"
-        + b"\x83" * 8
-        + b"\x84\x85"
+        b"\x81\x81" + b"\x83" * 8 + b"\x84\x85"
     )
 
     @staticmethod
@@ -4287,7 +4285,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
             ],
         )
         self.assertEqual(reply[pos], 0x84)
-        title_id_size = reply[pos + 1] & 0x7f
+        title_id_size = reply[pos + 1] & 0x7F
         self.assertEqual(reply[pos + 2 : pos + 2 + title_id_size], b"1000\x00")
         pos += 2 + title_id_size
         self.assertEqual(reply[pos : pos + 2], b"\x87\x86")
@@ -4318,7 +4316,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
 
         pos = 4 + 8 * 5
         self.assertEqual(reply[pos], 0x84)
-        pos += 2 + (reply[pos + 1] & 0x7f)
+        pos += 2 + (reply[pos + 1] & 0x7F)
         self.assertEqual(reply[pos : pos + 2], b"\x87\x86")
         self.assertEqual(reply[pos + 2 :], handler.title_body[font_end:])
 
@@ -4920,7 +4918,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
                 + struct.pack("<IHHI", total, 0, 0, pixels)
                 + struct.pack("<IiiHHII", 40, 8, 8, 1, 8, 0, 0)
                 + b"\x00" * 16
-                + b"\xAA" * (pixels - 0x36)
+                + b"\xaa" * (pixels - 0x36)
                 + b"\x11" * (total - pixels)
             )
 
@@ -4971,14 +4969,11 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         # MVPicture_SelectDecoderByMagic @ 0x7E865815 wants before it
         # creates the decoder, so no chunk boundary can keep the palette
         # build from running. Re-indexing to 8bpp moves bfOffBits to 1078.
-        palette = b"".join(
-            bytes((index * 16, index * 8, index * 4, 0)) for index in range(16)
-        )
+        palette = b"".join(bytes((index * 16, index * 8, index * 4, 0)) for index in range(16))
         rows = [[(x + y) % 16 for x in range(5)] for y in range(3)]
         packed = b"".join(
             bytes(
-                (row[x] << 4) | (row[x + 1] if x + 1 < len(row) else 0)
-                for x in range(0, 6, 2)
+                (row[x] << 4) | (row[x + 1] if x + 1 < len(row) else 0) for x in range(0, 6, 2)
             ).ljust(4, b"\x00")
             for row in rows
         )
@@ -5029,9 +5024,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         for name in ("mail.bmp", "smokes.bmp"):
             served = handler.baggage_map[name]
             self.assertEqual(struct.unpack_from("<H", served, 28)[0], 8, name)
-            self.assertEqual(
-                struct.unpack_from("<I", served, 10)[0], 0x36 + 256 * 4, name
-            )
+            self.assertEqual(struct.unpack_from("<I", served, 10)[0], 0x36 + 256 * 4, name)
         # An 8bpp neighbour is served exactly as authored.
         self.assertEqual(
             handler.baggage_map["lion.bmp"],
@@ -5951,7 +5944,11 @@ class TestBBIRService(unittest.TestCase):
         blob = (
             pathlib.Path(__file__).resolve().parent / "assets" / "bbir_queryspec.bin"
         ).read_bytes()
-        head = b"\x03\x00\x00\x00\x00\x05\x01" + struct.pack("<I", len(blob)) + b"\x03\x00\x00\x00\x00\x85"
+        head = (
+            b"\x03\x00\x00\x00\x00\x05\x01"
+            + struct.pack("<I", len(blob))
+            + b"\x03\x00\x00\x00\x00\x85"
+        )
         handler = BBIRServiceHandler(7, "BBIRService")
         with patch.object(handler, "_capture"):
             self.assertIsNone(handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5))
@@ -5990,8 +5987,9 @@ class TestBBIRService(unittest.TestCase):
             + struct.pack("<I", len(blob))
             + b"\x03\x00\x00\x00\x00\x85"
         )
-        with patch.object(handler, "_capture"), patch(
-            "server.blackbird.irindex.load_documents", return_value=docs
+        with (
+            patch.object(handler, "_capture"),
+            patch("server.blackbird.irindex.load_documents", return_value=docs),
         ):
             handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5)
             pkts = handler.handle_request(0xE7, 0x01, 0, blob, 5, 5)
@@ -6073,8 +6071,9 @@ class TestBBIRService(unittest.TestCase):
             + struct.pack("<I", len(blob))
             + b"\x03\x00\x00\x00\x00\x85"
         )
-        with patch.object(handler, "_capture"), patch(
-            "server.blackbird.irindex.load_documents", return_value=docs
+        with (
+            patch.object(handler, "_capture"),
+            patch("server.blackbird.irindex.load_documents", return_value=docs),
         ):
             handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5)
             pkts = handler.handle_request(0xE7, 0x01, 0, blob, 5, 5)
@@ -6121,8 +6120,9 @@ class TestBBIRService(unittest.TestCase):
             + struct.pack("<I", len(blob))
             + b"\x03\x00\x00\x00\x00\x85"
         )
-        with patch.object(handler, "_capture"), patch(
-            "server.blackbird.irindex.load_documents", return_value=[]
+        with (
+            patch.object(handler, "_capture"),
+            patch("server.blackbird.irindex.load_documents", return_value=[]),
         ):
             handler.handle_request(0x01, BBIR_SELECTOR_QUERY, 0, head, 5, 5)
             pkts = handler.handle_request(0xE7, 0x01, 0, blob, 5, 5)

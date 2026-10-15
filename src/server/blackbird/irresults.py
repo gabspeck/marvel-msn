@@ -325,9 +325,7 @@ def encode_cmd_completed(time_waited=0, time_processed=0):
     return ir_record(TAG_CMD_COMPLETED, _put_ulong(time_waited) + _put_ulong(time_processed))
 
 
-def encode_result_stream(
-    columns, rows, sort_keys=(), contexts=(), time_waited=0, time_processed=0
-):
+def encode_result_stream(columns, rows, sort_keys=(), contexts=(), time_waited=0, time_processed=0):
     """The whole reply body: schema, sort keys, contexts, rows, completion.
 
     Order is load-bearing. A row resolves its column types through the schema

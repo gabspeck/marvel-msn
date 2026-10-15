@@ -73,9 +73,7 @@ FTM_BILL_CLIENT_PAYLOAD_SIZE_OFFSET = 0x10
 FTM_FLAG_HAS_UNPACK_METHOD = 0x01
 FTM_FLAG_FAST_PATH = 0x02
 FTM_FLAG_HAS_FILENAME = 0x08
-FTM_REQUEST_REPLY_FLAGS = (
-    FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH | FTM_FLAG_HAS_FILENAME
-)
+FTM_REQUEST_REPLY_FLAGS = FTM_FLAG_HAS_UNPACK_METHOD | FTM_FLAG_FAST_PATH | FTM_FLAG_HAS_FILENAME
 
 FTM_FALLBACK_FILENAME = "plans.txt"
 FTM_BBS_SOURCE = "BBS"
@@ -135,6 +133,7 @@ def _dump_debug_bytes(path, blob):
         return
     log.info("debug_dump path=%s bytes=%d", path, len(blob))
 
+
 # SIGNUP.EXE!FUN_004029d8 opens these four in order and fails if any
 # CreateFile(OPEN_EXISTING) returns INVALID_HANDLE_VALUE.  The FTM client
 # sends name="LOGSRV" + counter 0..3, so the counter is the only
@@ -147,6 +146,7 @@ SIGNUP_LOGSRV_FILENAMES = (
     "newtips.rtf",
 )
 SIGNUP_LOGSRV_SOURCE = "LOGSRV"
+
 
 def mos2_original_size(blob):
     """Return the uncompressed size a MOS2 container declares, else None."""
@@ -358,10 +358,7 @@ def _build_start_download_blocks(content):
         chunk = content[start : start + _DYNAMIC_BLOCK_MAX]
         prefix = b""
         if not blocks:
-            prefix = (
-                build_tagged_reply_var(0x84, _START_DOWNLOAD_STATUS)
-                + bytes([TAG_END_STATIC])
-            )
+            prefix = build_tagged_reply_var(0x84, _START_DOWNLOAD_STATUS) + bytes([TAG_END_STATIC])
         blocks.append(prefix + bytes([TAG_DYNAMIC_STREAM_END]) + chunk)
     blocks.append(bytes([TAG_DYNAMIC_COMPLETE_SIGNAL]))
     return blocks
@@ -433,9 +430,7 @@ def _resolve_bbs_attachment(cfi, *, record_download=False):
     MOSAF FUN_7F4C18B0 stores those values in the four-dword FRI that
     FTMAPI SetFcfi copies to offsets 0x20..0x2f of the client file id.
     """
-    kind, board_id, attachment_id, reserved = struct.unpack_from(
-        "<IIII", cfi, FTM_FILENAME_BYTES
-    )
+    kind, board_id, attachment_id, reserved = struct.unpack_from("<IIII", cfi, FTM_FILENAME_BYTES)
     log.info(
         "resolve_bbs_attachment kind=%d board_id=%d attachment_id=%d reserved=%d",
         kind,

@@ -65,6 +65,7 @@ def _mapi_crc(data):
         value = table[(value ^ byte) & 0xFF] ^ (value >> 8)
     return value
 
+
 # Class-0x0B method-0 request as the reader sends it: the 8-byte mnid it copied
 # into its context at +0xA8, one 0x83 status DWORD to receive, and 0x85 marking
 # the request as streaming.
@@ -894,11 +895,7 @@ class TestBBSEditChannel(unittest.TestCase):
     def _request(self, node_id):
         msg_id, _sep, board_id = node_id.partition(":")
         mnid = struct.pack("<II", int(msg_id), int(board_id))
-        return (
-            b"\x04\x82\x02\x00"
-            + b"\x04" + bytes([0x80 | len(mnid)]) + mnid
-            + b"\x83\x83"
-        )
+        return b"\x04\x82\x02\x00" + b"\x04" + bytes([0x80 | len(mnid)]) + mnid + b"\x83\x83"
 
     @staticmethod
     def _add_folder_request():
@@ -946,9 +943,7 @@ class TestBBSEditChannel(unittest.TestCase):
             client_ack=0,
         )
 
-        self.assertEqual(
-            self._reply_payload(packets), dirsrv.build_get_ticket_reply_payload()
-        )
+        self.assertEqual(self._reply_payload(packets), dirsrv.build_get_ticket_reply_payload())
 
     def test_add_node_creates_a_bbs_folder_and_returns_its_mnid(self):
         handler = BBSHandler(1, "BBS", signed_in())
@@ -1278,7 +1273,7 @@ class TestChunkedReferenceDecoding(unittest.TestCase):
         # buffer still fits the call head. The size prefix counts compressed
         # bytes, and parsing must not stop at the tag — a following parameter
         # is lost if it does.
-        payload = b"\x44" + bytes([0x80 | 3]) + b"abc" + b"\x01\x2A"
+        payload = b"\x44" + bytes([0x80 | 3]) + b"abc" + b"\x01\x2a"
         send_params, _ = parse_request_params(payload)
         self.assertEqual(len(send_params), 2)
         self.assertEqual(send_params[0].tag, 0x44)
@@ -1399,9 +1394,7 @@ class TestBBSPostCommit(PostChannelTestCase):
 
         self.assertEqual(node.content.bbs.author, display_name)
         self.assertIn(f"From: {display_name}\n".encode(), bbs.build_bbs_article(node))
-        self.assertEqual(
-            app_store.member.get_member(display_name).display_name, display_name
-        )
+        self.assertEqual(app_store.member.get_member(display_name).display_name, display_name)
 
     def test_a_different_account_signs_its_own_posts(self):
         self.handler = BBSHandler(5, "BBS", signed_in(SUBSCRIBER))

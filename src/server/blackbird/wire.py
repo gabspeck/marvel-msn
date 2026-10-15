@@ -166,9 +166,7 @@ def build_kind5_raster(
     if palette_count is None:
         palette_count = len(palette) // 4
     if len(palette) != palette_count * 4:
-        raise ValueError(
-            f"palette length {len(palette)} != palette_count*4 = {palette_count*4}"
-        )
+        raise ValueError(f"palette length {len(palette)} != palette_count*4 = {palette_count * 4}")
 
     # Build the variable-length header section (everything up to the
     # final two u32 offsets) so we can compute pixel_data_offset.
@@ -272,8 +270,10 @@ def _wrap_item_lines(item: TextItem) -> list[str]:
         # Fonts (binaries/fonts, obtained separately) or Pillow absent:
         # degrade to a single line rather than crash the render path.
         return [item.text]
-    fmt = drawtext.DT_WORDBREAK | drawtext.DT_NOPREFIX | _ALIGN_TO_DT.get(
-        item.alignment, drawtext.DT_LEFT
+    fmt = (
+        drawtext.DT_WORDBREAK
+        | drawtext.DT_NOPREFIX
+        | _ALIGN_TO_DT.get(item.alignment, drawtext.DT_LEFT)
     )
     return drawtext.wrap_text(item.text, fmt, measure, item.rect_w) or [item.text]
 
@@ -284,8 +284,9 @@ def _item_line_height(item: TextItem) -> int:
     """
     px = abs(item.font_height) or 16
     try:
-        return textmetrics.line_height(item.font_face, px, item.font_weight >= 700,
-                                       item.italic) or px
+        return (
+            textmetrics.line_height(item.font_face, px, item.font_weight >= 700, item.italic) or px
+        )
     except (OSError, ImportError):
         return px
 
@@ -306,29 +307,30 @@ class TextItem:
     via the WMF Rectangle record; rect bounds default to a tight box
     around the text origin if `rect_w / rect_h` are 0.
     """
+
     x: int
     y: int
     text: str
     font_face: str = "MS Sans Serif"
-    font_height: int = -16          # negative = points, positive = device units
-    font_weight: int = 400          # 400 = FW_NORMAL, 700 = FW_BOLD
+    font_height: int = -16  # negative = points, positive = device units
+    font_weight: int = 400  # 400 = FW_NORMAL, 700 = FW_BOLD
     italic: bool = False
     underline: bool = False
     strikeout: bool = False
-    charset: int = 0                # LOGFONTA lfCharSet
-    color_rgb: int = 0              # text COLORREF (RGB0 little-endian DWORD)
-    back_color: int = 0xFFFFFF      # rect-fill COLORREF (only used when not transparent)
+    charset: int = 0  # LOGFONTA lfCharSet
+    color_rgb: int = 0  # text COLORREF (RGB0 little-endian DWORD)
+    back_color: int = 0xFFFFFF  # rect-fill COLORREF (only used when not transparent)
     transparent: bool = True
-    alignment: int = 0              # 0=left, 1=center, 2=right (BBDESIGN iAlignment)
-    rect_w: int = 0                 # pixels; 0 = no rect bounds (text-only mode)
+    alignment: int = 0  # 0=left, 1=center, 2=right (BBDESIGN iAlignment)
+    rect_w: int = 0  # pixels; 0 = no rect bounds (text-only mode)
     rect_h: int = 0
-    bevel_width: int = 0            # pixels; 0 = no bevel
-    bevel_hilight: int = 0xFFFFFF   # bevel highlight COLORREF
-    bevel_shadow: int = 0           # bevel shadow COLORREF
-    frame_style: int = 0            # 0 = no frame, non-zero = draw frame
-    frame_color: int = 0            # frame border COLORREF
-    word_wrap: bool = False         # BBCTL fWordWrap → DT_WORDBREAK pre-wrap (build_text_metafile)
-    auto_size: bool = False         # BBCTL fAutoSize → no clip; text grows past authored rect
+    bevel_width: int = 0  # pixels; 0 = no bevel
+    bevel_hilight: int = 0xFFFFFF  # bevel highlight COLORREF
+    bevel_shadow: int = 0  # bevel shadow COLORREF
+    frame_style: int = 0  # 0 = no frame, non-zero = draw frame
+    frame_color: int = 0  # frame border COLORREF
+    word_wrap: bool = False  # BBCTL fWordWrap → DT_WORDBREAK pre-wrap (build_text_metafile)
+    auto_size: bool = False  # BBCTL fAutoSize → no clip; text grows past authored rect
 
 
 def _wmf_record(rd_function: int, params: bytes) -> bytes:
@@ -437,18 +439,18 @@ def _wmf_createfontindirect(
     logfont = struct.pack(
         "<hhhhhBBBBBBBB",
         height,
-        0,                  # Width (= 0 → matched on aspect ratio)
-        0,                  # Escapement
-        0,                  # Orientation
+        0,  # Width (= 0 → matched on aspect ratio)
+        0,  # Escapement
+        0,  # Orientation
         weight,
         1 if italic else 0,
         1 if underline else 0,
         1 if strikeout else 0,
-        charset & 0xFF,     # CharSet (0 = ANSI_CHARSET)
-        0,                  # OutPrecision (default)
-        0,                  # ClipPrecision (default)
-        0,                  # Quality (default)
-        0,                  # PitchAndFamily (default)
+        charset & 0xFF,  # CharSet (0 = ANSI_CHARSET)
+        0,  # OutPrecision (default)
+        0,  # ClipPrecision (default)
+        0,  # Quality (default)
+        0,  # PitchAndFamily (default)
     )
     return _wmf_record(_META_CREATEFONTINDIRECT, logfont + face_bytes)
 
@@ -532,21 +534,24 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
 
     for idx, item in enumerate(items):
         has_border = (
-            item.frame_style != 0 or item.bevel_width > 0
-        ) and item.rect_w > 0 and item.rect_h > 0
+            (item.frame_style != 0 or item.bevel_width > 0) and item.rect_w > 0 and item.rect_h > 0
+        )
         has_fill = not item.transparent and item.rect_w > 0 and item.rect_h > 0
 
         if has_border or has_fill:
             brush_slot = next_obj_slot
             records += _wmf_createbrushindirect(
-                item.back_color, style=0 if has_fill else 1,  # 1 = BS_NULL
+                item.back_color,
+                style=0 if has_fill else 1,  # 1 = BS_NULL
             )
             records += _wmf_selectobject(brush_slot)
             pen_slot = brush_slot + 1
             pen_color = item.frame_color if item.frame_style != 0 else item.bevel_shadow
             pen_width = max(1, item.bevel_width) if item.bevel_width > 0 else 1
             records += _wmf_createpenindirect(
-                pen_color, width=pen_width, style=0 if has_border else 5,  # 5 = PS_NULL
+                pen_color,
+                width=pen_width,
+                style=0 if has_border else 5,  # 5 = PS_NULL
             )
             records += _wmf_selectobject(pen_slot)
             records += _wmf_rectangle(
@@ -610,13 +615,13 @@ def build_text_metafile(items: list[TextItem]) -> bytes:
     total_words = 9 + len(records) // 2  # header + body
     header = struct.pack(
         "<HHHIHIH",
-        1,                       # Type (memory)
-        9,                       # HeaderSize (WORDs)
-        0x0300,                  # Version
-        total_words,             # Size (WORDs)
-        max(1, peak_objects),    # NumberOfObjects (font slots + lazy brush/pen)
-        max_record,              # MaxRecord (WORDs)
-        0,                       # NumberOfMembers
+        1,  # Type (memory)
+        9,  # HeaderSize (WORDs)
+        0x0300,  # Version
+        total_words,  # Size (WORDs)
+        max(1, peak_objects),  # NumberOfObjects (font slots + lazy brush/pen)
+        max_record,  # MaxRecord (WORDs)
+        0,  # NumberOfMembers
     )
     return bytes(header) + bytes(records)
 
@@ -658,19 +663,15 @@ def build_kind8_baggage(
         + encode_ushort_or_u32_varint(trailer_size)
     )
     header_prefix = (
-        bytes([0x08, 0x00])                                    # kind, compression
+        bytes([0x08, 0x00])  # kind, compression
         + mapmode_varint
         + struct.pack("<HH", viewport_w & 0xFFFF, viewport_h & 0xFFFF)
         + size_varints
     )
-    header_len = len(header_prefix) + 8                        # + 2 u32 offsets
+    header_len = len(header_prefix) + 8  # + 2 u32 offsets
     metafile_data_offset = header_len
     trailer_offset = metafile_data_offset + len(metafile_bytes)
-    return (
-        header_prefix
-        + struct.pack("<II", metafile_data_offset, trailer_offset)
-        + metafile_bytes
-    )
+    return header_prefix + struct.pack("<II", metafile_data_offset, trailer_offset) + metafile_bytes
 
 
 def build_case3_bf_chunk(
@@ -687,9 +688,7 @@ def build_case3_bf_chunk(
     `build_case1_bf_chunk`'s text-row path.
     """
     if not (0x40 <= name_size <= 0xFFFF):
-        raise ValueError(
-            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
-        )
+        raise ValueError(f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}")
 
     chunk = bytearray(4 + name_size + 60)
     chunk[0] = 0xBF
@@ -721,7 +720,7 @@ def _stamp_no_nsr(chunk: bytearray, name_size: int) -> None:
     stamp the no-NSR sentinel.
     """
     nsr_off = 4 + name_size + 0x14
-    chunk[nsr_off:nsr_off + 4] = b"\xFF\xFF\xFF\xFF"
+    chunk[nsr_off : nsr_off + 4] = b"\xff\xff\xff\xff"
 
 
 # Sentinel contentsToken stamped into the prev/next link fields of every
@@ -786,7 +785,9 @@ def _stamp_chain_terminators(chunk: bytearray) -> None:
 # --------------------------------------------------------------------------
 
 
-_PREAMBLE_NARROW_TYPE_TAG_MAX = 0x10  # `MVDecodeTopicItemPrefix` reads an extra ushort only when type tag > 0x10
+_PREAMBLE_NARROW_TYPE_TAG_MAX = (
+    0x10  # `MVDecodeTopicItemPrefix` reads an extra ushort only when type tag > 0x10
+)
 
 
 def encode_signed_int_varint(value: int) -> bytes:
@@ -913,7 +914,9 @@ def build_type0_status_record(title_byte: int, status: int, contents_token: int)
     client's `HfcNextPrevHfc` retry loop can match the request and
     short-circuit instead of polling the full 30 s timeout.
     """
-    return struct.pack("<BBHI", 0xA5, title_byte & 0xFF, status & 0xFFFF, contents_token & 0xFFFFFFFF)
+    return struct.pack(
+        "<BBHI", 0xA5, title_byte & 0xFF, status & 0xFFFF, contents_token & 0xFFFFFFFF
+    )
 
 
 def build_type3_op4_frame(title_byte: int, kind: int, key: int, va: int, addr: int) -> bytes:
@@ -935,7 +938,8 @@ def build_type3_op4_frame(title_byte: int, kind: int, key: int, va: int, addr: i
     """
     return struct.pack(
         "<HHBBIII",
-        4, 18,
+        4,
+        18,
         title_byte & 0xFF,
         kind & 0xFF,
         key & 0xFFFFFFFF,
@@ -983,9 +987,7 @@ def build_type4_transfer_chunk_frame(
     """Build one type-4 opcode-3 contiguous transfer chunk."""
     frame_size = 12 + len(chunk_data)
     if frame_size > 0xFFFF:
-        raise ValueError(
-            f"type-4 transfer frame exceeds u16 size: {frame_size}"
-        )
+        raise ValueError(f"type-4 transfer frame exceeds u16 size: {frame_size}")
     return (
         struct.pack(
             "<HHII",
@@ -1019,16 +1021,16 @@ def encode_null_tlv() -> bytes:
 # `decode_case1_tlv(encode_text_item_tlv(x))` round-trips.
 _TLV_OPTIONAL_INT_FIELDS = (
     # offset, bitmap_mask
-    (0x12, 0x10000),       # text_base_or_mode (signed-int varint)
+    (0x12, 0x10000),  # text_base_or_mode (signed-int varint)
 )
 _TLV_OPTIONAL_SHORT_FIELDS = (
-    (0x16, 0x20000),       # space_before
-    (0x18, 0x40000),       # space_after
-    (0x1A, 0x80000),       # min_line_extent
-    (0x1C, 0x100000),      # left_indent
-    (0x1E, 0x200000),      # right_indent
-    (0x20, 0x400000),      # first_line_indent
-    (0x22, 0x800000),      # tab_interval
+    (0x16, 0x20000),  # space_before
+    (0x18, 0x40000),  # space_after
+    (0x1A, 0x80000),  # min_line_extent
+    (0x1C, 0x100000),  # left_indent
+    (0x1E, 0x200000),  # right_indent
+    (0x20, 0x400000),  # first_line_indent
+    (0x22, 0x800000),  # tab_interval
 )
 
 
@@ -1138,9 +1140,7 @@ def encode_text_item_tlv(
         optional_payload += encode_signed_short_varint(len(tab_stops))
         for stop_x, stop_payload in tab_stops:
             if not (0 <= stop_x <= 0x3FFF):
-                raise ValueError(
-                    f"stop_x out of range [0, 0x3FFF] (bit 14 reserved): {stop_x}"
-                )
+                raise ValueError(f"stop_x out of range [0, 0x3FFF] (bit 14 reserved): {stop_x}")
             if not (0 <= stop_payload <= 0x7FFF):
                 raise ValueError(
                     f"stop_payload out of PackedUnsignedSmall range [0, 0x7FFF]: {stop_payload}"
@@ -1163,9 +1163,7 @@ def encode_text_item_tlv(
         raise ValueError(f"unknown TLV field keys: {sorted(f)}")
 
     return (
-        encode_signed_int_varint(length_value)
-        + struct.pack("<I", bitmap)
-        + bytes(optional_payload)
+        encode_signed_int_varint(length_value) + struct.pack("<I", bitmap) + bytes(optional_payload)
     )
 
 
@@ -1180,12 +1178,12 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
     fields: dict = {}
 
     # Length field — same varint form as preamble length.
-    raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
+    raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
     if (raw_word & 1) == 0:
-        fields[0x00] = ((raw_word >> 1) - 0x4000)
+        fields[0x00] = (raw_word >> 1) - 0x4000
         pos += 2
     else:
-        raw_dword = struct.unpack("<I", buf[pos:pos + 4])[0]
+        raw_dword = struct.unpack("<I", buf[pos : pos + 4])[0]
         decoded = (raw_dword >> 1) + 0xC0000000
         if decoded >= 0x80000000:
             decoded -= 0x100000000
@@ -1193,7 +1191,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
         pos += 4
 
     # Presence bitmap u32 + four unconditional flag fields.
-    bitmap = struct.unpack("<I", buf[pos:pos + 4])[0]
+    bitmap = struct.unpack("<I", buf[pos : pos + 4])[0]
     pos += 4
     fields[0x04] = bitmap & 0x1
     fields[0x08] = (bitmap >> 16) & 0x1
@@ -1204,12 +1202,12 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
     # Conditional signed-int field at +0x12 (gated by bit 0x10000;
     # same gate also drives the unconditional flag at +0x08).
     if bitmap & 0x10000:
-        raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
+        raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
         if (raw_word & 1) == 0:
-            fields[0x12] = ((raw_word >> 1) - 0x4000)
+            fields[0x12] = (raw_word >> 1) - 0x4000
             pos += 2
         else:
-            raw_dword = struct.unpack("<I", buf[pos:pos + 4])[0]
+            raw_dword = struct.unpack("<I", buf[pos : pos + 4])[0]
             decoded = (raw_dword >> 1) + 0xC0000000
             if decoded >= 0x80000000:
                 decoded -= 0x100000000
@@ -1233,7 +1231,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
                 fields[offset] = (raw_byte >> 1) - 0x40
                 pos += 1
             else:
-                raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
+                raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
                 decoded = (raw_word >> 1) + 0xC000
                 if decoded >= 0x8000:
                     decoded -= 0x10000
@@ -1249,7 +1247,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
             fields[0x22] = (raw_byte >> 1) - 0x40
             pos += 1
         else:
-            raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
+            raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
             decoded = (raw_word >> 1) + 0xC000
             if decoded >= 0x8000:
                 decoded -= 0x10000
@@ -1261,7 +1259,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
     # +0x24 — 3-byte read, low 2 bytes stored. Parser advances 3 bytes
     # but writes only the low 2 to the struct (third byte discarded).
     if bitmap & 0x1000000:
-        fields[0x24] = struct.unpack("<H", buf[pos:pos + 2])[0]
+        fields[0x24] = struct.unpack("<H", buf[pos : pos + 2])[0]
         pos += 3
     else:
         fields[0x24] = 0
@@ -1273,7 +1271,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
             fields[0x27] = (raw_byte >> 1) - 0x40
             pos += 1
         else:
-            raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
+            raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
             decoded = (raw_word >> 1) + 0xC000
             if decoded >= 0x8000:
                 decoded -= 0x10000
@@ -1293,7 +1291,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
             stop_x = raw_byte >> 1
             pos += 1
         else:
-            raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
+            raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
             stop_x = raw_word >> 1
             pos += 2
         if stop_x & _TAB_STOP_SECOND_FLAG:
@@ -1302,7 +1300,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
                 stop_payload = raw_byte >> 1
                 pos += 1
             else:
-                raw_word = struct.unpack("<H", buf[pos:pos + 2])[0]
+                raw_word = struct.unpack("<H", buf[pos : pos + 2])[0]
                 stop_payload = raw_word >> 1
                 pos += 2
         else:
@@ -1324,6 +1322,7 @@ def decode_case1_tlv(buf: bytes) -> tuple[dict, int]:
 # from the chunk into the cache entry's name_buf; larger values are
 # accepted up to u16 capacity.
 _CASE1_DEFAULT_NAME_SIZE = 0x100
+
 
 def case1_text_budget(
     name_size: int = _CASE1_DEFAULT_NAME_SIZE,
@@ -1412,9 +1411,7 @@ def build_case1_bf_chunk(
     # has no topic-source entries.
 
     if not (0x40 <= name_size <= 0xFFFF):
-        raise ValueError(
-            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
-        )
+        raise ValueError(f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}")
 
     tlv = encode_null_tlv() if tlv_fields is None else encode_text_item_tlv(tlv_fields)
     if len(tlv) < 6:
@@ -1423,10 +1420,10 @@ def build_case1_bf_chunk(
     if initial_font_style is not None and not -0x8000 <= initial_font_style <= 0xFFFF:
         raise ValueError(f"initial_font_style out of int16/u16 range: {initial_font_style}")
 
-    control_stream = b"\xFF"
+    control_stream = b"\xff"
     text_prefix = b""
     if initial_font_style is not None:
-        control_stream = b"\x80" + struct.pack("<H", initial_font_style & 0xFFFF) + b"\xFF"
+        control_stream = b"\x80" + struct.pack("<H", initial_font_style & 0xFFFF) + b"\xff"
         text_prefix = b"\x00"
 
     text_bytes = text_prefix + text.encode("ascii", errors="replace") + b"\x00"
@@ -1460,17 +1457,17 @@ def build_case1_bf_chunk(
         raise AssertionError(
             f"non-narrow case-1 preamble not implemented for length_value={preamble_length_value}"
         )
-    chunk[case_offset + 1:case_offset + 3] = preamble[1:3]
+    chunk[case_offset + 1 : case_offset + 3] = preamble[1:3]
 
-    chunk[case_offset + 3:case_offset + 3 + len(tlv)] = tlv
+    chunk[case_offset + 3 : case_offset + 3 + len(tlv)] = tlv
 
     # Control stream at end_of_TLV — read by MVDispatchControlRun when the text
     # walker sees NUL. The default stream selects style 0 before text.
     control_offset = case_offset + 3 + len(tlv)
-    chunk[control_offset:control_offset + len(control_stream)] = control_stream
+    chunk[control_offset : control_offset + len(control_stream)] = control_stream
 
     text_offset = case_offset + 3 + len(tlv) + len(control_stream)
-    chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
+    chunk[text_offset : text_offset + len(text_bytes)] = text_bytes
 
     _stamp_chain_terminators(chunk)
     _stamp_no_nsr(chunk, name_size)
@@ -1516,14 +1513,10 @@ def build_case1_stream_bf_chunk(
         prefix_u16=topic_length,
     )
 
-    required_name_size = (
-        0x26 + len(preamble) + len(tlv) + len(control_stream) + len(text_data)
-    )
+    required_name_size = 0x26 + len(preamble) + len(tlv) + len(control_stream) + len(text_data)
     name_size = max(0x40, (required_name_size + 3) & ~3)
     if name_size > 0xFFFF:
-        raise ValueError(
-            f"Media View display record exceeds 0xFFFF-byte name buffer: {name_size}"
-        )
+        raise ValueError(f"Media View display record exceeds 0xFFFF-byte name buffer: {name_size}")
 
     chunk = bytearray(4 + name_size + 60)
     chunk[0] = 0xBF
@@ -1532,18 +1525,18 @@ def build_case1_stream_bf_chunk(
     chunk[12:16] = struct.pack("<I", key & 0xFFFFFFFF)
 
     case_offset = 4 + 0x26
-    chunk[case_offset:case_offset + len(preamble)] = preamble
+    chunk[case_offset : case_offset + len(preamble)] = preamble
     tlv_offset = case_offset + len(preamble)
-    chunk[tlv_offset:tlv_offset + len(tlv)] = tlv
+    chunk[tlv_offset : tlv_offset + len(tlv)] = tlv
     control_offset = tlv_offset + len(tlv)
-    chunk[control_offset:control_offset + len(control_stream)] = control_stream
+    chunk[control_offset : control_offset + len(control_stream)] = control_stream
     text_offset = control_offset + len(control_stream)
-    chunk[text_offset:text_offset + len(text_data)] = text_data
+    chunk[text_offset : text_offset + len(text_data)] = text_data
 
     chunk[8:12] = struct.pack("<I", previous & 0xFFFFFFFF)
     chunk[16:20] = struct.pack("<I", following & 0xFFFFFFFF)
     nsr_offset = 4 + name_size + 0x14
-    chunk[nsr_offset:nsr_offset + 8] = struct.pack(
+    chunk[nsr_offset : nsr_offset + 8] = struct.pack(
         "<II",
         non_scroll & 0xFFFFFFFF,
         scroll & 0xFFFFFFFF,
@@ -1560,6 +1553,7 @@ class StyledSegment:
     case-1 control stream (the only multi-run styling primitive — see
     `docs/MEDVIEW-TEXT-ENCODING.md` §5.1).
     """
+
     text: str
     style_id: int
 
@@ -1579,7 +1573,7 @@ def build_styled_case1_chunk(
     `0xFF`):
 
       Text region:    `\x00 seg0 \x00 seg1 \x00 ... \x00 segN \x00`
-      Control region: `\x80 <s0> \x80 <s1> ... \x80 <sN> \xFF`
+      Control region: `\x80 <s0> \x80 <s1> ... \x80 <sN> \xff`
 
     Walker model (per `MVDispatchControlRun @ 0x7e894ec0` §5.1 +
     `MVTextLayoutFSM @ 0x7e891810`): the text walker reads printable
@@ -1616,18 +1610,12 @@ def build_styled_case1_chunk(
 
     for seg in normalised:
         if not -0x8000 <= seg.style_id <= 0xFFFF:
-            raise ValueError(
-                f"segment style_id out of int16/u16 range: {seg.style_id}"
-            )
+            raise ValueError(f"segment style_id out of int16/u16 range: {seg.style_id}")
         if "\x00" in seg.text:
-            raise ValueError(
-                f"segment text must not contain embedded NUL: {seg.text!r}"
-            )
+            raise ValueError(f"segment text must not contain embedded NUL: {seg.text!r}")
 
     if not (0x40 <= name_size <= 0xFFFF):
-        raise ValueError(
-            f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}"
-        )
+        raise ValueError(f"name_size out of range [0x40..0xFFFF]: 0x{name_size:x}")
 
     tlv = (
         encode_text_item_tlv(tlv_fields, tab_stops=tab_stops)
@@ -1638,17 +1626,18 @@ def build_styled_case1_chunk(
         raise AssertionError(f"TLV must be >= 6 bytes, got {len(tlv)}")
 
     # Control stream: one `0x80 <style>` per segment, then 0xFF EOF.
-    control_stream = b"".join(
-        b"\x80" + struct.pack("<H", seg.style_id & 0xFFFF)
-        for seg in normalised
-    ) + b"\xFF"
+    control_stream = (
+        b"".join(b"\x80" + struct.pack("<H", seg.style_id & 0xFFFF) for seg in normalised) + b"\xff"
+    )
 
     # Text stream: leading NUL + segments separated by NUL + trailing NUL.
     # Total NULs = len(segments) + 1; one consumed by the control walker
     # per pop (matches len(segments) `0x80` controls + the final 0xFF).
-    text_bytes = b"\x00" + b"\x00".join(
-        seg.text.encode("ascii", errors="replace") for seg in normalised
-    ) + b"\x00"
+    text_bytes = (
+        b"\x00"
+        + b"\x00".join(seg.text.encode("ascii", errors="replace") for seg in normalised)
+        + b"\x00"
+    )
 
     # Budget check: name_size - 0x29 pad - 3 preamble - len(tlv) -
     # len(control_stream) - len(text_bytes) ≥ 0.
@@ -1677,15 +1666,15 @@ def build_styled_case1_chunk(
         raise AssertionError(
             f"non-narrow case-1 preamble not implemented for length_value={preamble_length_value}"
         )
-    chunk[case_offset + 1:case_offset + 3] = preamble[1:3]
+    chunk[case_offset + 1 : case_offset + 3] = preamble[1:3]
 
-    chunk[case_offset + 3:case_offset + 3 + len(tlv)] = tlv
+    chunk[case_offset + 3 : case_offset + 3 + len(tlv)] = tlv
 
     control_offset = case_offset + 3 + len(tlv)
-    chunk[control_offset:control_offset + len(control_stream)] = control_stream
+    chunk[control_offset : control_offset + len(control_stream)] = control_stream
 
     text_offset = control_offset + len(control_stream)
-    chunk[text_offset:text_offset + len(text_bytes)] = text_bytes
+    chunk[text_offset : text_offset + len(text_bytes)] = text_bytes
 
     _stamp_chain_terminators(chunk)
     _stamp_no_nsr(chunk, name_size)

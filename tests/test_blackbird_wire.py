@@ -75,14 +75,10 @@ class TestVarintEncoding(unittest.TestCase):
     def test_ushort_or_u32_wide_high_values(self):
         # 32768..0x7FFFFFFF needs the u32-wide form; 4 bytes, low bit
         # set ((value << 1) | 1 as LE u32).
-        self.assertEqual(
-            encode_ushort_or_u32_varint(32768), bytes.fromhex("01000100")
-        )
+        self.assertEqual(encode_ushort_or_u32_varint(32768), bytes.fromhex("01000100"))
         # 38400 = 640*60 = 1bpp pixel-byte-count for a 640×480 bitmap.
         # Encoded as wide form: (38400 << 1) | 1 = 0x12C01.
-        self.assertEqual(
-            encode_ushort_or_u32_varint(38400), bytes.fromhex("012c0100")
-        )
+        self.assertEqual(encode_ushort_or_u32_varint(38400), bytes.fromhex("012c0100"))
 
     def test_ushort_or_u32_overflow_rejected(self):
         with self.assertRaises(ValueError):
@@ -104,8 +100,7 @@ class TestChildRecord(unittest.TestCase):
         )
         self.assertEqual(len(rec), 15)
         self.assertEqual(
-            rec,
-            bytes.fromhex("8a 00 00 0a 00 14 00 64 00 12 00 78 56 34 12".replace(" ", ""))
+            rec, bytes.fromhex("8a 00 00 0a 00 14 00 64 00 12 00 78 56 34 12".replace(" ", ""))
         )
 
     def test_child_record_signed_position(self):
@@ -162,15 +157,15 @@ class TestKind5Raster(unittest.TestCase):
         self.assertEqual(
             raster,
             bytes.fromhex(
-                "0500"               # kind=5, compression=raw
-                "00000000"           # 2x narrow skip-ints
-                "0202"               # planes=1, bpp=1
-                "02000200"           # width=1, height=1 (narrow ushort)
-                "00000000"           # palette=0, reserved=0
-                "04000000"           # pixel_byte_count=2, trailer_size=0
-                "1c000000"           # pixel_data_offset = 28
-                "1e000000"           # trailer_offset = 30 (after pixels)
-                "0000"               # pixel data
+                "0500"  # kind=5, compression=raw
+                "00000000"  # 2x narrow skip-ints
+                "0202"  # planes=1, bpp=1
+                "02000200"  # width=1, height=1 (narrow ushort)
+                "00000000"  # palette=0, reserved=0
+                "04000000"  # pixel_byte_count=2, trailer_size=0
+                "1c000000"  # pixel_data_offset = 28
+                "1e000000"  # trailer_offset = 30 (after pixels)
+                "0000"  # pixel data
             ),
         )
 
@@ -183,7 +178,7 @@ class TestKind5Raster(unittest.TestCase):
             width=640,
             height=480,
             bpp=1,
-            pixel_data=b"\xFF" * 38400,
+            pixel_data=b"\xff" * 38400,
             trailer=b"",
         )
         # Expected size: 30 B header + 38400 B pixel data = 38430 B.
@@ -398,7 +393,7 @@ class TestCase1Tlv(unittest.TestCase):
 
     def test_decode_consumes_only_narrow_length_plus_bitmap(self):
         # Trailing bytes after the 6-byte null TLV must NOT be read.
-        suffix = b"\xCA\xFE\xBA\xBE"
+        suffix = b"\xca\xfe\xba\xbe"
         fields, consumed = decode_case1_tlv(encode_null_tlv() + suffix)
         self.assertEqual(consumed, 6)
 
@@ -456,8 +451,8 @@ class TestTextItemTlvEncoder(unittest.TestCase):
         # the empty-stop-list case.
         fields = {
             0x00: 0,
-            0x0C: 2,        # alignment_mode = center
-            0x27: 0,        # tab_stop_count = 0 (encoded but no payload)
+            0x0C: 2,  # alignment_mode = center
+            0x27: 0,  # tab_stop_count = 0 (encoded but no payload)
         }
         encoded = encode_text_item_tlv(fields)
         decoded, consumed = decode_case1_tlv(encoded)
@@ -540,11 +535,13 @@ class TestType0StatusRecord(unittest.TestCase):
 
     def test_layout_matches_spec(self):
         rec = build_type0_status_record(
-            title_byte=0x42, status=0xCAFE, contents_token=0xDEADBEEF,
+            title_byte=0x42,
+            status=0xCAFE,
+            contents_token=0xDEADBEEF,
         )
-        self.assertEqual(rec[0], 0xA5)                   # opcode
-        self.assertEqual(rec[1], 0x42)                   # title_byte
-        self.assertEqual(rec[2:4], bytes.fromhex("feca"))    # status u16 LE
+        self.assertEqual(rec[0], 0xA5)  # opcode
+        self.assertEqual(rec[1], 0x42)  # title_byte
+        self.assertEqual(rec[2:4], bytes.fromhex("feca"))  # status u16 LE
         self.assertEqual(rec[4:8], bytes.fromhex("efbeadde"))  # contents_token u32 LE
 
     def test_zero_status_for_empty_no_data(self):
@@ -604,8 +601,8 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
 
     def test_chunk_header_and_key_placement(self):
         chunk = self._chunk(key=0xCAFEBABE)
-        self.assertEqual(chunk[0], 0xBF)        # type-0 cache opcode
-        self.assertEqual(chunk[1], 0x01)        # title byte
+        self.assertEqual(chunk[0], 0xBF)  # type-0 cache opcode
+        self.assertEqual(chunk[1], 0x01)  # title byte
         self.assertEqual(chunk[2:4], bytes.fromhex("4000"))  # name_size = 0x40
         self.assertEqual(chunk[12:16], struct.pack("<I", 0xCAFEBABE))  # key
 
@@ -620,12 +617,12 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         #   bytes 0x27-0x28: signed-int varint, value = 7 (TLV size + 1).
         # text_base = entry + 0x26 + 3 + 7 = entry + 0x30.
         chunk = self._chunk()
-        self.assertEqual(chunk[4 + 0x26:4 + 0x29], bytes.fromhex("010e80"))
+        self.assertEqual(chunk[4 + 0x26 : 4 + 0x29], bytes.fromhex("010e80"))
 
     def test_chunk_tlv_is_null(self):
         chunk = self._chunk()
         # TLV at name_buf[0x29..0x2E] = 6-byte null TLV.
-        self.assertEqual(chunk[4 + 0x29:4 + 0x2F], bytes.fromhex("008000000000"))
+        self.assertEqual(chunk[4 + 0x29 : 4 + 0x2F], bytes.fromhex("008000000000"))
 
     def test_chunk_end_of_chunk_marker_at_end_of_tlv(self):
         # 0xFF at name_buf[0x2F] = end_of_TLV. Read by MVDispatchControlRun
@@ -637,7 +634,7 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         chunk = self._chunk()
         # Text at name_buf[0x30..0x39] = 9 ASCII + NUL.
         self.assertEqual(
-            chunk[4 + 0x30:4 + 0x30 + 10],
+            chunk[4 + 0x30 : 4 + 0x30 + 10],
             b"MSN Today\x00",
         )
 
@@ -657,15 +654,15 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         expected[8:12] = b"\x01\x00\x00\x00"
         expected[12:16] = struct.pack("<I", 0xCAFEBABE)
         expected[16:20] = b"\x01\x00\x00\x00"
-        expected[4 + 0x26:4 + 0x29] = bytes.fromhex("010e80")
-        expected[4 + 0x29:4 + 0x2F] = bytes.fromhex("008000000000")
+        expected[4 + 0x26 : 4 + 0x29] = bytes.fromhex("010e80")
+        expected[4 + 0x29 : 4 + 0x2F] = bytes.fromhex("008000000000")
         expected[4 + 0x2F] = 0xFF
-        expected[4 + 0x30:4 + 0x3A] = b"MSN Today\x00"
+        expected[4 + 0x30 : 4 + 0x3A] = b"MSN Today\x00"
         # Content block @ +0x14 carries the unconditional NSR-collapse
         # sentinel — `MVCL14N!fMVHasNSR` reads `viewer+0x4c == -1`, and
         # the content block lands at `viewer+0x38` on cache hit. Every
         # Blackbird-authored 0xBF chunk stamps -1 here.
-        expected[4 + 0x40 + 0x14:4 + 0x40 + 0x18] = b"\xFF\xFF\xFF\xFF"
+        expected[4 + 0x40 + 0x14 : 4 + 0x40 + 0x18] = b"\xff\xff\xff\xff"
         self.assertEqual(chunk, bytes(expected))
 
     def test_chunk_stamps_chain_terminators(self):
@@ -685,7 +682,7 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         # bytes +0x2C / +0x34 are HGLOBAL slots, kept NULL.
         content = chunk[0x44:]
         self.assertEqual(content[:0x14], b"\x00" * 0x14)
-        self.assertEqual(content[0x14:0x18], b"\xFF\xFF\xFF\xFF")
+        self.assertEqual(content[0x14:0x18], b"\xff\xff\xff\xff")
         self.assertEqual(content[0x18:], b"\x00" * (60 - 0x18))
 
     def test_empty_text_skip_row_chunk(self):
@@ -697,7 +694,11 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
         # hourglass). Verify the chunk has the exact byte pattern the
         # pre-test matches.
         chunk = build_case1_bf_chunk(
-            "", title_byte=0x01, key=0, name_size=0x40, initial_font_style=None,
+            "",
+            title_byte=0x01,
+            key=0,
+            name_size=0x40,
+            initial_font_style=None,
         )
         # name_size=0x40 → name_buf occupies chunk[4..0x44].
         # chunk[0x33] = end-of-TLV byte (control_stream); chunk[0x34] = first text byte.
@@ -707,7 +708,9 @@ class TestCase1BfChunkLegacy0x40(unittest.TestCase):
     def test_text_too_long_for_in_name_buf_form_rejected(self):
         # 13 bytes of text + NUL = 14 bytes, exceeds 13-byte budget at name_size=0x40.
         with self.assertRaises(ValueError):
-            build_case1_bf_chunk("X" * 13, title_byte=0x01, key=0, name_size=0x40, initial_font_style=None)
+            build_case1_bf_chunk(
+                "X" * 13, title_byte=0x01, key=0, name_size=0x40, initial_font_style=None
+            )
 
 
 class TestCase1BfChunkExtended(unittest.TestCase):
@@ -731,7 +734,7 @@ class TestCase1BfChunkExtended(unittest.TestCase):
         self.assertEqual(chunk[4 + 0x33], 0)
         # With a 0x100 buffer there's room through name_buf[0x100 - 1] = 0xFF.
         self.assertEqual(
-            chunk[4 + 0x34:4 + 0x34 + 120],
+            chunk[4 + 0x34 : 4 + 0x34 + 120],
             text.encode("ascii") + b"\x00",
         )
 
@@ -740,17 +743,17 @@ class TestCase1BfChunkExtended(unittest.TestCase):
         # offsets are all measured from name_buf[0x26] — they don't shift
         # when name_size grows.
         chunk = build_case1_bf_chunk("hello", title_byte=0x01, key=0xDEADBEEF)
-        self.assertEqual(chunk[4 + 0x26], 0x01)              # case-1 dispatch
-        self.assertEqual(chunk[4 + 0x26:4 + 0x29], bytes.fromhex("011480"))  # preamble
-        self.assertEqual(chunk[4 + 0x29:4 + 0x2F], bytes.fromhex("008000000000"))  # null TLV
-        self.assertEqual(chunk[4 + 0x2F:4 + 0x33], bytes.fromhex("800000ff"))  # style 0, then end
-        self.assertEqual(chunk[4 + 0x33], 0)                 # leading NUL runs the style control
-        self.assertEqual(chunk[4 + 0x34:4 + 0x3A], b"hello\x00")
+        self.assertEqual(chunk[4 + 0x26], 0x01)  # case-1 dispatch
+        self.assertEqual(chunk[4 + 0x26 : 4 + 0x29], bytes.fromhex("011480"))  # preamble
+        self.assertEqual(chunk[4 + 0x29 : 4 + 0x2F], bytes.fromhex("008000000000"))  # null TLV
+        self.assertEqual(chunk[4 + 0x2F : 4 + 0x33], bytes.fromhex("800000ff"))  # style 0, then end
+        self.assertEqual(chunk[4 + 0x33], 0)  # leading NUL runs the style control
+        self.assertEqual(chunk[4 + 0x34 : 4 + 0x3A], b"hello\x00")
         # Content block is appended after the larger name_buf; +0x14
         # carries the unconditional NSR-collapse sentinel, rest zero.
         content = chunk[-60:]
         self.assertEqual(content[:0x14], b"\x00" * 0x14)
-        self.assertEqual(content[0x14:0x18], b"\xFF\xFF\xFF\xFF")
+        self.assertEqual(content[0x14:0x18], b"\xff\xff\xff\xff")
         self.assertEqual(content[0x18:], b"\x00" * (60 - 0x18))
         # Key still in the canonical name_buf+0x08 slot (= chunk[12..16]).
         self.assertEqual(chunk[12:16], struct.pack("<I", 0xDEADBEEF))
@@ -765,11 +768,11 @@ class TestCase3BfChunk(unittest.TestCase):
         self.assertEqual(chunk[2:4], bytes.fromhex("4000"))
         self.assertEqual(struct.unpack("<I", chunk[12:16])[0], 0xCAFEBABE)
         self.assertEqual(chunk[4 + 0x26], 0x03)
-        self.assertEqual(chunk[4 + 0x27:4 + 0x40], b"\x00" * 0x19)
+        self.assertEqual(chunk[4 + 0x27 : 4 + 0x40], b"\x00" * 0x19)
         # Content block @ +0x14 = NSR-collapse sentinel, rest zero.
         content = chunk[0x44:]
         self.assertEqual(content[:0x14], b"\x00" * 0x14)
-        self.assertEqual(content[0x14:0x18], b"\xFF\xFF\xFF\xFF")
+        self.assertEqual(content[0x14:0x18], b"\xff\xff\xff\xff")
         self.assertEqual(content[0x18:], b"\x00" * (60 - 0x18))
 
     def test_chunk_stamps_chain_terminators(self):
@@ -788,8 +791,11 @@ class TestTextMetafileBorderAndFill(unittest.TestCase):
 
     def test_opaque_item_emits_rectangle_and_objects(self):
         item = TextItem(
-            x=10, y=20, text="hi",
-            rect_w=100, rect_h=30,
+            x=10,
+            y=20,
+            text="hi",
+            rect_w=100,
+            rect_h=30,
             transparent=False,
             back_color=0x00FF00,
         )
@@ -808,8 +814,11 @@ class TestTextMetafileBorderAndFill(unittest.TestCase):
 
     def test_framed_item_emits_pen_with_frame_color(self):
         item = TextItem(
-            x=0, y=0, text="hi",
-            rect_w=50, rect_h=50,
+            x=0,
+            y=0,
+            text="hi",
+            rect_w=50,
+            rect_h=50,
             frame_style=1,
             frame_color=0xFF0000,  # red
         )
@@ -822,8 +831,11 @@ class TestTextMetafileBorderAndFill(unittest.TestCase):
 
     def test_transparent_no_border_skips_rectangle(self):
         item = TextItem(
-            x=0, y=0, text="hi",
-            rect_w=50, rect_h=50,
+            x=0,
+            y=0,
+            text="hi",
+            rect_w=50,
+            rect_h=50,
             transparent=True,
             frame_style=0,
             bevel_width=0,
@@ -853,7 +865,7 @@ def _find_textout_records(meta: bytes) -> list[tuple[int, int, str]]:
             count = struct.unpack_from("<H", meta, pos + 6)[0]
             text_padded = (count + 1) & ~1
             y, x = struct.unpack_from("<hh", meta, pos + 8 + text_padded)
-            text = meta[pos + 8:pos + 8 + count].decode("ascii", "replace")
+            text = meta[pos + 8 : pos + 8 + count].decode("ascii", "replace")
             out.append((x, y, text))
         if rd_size == 0:
             break
@@ -881,27 +893,54 @@ class TestTextMetafileAlignment(unittest.TestCase):
         return struct.unpack_from("<H", meta, idx + 6)[0]
 
     def test_left_aligned_textout_anchors_at_rect_left(self):
-        meta = build_text_metafile([TextItem(
-            x=100, y=50, text="Hi", rect_w=200, rect_h=24, alignment=0,
-        )])
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=100,
+                    y=50,
+                    text="Hi",
+                    rect_w=200,
+                    rect_h=24,
+                    alignment=0,
+                )
+            ]
+        )
         self.assertEqual(self._settextalign_mode(meta), 0x00)  # TA_LEFT
         textouts = _find_textout_records(meta)
         self.assertEqual(len(textouts), 1)
         self.assertEqual(textouts[0][0], 100)
 
     def test_right_aligned_textout_anchors_at_rect_right(self):
-        meta = build_text_metafile([TextItem(
-            x=100, y=50, text="Hi", rect_w=200, rect_h=24, alignment=1,
-        )])
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=100,
+                    y=50,
+                    text="Hi",
+                    rect_w=200,
+                    rect_h=24,
+                    alignment=1,
+                )
+            ]
+        )
         self.assertEqual(self._settextalign_mode(meta), 0x02)  # TA_RIGHT
         textouts = _find_textout_records(meta)
         self.assertEqual(len(textouts), 1)
         self.assertEqual(textouts[0][0], 300)
 
     def test_center_aligned_textout_anchors_at_rect_center(self):
-        meta = build_text_metafile([TextItem(
-            x=100, y=50, text="Hi", rect_w=200, rect_h=24, alignment=2,
-        )])
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=100,
+                    y=50,
+                    text="Hi",
+                    rect_w=200,
+                    rect_h=24,
+                    alignment=2,
+                )
+            ]
+        )
         self.assertEqual(self._settextalign_mode(meta), 0x06)  # TA_CENTER
         textouts = _find_textout_records(meta)
         self.assertEqual(len(textouts), 1)
@@ -910,9 +949,18 @@ class TestTextMetafileAlignment(unittest.TestCase):
     def test_textout_anchor_unchanged_when_rect_w_zero(self):
         # Story controls + text-only mode pass no rect; alignment can be
         # set but there's nothing to anchor inside, so x stays as-is.
-        meta = build_text_metafile([TextItem(
-            x=100, y=50, text="Hi", rect_w=0, rect_h=0, alignment=1,
-        )])
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=100,
+                    y=50,
+                    text="Hi",
+                    rect_w=0,
+                    rect_h=0,
+                    alignment=1,
+                )
+            ]
+        )
         textouts = _find_textout_records(meta)
         self.assertEqual(textouts[0][0], 100)
 
@@ -921,12 +969,14 @@ class TestTextMetafileAlignment(unittest.TestCase):
         # (simple_center, alignment=2) must drive both SetTextAlign and
         # TextOut anchor shifts inside bm0 baggage.
         from src.server.services.medview.ttl_loader import (
-            CaptionControl, build_all_bm_baggage, load_title,
+            CaptionControl,
+            build_all_bm_baggage,
+            load_title,
         )
+
         t = load_title("tests/assets/captions_test.ttl")
         bag = build_all_bm_baggage(t)["bm0"]
-        captions = {c.seq: c for c in t.pages[0].controls
-                    if isinstance(c, CaptionControl)}
+        captions = {c.seq: c for c in t.pages[0].controls if isinstance(c, CaptionControl)}
         self.assertEqual(captions[2].alignment, 1)
         self.assertEqual(captions[3].alignment, 2)
         # Container preamble is 8 bytes, kind=8 header before metafile;
@@ -955,11 +1005,20 @@ class TestTextMetafileWordWrap(unittest.TestCase):
     _SAMPLE = "Word wrap enabled for this one"
 
     def test_word_wrap_emits_multiple_textouts(self):
-        meta = build_text_metafile([TextItem(
-            x=10, y=20, text=self._SAMPLE,
-            font_face="MS Sans Serif", font_height=-16,
-            rect_w=100, rect_h=100, word_wrap=True,
-        )])
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=10,
+                    y=20,
+                    text=self._SAMPLE,
+                    font_face="MS Sans Serif",
+                    font_height=-16,
+                    rect_w=100,
+                    rect_h=100,
+                    word_wrap=True,
+                )
+            ]
+        )
         textouts = _find_textout_records(meta)
         self.assertGreaterEqual(len(textouts), 2)
         # Lines stack downward by the font cell height (MS Sans Serif
@@ -972,40 +1031,69 @@ class TestTextMetafileWordWrap(unittest.TestCase):
         self.assertEqual(joined.split(), self._SAMPLE.split())
 
     def test_word_wrap_disabled_emits_single_textout(self):
-        meta = build_text_metafile([TextItem(
-            x=10, y=20, text=self._SAMPLE,
-            font_face="MS Sans Serif", font_height=-16,
-            rect_w=100, rect_h=100, word_wrap=False,
-        )])
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=10,
+                    y=20,
+                    text=self._SAMPLE,
+                    font_face="MS Sans Serif",
+                    font_height=-16,
+                    rect_w=100,
+                    rect_h=100,
+                    word_wrap=False,
+                )
+            ]
+        )
         textouts = _find_textout_records(meta)
         self.assertEqual(len(textouts), 1)
         self.assertEqual(textouts[0][2], self._SAMPLE)
 
     def test_word_wrap_lines_fit_rect_width(self):
         from src.server.blackbird import textmetrics
+
         rect_w = 100
-        meta = build_text_metafile([TextItem(
-            x=0, y=0, text=self._SAMPLE,
-            font_face="MS Sans Serif", font_height=-16,
-            rect_w=rect_w, rect_h=200, word_wrap=True,
-        )])
-        for (_x, _y, line) in _find_textout_records(meta):
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=0,
+                    y=0,
+                    text=self._SAMPLE,
+                    font_face="MS Sans Serif",
+                    font_height=-16,
+                    rect_w=rect_w,
+                    rect_h=200,
+                    word_wrap=True,
+                )
+            ]
+        )
+        for _x, _y, line in _find_textout_records(meta):
             if len(line.split()) > 1:  # multi-word lines must fit
                 w = textmetrics.measure_text("MS Sans Serif", 16, False, False, line)
                 self.assertLessEqual(w, rect_w, f"line exceeds rect: {line!r} ({w}px)")
 
     def test_forced_break_keeps_long_word_on_own_line(self):
         text = "Hi supercalifragilisticexpialidocious yo"
-        meta = build_text_metafile([TextItem(
-            x=0, y=0, text=text,
-            font_face="MS Sans Serif", font_height=-16,
-            rect_w=80, rect_h=200, word_wrap=True,
-        )])
+        meta = build_text_metafile(
+            [
+                TextItem(
+                    x=0,
+                    y=0,
+                    text=text,
+                    font_face="MS Sans Serif",
+                    font_height=-16,
+                    rect_w=80,
+                    rect_h=200,
+                    word_wrap=True,
+                )
+            ]
+        )
         lines = [t.strip() for (_x, _y, t) in _find_textout_records(meta)]
         self.assertIn("supercalifragilisticexpialidocious", lines)
 
     def test_captions_fixture_seq19_wraps_end_to_end(self):
         from src.server.services.medview.ttl_loader import build_all_bm_baggage, load_title
+
         t = load_title("tests/assets/captions_test.ttl")
         bag = build_all_bm_baggage(t)["bm0"]
         textouts = _textouts_in_baggage(bag)
@@ -1025,21 +1113,22 @@ class TestTextMetrics(unittest.TestCase):
 
     def test_ms_sans_serif_12pt_strike_extent(self):
         from src.server.blackbird import textmetrics
+
         # lfHeight -16 → 12pt MS Sans Serif strike. Width is summed from
         # the FNT dfCharTable (the table GDI itself reads), pix height 20.
         self.assertEqual(
-            textmetrics.measure_text("MS Sans Serif", 16, False, False,
-                                     "Word wrap enabled for this one"),
+            textmetrics.measure_text(
+                "MS Sans Serif", 16, False, False, "Word wrap enabled for this one"
+            ),
             220,
         )
         self.assertEqual(textmetrics.line_height("MS Sans Serif", 16, False, False), 20)
 
     def test_unknown_face_falls_back(self):
         from src.server.blackbird import textmetrics
+
         # Should not raise; resolves to the default face.
-        self.assertGreater(
-            textmetrics.measure_text("No Such Font", 16, False, False, "abc"), 0
-        )
+        self.assertGreater(textmetrics.measure_text("No Such Font", 16, False, False, "abc"), 0)
 
 
 class TestStyledCase1Chunk(unittest.TestCase):
@@ -1083,12 +1172,12 @@ class TestStyledCase1Chunk(unittest.TestCase):
         # Text stream: \x00 H e l l o ' ' \x00 W o r l d \x00 (14 bytes).
         control_offset = 4 + 0x26 + 3 + 6  # = 0x33
         self.assertEqual(
-            styled[control_offset:control_offset + 7],
+            styled[control_offset : control_offset + 7],
             bytes.fromhex("80 00 00 80 01 00 ff".replace(" ", "")),
         )
         text_offset = control_offset + 7
         self.assertEqual(
-            styled[text_offset:text_offset + 14],
+            styled[text_offset : text_offset + 14],
             b"\x00Hello \x00World\x00",
         )
 
@@ -1104,18 +1193,18 @@ class TestStyledCase1Chunk(unittest.TestCase):
         # Text stream: \x00 A \x00 B \x00 C \x00 = 7 bytes.
         control_offset = 4 + 0x26 + 3 + 6
         expected_controls = (
-            b"\x80\x00\x00"     # style 0
-            b"\x80\x07\x00"     # style 7
-            b"\x80\x0d\x00"     # style 13
+            b"\x80\x00\x00"  # style 0
+            b"\x80\x07\x00"  # style 7
+            b"\x80\x0d\x00"  # style 13
             b"\xff"
         )
         self.assertEqual(
-            styled[control_offset:control_offset + len(expected_controls)],
+            styled[control_offset : control_offset + len(expected_controls)],
             expected_controls,
         )
         text_offset = control_offset + len(expected_controls)
         self.assertEqual(
-            styled[text_offset:text_offset + 7],
+            styled[text_offset : text_offset + 7],
             b"\x00A\x00B\x00C\x00",
         )
 
@@ -1131,11 +1220,11 @@ class TestStyledCase1Chunk(unittest.TestCase):
         # Validate the TLV decodes with the right tab stops.
         # Find the TLV: starts at 4 + 0x26 + 3 (preamble) = 0x2D.
         tlv_start = 4 + 0x26 + 3
-        fields, consumed = decode_case1_tlv(styled[tlv_start:tlv_start + 32])
+        fields, consumed = decode_case1_tlv(styled[tlv_start : tlv_start + 32])
         self.assertEqual(fields["tab_stops"], [(80, 0), (160, 0)])
         # Control stream right after the consumed TLV bytes.
         ctrl_offset = tlv_start + consumed
-        self.assertEqual(styled[ctrl_offset:ctrl_offset + 3], b"\x80\x00\x00")
+        self.assertEqual(styled[ctrl_offset : ctrl_offset + 3], b"\x80\x00\x00")
         self.assertEqual(styled[ctrl_offset + 3], 0xFF)
 
     def test_empty_segments_rejected(self):
@@ -1147,18 +1236,24 @@ class TestStyledCase1Chunk(unittest.TestCase):
         # synchronisation.
         with self.assertRaises(ValueError):
             build_styled_case1_chunk(
-                [("Bad\x00Text", 0)], title_byte=0, key=0,
+                [("Bad\x00Text", 0)],
+                title_byte=0,
+                key=0,
             )
 
     def test_style_id_overflow_rejected(self):
         with self.assertRaises(ValueError):
             build_styled_case1_chunk(
-                [("X", 0x10000)], title_byte=0, key=0,
+                [("X", 0x10000)],
+                title_byte=0,
+                key=0,
             )
 
     def test_chain_terminators_and_nsr_stamped(self):
         styled = build_styled_case1_chunk(
-            [("X", 0)], title_byte=0x01, key=0x00,
+            [("X", 0)],
+            title_byte=0x01,
+            key=0x00,
         )
         # wire+0x8 and wire+0x10 are chain terminators below valid TOPICPOS.
         self.assertEqual(struct.unpack("<I", styled[8:12])[0], 1)
@@ -1166,7 +1261,7 @@ class TestStyledCase1Chunk(unittest.TestCase):
         # content_block +0x14 NSR sentinel = 0xFFFFFFFF.
         name_size = struct.unpack("<H", styled[2:4])[0]
         nsr_off = 4 + name_size + 0x14
-        self.assertEqual(struct.unpack("<I", styled[nsr_off:nsr_off + 4])[0], 0xFFFFFFFF)
+        self.assertEqual(struct.unpack("<I", styled[nsr_off : nsr_off + 4])[0], 0xFFFFFFFF)
 
 
 if __name__ == "__main__":

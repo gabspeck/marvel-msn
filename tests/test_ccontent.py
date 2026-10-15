@@ -34,9 +34,7 @@ class TestDecodeTextRuns(unittest.TestCase):
         # First 32 bytes of tests/assets/story_test.ttl `8/7/object` (TextRuns).
         # Body is CTypedPtrArray<CElementData>::Serialize: u16 count
         # then count × CElementData. count = 0x0002 = 2 (bytes 0..1).
-        head = bytes.fromhex(
-            "0200535468697320697320616e206578616d706c65206f6620636f6e74656e74"
-        )
+        head = bytes.fromhex("0200535468697320697320616e206578616d706c65206f6620636f6e74656e74")
         decoded = decode_textruns(head)
         # Legacy (version, flag) view: bytes 0..1 are the count
         # (matches `02 00`), exposed as-is for backward compat.
@@ -181,8 +179,10 @@ class TestElementTree(unittest.TestCase):
     def test_paragraph_holds_one_text_leaf(self):
         # `<H1>Story title</H1>`: tag 7, one child, and the child is a
         # version-3 leaf carrying 11 bytes.
-        body = bytes.fromhex("01") + bytes.fromhex("0700010100") + (
-            bytes.fromhex("ffff030b") + b"Story title" + bytes.fromhex("0000")
+        body = (
+            bytes.fromhex("01")
+            + bytes.fromhex("0700010100")
+            + (bytes.fromhex("ffff030b") + b"Story title" + bytes.fromhex("0000"))
         )
         root = parse_element_tree(body)
         self.assertIsNotNone(root)
@@ -203,8 +203,13 @@ class TestElementTree(unittest.TestCase):
     def test_version_two_dword_leaf_is_not_prose(self):
         # `story_test.ttl 8/6` puts one of these in the empty `<P>`
         # ahead of each list.
-        body = bytes.fromhex("01") + bytes.fromhex("0600010100") + \
-            bytes.fromhex("ffff02") + bytes.fromhex("01000000") + bytes.fromhex("0000")
+        body = (
+            bytes.fromhex("01")
+            + bytes.fromhex("0600010100")
+            + bytes.fromhex("ffff02")
+            + bytes.fromhex("01000000")
+            + bytes.fromhex("0000")
+        )
         root = parse_element_tree(body)
         leaf = root.children[0]
         self.assertEqual((leaf.version, leaf.data), (2, b"\x01\x00\x00\x00"))
@@ -213,9 +218,16 @@ class TestElementTree(unittest.TestCase):
     def test_version_five_carries_pascal_property_pairs(self):
         body = (
             bytes.fromhex("01")
-            + bytes.fromhex("2e0005") + bytes.fromhex("0200")
-            + bytes([5]) + b"CLSID" + bytes([21]) + b"PICTURE.PictureCtrl.1"
-            + bytes([2]) + b"CX" + bytes([4]) + b"1500"
+            + bytes.fromhex("2e0005")
+            + bytes.fromhex("0200")
+            + bytes([5])
+            + b"CLSID"
+            + bytes([21])
+            + b"PICTURE.PictureCtrl.1"
+            + bytes([2])
+            + b"CX"
+            + bytes([4])
+            + b"1500"
             + bytes.fromhex("0000")
         )
         root = parse_element_tree(body)
@@ -246,12 +258,12 @@ class TestElementTree(unittest.TestCase):
 class TestPictureRefDataclass(unittest.TestCase):
     def test_construction(self):
         ref = PictureRef(
-            byte_offset=0x4b5,
+            byte_offset=0x4B5,
             clsid="PICTURE.PictureCtrl.1",
             filename="bitmap.bmp",
             iuid=b"\x01" * 16,
         )
-        self.assertEqual(ref.byte_offset, 0x4b5)
+        self.assertEqual(ref.byte_offset, 0x4B5)
         self.assertEqual(ref.clsid, "PICTURE.PictureCtrl.1")
         self.assertEqual(ref.filename, "bitmap.bmp")
         self.assertEqual(len(ref.iuid), 16)

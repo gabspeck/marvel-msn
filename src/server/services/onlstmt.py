@@ -68,11 +68,11 @@ log = logging.getLogger(__name__)
 
 # OnlStmt wire selectors.  Called by ONLSTMT.EXE worker threads via
 # proxy->m0c(selector, ...) after the IID discovery map lookup.
-ONLSTMT_SELECTOR_SUMMARY = 0x00               # GetStatementSummary (initial call)
-ONLSTMT_SELECTOR_SUBSCRIPTIONS = 0x02         # list subscriptions
-ONLSTMT_SELECTOR_MANAGE_SUBSCRIPTION = 0x03   # load plans for the manage dialog
-ONLSTMT_SELECTOR_CANCEL_SUBSCRIPTION = 0x04   # cancel-subscription ack
-ONLSTMT_SELECTOR_GET_DETAILS = 0x05           # per-period charge details
+ONLSTMT_SELECTOR_SUMMARY = 0x00  # GetStatementSummary (initial call)
+ONLSTMT_SELECTOR_SUBSCRIPTIONS = 0x02  # list subscriptions
+ONLSTMT_SELECTOR_MANAGE_SUBSCRIPTION = 0x03  # load plans for the manage dialog
+ONLSTMT_SELECTOR_CANCEL_SUBSCRIPTION = 0x04  # cancel-subscription ack
+ONLSTMT_SELECTOR_GET_DETAILS = 0x05  # per-period charge details
 
 
 def build_summary_payload(user):
@@ -216,7 +216,7 @@ def build_details_payload(period_index, user):
         for t in txns
     ]
     sample = ",".join(
-        f'{t.when.strftime("%Y-%m-%dT%H:%M")}|{t.description!r}|amt={t.amount_minor}|tot={t.total_minor}'
+        f"{t.when.strftime('%Y-%m-%dT%H:%M')}|{t.description!r}|amt={t.amount_minor}|tot={t.total_minor}"
         for t in txns[:3]
     )
     log.info(

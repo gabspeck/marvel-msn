@@ -25,7 +25,6 @@ _MVAUTHOR = Path("binaries/MVPUBKIT/MVAUTHOR.MVB")
 
 @unittest.skipUnless(_MMAG.exists(), "MVPUBKIT archives not present")
 class TestMvbArchive(unittest.TestCase):
-
     def _file_names(self, info: dict) -> list[str]:
         return [f.name for f in info["internal_files"]]
 

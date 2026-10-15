@@ -387,9 +387,7 @@ class BbirdOBHandler:
         """The published object a per-artifact request names, or None."""
         blobs = [p.data for p in send_params if isinstance(p, VarParam)]
         if not blobs or len(blobs[0]) != 16:
-            log.error(
-                "bbird_artifact_bad_guid payload=%s", blobs[0].hex() if blobs else "-"
-            )
+            log.error("bbird_artifact_bad_guid payload=%s", blobs[0].hex() if blobs else "-")
             return None, None
         guid = blobs[0]
         return guid, _load_published_objects().get(guid)

@@ -74,6 +74,7 @@ _JUSTIFY_LEFT = 0
 @dataclass(frozen=True)
 class Paragraph:
     """One drawable element: its resolved style plus its prose."""
+
     style: ResolvedStyle
     text: str
 
@@ -118,13 +119,15 @@ def flatten_paragraphs(
             return
         text = node.text
         if text.strip():
-            out.append(Paragraph(
-                style=bbstyles.resolve(
-                    bbstyles.style_for_element(node.tag, enclosing_list),
-                    font_map,
-                ),
-                text=text,
-            ))
+            out.append(
+                Paragraph(
+                    style=bbstyles.resolve(
+                        bbstyles.style_for_element(node.tag, enclosing_list),
+                        font_map,
+                    ),
+                    text=text,
+                )
+            )
         for child in node.children:
             visit(child, enclosing_list)
 
@@ -139,7 +142,10 @@ def _wrap(style: ResolvedStyle, text: str, width_px: int) -> list[str]:
         return [text]
     try:
         measure = textmetrics.text_measurer(
-            style.font_face, _em_px(style), style.bold, style.italic,
+            style.font_face,
+            _em_px(style),
+            style.bold,
+            style.italic,
         )
     except (OSError, ImportError):
         return [text]
@@ -201,16 +207,18 @@ def layout_story(
     content_left = left + margin
     content_right = right - margin
 
-    items: list[TextItem] = [TextItem(
-        x=left,
-        y=top,
-        text="",
-        back_color=bbstyles.resolve(bbstyles.NORMAL, font_map).back_color,
-        transparent=False,
-        rect_w=max(0, right - left),
-        rect_h=max(0, bottom - top),
-        auto_size=True,
-    )]
+    items: list[TextItem] = [
+        TextItem(
+            x=left,
+            y=top,
+            text="",
+            back_color=bbstyles.resolve(bbstyles.NORMAL, font_map).back_color,
+            transparent=False,
+            rect_w=max(0, right - left),
+            rect_h=max(0, bottom - top),
+            auto_size=True,
+        )
+    ]
 
     y = top + margin
     for para in paragraphs:
@@ -227,11 +235,13 @@ def layout_story(
                 if style.special_line_indent == bbstyles.SPECIAL_INDENT_HANGING
                 else 0
             )
-            items.append(_bullet_item(
-                style,
-                text_left - hanging,
-                y + _metric(textmetrics.ascent, style, em),
-            ))
+            items.append(
+                _bullet_item(
+                    style,
+                    text_left - hanging,
+                    y + _metric(textmetrics.ascent, style, em),
+                )
+            )
         for line in _wrap(style, para.text.rstrip(), text_right - text_left):
             items.append(_text_item(style, text_left, y, line))
             y += line_h

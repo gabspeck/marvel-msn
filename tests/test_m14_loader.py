@@ -240,10 +240,7 @@ class TestM14Loader(unittest.TestCase):
         self.assertEqual(sections["PANES"], [])
         self.assertEqual(
             sections["WINDOWS"],
-            [
-                'main="Employee Handbook Example",(0,0,640,480,1),,,'
-                "(255,255,255),(255,255,192)"
-            ],
+            ['main="Employee Handbook Example",(0,0,640,480,1),,,(255,255,255),(255,255,192)'],
         )
 
     def test_mvpfile_carries_the_same_records_as_the_rtm_body(self):
@@ -259,7 +256,7 @@ class TestM14Loader(unittest.TestCase):
         popup_background, popup_window = title.popup_pane
 
         def rgb(value: int) -> str:
-            return f"{value & 0xff},{value >> 8 & 0xff},{value >> 16 & 0xff}"
+            return f"{value & 0xFF},{value >> 8 & 0xFF},{value >> 16 & 0xFF}"
 
         sections = _mvp_sections(build_m14_mvpfile(title))
         window = sections["WINDOWS"][0]
@@ -363,9 +360,7 @@ class TestM14Loader(unittest.TestCase):
         title = load_m14(_FRANCE)
         self.assertIsNotNone(title)
         positions = sorted(
-            display.topic_pos
-            for topic in title.topics
-            for display in topic.displays
+            display.topic_pos for topic in title.topics for display in topic.displays
         )
         occupied = set(positions)
         for topic_pos in positions:
@@ -378,8 +373,7 @@ class TestM14Loader(unittest.TestCase):
                 self.assertIn(
                     token,
                     (topic_pos - 1, topic_pos + 1),
-                    f"display 0x{topic_pos:x} names non-adjacent edge "
-                    f"token 0x{token:x}",
+                    f"display 0x{topic_pos:x} names non-adjacent edge token 0x{token:x}",
                 )
         # The lowest display in the title is the popup target; its
         # leading token must not reach down past it.
@@ -419,15 +413,18 @@ class TestM14Loader(unittest.TestCase):
             scroll=non_scroll.scroll,
         )
         preamble = encode_case1_preamble(
-            len(encode_text_item_tlv(
-                non_scroll.fields_dict(),
-                tab_stops=list(non_scroll.tab_stops),
-            )) + len(non_scroll.control_stream),
+            len(
+                encode_text_item_tlv(
+                    non_scroll.fields_dict(),
+                    tab_stops=list(non_scroll.tab_stops),
+                )
+            )
+            + len(non_scroll.control_stream),
             type_tag=0x20,
             prefix_u16=non_scroll.topic_length,
         )
         fields, _tlv_size = decode_case1_tlv(
-            chunk[0x2A + len(preamble):],
+            chunk[0x2A + len(preamble) :],
         )
         self.assertEqual(fields[0x12], 1)
         self.assertEqual(fields[0x16], 240)
@@ -492,6 +489,6 @@ class TestM14Loader(unittest.TestCase):
         self.assertIsNotNone(title)
         row = title.display_at(0x8E1B)
         self.assertIsNotNone(row)
-        self.assertEqual(row.control_stream, bytes.fromhex("800600818282" "82ff"))
+        self.assertEqual(row.control_stream, bytes.fromhex("80060081828282ff"))
         self.assertEqual(row.text_data.count(b"\x00"), 6)
         self.assertEqual(row.fields_dict(), {0x12: 1})

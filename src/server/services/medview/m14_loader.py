@@ -218,11 +218,7 @@ class LoadedM14:
         for topic in self.topics:
             for index, display in enumerate(topic.displays):
                 if display.topic_pos == topic_pos:
-                    previous = (
-                        topic.displays[index - 1].topic_pos
-                        if index
-                        else topic_pos - 1
-                    )
+                    previous = topic.displays[index - 1].topic_pos if index else topic_pos - 1
                     following = (
                         topic.displays[index + 1].topic_pos
                         if index + 1 < len(topic.displays)
@@ -399,10 +395,7 @@ def _parse_system(data: bytes) -> _SystemInfo:
             fields = payload.split(b"\x00")
             if len(fields) < 6:
                 raise ValueError("|SYSTEM DLLMAP record has fewer than five strings")
-            decoded = [
-                field.decode("cp1252", errors="replace")
-                for field in fields[:5]
-            ]
+            decoded = [field.decode("cp1252", errors="replace") for field in fields[:5]]
             dll_maps.append(M14DllMap(*decoded))
 
     return _SystemInfo(
@@ -495,10 +488,7 @@ def _parse_context(data: bytes) -> tuple[tuple[int, int], ...]:
         pos = start + 8
         if pos + count * 8 > end:
             raise ValueError(f"|CONTEXT page {page} records overrun page")
-        records.extend(
-            struct.unpack_from("<II", data, pos + index * 8)
-            for index in range(count)
-        )
+        records.extend(struct.unpack_from("<II", data, pos + index * 8) for index in range(count))
         page = 0xFFFF if next_page < 0 else next_page
     return tuple(records)
 
@@ -579,9 +569,7 @@ def _parse_phrases(data: bytes) -> tuple[bytes, ...]:
     text = _lz77_decompress(data[_PHRASE_TABLE_OFFSET + base :], text_size)
     if len(text) != text_size:
         raise ValueError("|Phrases text decompressed to the wrong size")
-    return tuple(
-        text[offsets[index] - base : offsets[index + 1] - base] for index in range(count)
-    )
+    return tuple(text[offsets[index] - base : offsets[index + 1] - base] for index in range(count))
 
 
 def _phrase_expand(data: bytes, phrases: tuple[bytes, ...]) -> bytes:
@@ -936,9 +924,10 @@ def _parse_table(
 
     if cells:
         fields, tab_stops, _control = cells[0]
-        control_stream = b"".join(
-            cell[2][:-1] + bytes([_CONTROL_END_PARAGRAPH]) for cell in cells[:-1]
-        ) + cells[-1][2]
+        control_stream = (
+            b"".join(cell[2][:-1] + bytes([_CONTROL_END_PARAGRAPH]) for cell in cells[:-1])
+            + cells[-1][2]
+        )
     else:
         fields, tab_stops = {}, ()
         control_stream = bytes([_CONTROL_END])
@@ -1053,11 +1042,7 @@ def _resolve_context_map(
     records: tuple[tuple[int, int], ...],
     topics: tuple[M14Topic, ...],
 ) -> tuple[tuple[int, int, int], ...]:
-    displays = tuple(
-        display
-        for topic in topics
-        for display in topic.displays
-    )
+    displays = tuple(display for topic in topics for display in topic.displays)
     resolved = []
     unresolved = 0
     for context_hash, address in records:
@@ -1247,10 +1232,7 @@ def _build_sec13(m14: LoadedM14) -> bytes:
             win32_retail,
             dll_map.win32_debug,
         )
-        entry = b"\x00".join(
-            field.encode("cp1252", errors="replace")
-            for field in fields
-        ) + b"\x00"
+        entry = b"\x00".join(field.encode("cp1252", errors="replace") for field in fields) + b"\x00"
         entries += struct.pack("<H", len(entry)) + entry
     if not entries:
         return b"\x00\x00"
@@ -1289,9 +1271,7 @@ def lower_m14_to_osr2_payload(m14: LoadedM14, deid: str) -> bytes:
     """
     title = m14.title.encode("cp1252", errors="replace") + b"\x00"
     copyright_text = (
-        m14.copyright.encode("cp1252", errors="replace") + b"\x00"
-        if m14.copyright
-        else b""
+        m14.copyright.encode("cp1252", errors="replace") + b"\x00" if m14.copyright else b""
     )
     title_id = deid.encode("ascii", errors="replace") + b"\x00"
     return b"".join(
@@ -1329,14 +1309,11 @@ def build_m14_mvpfile(m14: LoadedM14) -> bytes:
     def color(value: int) -> str:
         if value == _COLOR_INHERIT:
             return ""
-        return f"({value & 0xff},{value >> 8 & 0xff},{value >> 16 & 0xff})"
+        return f"({value & 0xFF},{value >> 8 & 0xFF},{value >> 16 & 0xFF})"
 
     caption = m14.title.replace('"', "'")
     non_scroll, scroll = m14.pane_backgrounds
-    window = (
-        f'main="{caption}",(0,0,640,480,1),,,'
-        f"{color(scroll)},{color(non_scroll)}"
-    ).rstrip(",")
+    window = (f'main="{caption}",(0,0,640,480,1),,,{color(scroll)},{color(non_scroll)}').rstrip(",")
 
     popups = ""
     if m14.popup_pane is not None:
@@ -1348,8 +1325,5 @@ def build_m14_mvpfile(m14: LoadedM14) -> bytes:
             popups = f"{_popup_pane_name(popup_window)}=,{colour}\r\n"
 
     return (
-        "[CONFIG]\r\n\r\n"
-        "[PANES]\r\n\r\n"
-        f"[POPUPS]\r\n{popups}\r\n"
-        f"[WINDOWS]\r\n{window}\r\n"
+        f"[CONFIG]\r\n\r\n[PANES]\r\n\r\n[POPUPS]\r\n{popups}\r\n[WINDOWS]\r\n{window}\r\n"
     ).encode("cp1252", errors="replace")

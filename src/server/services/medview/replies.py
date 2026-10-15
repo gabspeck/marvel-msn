@@ -159,11 +159,7 @@ def get_title_info_remote(info_kind: int) -> bytes:
 def query_topics() -> bytes:
     """`0x04` — empty-result shape: highlightContext=0, logicalCount=0,
     secondaryResult=0, no aux blob, no sideband."""
-    static = (
-        build_tagged_reply_byte(0)
-        + build_tagged_reply_dword(0)
-        + build_tagged_reply_dword(0)
-    )
+    static = build_tagged_reply_byte(0) + build_tagged_reply_dword(0) + build_tagged_reply_dword(0)
     return _dynamic_complete(static, b"")
 
 
@@ -229,19 +225,13 @@ def open_remote_hfs_file_reject() -> bytes:
     """`0x1A` rejection — `0x87 0x81 <handle=0> 0x83 <size=0>`. Used when
     the requested baggage name is not `bm0` (e.g. the engine's first probe
     `|bm0`); MVCL14N then retries with the canonical `bm0`."""
-    return (
-        bytes([TAG_END_STATIC])
-        + build_tagged_reply_byte(0)
-        + build_tagged_reply_dword(0)
-    )
+    return bytes([TAG_END_STATIC]) + build_tagged_reply_byte(0) + build_tagged_reply_dword(0)
 
 
 def open_remote_hfs_file_accept(handle: int, size: int) -> bytes:
     """`0x1A` accept — `0x87 0x81 <handle> 0x83 <size>`."""
     return (
-        bytes([TAG_END_STATIC])
-        + build_tagged_reply_byte(handle)
-        + build_tagged_reply_dword(size)
+        bytes([TAG_END_STATIC]) + build_tagged_reply_byte(handle) + build_tagged_reply_dword(size)
     )
 
 

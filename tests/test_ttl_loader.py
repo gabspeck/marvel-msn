@@ -111,10 +111,35 @@ class TestCaptionsTestFixture(unittest.TestCase):
         # Seq numbers from BBDESIGN authoring; 1-based with gaps where
         # the author deleted intermediate sites (7, 9, 14 missing).
         seqs = [c.seq for c in controls]
-        self.assertEqual(seqs, [
-            1, 2, 3, 4, 5, 6, 8, 10, 11, 12, 13, 15, 16, 17, 18,
-            19, 20, 21, 22, 23, 24, 25, 26, 27,
-        ])
+        self.assertEqual(
+            seqs,
+            [
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                8,
+                10,
+                11,
+                12,
+                13,
+                15,
+                16,
+                17,
+                18,
+                19,
+                20,
+                21,
+                22,
+                23,
+                24,
+                25,
+                26,
+                27,
+            ],
+        )
 
     def test_alignment_variant_captions(self):
         # Seqs 1/2/3 are simpleR / simple_right / simple_center. The
@@ -316,10 +341,12 @@ class TestAllControlsShowcase(unittest.TestCase):
         self.assertEqual(controls["Outline1"].rect_himetric, (6773, 2540, 9313, 5927))
         self.assertEqual(controls["Audio1R"].rect_himetric, (1905, 635, 5503, 2116))
         self.assertEqual(
-            controls["Shortcut1-V"].rect_himetric, (1270, 9736, 4656, 11006),
+            controls["Shortcut1-V"].rect_himetric,
+            (1270, 9736, 4656, 11006),
         )
         self.assertEqual(
-            controls["CaptionButton1"].rect_himetric, (6773, 423, 9525, 1693),
+            controls["CaptionButton1"].rect_himetric,
+            (6773, 423, 9525, 1693),
         )
 
     def test_caption1_rect_and_font(self):
@@ -341,26 +368,29 @@ class TestLowerToPayload(unittest.TestCase):
     def test_section0_face_table_contains_all_fonts(self):
         # Entries sit at the CStyleSheet font key, so slot 0 stays blank
         # and Times/Arial/Courier land at keys 1/2/3.
-        sec0_off = 2                         # leading u16 length prefix
+        sec0_off = 2  # leading u16 length prefix
         face_table_off = sec0_off + 0x12
         self.assertEqual(
-            self.body[face_table_off:face_table_off + 15], b"\x00" * 15,
+            self.body[face_table_off : face_table_off + 15],
+            b"\x00" * 15,
         )
         self.assertEqual(
-            self.body[face_table_off + 0x20:face_table_off + 0x20 + 15],
+            self.body[face_table_off + 0x20 : face_table_off + 0x20 + 15],
             b"Times New Roman",
         )
         self.assertEqual(
-            self.body[face_table_off + 0x40:face_table_off + 0x40 + 5], b"Arial",
+            self.body[face_table_off + 0x40 : face_table_off + 0x40 + 5],
+            b"Arial",
         )
         self.assertEqual(
-            self.body[face_table_off + 0x60:face_table_off + 0x60 + 11], b"Courier New",
+            self.body[face_table_off + 0x60 : face_table_off + 0x60 + 11],
+            b"Courier New",
         )
 
     def test_sec06_record_contains_caption_at_offset_0x15(self):
         idx = self.body.find(b"Captions Test\x00")
         self.assertGreater(idx, 0)
-        self.assertEqual(self.body[idx:idx + 13], b"Captions Test")
+        self.assertEqual(self.body[idx : idx + 13], b"Captions Test")
 
 
 class TestSection0CarriesCaptionStyling(unittest.TestCase):
@@ -376,6 +406,7 @@ class TestSection0CarriesCaptionStyling(unittest.TestCase):
             _SEC0_FACE_ENTRY_SIZE,
             _build_section0,
         )
+
         t = load_title(_TITLE_4)
         sec0 = _build_section0(t)
         face_count = max(f.slot for f in t.font_table) + 1
@@ -386,17 +417,17 @@ class TestSection0CarriesCaptionStyling(unittest.TestCase):
 
         # seq=1 ("Plain caption", MS Sans Serif default): plain.
         d_plain = sec0[
-            desc_off + seq_to_index[1] * _SEC0_DESCRIPTOR_SIZE:
-            desc_off + (seq_to_index[1] + 1) * _SEC0_DESCRIPTOR_SIZE
+            desc_off + seq_to_index[1] * _SEC0_DESCRIPTOR_SIZE : desc_off
+            + (seq_to_index[1] + 1) * _SEC0_DESCRIPTOR_SIZE
         ]
-        self.assertEqual(d_plain[0x20], 0)         # lfItalic
-        self.assertEqual(d_plain[0x21], 0)         # lfUnderline
-        self.assertEqual(d_plain[0x22], 0)         # lfStrikeOut
+        self.assertEqual(d_plain[0x20], 0)  # lfItalic
+        self.assertEqual(d_plain[0x21], 0)  # lfUnderline
+        self.assertEqual(d_plain[0x22], 0)  # lfStrikeOut
 
         # seq=12 ("Garamond, italic"): lfItalic=1.
         d_italic = sec0[
-            desc_off + seq_to_index[12] * _SEC0_DESCRIPTOR_SIZE:
-            desc_off + (seq_to_index[12] + 1) * _SEC0_DESCRIPTOR_SIZE
+            desc_off + seq_to_index[12] * _SEC0_DESCRIPTOR_SIZE : desc_off
+            + (seq_to_index[12] + 1) * _SEC0_DESCRIPTOR_SIZE
         ]
         self.assertEqual(d_italic[0x20], 1)
         self.assertEqual(d_italic[0x21], 0)
@@ -404,8 +435,8 @@ class TestSection0CarriesCaptionStyling(unittest.TestCase):
 
         # seq=15 ("Plain caption, underlined"): lfUnderline=1.
         d_under = sec0[
-            desc_off + seq_to_index[15] * _SEC0_DESCRIPTOR_SIZE:
-            desc_off + (seq_to_index[15] + 1) * _SEC0_DESCRIPTOR_SIZE
+            desc_off + seq_to_index[15] * _SEC0_DESCRIPTOR_SIZE : desc_off
+            + (seq_to_index[15] + 1) * _SEC0_DESCRIPTOR_SIZE
         ]
         self.assertEqual(d_under[0x20], 0)
         self.assertEqual(d_under[0x21], 1)
@@ -413,8 +444,8 @@ class TestSection0CarriesCaptionStyling(unittest.TestCase):
 
         # seq=16 ("Plain caption, strikethrough"): lfStrikeOut=1.
         d_strike = sec0[
-            desc_off + seq_to_index[16] * _SEC0_DESCRIPTOR_SIZE:
-            desc_off + (seq_to_index[16] + 1) * _SEC0_DESCRIPTOR_SIZE
+            desc_off + seq_to_index[16] * _SEC0_DESCRIPTOR_SIZE : desc_off
+            + (seq_to_index[16] + 1) * _SEC0_DESCRIPTOR_SIZE
         ]
         self.assertEqual(d_strike[0x20], 0)
         self.assertEqual(d_strike[0x21], 0)
@@ -456,9 +487,9 @@ class TestBaggageCarriesNewStyling(unittest.TestCase):
             lf_off = idx - 18
             if (
                 lf_off >= 0
-                and bag[lf_off + 10] == 1                  # italic
-                and bag[lf_off + 11] == 0                  # underline
-                and bag[lf_off + 12] == 0                  # strikeout
+                and bag[lf_off + 10] == 1  # italic
+                and bag[lf_off + 11] == 0  # underline
+                and bag[lf_off + 12] == 0  # strikeout
             ):
                 found = True
                 break
@@ -515,7 +546,10 @@ class TestDynamicCaptions(unittest.TestCase):
         page = t.pages[0]
         resolve = {
             tag: _resolve_caption_text(
-                cap, page, t.first_section_name, self._NOW,
+                cap,
+                page,
+                t.first_section_name,
+                self._NOW,
             )
             for tag, cap in by_tag.items()
         }
@@ -582,18 +616,20 @@ class TestBuildBm0Baggage(unittest.TestCase):
             caption="Empty",
             window_rect=(0, 0, 640, 480),
             font_table=(),
-            pages=(LoadedPage(
-                name="",
-                section_name="Empty",
-                cbform_table=5,
-                cbform_slot=0,
-                cvform_handle=None,
-                page_bg=0,
-                page_pixel_w=640,
-                page_pixel_h=480,
-                scrollbar_flags=0,
-                controls=(),
-            ),),
+            pages=(
+                LoadedPage(
+                    name="",
+                    section_name="Empty",
+                    cbform_table=5,
+                    cbform_slot=0,
+                    cvform_handle=None,
+                    page_bg=0,
+                    page_pixel_w=640,
+                    page_pixel_h=480,
+                    scrollbar_flags=0,
+                    controls=(),
+                ),
+            ),
         )
         bag = build_bm0_baggage(empty)
         self.assertEqual(bag[8], 0x05)
@@ -664,7 +700,8 @@ class TestMsnTodayStoryContentChase(unittest.TestCase):
         self.assertEqual(heading.text, "MSN Today (update test)")
         intrusion = heading.children[0]
         self.assertEqual(
-            dict(intrusion.props)["CLSID"], "PICTURE.PictureCtrl.1",
+            dict(intrusion.props)["CLSID"],
+            "PICTURE.PictureCtrl.1",
         )
 
 
@@ -675,26 +712,28 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
 
     def test_captions_test_emits_one_sec06_record(self):
         from server.services.medview.ttl_loader import _SEC06_RECORD_SIZE
+
         t = load_title(_TITLE_4)
         body = lower_to_payload(t)
         # section 0 length is u16 prefixed. Walk to section 3 (4th
         # length-prefixed block, after sec0 / sec07 empty / sec08 empty).
         pos = 0
         for _ in range(3):
-            seclen = int.from_bytes(body[pos:pos + 2], "little")
+            seclen = int.from_bytes(body[pos : pos + 2], "little")
             pos += 2 + seclen
-        sec06_len = int.from_bytes(body[pos:pos + 2], "little")
+        sec06_len = int.from_bytes(body[pos : pos + 2], "little")
         self.assertEqual(sec06_len, _SEC06_RECORD_SIZE)
 
     def test_msn_today_emits_one_sec06(self):
         from server.services.medview.ttl_loader import _SEC06_RECORD_SIZE
+
         t = load_title(_TITLE_MSN_TODAY)
         body = lower_to_payload(t)
         pos = 0
         for _ in range(3):
-            seclen = int.from_bytes(body[pos:pos + 2], "little")
+            seclen = int.from_bytes(body[pos : pos + 2], "little")
             pos += 2 + seclen
-        sec06_len = int.from_bytes(body[pos:pos + 2], "little")
+        sec06_len = int.from_bytes(body[pos : pos + 2], "little")
         self.assertEqual(sec06_len, _SEC06_RECORD_SIZE)
 
     def test_scrollbar_flag_on_only_page(self):
@@ -703,6 +742,7 @@ class TestLowerToPayloadMultiPage(unittest.TestCase):
             _SEC06_RECORD_SIZE,
             _build_sec06_record,
         )
+
         t = load_title(_TITLE_4)
         records = [_build_sec06_record(p, t) for p in t.pages]
         self.assertEqual(len(records), 1)
@@ -725,12 +765,24 @@ class TestBbctlClsidDispatch(unittest.TestCase):
 
     def test_bbctl_clsids_pinned_per_descriptor(self):
         from server.services.medview.ttl_loader import _BBCTL_CLSIDS
+
         # All 10 BBCTL.OCX site classes pinned (Ghidra symbol table).
         names = sorted(_BBCTL_CLSIDS.values())
-        self.assertEqual(names, [
-            "Audio", "Caption", "CaptionButton", "Outline", "Picture",
-            "PictureButton", "PrintPsf", "Psf", "Shortcut", "Story",
-        ])
+        self.assertEqual(
+            names,
+            [
+                "Audio",
+                "Caption",
+                "CaptionButton",
+                "Outline",
+                "Picture",
+                "PictureButton",
+                "PrintPsf",
+                "Psf",
+                "Shortcut",
+                "Story",
+            ],
+        )
 
     def test_captions_test_dispatches_via_single_class_clsid(self):
         # captions_test.ttl's CVForm has a single Caption CLSID in the
@@ -836,26 +888,30 @@ class TestStoryTitleFixture(unittest.TestCase):
 
     def test_paragraphs_take_the_builtin_styles(self):
         from server.services.medview import story_layout
+
         font_map = {f.slot: f.face_name for f in self.title.font_table}
         got = [
             (p.style.name, p.style.font_face, p.style.pt_size, p.style.bold, p.text)
             for p in story_layout.flatten_paragraphs(
-                self.story.element_tree, font_map,
+                self.story.element_tree,
+                font_map,
             )
         ]
-        self.assertEqual(got, [
-            ("Heading 1", "Arial", 22, True, "Story title"),
-            ("Normal", "Times New Roman", 11, False, "Story body here "),
-            ("Heading 2", "Arial", 18, True, "Second heading"),
-            ("Normal", "Times New Roman", 11, False,
-             "Some more content blah bla blah"),
-            ("List Number", "Times New Roman", 11, False, "Numbered list item"),
-            ("List Number", "Times New Roman", 11, False, "Item "),
-            ("List Number", "Times New Roman", 11, False, "Item"),
-            ("List Bullet", "Times New Roman", 11, False, "Bullet list"),
-            ("List Bullet", "Times New Roman", 11, False, "second level"),
-            ("List Bullet", "Times New Roman", 11, False, "third level"),
-        ])
+        self.assertEqual(
+            got,
+            [
+                ("Heading 1", "Arial", 22, True, "Story title"),
+                ("Normal", "Times New Roman", 11, False, "Story body here "),
+                ("Heading 2", "Arial", 18, True, "Second heading"),
+                ("Normal", "Times New Roman", 11, False, "Some more content blah bla blah"),
+                ("List Number", "Times New Roman", 11, False, "Numbered list item"),
+                ("List Number", "Times New Roman", 11, False, "Item "),
+                ("List Number", "Times New Roman", 11, False, "Item"),
+                ("List Bullet", "Times New Roman", 11, False, "Bullet list"),
+                ("List Bullet", "Times New Roman", 11, False, "second level"),
+                ("List Bullet", "Times New Roman", 11, False, "third level"),
+            ],
+        )
 
     def test_layout_matches_the_bbview_reference(self):
         """Positions against `reference/screenshots/story title.png`.
@@ -869,7 +925,9 @@ class TestStoryTitleFixture(unittest.TestCase):
         rect = tuple(_himetric_to_pixels(v) for v in self.story.rect_himetric)
         self.assertEqual(rect, (87, 24, 576, 447))
         items = story_layout.layout_story(
-            self.story.element_tree, rect, font_map,
+            self.story.element_tree,
+            rect,
+            font_map,
         )
 
         background = items[0]
@@ -923,9 +981,13 @@ class TestBuildAllBmBaggage(unittest.TestCase):
         t = load_title(_TITLE_STORY_TITLE)
         bags = build_all_bm_baggage(t)
         for phrase in (
-            b"Story title", b"Story body here", b"Second heading",
-            b"Some more content blah bla blah", b"Numbered list item",
-            b"Bullet list", b"third level",
+            b"Story title",
+            b"Story body here",
+            b"Second heading",
+            b"Some more content blah bla blah",
+            b"Numbered list item",
+            b"Bullet list",
+            b"third level",
         ):
             self.assertIn(phrase, bags["bm0"])
 
@@ -940,6 +1002,7 @@ class TestTitleOpenMetadataMultiPage(unittest.TestCase):
 
     def test_topic_count_matches_page_count(self):
         from server.services.medview.payload import derive_title_open_metadata
+
         t = load_title(_TITLE_4)
         md = derive_title_open_metadata(
             page_count=len(t.pages),
@@ -953,8 +1016,11 @@ class TestTitleOpenMetadataMultiPage(unittest.TestCase):
 
     def test_empty_title_falls_back_to_one(self):
         from server.services.medview.payload import derive_title_open_metadata
+
         md = derive_title_open_metadata(
-            page_count=0, page_pixel_w=640, page_pixel_h=480,
+            page_count=0,
+            page_pixel_w=640,
+            page_pixel_h=480,
             title_name="",
         )
         self.assertEqual(md.topic_count, 1)

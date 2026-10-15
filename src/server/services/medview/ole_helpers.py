@@ -42,12 +42,12 @@ def parse_type_names_map(data: bytes) -> dict[int, str]:
     if len(data) < 6:
         raise ValueError("type_names_map stream too short")
     count = struct.unpack_from("<I", data, 0)[0]
-    pos = 6                                                # skip count + max_slot
+    pos = 6  # skip count + max_slot
     out: dict[int, str] = {}
     for _ in range(count):
         name_len = data[pos]
         pos += 1
-        name = data[pos:pos + name_len].decode("ascii", errors="replace")
+        name = data[pos : pos + name_len].decode("ascii", errors="replace")
         pos += name_len
         level_specifier = struct.unpack_from("<I", data, pos)[0]
         pos += 4
@@ -121,7 +121,7 @@ def parse_mfc_ansi_string(buf: bytes, off: int) -> tuple[str, int]:
             off += 4
     else:
         char_count = marker
-    raw = buf[off:off + char_count]
+    raw = buf[off : off + char_count]
     if len(raw) != char_count:
         raise ValueError("MFC ANSI string overruns buffer")
     return raw.decode("ascii", errors="replace"), off + char_count
@@ -134,10 +134,10 @@ def parse_mfc_ansi_string(buf: bytes, off: int) -> tuple[str, int]:
 
 @dataclass(frozen=True)
 class TypedSwizzleRef:
-    type_code: int                                         # 0 for untyped sections list
-    type_name: str                                         # via SPTR_TYPE_NAMES
+    type_code: int  # 0 for untyped sections list
+    type_name: str  # via SPTR_TYPE_NAMES
     swizzle_index: int
-    handle: int | None                                     # resolved through per-storage handles
+    handle: int | None  # resolved through per-storage handles
 
 
 @dataclass(frozen=True)
@@ -154,7 +154,7 @@ class SectionProp:
 @dataclass(frozen=True)
 class SectionRecord:
     version: int
-    sections: tuple[TypedSwizzleRef, ...]                  # homogeneous (CSection)
+    sections: tuple[TypedSwizzleRef, ...]  # homogeneous (CSection)
     magnets: tuple[TypedSwizzleRef, ...]
     forms: tuple[TypedSwizzleRef, ...]
     contents: tuple[TypedSwizzleRef, ...]
@@ -165,7 +165,7 @@ class SectionRecord:
 
 @dataclass(frozen=True)
 class ProxyEntry:
-    proxy_key: int                                         # e.g. 0x00001500, 0x00001400
+    proxy_key: int  # e.g. 0x00001500, 0x00001400
     content_index: int
     content_handle: int | None
 
@@ -180,7 +180,10 @@ def _typed_ref(type_code: int, index: int, handles: tuple[int, ...]) -> TypedSwi
 
 
 def _parse_homogeneous_sptr_list(
-    buf: bytes, off: int, handles: tuple[int, ...], type_code: int,
+    buf: bytes,
+    off: int,
+    handles: tuple[int, ...],
+    type_code: int,
 ) -> tuple[tuple[TypedSwizzleRef, ...], int]:
     """CSection.sections: `[CCount count]{u32 swizzle_index}*count`. The
     runtime type is implied by context (CSection always), so the on-disk
@@ -195,7 +198,9 @@ def _parse_homogeneous_sptr_list(
 
 
 def _parse_typed_sptr_list(
-    buf: bytes, off: int, handles: tuple[int, ...],
+    buf: bytes,
+    off: int,
+    handles: tuple[int, ...],
 ) -> tuple[tuple[TypedSwizzleRef, ...], int]:
     """CSection.{magnets,forms,contents,styles,frames}:
     `[CCount count]{[u16 type_code][u32 swizzle_index]}*count`."""
@@ -211,7 +216,10 @@ def _parse_typed_sptr_list(
 
 
 def _parse_section_prop(
-    buf: bytes, off: int, section_version: int, handles: tuple[int, ...],
+    buf: bytes,
+    off: int,
+    section_version: int,
+    handles: tuple[int, ...],
 ) -> tuple[SectionProp, int]:
     refs: list[TypedSwizzleRef | None] = []
     for _ in range(3):
@@ -220,7 +228,7 @@ def _parse_section_prop(
         if present:
             idx = struct.unpack_from("<I", buf, off)[0]
             off += 4
-            refs.append(_typed_ref(3, idx, handles))       # presumed CSection refs
+            refs.append(_typed_ref(3, idx, handles))  # presumed CSection refs
         else:
             refs.append(None)
     u32_0 = struct.unpack_from("<I", buf, off)[0]
@@ -236,7 +244,7 @@ def _parse_section_prop(
         if present:
             idx = struct.unpack_from("<I", buf, off)[0]
             off += 4
-            form_ref = _typed_ref(4, idx, handles)         # presumed CBForm ref
+            form_ref = _typed_ref(4, idx, handles)  # presumed CBForm ref
     return SectionProp(
         section_ref_a=refs[0],
         section_ref_b=refs[1],
@@ -278,7 +286,8 @@ def parse_section(buf: bytes, handles: tuple[int, ...]) -> SectionRecord:
 
 
 def parse_proxy_table(
-    buf: bytes, handles: tuple[int, ...],
+    buf: bytes,
+    handles: tuple[int, ...],
 ) -> tuple[ProxyEntry, ...]:
     """CProxyTable payload shape: `[CCount count]{[u32 proxy_key][u32
     content_swizzle_index]}*count`."""
@@ -289,11 +298,13 @@ def parse_proxy_table(
         off += 4
         idx = struct.unpack_from("<I", buf, off)[0]
         off += 4
-        entries.append(ProxyEntry(
-            proxy_key=proxy_key,
-            content_index=idx,
-            content_handle=resolve_swizzle(idx, handles),
-        ))
+        entries.append(
+            ProxyEntry(
+                proxy_key=proxy_key,
+                content_index=idx,
+                content_handle=resolve_swizzle(idx, handles),
+            )
+        )
     return tuple(entries)
 
 
@@ -334,29 +345,29 @@ def parse_simple_property_table(data: bytes) -> dict[str, object]:
     for _ in range(count):
         key_len = data[pos]
         pos += 1
-        key = data[pos:pos + key_len].decode("ascii", errors="replace")
+        key = data[pos : pos + key_len].decode("ascii", errors="replace")
         pos += key_len
         vartype = struct.unpack_from("<H", data, pos)[0]
         pos += 2
-        if vartype == 0x0008:                              # VT_STRING
+        if vartype == 0x0008:  # VT_STRING
             char_count = struct.unpack_from("<I", data, pos)[0]
             pos += 4
-            raw = data[pos:pos + char_count + 1]
+            raw = data[pos : pos + char_count + 1]
             pos += char_count + 1
             out[key] = raw[:-1].decode("ascii", errors="replace")
-        elif vartype == 0x000B:                            # VT_BOOL
+        elif vartype == 0x000B:  # VT_BOOL
             out[key] = bool(struct.unpack_from("<H", data, pos)[0])
             pos += 2
-        elif vartype == 0x0013:                            # VT_UI4
+        elif vartype == 0x0013:  # VT_UI4
             out[key] = struct.unpack_from("<I", data, pos)[0]
             pos += 4
-        elif vartype == 0x0011:                            # VT_UI1
+        elif vartype == 0x0011:  # VT_UI1
             out[key] = data[pos]
             pos += 1
-        elif vartype == 0x0041:                            # VT_BLOB
+        elif vartype == 0x0041:  # VT_BLOB
             blob_len = struct.unpack_from("<I", data, pos)[0]
             pos += 4
-            out[key] = bytes(data[pos:pos + blob_len])
+            out[key] = bytes(data[pos : pos + blob_len])
             pos += blob_len
         else:
             raise ValueError(f"unsupported vartype 0x{vartype:04x}")

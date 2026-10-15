@@ -260,8 +260,7 @@ def decode_dirsrv_request(payload):
                 # entry because every other caller sends exactly one.
                 d = p.data
                 req.node_ids = [
-                    f"{f0}:{f8}"
-                    for f0, f8 in struct.iter_unpack("<II", d[: len(d) - len(d) % 8])
+                    f"{f0}:{f8}" for f0, f8 in struct.iter_unpack("<II", d[: len(d) - len(d) % 8])
                 ]
                 if not req.node_ids:
                     req.node_ids = [d.hex()]

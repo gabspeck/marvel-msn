@@ -80,9 +80,7 @@ def derive_title_open_metadata(
     survived `OpenMediaTitleSession` on the empty-title bring-up;
     multi-page round-trip in 86Box is deferred to a follow-up.
     """
-    base = (
-        f"{title_name}\x00{page_count}\x00{page_pixel_w}x{page_pixel_h}"
-    ).encode()
+    base = (f"{title_name}\x00{page_count}\x00{page_pixel_w}x{page_pixel_h}").encode()
     seed = sum(b * (i + 1) for i, b in enumerate(base)) or 0xC0FFEE01
     return TitleOpenMetadata(
         title_slot=0x01,
@@ -121,9 +119,9 @@ def _build_section0() -> bytes:
         descriptor,
         0x0C,
         -12,  # lfHeight
-        0,    # lfWidth
-        0,    # lfEscapement
-        0,    # lfOrientation
+        0,  # lfWidth
+        0,  # lfEscapement
+        0,  # lfOrientation
         400,  # lfWeight
     )
     pointer_table = b"\x00" * _SEC0_POINTER_ENTRY_SIZE
@@ -137,13 +135,13 @@ def _build_section0() -> bytes:
         "<HHHHHHH",
         header,
         0x00,
-        0,                   # +0x00 header_word_0
-        0xFFFF,              # +0x02 descriptor_count (clamp-to-0)
-        face_off,            # +0x04 face_name_table_off
-        descriptor_off,      # +0x06 descriptor_table_off
-        0,                   # +0x08 override_count
-        pointer_off,         # +0x0a override_table_off (= pointer_off)
-        0,                   # +0x0c header_word_0c
+        0,  # +0x00 header_word_0
+        0xFFFF,  # +0x02 descriptor_count (clamp-to-0)
+        face_off,  # +0x04 face_name_table_off
+        descriptor_off,  # +0x06 descriptor_table_off
+        0,  # +0x08 override_count
+        pointer_off,  # +0x0a override_table_off (= pointer_off)
+        0,  # +0x0c header_word_0c
     )
     struct.pack_into("<H", header, 0x10, pointer_off)
     return bytes(header) + face_table + bytes(descriptor) + pointer_table
@@ -187,7 +185,7 @@ _SEC06_RECT_INHERIT = (-1, -1, -1, -1)
 def _build_sec06_record() -> bytes:
     record = bytearray(_SEC06_RECORD_SIZE)
     caption = b"MSN Today\x00"
-    record[0x15:0x15 + len(caption)] = caption
+    record[0x15 : 0x15 + len(caption)] = caption
     record[0x48] = _SEC06_FLAG_OUTER_RECT_ABSOLUTE
     struct.pack_into("<iiii", record, 0x49, 0, 0, 640, 480)
     struct.pack_into("<I", record, 0x5B, _SEC06_COLOR_INHERIT)
@@ -214,15 +212,15 @@ def _build_title_open_body() -> bytes:
     sec06 = _build_sec06_record()
     return b"".join(
         [
-            _length_prefixed(section0),       # sec0: font table
-            b"\x00\x00",                       # sec07: empty
-            b"\x00\x00",                       # sec08: empty
-            _length_prefixed(sec06),           # sec06: one window scaffold
+            _length_prefixed(section0),  # sec0: font table
+            b"\x00\x00",  # sec07: empty
+            b"\x00\x00",  # sec08: empty
+            _length_prefixed(sec06),  # sec06: one window scaffold
             _length_prefixed(_TITLE_CAPTION),  # sec01: caption
-            b"\x00\x00",                       # sec02: empty
-            _length_prefixed(_TITLE_DEID),     # sec6a: deid placeholder
-            b"\x00\x00",                       # sec13: empty
-            b"\x00\x00",                       # sec04: count=0
+            b"\x00\x00",  # sec02: empty
+            _length_prefixed(_TITLE_DEID),  # sec6a: deid placeholder
+            b"\x00\x00",  # sec13: empty
+            b"\x00\x00",  # sec04: count=0
         ]
     )
 
@@ -274,7 +272,7 @@ def _build_bm0_baggage() -> bytes:
         width=_BM0_WIDTH,
         height=_BM0_HEIGHT,
         bpp=_BM0_BPP,
-        pixel_data=b"\xFF" * _BM0_PIXEL_BYTES,
+        pixel_data=b"\xff" * _BM0_PIXEL_BYTES,
         trailer=build_trailer([], b""),
     )
     return build_baggage_container(raster)

@@ -14,7 +14,6 @@ from server.services.medview import bbstyles
 
 
 class TestTableShape(unittest.TestCase):
-
     def test_index_space_is_the_full_fifty_four_names(self):
         # 47 records at VA 0x40770e00 + 7 intrusion names at
         # 0x407717c0 — the span CStyle::FindNameIndex walks.
@@ -33,7 +32,6 @@ class TestTableShape(unittest.TestCase):
 
 
 class TestResolution(unittest.TestCase):
-
     def resolve(self, name):
         return bbstyles.resolve(bbstyles.STYLE_BY_NAME[name])
 
@@ -73,7 +71,9 @@ class TestResolution(unittest.TestCase):
             self.assertEqual(s.left_indent, 18, name)
             self.assertEqual(s.indent_by, 18, name)
             self.assertEqual(
-                s.special_line_indent, bbstyles.SPECIAL_INDENT_HANGING, name,
+                s.special_line_indent,
+                bbstyles.SPECIAL_INDENT_HANGING,
+                name,
             )
             # Body text, inherited from Normal.
             self.assertEqual((s.font_face, s.pt_size), ("Times New Roman", 11))
@@ -95,7 +95,7 @@ class TestResolution(unittest.TestCase):
     def test_hyperlink_is_blue_and_underlined(self):
         s = self.resolve("Hyperlink")
         self.assertTrue(s.underline)
-        self.assertEqual(s.fore_color, 0xFF0000)   # COLORREF 0x00BBGGRR
+        self.assertEqual(s.fore_color, 0xFF0000)  # COLORREF 0x00BBGGRR
 
     def test_toc_levels_step_eighteen_points(self):
         got = [self.resolve(f"TOC {n}").left_indent for n in range(1, 10)]
@@ -103,34 +103,39 @@ class TestResolution(unittest.TestCase):
 
     def test_font_map_overrides_the_builtin_faces(self):
         s = bbstyles.resolve(
-            bbstyles.STYLE_BY_NAME["Heading 1"], {2: "Verdana"},
+            bbstyles.STYLE_BY_NAME["Heading 1"],
+            {2: "Verdana"},
         )
         self.assertEqual(s.font_face, "Verdana")
 
 
 class TestElementMapping(unittest.TestCase):
-
     def test_known_paragraph_tags(self):
         self.assertEqual(
-            bbstyles.style_for_element(bbstyles.TAG_PARAGRAPH).name, "Normal",
+            bbstyles.style_for_element(bbstyles.TAG_PARAGRAPH).name,
+            "Normal",
         )
         self.assertEqual(
-            bbstyles.style_for_element(bbstyles.TAG_HEADING_1).name, "Heading 1",
+            bbstyles.style_for_element(bbstyles.TAG_HEADING_1).name,
+            "Heading 1",
         )
         self.assertEqual(
-            bbstyles.style_for_element(bbstyles.TAG_HEADING_2).name, "Heading 2",
+            bbstyles.style_for_element(bbstyles.TAG_HEADING_2).name,
+            "Heading 2",
         )
 
     def test_list_item_style_comes_from_the_enclosing_list(self):
         self.assertEqual(
             bbstyles.style_for_element(
-                bbstyles.TAG_LIST_ITEM, bbstyles.TAG_UNORDERED_LIST,
+                bbstyles.TAG_LIST_ITEM,
+                bbstyles.TAG_UNORDERED_LIST,
             ).name,
             "List Bullet",
         )
         self.assertEqual(
             bbstyles.style_for_element(
-                bbstyles.TAG_LIST_ITEM, bbstyles.TAG_ORDERED_LIST,
+                bbstyles.TAG_LIST_ITEM,
+                bbstyles.TAG_ORDERED_LIST,
             ).name,
             "List Number",
         )
@@ -139,7 +144,8 @@ class TestElementMapping(unittest.TestCase):
         self.assertEqual(bbstyles.style_for_element(0x7FFF).name, "Normal")
         # A list item outside any list, too.
         self.assertEqual(
-            bbstyles.style_for_element(bbstyles.TAG_LIST_ITEM).name, "Normal",
+            bbstyles.style_for_element(bbstyles.TAG_LIST_ITEM).name,
+            "Normal",
         )
 
 

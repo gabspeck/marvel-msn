@@ -211,8 +211,14 @@ _REQUEST_PARAM_NAMES: dict[int, list[str]] = {
     MEDVIEW_CLOSE_TITLE: ["titleSlot"],
     MEDVIEW_GET_TITLE_INFO_REMOTE: ["titleSlot", "infoKind", "infoArg", "callerCookie"],
     MEDVIEW_QUERY_TOPICS: [
-        "titleSlot", "queryClass", "primaryText", "queryFlags", "queryMode",
-        "secondaryOrSourceOrAux", "auxTail0", "auxTail1",
+        "titleSlot",
+        "queryClass",
+        "primaryText",
+        "queryFlags",
+        "queryMode",
+        "secondaryOrSourceOrAux",
+        "auxTail0",
+        "auxTail1",
     ],
     MEDVIEW_PRE_NOTIFY_TITLE: ["titleSlot", "notifyOp", "notifyPayload"],
     MEDVIEW_OPEN_WORD_WHEEL: ["titleSlot", "titleName"],
@@ -246,9 +252,16 @@ _REPLY_FIELD_NAMES: dict[int, list[str]] = {
     MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS: [],
     MEDVIEW_VALIDATE_TITLE: ["isValid"],
     MEDVIEW_OPEN_TITLE: [
-        "titleSlot", "fileSystemMode", "contentsVa", "contentsAddr",
-        "topicUpperBound", "cacheHeader0", "cacheHeader1",
-        "fontCacheHeader", "titleCacheHeader", "status",
+        "titleSlot",
+        "fileSystemMode",
+        "contentsVa",
+        "contentsAddr",
+        "topicUpperBound",
+        "cacheHeader0",
+        "cacheHeader1",
+        "fontCacheHeader",
+        "titleCacheHeader",
+        "status",
     ],
     MEDVIEW_CLOSE_TITLE: [],
     MEDVIEW_GET_TITLE_INFO_REMOTE: ["lengthOrScalar"],
@@ -351,7 +364,7 @@ def _walk_reply_tokens(payload: bytes):
             pos += 1
         elif b == 0x86:
             yield ("marker", "dyn-complete")
-            yield ("body", payload[pos + 1:])
+            yield ("body", payload[pos + 1 :])
             return
         elif b == 0x88:
             yield ("marker", "stream-end")
@@ -360,11 +373,11 @@ def _walk_reply_tokens(payload: bytes):
             yield ("field", ByteParam(tag=b, value=payload[pos + 1]))
             pos += 2
         elif b == 0x82 and pos + 2 < n:
-            val = int.from_bytes(payload[pos + 1:pos + 3], "little")
+            val = int.from_bytes(payload[pos + 1 : pos + 3], "little")
             yield ("field", WordParam(tag=b, value=val))
             pos += 3
         elif b == 0x83 and pos + 4 < n:
-            val = int.from_bytes(payload[pos + 1:pos + 5], "little")
+            val = int.from_bytes(payload[pos + 1 : pos + 5], "little")
             yield ("field", DwordParam(tag=b, value=val))
             pos += 5
         else:
@@ -439,7 +452,8 @@ def _format_push_chunk(chunk: bytes) -> str:
 
     if len(chunk) >= 12 and int.from_bytes(chunk[0:2], "little") == 3:
         opcode, length, transfer_id, chunk_offset = struct.unpack_from(
-            "<HHII", chunk,
+            "<HHII",
+            chunk,
         )
         return (
             f"type4_transfer_chunk{{opcode={opcode}, length={length}, "
@@ -452,8 +466,7 @@ def _format_push_chunk(chunk: bytes) -> str:
         status = int.from_bytes(chunk[2:4], "little")
         token = int.from_bytes(chunk[4:8], "little")
         return (
-            f"type0_a5{{title=0x{title:02x}, status=0x{status:04x}, "
-            f"contents_token=0x{token:08x}}}"
+            f"type0_a5{{title=0x{title:02x}, status=0x{status:04x}, contents_token=0x{token:08x}}}"
         )
 
     if chunk[0] == 0xBF and len(chunk) >= 16:
@@ -496,10 +509,7 @@ def _push_type3_op4(selector: int):
     def build(handler, title_slot: int, key: int) -> bytes:
         va = addr = 0
         title = handler.loaded_m14
-        if (
-            title is not None
-            and selector == MEDVIEW_CONVERT_HASH_TO_VA
-        ):
+        if title is not None and selector == MEDVIEW_CONVERT_HASH_TO_VA:
             if key == 1:
                 # MOSVIEW hashes the empty initial context string to 1.
                 va = title.contents_va
@@ -540,7 +550,10 @@ def _push_va_resolve(handler, title_slot: int, key: int) -> bytes:
                 following=following,
             )
     return build_case1_bf_chunk(
-        text="", title_byte=title_slot, key=key, initial_font_style=None,
+        text="",
+        title_byte=title_slot,
+        key=key,
+        initial_font_style=None,
     )
 
 
@@ -558,7 +571,9 @@ def _push_type0_a5_status(_handler, title_slot: int, key: int) -> bytes:
     fields so the engine's HfcNextPrevHfc path misses cache and reaches
     this 0x16 reply."""
     return build_type0_status_record(
-        title_byte=title_slot, status=0x3F3, contents_token=key,
+        title_byte=title_slot,
+        status=0x3F3,
+        contents_token=key,
     )
 
 
@@ -659,7 +674,7 @@ def _deid_from_title_token(token: str) -> str:
     lb = token.find("[")
     rb = token.rfind("]")
     if lb >= 0 and rb > lb:
-        return token[lb + 1:rb]
+        return token[lb + 1 : rb]
     return ""
 
 
@@ -782,9 +797,7 @@ def _widen_low_bpp_dib(data: bytes) -> bytes:
     pixel_offset, header_size = struct.unpack_from("<II", data, 10)
     if header_size < 40 or len(data) < 14 + header_size:
         return data
-    width, height, _planes, bit_count, compression = struct.unpack_from(
-        "<iiHHI", data, 18
-    )
+    width, height, _planes, bit_count, compression = struct.unpack_from("<iiHHI", data, 18)
     if bit_count not in (1, 4) or compression != 0 or width <= 0:
         return data
     rows = abs(height)
@@ -794,7 +807,7 @@ def _widen_low_bpp_dib(data: bytes) -> bytes:
 
     table_start = 14 + header_size
     table = data[table_start:pixel_offset]
-    table = table[: _BMP_PALETTE_BYTES].ljust(_BMP_PALETTE_BYTES, b"\x00")
+    table = table[:_BMP_PALETTE_BYTES].ljust(_BMP_PALETTE_BYTES, b"\x00")
 
     per_byte = 8 // bit_count
     mask = (1 << bit_count) - 1
@@ -813,11 +826,7 @@ def _widen_low_bpp_dib(data: bytes) -> bytes:
     struct.pack_into("<I", header, 20, stride * rows)
     struct.pack_into("<II", header, 32, 0, 0)
     body = bytes(header) + table + bytes(pixels)
-    return (
-        b"BM"
-        + struct.pack("<IHHI", 14 + len(body), 0, 0, table_start + len(table))
-        + body
-    )
+    return b"BM" + struct.pack("<IHHI", 14 + len(body), 0, 0, table_start + len(table)) + body
 
 
 def _picture_chunk_limit(data: bytes, offset: int) -> int:
@@ -893,9 +902,7 @@ class MEDVIEWHandler:
         self.title_body: bytes = TITLE_OPEN_BODY
         self.baggage_map: dict[str, bytes] = {"bm0": BM0_BAGGAGE}
         self.title_metadata: TitleOpenMetadata = TITLE_OPEN_METADATA
-        self._pending_picture_transfers: dict[
-            int, tuple[str, int, bytes]
-        ] = {}
+        self._pending_picture_transfers: dict[int, tuple[str, int, bytes]] = {}
         # Client-reported subscriber enable bit, keyed by notification type
         # (PreNotifyTitle opcode 0x07). Absent means the client has not
         # reported a transition yet, which the engine treats as deliverable:
@@ -908,7 +915,10 @@ class MEDVIEWHandler:
         payload = build_discovery_payload(MEDVIEW_INTERFACE_GUIDS)
         host_block = build_discovery_host_block(payload)
         return build_service_packet(
-            self.pipe_idx, host_block, server_seq, client_ack,
+            self.pipe_idx,
+            host_block,
+            server_seq,
+            client_ack,
         )
 
     # --- Top-level dispatch ----------------------------------------
@@ -916,14 +926,20 @@ class MEDVIEWHandler:
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
         log.info(
             "request selector=%s(0x%02x) class=0x%02x req_id=%d payload_len=%d %s",
-            _selector_name(selector), selector, msg_class, request_id,
-            len(payload), _format_request_params(selector, payload),
+            _selector_name(selector),
+            selector,
+            msg_class,
+            request_id,
+            len(payload),
+            _format_request_params(selector, payload),
         )
 
         if (msg_class & MPC_CLASS_ONEWAY_MASK) == MPC_CLASS_ONEWAY_MASK:
             log.info(
                 "oneway_continuation class=0x%02x selector=0x%02x payload_len=%d",
-                msg_class, selector, len(payload),
+                msg_class,
+                selector,
+                len(payload),
             )
             return None
 
@@ -936,7 +952,11 @@ class MEDVIEWHandler:
                 reply_payload = build_get_ticket_reply_payload(self.session)
             else:
                 log_unhandled_selector(
-                    log, msg_class, selector, request_id, payload,
+                    log,
+                    msg_class,
+                    selector,
+                    request_id,
+                    payload,
                 )
                 return None
             log.info(
@@ -946,19 +966,34 @@ class MEDVIEWHandler:
                 _format_reply_payload(selector, reply_payload),
             )
             host_block = build_host_block(
-                msg_class, selector, request_id, reply_payload,
+                msg_class,
+                selector,
+                request_id,
+                reply_payload,
             )
             return build_service_packet(
-                self.pipe_idx, host_block, server_seq, client_ack,
+                self.pipe_idx,
+                host_block,
+                server_seq,
+                client_ack,
             )
 
         if selector in _PUSH_DISPATCH:
             return self._handle_cache_miss(
-                msg_class, selector, request_id, payload, server_seq, client_ack,
+                msg_class,
+                selector,
+                request_id,
+                payload,
+                server_seq,
+                client_ack,
             )
         if selector == MEDVIEW_PRE_NOTIFY_TITLE:
             return self._handle_pre_notify(
-                msg_class, request_id, payload, server_seq, client_ack,
+                msg_class,
+                request_id,
+                payload,
+                server_seq,
+                client_ack,
             )
 
         reply_payload = self._dispatch(msg_class, selector, request_id, payload)
@@ -967,7 +1002,9 @@ class MEDVIEWHandler:
             return None
         log.info(
             "reply selector=%s(0x%02x) req_id=%d %s",
-            _selector_name(selector), selector, request_id,
+            _selector_name(selector),
+            selector,
+            request_id,
             _format_reply_payload(selector, reply_payload),
         )
         if selector == MEDVIEW_READ_REMOTE_HFS_FILE:
@@ -981,13 +1018,12 @@ class MEDVIEWHandler:
             )
         host_block = build_host_block(msg_class, selector, request_id, reply_payload)
         reply_packets = build_service_packet(
-            self.pipe_idx, host_block, server_seq, client_ack,
+            self.pipe_idx,
+            host_block,
+            server_seq,
+            client_ack,
         )
-        if (
-            selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS
-            and len(payload) >= 2
-            and payload[1] == 4
-        ):
+        if selector == MEDVIEW_SUBSCRIBE_NOTIFICATIONS and len(payload) >= 2 and payload[1] == 4:
             push_packets = self._flush_pending_picture_chunks(
                 (server_seq + len(reply_packets)) & 0x7F,
                 client_ack,
@@ -1078,8 +1114,7 @@ class MEDVIEWHandler:
             and len(record_id) == 8
         ):
             log.warning(
-                "data_edit_delete refused req_id=%d user=%s ticket_len=%d "
-                "record_id_len=%d",
+                "data_edit_delete refused req_id=%d user=%s ticket_len=%d record_id_len=%d",
                 request_id,
                 self.session.user.username or "-",
                 len(ticket),
@@ -1088,8 +1123,7 @@ class MEDVIEWHandler:
             return replies.data_edit_result(TREEEDCL_STATUS_REFUSED)
 
         log.info(
-            "data_edit_delete status=0 req_id=%d table=%d record_id=%s "
-            "dataset=0x%04x",
+            "data_edit_delete status=0 req_id=%d table=%d record_id=%s dataset=0x%04x",
             request_id,
             send_params[1].value,
             record_id.hex(),
@@ -1107,16 +1141,20 @@ class MEDVIEWHandler:
         client_ack,
     ):
         dynamic = reply_payload[4:]
-        if (
-            len(reply_payload) <= 4 + _HFS_DYNAMIC_BLOCK_DATA_MAX
-            or reply_payload[:4]
-            != bytes([0x81, 0x00, 0x87, TAG_DYNAMIC_COMPLETE_SIGNAL])
+        if len(reply_payload) <= 4 + _HFS_DYNAMIC_BLOCK_DATA_MAX or reply_payload[:4] != bytes(
+            [0x81, 0x00, 0x87, TAG_DYNAMIC_COMPLETE_SIGNAL]
         ):
             host_block = build_host_block(
-                msg_class, selector, request_id, reply_payload,
+                msg_class,
+                selector,
+                request_id,
+                reply_payload,
             )
             return build_service_packet(
-                self.pipe_idx, host_block, server_seq, client_ack,
+                self.pipe_idx,
+                host_block,
+                server_seq,
+                client_ack,
             )
 
         packets = []
@@ -1131,13 +1169,14 @@ class MEDVIEWHandler:
             is_last = block_index == block_count - 1
             block_payload = (
                 (reply_payload[:3] if is_first else b"")
-                + bytes([
-                    TAG_DYNAMIC_COMPLETE_SIGNAL if is_last else TAG_DYNAMIC_PARTIAL
-                ])
+                + bytes([TAG_DYNAMIC_COMPLETE_SIGNAL if is_last else TAG_DYNAMIC_PARTIAL])
                 + chunk
             )
             host_block = build_host_block(
-                msg_class, selector, request_id, block_payload,
+                msg_class,
+                selector,
+                request_id,
+                block_payload,
             )
             block_packets = build_service_packet(
                 self.pipe_idx,
@@ -1148,8 +1187,7 @@ class MEDVIEWHandler:
             packets.extend(block_packets)
 
         log.info(
-            "read_remote_hfs_file_stream req_id=%d bytes=%d host_blocks=%d "
-            "transport_fragments=%d",
+            "read_remote_hfs_file_stream req_id=%d bytes=%d host_blocks=%d transport_fragments=%d",
             request_id,
             len(dynamic),
             block_count,
@@ -1240,7 +1278,9 @@ class MEDVIEWHandler:
     def _handle_subscribe(self, msg_class, request_id, payload) -> bytes:
         notification_type = payload[1] if len(payload) >= 2 else None
         log.info(
-            "subscribe_notifications req_id=%d type=%r", request_id, notification_type,
+            "subscribe_notifications req_id=%d type=%r",
+            request_id,
+            notification_type,
         )
         if notification_type is not None:
             self._subscriptions[notification_type] = (msg_class, request_id)
@@ -1252,7 +1292,9 @@ class MEDVIEWHandler:
     def _handle_unsubscribe(self, request_id, payload) -> bytes:
         notification_type = payload[1] if len(payload) >= 2 else None
         log.info(
-            "unsubscribe_notifications req_id=%d type=%r", request_id, notification_type,
+            "unsubscribe_notifications req_id=%d type=%r",
+            request_id,
+            notification_type,
         )
         if notification_type is not None:
             self._subscriptions.pop(notification_type, None)
@@ -1271,12 +1313,16 @@ class MEDVIEWHandler:
                 del self._subscriptions[n_type]
                 log.info(
                     "iterator_cancel cleared subscription type=%d class=0x%02x req_id=%d",
-                    n_type, msg_class, request_id,
+                    n_type,
+                    msg_class,
+                    request_id,
                 )
                 return
         log.info(
             "iterator_cancel no_subscription class=0x%02x selector=0x%02x req_id=%d",
-            msg_class, selector, request_id,
+            msg_class,
+            selector,
+            request_id,
         )
 
     # --- TitleService ----------------------------------------------
@@ -1290,7 +1336,9 @@ class MEDVIEWHandler:
         is_valid = slot in self._open_title_slots
         log.info(
             "validate_title req_id=%d slot=%r is_valid=%d",
-            request_id, slot, int(is_valid),
+            request_id,
+            slot,
+            int(is_valid),
         )
         return replies.validate_title(is_valid)
 
@@ -1313,8 +1361,7 @@ class MEDVIEWHandler:
                 self.title_body = lower_m14_to_payload(title, deid)
             cache0, cache1 = title.cache_tuple(self.title_body)
             self.baggage_map = {
-                name: _widen_low_bpp_dib(blob)
-                for name, blob in title.baggage_map().items()
+                name: _widen_low_bpp_dib(blob) for name, blob in title.baggage_map().items()
             }
             if self._client_dialect == _DIALECT_OSR2:
                 self.baggage_map["mvpfile"] = build_m14_mvpfile(title)
@@ -1353,8 +1400,15 @@ class MEDVIEWHandler:
             "open_title req_id=%d slot=0x%02x token=%r deid=%r source=%s "
             "dialect=%s caption=%r body_len=%d reply_body_len=%d topics=%d "
             "topic_count=%d baggage=%s",
-            request_id, slot, token, deid, source, self._client_dialect, caption,
-            len(self.title_body), len(reply_body),
+            request_id,
+            slot,
+            token,
+            deid,
+            source,
+            self._client_dialect,
+            caption,
+            len(self.title_body),
+            len(reply_body),
             title.topic_count if title is not None else 0,
             self.title_metadata.topic_count,
             ",".join(f"{k}={len(v)}" for k, v in self.baggage_map.items()),
@@ -1401,7 +1455,9 @@ class MEDVIEWHandler:
         )
         log.info(
             "pre_notify_title req_id=%d slot=%r op=%r",
-            request_id, title_slot, notify_op,
+            request_id,
+            title_slot,
+            notify_op,
         )
         reply_payload = replies.pre_notify_title()
         log.info(
@@ -1418,7 +1474,10 @@ class MEDVIEWHandler:
             reply_payload,
         )
         packets = build_service_packet(
-            self.pipe_idx, host_block, server_seq, client_ack,
+            self.pipe_idx,
+            host_block,
+            server_seq,
+            client_ack,
         )
         if notify_op == 8 and len(notify_payload) > 1:
             # Opcode 0x08's long form is MOSVIEW's own failure report, not the
@@ -1448,13 +1507,16 @@ class MEDVIEWHandler:
         if parsed is None:
             log.info(
                 "picture_transfer_start req_id=%d malformed payload_len=%d",
-                request_id, len(notify_payload),
+                request_id,
+                len(notify_payload),
             )
             return packets
         mode_byte, entries = parsed
         log.info(
             "picture_transfer_start req_id=%d mode=%d entries=%d",
-            request_id, mode_byte, len(entries),
+            request_id,
+            mode_byte,
+            len(entries),
         )
         if mode_byte == _PICTURE_MODE_SUBSCRIBER_RESET:
             # Advance notice that the type-4 subscriber is going down. Hold
@@ -1466,16 +1528,20 @@ class MEDVIEWHandler:
             data = self.baggage_map.get(canonical)
             if data is None:
                 log.info(
-                    "picture_transfer_missing req_id=%d transfer_id=0x%08x "
-                    "name=%r canonical=%r",
-                    request_id, transfer_id, name, canonical,
+                    "picture_transfer_missing req_id=%d transfer_id=0x%08x name=%r canonical=%r",
+                    request_id,
+                    transfer_id,
+                    name,
+                    canonical,
                 )
                 continue
             if current_size > len(data):
                 log.info(
-                    "picture_transfer_restart req_id=%d transfer_id=0x%08x "
-                    "current=%d target=%d",
-                    request_id, transfer_id, current_size, len(data),
+                    "picture_transfer_restart req_id=%d transfer_id=0x%08x current=%d target=%d",
+                    request_id,
+                    transfer_id,
+                    current_size,
+                    len(data),
                 )
                 current_size = 0
 
@@ -1586,7 +1652,8 @@ class MEDVIEWHandler:
         if parsed is None:
             log.info(
                 "subscriber_state req_id=%d malformed payload_len=%d",
-                request_id, len(notify_payload),
+                request_id,
+                len(notify_payload),
             )
             return []
         notification_type, enabled = parsed
@@ -1598,10 +1665,7 @@ class MEDVIEWHandler:
             int(enabled),
             len(self._pending_picture_transfers),
         )
-        if (
-            notification_type != _NOTIFICATION_TYPE_TRANSFER_CHUNK
-            or not enabled
-        ):
+        if notification_type != _NOTIFICATION_TYPE_TRANSFER_CHUNK or not enabled:
             return []
         return self._flush_pending_picture_chunks(server_seq, client_ack)
 
@@ -1613,9 +1677,7 @@ class MEDVIEWHandler:
                     len(self._pending_picture_transfers),
                 )
             return []
-        if not self._subscriber_enabled.get(
-            _NOTIFICATION_TYPE_TRANSFER_CHUNK, True
-        ):
+        if not self._subscriber_enabled.get(_NOTIFICATION_TYPE_TRANSFER_CHUNK, True):
             if self._pending_picture_transfers:
                 log.info(
                     "picture_transfer_chunks_queued count=%d reason=type4_disabled",
@@ -1631,9 +1693,7 @@ class MEDVIEWHandler:
             offset = current_size
             chunk_count = 0
             while offset < len(data):
-                chunk_data = data[
-                    offset : offset + _picture_chunk_limit(data, offset)
-                ]
+                chunk_data = data[offset : offset + _picture_chunk_limit(data, offset)]
                 frame = build_type4_transfer_chunk_frame(
                     transfer_id,
                     offset,
@@ -1665,7 +1725,10 @@ class MEDVIEWHandler:
         info_kind, info_arg, caller_cookie = _extract_get_info_args(payload)
         log.info(
             "get_title_info_remote req_id=%d kind=0x%x arg=0x%08x cookie=0x%08x",
-            request_id, info_kind, info_arg, caller_cookie,
+            request_id,
+            info_kind,
+            info_arg,
+            caller_cookie,
         )
         return replies.get_title_info_remote(info_kind)
 
@@ -1677,14 +1740,14 @@ class MEDVIEWHandler:
         size = replies.baggage_size(canonical, baggage_map=self.baggage_map)
         log.info(
             "open_remote_hfs_file req_id=%d name=%r canonical=%r accept=%r",
-            request_id, name, canonical, size is not None,
+            request_id,
+            name,
+            canonical,
+            size is not None,
         )
         # RTM retries `|bm%d` without the pipe. OSR2 directly requests
         # its authored layout as `|MVPFILE`, which is a real HFS name.
-        pipe_name_allowed = (
-            self._client_dialect == _DIALECT_OSR2
-            and name.lower() == "|mvpfile"
-        )
+        pipe_name_allowed = self._client_dialect == _DIALECT_OSR2 and name.lower() == "|mvpfile"
         if size is None or (name.startswith("|") and not pipe_name_allowed):
             return replies.open_remote_hfs_file_reject()
         # Allocate (or reuse) a stable handle per name. bm0 keeps the
@@ -1711,16 +1774,26 @@ class MEDVIEWHandler:
         if name is None or count <= 0:
             log.info(
                 "read_remote_hfs_file req_id=%d handle=%r count=%d offset=%d → error",
-                request_id, handle, count, offset,
+                request_id,
+                handle,
+                count,
+                offset,
             )
             return replies.read_remote_hfs_file_error()
         chunk = replies.baggage_chunk(
-            name, offset, count, baggage_map=self.baggage_map,
+            name,
+            offset,
+            count,
+            baggage_map=self.baggage_map,
         )
         log.info(
-            "read_remote_hfs_file req_id=%d handle=%r name=%r count=%d "
-            "offset=%d returned=%d",
-            request_id, handle, name, count, offset, len(chunk),
+            "read_remote_hfs_file req_id=%d handle=%r name=%r count=%d offset=%d returned=%d",
+            request_id,
+            handle,
+            name,
+            count,
+            offset,
+            len(chunk),
         )
         return replies.read_remote_hfs_file_chunk(chunk)
 
@@ -1738,29 +1811,46 @@ class MEDVIEWHandler:
     # --- Cache-miss group (sync ack + async push) ------------------
 
     def _handle_cache_miss(
-        self, msg_class, selector, request_id, payload, server_seq, client_ack,
+        self,
+        msg_class,
+        selector,
+        request_id,
+        payload,
+        server_seq,
+        client_ack,
     ):
         title_slot, key = _extract_cache_miss_args(payload)
         log.info(
             "cache_miss_rpc selector=0x%02x req_id=%d title_slot=%r key=%s",
-            selector, request_id, title_slot,
+            selector,
+            request_id,
+            title_slot,
             f"0x{key:08x}" if key is not None else None,
         )
         ack_payload = replies.ack()
         log.info(
             "reply selector=%s(0x%02x) req_id=%d %s",
-            _selector_name(selector), selector, request_id,
+            _selector_name(selector),
+            selector,
+            request_id,
             _format_reply_payload(selector, ack_payload),
         )
         host_block = build_host_block(msg_class, selector, request_id, ack_payload)
         reply_pkts = build_service_packet(
-            self.pipe_idx, host_block, server_seq, client_ack,
+            self.pipe_idx,
+            host_block,
+            server_seq,
+            client_ack,
         )
         if title_slot is None or key is None:
             return reply_pkts
         next_seq = (server_seq + len(reply_pkts)) & 0x7F
         push_pkts = self._build_cache_push_packet(
-            title_slot, selector, key, next_seq, client_ack,
+            title_slot,
+            selector,
+            key,
+            next_seq,
+            client_ack,
         )
         if push_pkts is not None:
             return reply_pkts + push_pkts
@@ -1775,19 +1865,31 @@ class MEDVIEWHandler:
             log.info(
                 "cache_push_dropped selector=%s(0x%02x) title_slot=0x%02x "
                 "key=0x%08x sub_type=%d reason=no_subscriber",
-                _selector_name(selector), selector, title_slot, key, sub_type,
+                _selector_name(selector),
+                selector,
+                title_slot,
+                key,
+                sub_type,
             )
             return None
         sub_class, sub_req_id = sub
         chunk = builder(self, title_slot, key)
         push_payload = bytes([0x85]) + chunk
         push_host = build_host_block(
-            sub_class, MEDVIEW_SUBSCRIBE_NOTIFICATIONS, sub_req_id, push_payload,
+            sub_class,
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
+            sub_req_id,
+            push_payload,
         )
         log.info(
             "cache_push selector=%s(0x%02x) title_slot=0x%02x key=0x%08x "
             "sub_type=%d sub_req_id=%d %s",
-            _selector_name(selector), selector, title_slot, key,
-            sub_type, sub_req_id, _format_push_payload(push_payload),
+            _selector_name(selector),
+            selector,
+            title_slot,
+            key,
+            sub_type,
+            sub_req_id,
+            _format_push_payload(push_payload),
         )
         return build_service_packet(self.pipe_idx, push_host, server_seq, client_ack)

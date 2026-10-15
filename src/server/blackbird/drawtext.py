@@ -67,8 +67,9 @@ def get_next_wordbreak(text: str, lpch: int, end: int, break_space: bool) -> int
     return lpch
 
 
-def adjust_white_spaces(text: str, next_start: int, end: int, line_length: int,
-                        fmt: int) -> tuple[int, int]:
+def adjust_white_spaces(
+    text: str, next_start: int, end: int, line_length: int, fmt: int
+) -> tuple[int, int]:
     """Port of `DT_AdjustWhiteSpaces` (drawtext.c). At a wrap boundary,
     trim the whitespace that should not show given the justification:
     leading space off the next line (LEFT), trailing space off the
@@ -94,9 +95,15 @@ def adjust_white_spaces(text: str, next_start: int, end: int, line_length: int,
     return next_start, line_length
 
 
-def get_line_break(text: str, line_start: int, count: int, fmt: int,
-                   measure: MeasureFn, cx_max_width: int,
-                   overhang: int = 0) -> tuple[int, int]:
+def get_line_break(
+    text: str,
+    line_start: int,
+    count: int,
+    fmt: int,
+    measure: MeasureFn,
+    cx_max_width: int,
+    overhang: int = 0,
+) -> tuple[int, int]:
     """Port of `DT_GetLineBreak` (drawtext.c). Finds where the current
     line ends.
 
@@ -116,9 +123,7 @@ def get_line_break(text: str, line_start: int, count: int, fmt: int,
     adjust = False
 
     while lpch_text < end:
-        lpch_line_end = lpch = get_next_wordbreak(
-            text, lpch_text, end, bool(fmt & DT_WORDBREAK)
-        )
+        lpch_line_end = lpch = get_next_wordbreak(text, lpch_text, end, bool(fmt & DT_WORDBREAK))
         # DT_DrawStr returns extent-minus-overhang; cumulative from line start.
         cx_new_extent = measure(text[line_start:lpch]) - overhang
 
@@ -152,8 +157,9 @@ def get_line_break(text: str, line_start: int, count: int, fmt: int,
     return lpch, line_length
 
 
-def wrap_text(text: str, fmt: int, measure: MeasureFn, cx_max_width: int,
-              overhang: int = 0) -> list[str]:
+def wrap_text(
+    text: str, fmt: int, measure: MeasureFn, cx_max_width: int, overhang: int = 0
+) -> list[str]:
     """Multiline driver — the loop from `DrawTextExW`'s non-SINGLELINE
     branch. Returns the list of line strings DrawText would lay out for
     `text` in a rectangle `cx_max_width` pixels wide.
@@ -167,7 +173,7 @@ def wrap_text(text: str, fmt: int, measure: MeasureFn, cx_max_width: int,
         next_start, line_length = get_line_break(
             text, cursor, count - cursor, fmt, measure, cx_max_width, overhang
         )
-        lines.append(text[cursor:cursor + line_length])
+        lines.append(text[cursor : cursor + line_length])
         if next_start <= cursor:
             # Defensive: guarantee forward progress (the C relies on
             # GetNextWordbreak always advancing; mirror that invariant).

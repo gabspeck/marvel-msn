@@ -614,9 +614,7 @@ def build_bbs_get_children_reply_payload(request):
         len(children),
     )
     nodes = [store.get_node(request.node_id), *children] if with_self else children
-    records = [
-        (node.node_id, build_bbs_props(requested, node, is_children=True)) for node in nodes
-    ]
+    records = [(node.node_id, build_bbs_props(requested, node, is_children=True)) for node in nodes]
     return dirsrv.build_tree_reply_wire(records)
 
 

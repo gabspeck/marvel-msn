@@ -31,6 +31,7 @@ class StyleRun:
     """One per-character style annotation. `style_id` references a slot
     in the title's CStyleSheet. Reserved for future style-handle
     decoding; the partial TextTree decoder leaves this empty."""
+
     char_offset: int
     char_length: int
     style_id: int
@@ -48,6 +49,7 @@ class PictureRef:
     The full reference's baggage proxy_key is resolved by looking up
     `iuid` in the title's CProxyTable; the partial decoder surfaces
     the raw bytes."""
+
     byte_offset: int
     clsid: str
     filename: str = ""
@@ -70,11 +72,12 @@ class TextRunsContent:
     text run). The raw `text` attribute remains for backward-compat
     callers and is the concatenation of all blobs joined by `'\\n'`.
     """
+
     text: str
     style_runs: tuple[StyleRun, ...]
-    header_version: int                                    # observed: 0x02 in story_test.ttl 8/7
+    header_version: int  # observed: 0x02 in story_test.ttl 8/7
     header_byte_1: int
-    raw_payload: bytes                                     # bytes from offset 2 onwards (legacy)
+    raw_payload: bytes  # bytes from offset 2 onwards (legacy)
     blobs: tuple[str, ...] = ()
 
 
@@ -99,6 +102,7 @@ class TextTreeNode:
     `<H1>Story title</H1>` — tag 7, one child, and the child is a
     version-3 leaf carrying 11 bytes and no children of its own.
     """
+
     tag: int
     version: int
     props: tuple[tuple[str, str], ...] = ()
@@ -142,6 +146,7 @@ class TextTreeContent:
       - `raw_payload`: bytes from offset 2 onwards (after the
         `01 05` magic), for downstream tooling that needs the full
         body."""
+
     text: str
     segments: tuple[tuple[int, str], ...]
     style_runs: tuple[StyleRun, ...] = ()
@@ -196,12 +201,12 @@ def _read_segment_length(data: bytes, offset: int) -> tuple[int, int]:
         return (b0, 1)
     if offset + 3 > len(data):
         return (0, 0)
-    w = int.from_bytes(data[offset + 1:offset + 3], "little")
+    w = int.from_bytes(data[offset + 1 : offset + 3], "little")
     if w != 0xFFFF:
         return (w, 3)
     if offset + 7 > len(data):
         return (0, 0)
-    dw = int.from_bytes(data[offset + 3:offset + 7], "little")
+    dw = int.from_bytes(data[offset + 3 : offset + 7], "little")
     return (dw, 7)
 
 
@@ -254,16 +259,12 @@ def _find_filename_in_intrude(payload: bytes, start: int, end: int) -> str:
     while pos < end - 2:
         ln = payload[pos]
         if 4 <= ln <= 64 and pos + 1 + ln <= end:
-            candidate = payload[pos + 1:pos + 1 + ln]
-            if (
-                all(0x20 <= b < 0x7F for b in candidate)
-                and b"." in candidate
-            ):
+            candidate = payload[pos + 1 : pos + 1 + ln]
+            if all(0x20 <= b < 0x7F for b in candidate) and b"." in candidate:
                 lower = candidate.lower()
                 if any(
                     lower.endswith(ext)
-                    for ext in (b".bmp", b".wmf", b".dib", b".jpg",
-                                b".png", b".gif", b".shg")
+                    for ext in (b".bmp", b".wmf", b".dib", b".jpg", b".png", b".gif", b".shg")
                 ):
                     return candidate.decode("ascii")
         pos += 1
@@ -278,8 +279,8 @@ def _find_iuid_in_intrude(payload: bytes, start: int, end: int) -> bytes:
     not be all-zero."""
     pos = start
     while pos < end - 20:
-        if payload[pos:pos + 4] == b"\x10\x00\x00\x00":
-            candidate = payload[pos + 4:pos + 20]
+        if payload[pos : pos + 4] == b"\x10\x00\x00\x00":
+            candidate = payload[pos + 4 : pos + 20]
             if any(b != 0 for b in candidate):
                 return bytes(candidate)
         pos += 1
@@ -317,17 +318,23 @@ def _scan_picture_refs(payload: bytes) -> list[PictureRef]:
                         # the embedded filename + IUID.
                         scan_end = min(name_end + 0x200, len(payload))
                         filename = _find_filename_in_intrude(
-                            payload, name_end, scan_end,
+                            payload,
+                            name_end,
+                            scan_end,
                         )
                         iuid = _find_iuid_in_intrude(
-                            payload, name_end, scan_end,
+                            payload,
+                            name_end,
+                            scan_end,
                         )
-                        refs.append(PictureRef(
-                            byte_offset=idx - 1,
-                            clsid=name_bytes.decode("ascii"),
-                            filename=filename,
-                            iuid=iuid,
-                        ))
+                        refs.append(
+                            PictureRef(
+                                byte_offset=idx - 1,
+                                clsid=name_bytes.decode("ascii"),
+                                filename=filename,
+                                iuid=iuid,
+                            )
+                        )
                         pos = name_end
                         continue
         pos = idx + len(_PICTURE_CLSID_MARKER)
@@ -342,7 +349,7 @@ def _read_pascal_string(data: bytes, offset: int) -> tuple[str, int]:
     end = offset + 1 + length
     if end > len(data):
         raise ValueError("Pascal string runs past the body")
-    return data[offset + 1:end].decode("ascii", errors="replace"), end
+    return data[offset + 1 : end].decode("ascii", errors="replace"), end
 
 
 def _parse_node(data: bytes, offset: int, depth: int) -> tuple[TextTreeNode, int]:
@@ -352,7 +359,7 @@ def _parse_node(data: bytes, offset: int, depth: int) -> tuple[TextTreeNode, int
         raise ValueError("element tree nested past the depth bound")
     if offset + 3 > len(data):
         raise ValueError("truncated element header")
-    tag = int.from_bytes(data[offset:offset + 2], "little")
+    tag = int.from_bytes(data[offset : offset + 2], "little")
     version = data[offset + 2]
     pos = offset + 3
 
@@ -364,19 +371,19 @@ def _parse_node(data: bytes, offset: int, depth: int) -> tuple[TextTreeNode, int
         # list, 1 before the numbered one).
         if pos + _NODE_DWORD_SIZE > len(data):
             raise ValueError("truncated element dword")
-        payload = data[pos:pos + _NODE_DWORD_SIZE]
+        payload = data[pos : pos + _NODE_DWORD_SIZE]
         pos += _NODE_DWORD_SIZE
     elif version == _NODE_VERSION_DATA:
         length, consumed = _read_celementdata_length(data, pos)
         if consumed == 0 or pos + consumed + length > len(data):
             raise ValueError("truncated element data")
         pos += consumed
-        payload = data[pos:pos + length]
+        payload = data[pos : pos + length]
         pos += length
     elif version == _NODE_VERSION_PROPS:
         if pos + 2 > len(data):
             raise ValueError("truncated property count")
-        prop_count = int.from_bytes(data[pos:pos + 2], "little")
+        prop_count = int.from_bytes(data[pos : pos + 2], "little")
         pos += 2
         for _ in range(prop_count):
             name, pos = _read_pascal_string(data, pos)
@@ -385,7 +392,7 @@ def _parse_node(data: bytes, offset: int, depth: int) -> tuple[TextTreeNode, int
 
     if pos + 2 > len(data):
         raise ValueError("truncated child count")
-    child_count = int.from_bytes(data[pos:pos + 2], "little")
+    child_count = int.from_bytes(data[pos : pos + 2], "little")
     pos += 2
     children: list[TextTreeNode] = []
     for _ in range(child_count):
@@ -394,8 +401,11 @@ def _parse_node(data: bytes, offset: int, depth: int) -> tuple[TextTreeNode, int
 
     return (
         TextTreeNode(
-            tag=tag, version=version, props=tuple(props),
-            data=payload, children=tuple(children),
+            tag=tag,
+            version=version,
+            props=tuple(props),
+            data=payload,
+            children=tuple(children),
         ),
         pos,
     )
@@ -465,12 +475,12 @@ def _read_celementdata_length(data: bytes, offset: int) -> tuple[int, int]:
         return (b0, 1)
     if offset + 3 > len(data):
         return (0, 0)
-    w = int.from_bytes(data[offset + 1:offset + 3], "little")
+    w = int.from_bytes(data[offset + 1 : offset + 3], "little")
     if w != 0xFFFF:
         return (w, 3)
     if offset + 7 > len(data):
         return (0, 0)
-    dw = int.from_bytes(data[offset + 3:offset + 7], "little")
+    dw = int.from_bytes(data[offset + 3 : offset + 7], "little")
     return (dw, 7)
 
 
@@ -503,7 +513,7 @@ def _parse_textruns_blobs(payload: bytes) -> tuple[list[str], int]:
         if consumed == 0 or pos + consumed + length > len(payload):
             break
         pos += consumed
-        chunk = payload[pos:pos + length]
+        chunk = payload[pos : pos + length]
         blobs.append(chunk.decode("ascii", errors="replace"))
         pos += length
     return (blobs, pos)
@@ -533,9 +543,7 @@ def decode_textruns(raw: bytes) -> TextRunsContent:
     `is_texttree(raw)` and call `decode_texttree` instead.
     """
     if is_texttree(raw):
-        raise ValueError(
-            "raw is a TextTree payload — call decode_texttree() instead"
-        )
+        raise ValueError("raw is a TextTree payload — call decode_texttree() instead")
     if len(raw) < 2:
         return TextRunsContent(
             text="",
