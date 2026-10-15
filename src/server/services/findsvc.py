@@ -30,7 +30,6 @@ from ..config import (
 )
 from ..models import DwordParam, VarParam
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -40,6 +39,7 @@ from ..mpc import (
 from ..session import Session
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
+from ._handler import ServiceHandler
 from .findquery import QueryError, node_fields, parse_query
 
 log = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ FINDSVC_STATUS_OK = 0
 FINDSVC_MAX_RESULTS = 200
 
 
-class FindSvcHandler:
+class FindSvcHandler(ServiceHandler):
     """Handles directory-search requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name, session=None):
@@ -82,7 +82,7 @@ class FindSvcHandler:
         all looks like.
         """
         payload = build_discovery_payload(FINDSVC_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

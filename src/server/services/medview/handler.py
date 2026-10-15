@@ -83,7 +83,6 @@ from ...models import (
     WordParam,
 )
 from ...mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -91,6 +90,7 @@ from ...mpc import (
 )
 from ...session import Session
 from .._dispatch import log_unhandled_selector
+from .._handler import ServiceHandler
 from ..dirsrv import TREEEDCL_STATUS_REFUSED, build_get_ticket_reply_payload
 from . import replies
 from .m14_loader import (
@@ -881,7 +881,7 @@ def _picture_status_metrics(data: bytes) -> tuple[int, int, int]:
     return 1, width, height
 
 
-class MEDVIEWHandler:
+class MEDVIEWHandler(ServiceHandler):
     """Per-pipe MEDVIEW handler."""
 
     def __init__(self, pipe_idx, svc_name, session=None):
@@ -913,7 +913,7 @@ class MEDVIEWHandler:
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(MEDVIEW_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(
             self.pipe_idx,
             host_block,

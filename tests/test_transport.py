@@ -6,13 +6,13 @@ import unittest
 from server.config import (
     TRANSPORT_ACK_BEHIND,
     TRANSPORT_ACK_TIMEOUT_MS,
-    TRANSPORT_MAX_BYTES,
     TRANSPORT_PACKET_SIZE,
     TRANSPORT_WINDOW_SIZE,
 )
 from server.connection import ConnectionState
 from server.mpc import build_service_packet
 from server.pipe import build_pipe_frame
+from server.services._handler import ServiceHandler
 from server.transport import (
     build_ack_packet,
     build_packet,
@@ -216,7 +216,7 @@ class TestStraightFraming(unittest.TestCase):
         params = struct.pack(
             "<IIIII",
             TRANSPORT_PACKET_SIZE,
-            TRANSPORT_MAX_BYTES,
+            TRANSPORT_PACKET_SIZE,
             TRANSPORT_WINDOW_SIZE,
             TRANSPORT_ACK_BEHIND,
             TRANSPORT_ACK_TIMEOUT_MS,
@@ -259,7 +259,7 @@ class TestStraightRouting(unittest.TestCase):
         # close command byte, echoed. Routing on that header closed pipe 1,
         # left pipe 3 open and dropped the close on the floor.
         state = self._state()
-        state.services[3] = object()
+        state.services[3] = ServiceHandler()
         with self.assertRaises(ConnectionError):
             state._handle_straight_record(b"\x03\x00\x01")
         self.assertEqual(state.pipes_closed, {3})

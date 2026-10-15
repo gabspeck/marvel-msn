@@ -32,7 +32,6 @@ import struct
 from ..config import SASRV_INTERFACE_GUIDS, TAG_DYNAMIC_COMPLETE_SIGNAL, TAG_END_STATIC
 from ..models import DwordParam
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -41,6 +40,7 @@ from ..mpc import (
 )
 from ..session import Session
 from ._dispatch import log_unhandled_selector
+from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ SASRV_TOKEN_NAME_MAX = 0x5C - 1
 SA_E_BAD_LIST_KIND = 0x12
 
 
-class SASRVHandler:
+class SASRVHandler(ServiceHandler):
     """Serve SACLIENT's master-list enumerator on one logical pipe.
 
     Enumeration state is per instance, which matches its lifetime on the wire:
@@ -104,7 +104,7 @@ class SASRVHandler:
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_sasrv_service_map_payload()
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

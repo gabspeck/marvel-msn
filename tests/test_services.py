@@ -25,22 +25,22 @@ from server.config import (
     CONFSRV_INTERFACE_GUIDS,
     DIRSRV_INTERFACE_GUIDS,
     LOGSRV_INTERFACE_GUIDS,
+    MEDVIEW_ATTACH_SESSION,
+    MEDVIEW_CONVERT_HASH_TO_VA,
+    MEDVIEW_CONVERT_TOPIC_TO_VA,
     MEDVIEW_DATA_EDIT_ADD,
     MEDVIEW_DATA_EDIT_CLASS,
     MEDVIEW_DATA_EDIT_DELETE,
     MEDVIEW_DATA_EDIT_GET_TICKET,
+    MEDVIEW_FETCH_NEARBY_TOPIC,
+    MEDVIEW_GET_TITLE_INFO_REMOTE,
     MEDVIEW_INTERFACE_GUIDS,
-    MEDVIEW_SELECTOR_HANDSHAKE,
-    MEDVIEW_SELECTOR_HFS_OPEN,
-    MEDVIEW_SELECTOR_HFS_READ,
-    MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
-    MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
-    MEDVIEW_SELECTOR_TITLE_GET_INFO,
-    MEDVIEW_SELECTOR_TITLE_OPEN,
-    MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
-    MEDVIEW_SELECTOR_VA_CONVERT_HASH,
-    MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
-    MEDVIEW_SELECTOR_VA_RESOLVE,
+    MEDVIEW_LOAD_TOPIC_HIGHLIGHTS,
+    MEDVIEW_OPEN_REMOTE_HFS_FILE,
+    MEDVIEW_OPEN_TITLE,
+    MEDVIEW_PRE_NOTIFY_TITLE,
+    MEDVIEW_READ_REMOTE_HFS_FILE,
+    MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
     MPC_CLASS_CONTINUATION_LAST,
     MPC_CLASS_CONTINUATION_MORE,
     OLREGSRV_INTERFACE_GUIDS,
@@ -55,7 +55,6 @@ from server.config import (
 )
 from server.models import DirsrvRequest, DwordParam, EndMarker, VarParam
 from server.mpc import (
-    _build_continuation_frame,
     build_host_block,
     build_service_packet,
     build_tagged_reply_var,
@@ -63,6 +62,7 @@ from server.mpc import (
     parse_host_block,
     parse_tagged_params,
 )
+from server.pipe import build_pipe_header
 from server.services import SERVICE_HANDLERS
 from server.services.bbir import (
     BBIR_SELECTOR_GET_SEARCH_OBJECTS,
@@ -1502,11 +1502,13 @@ class TestDIRSRVReply(unittest.TestCase):
         # `OkToGetChildren` sends flags=0 and must keep getting children alone.
         prop_group = "g\x00a"
         plain = _walk_get_children_records(
-            build_get_children_reply_payload(DirsrvRequest(node_id="1:16", prop_group=prop_group))
+            build_get_children_reply_payload(
+                DirsrvRequest(node_ids=["1:16"], prop_group=prop_group)
+            )
         )
         with_self = _walk_get_children_records(
             build_get_children_reply_payload(
-                DirsrvRequest(node_id="1:16", prop_group=prop_group, flags=1)
+                DirsrvRequest(node_ids=["1:16"], prop_group=prop_group, flags=1)
             )
         )
 
@@ -1535,7 +1537,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_parent_and_child_counts_follow_the_directory_graph(self):
         request = DirsrvRequest(
-            node_id="1:256",
+            node_ids=["1:256"],
             node_id_raw=struct.pack("<II", 1, 256),
             prop_group="np\x00nc",
             recv_descriptors=[0x83, 0x83, 0x85],
@@ -1551,7 +1553,7 @@ class TestDIRSRVReply(unittest.TestCase):
         node = app_store.content.get_node("4:0")
         app_store.content.add_child("0:0", node)
         request = DirsrvRequest(
-            node_id=node.node_id,
+            node_ids=[node.node_id],
             node_id_raw=node.mnid_a,
             prop_group="np\x00nc",
             recv_descriptors=[0x83, 0x83, 0x85],
@@ -1569,7 +1571,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # delegating to children corrupts wrappers (Cats US ends up named
         # "Arts and Entertainment", its first child).
         request = DirsrvRequest(
-            node_id=f"1:{0x10}",
+            node_ids=[f"1:{0x10}"],
             node_id_raw=struct.pack("<II", 1, 0x10),
             dword_0=1,
             dword_1=14,
@@ -1592,7 +1594,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # and substitutes STRINGTABLE 0x8E / 0x8F. We still send the matching
         # text so server logs read the same as the client.
         request = DirsrvRequest(
-            node_id="0:0",
+            node_ids=["0:0"],
             node_id_raw=struct.pack("<II", 0, 0),
             dword_0=0,
             dword_1=1,
@@ -1604,7 +1606,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_special_msn_today_node_returns_title(self):
         request = DirsrvRequest(
-            node_id="4:0",
+            node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
             dword_0=0,
             dword_1=1,
@@ -1616,7 +1618,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_explicit_leaf_children_do_not_fall_back_to_unknown_sentinel(self):
         request = DirsrvRequest(
-            node_id="4:0",
+            node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
             dword_0=1,
             dword_1=14,
@@ -1628,7 +1630,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_special_msn_today_leaf_children_emit_self_nav_record(self):
         request = DirsrvRequest(
-            node_id="4:0",
+            node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
             dword_0=1,
             dword_1=14,
@@ -1667,7 +1669,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # four extra rows — including a self-reference — in the Worldwide
         # Categories view.
         request = DirsrvRequest(
-            node_id="0:0",
+            node_ids=["0:0"],
             node_id_raw=struct.pack("<II", 0, 0),
             dword_0=1,
             dword_1=14,
@@ -1691,7 +1693,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # 1:1:0:0 target. This hub was already correct; the assertion pins it
         # so the two hubs stay symmetric.
         request = DirsrvRequest(
-            node_id="1:0",
+            node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=1,
             dword_1=14,
@@ -1708,7 +1710,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_narrow_root_children_request_returns_localized_wrappers(self):
         request = DirsrvRequest(
-            node_id="0:0",
+            node_ids=["0:0"],
             node_id_raw=struct.pack("<II", 0, 0),
             dword_0=1,
             dword_1=14,
@@ -1724,7 +1726,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # Server "1:0" is the LJUMP 1:1:0:0 target (client's MSN Central /
         # Worldwide Member Assistance hub). Its children are MA US + MA BR.
         request = DirsrvRequest(
-            node_id="1:0",
+            node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=1,
             dword_1=14,
@@ -1742,7 +1744,7 @@ class TestDIRSRVReply(unittest.TestCase):
             (f"1:{0x100}", struct.pack("<II", 1, 0x100)),  # Arts and Entertainment
         ):
             request = DirsrvRequest(
-                node_id=node_id,
+                node_ids=[node_id],
                 node_id_raw=raw,
                 dword_0=1,
                 dword_1=14,
@@ -1760,7 +1762,7 @@ class TestDIRSRVReply(unittest.TestCase):
             ("1:0", 1, 0x11),  # WW Member Assistance → Member Assistance (US)
         ):
             request = DirsrvRequest(
-                node_id=node_id,
+                node_ids=[node_id],
                 node_id_raw=struct.pack("<II", f8, 0),
                 dword_0=1,
                 dword_1=14,
@@ -1778,7 +1780,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # Server wire "1:0" = client's MSN Central, overloaded as Worldwide
         # Member Assistance. Self-query returns the WMA name.
         request = DirsrvRequest(
-            node_id="1:0",
+            node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=0,
             dword_1=1,
@@ -1790,7 +1792,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_worldwide_member_assistance_children_return_locale_wrappers(self):
         request = DirsrvRequest(
-            node_id="1:0",
+            node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=1,
             dword_1=14,
@@ -1806,7 +1808,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # MSN Today leaf so clicking the in-MA entry launches MOSVIEW exactly
         # as the HOMEBASE MSN Today button does.
         request = DirsrvRequest(
-            node_id=f"1:{0x11}",
+            node_ids=[f"1:{0x11}"],
             node_id_raw=struct.pack("<II", 1, 0x11),
             dword_0=1,
             dword_1=14,
@@ -1822,7 +1824,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_categories_us_children_emit_fourteen_categories(self):
         request = DirsrvRequest(
-            node_id=f"1:{0x10}",
+            node_ids=[f"1:{0x10}"],
             node_id_raw=struct.pack("<II", 1, 0x10),
             dword_0=1,
             dword_1=14,
@@ -1837,7 +1839,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
     def test_arts_and_entertainment_children_emit_subleaves(self):
         request = DirsrvRequest(
-            node_id=f"1:{0x100}",
+            node_ids=[f"1:{0x100}"],
             node_id_raw=struct.pack("<II", 1, 0x100),
             dword_0=1,
             dword_1=14,
@@ -1853,7 +1855,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # filter_on=1, lcid=pt-BR → WW MA's children (server "1:0") drop
         # MA (US) and keep only MA (BR).
         request = DirsrvRequest(
-            node_id="1:0",
+            node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=1,
             dword_1=14,
@@ -1868,7 +1870,7 @@ class TestDIRSRVReply(unittest.TestCase):
 
         # filter_on=0 — the 4-byte form — keeps everything.
         request = DirsrvRequest(
-            node_id="1:0",
+            node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=1,
             dword_1=14,
@@ -1887,7 +1889,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # wrapper as a direct child of MSN root the filter would skip past
         # both Cats(US) and MA(US) and surface Worldwide Categories instead.
         request = DirsrvRequest(
-            node_id="0:0",
+            node_ids=["0:0"],
             node_id_raw=struct.pack("<II", 0, 0),
             dword_0=1,
             dword_1=14,
@@ -1980,7 +1982,7 @@ class TestDIRSRVReply(unittest.TestCase):
         ]
         for node_id, raw, expected in cases:
             request = DirsrvRequest(
-                node_id=node_id,
+                node_ids=[node_id],
                 node_id_raw=raw,
                 dword_0=1,
                 dword_1=14,
@@ -2013,7 +2015,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # tp=0x0A ASCIIZ, p=0x03 DWORD (size), w=0x0C FILETIME (8-byte).
         # `l` is advertised but unread — DWORD 0 is the safe default (§12).
         request = DirsrvRequest(
-            node_id="1:0",
+            node_ids=["1:0"],
             node_id_raw=struct.pack("<II", 1, 0),
             dword_0=1,
             dword_1=14,
@@ -2061,7 +2063,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # as an inline 0x03 DWORD so MOSSHELL's FormatSizeString formats it,
         # not the low-4 of a heap pointer.
         request = DirsrvRequest(
-            node_id="4:0",
+            node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
             dword_0=1,
             dword_1=14,
@@ -2087,7 +2089,7 @@ class TestDIRSRVReply(unittest.TestCase):
     def test_msn_today_mixed_content_request_returns_fixture_values(self):
         """Client can mix nav and content props on is_children=True and get real values."""
         request = DirsrvRequest(
-            node_id="4:0",
+            node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
             dword_0=1,
             dword_1=14,
@@ -2110,7 +2112,7 @@ class TestDIRSRVReply(unittest.TestCase):
     def test_msn_today_properties_dialog_request_uses_dialog_wire_types(self):
         """Properties dialog (is_children=False) gets 0x0B tp and 0x0B w string."""
         request = DirsrvRequest(
-            node_id="4:0",
+            node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
             dword_0=0,
             dword_1=1,
@@ -2131,7 +2133,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # put the LCID at offset 0 and the +4 read would fall off the
         # 4-byte buffer — root cause of the garbage combobox.
         request = DirsrvRequest(
-            node_id="4:0",
+            node_ids=["4:0"],
             node_id_raw=struct.pack("<II", 4, 0),
             dword_0=0,
             dword_1=1,
@@ -2154,7 +2156,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # per-locale reply regardless of is_children.
         for dword_0 in (0, 1):
             request = DirsrvRequest(
-                node_id="0:0",
+                node_ids=["0:0"],
                 node_id_raw=struct.pack("<II", 0, 0),
                 dword_0=dword_0,
                 dword_1=1,
@@ -2171,7 +2173,7 @@ class TestDIRSRVReply(unittest.TestCase):
         # Address-bar enumeration (different propList) still resolves
         # through the regular content tree — no language leakage.
         addrbar_request = DirsrvRequest(
-            node_id="0:0",
+            node_ids=["0:0"],
             node_id_raw=struct.pack("<II", 0, 0),
             dword_0=1,
             dword_1=14,
@@ -3875,28 +3877,19 @@ class TestServicePacketFragmentation(unittest.TestCase):
             self.assertLessEqual(len(p), 100)
 
 
-class TestContinuationFrame(unittest.TestCase):
+class TestPipeHeader(unittest.TestCase):
     def test_flags_with_last(self):
-        frame = _build_continuation_frame(3, b"\x01\x02\x03", last=True)
-        hdr = decode_header_byte(frame[0])
+        hdr = decode_header_byte(build_pipe_header(3, last=True)[0])
         self.assertTrue(hdr & PIPE_ALWAYS_SET)
         self.assertTrue(hdr & PIPE_CONTINUATION)
         self.assertTrue(hdr & PIPE_LAST_DATA)
         self.assertEqual(hdr & 0x0F, 3)
 
     def test_flags_without_last(self):
-        frame = _build_continuation_frame(3, b"\x01\x02\x03", last=False)
-        hdr = decode_header_byte(frame[0])
+        hdr = decode_header_byte(build_pipe_header(3, last=False)[0])
         self.assertTrue(hdr & PIPE_ALWAYS_SET)
         self.assertTrue(hdr & PIPE_CONTINUATION)
         self.assertFalse(hdr & PIPE_LAST_DATA)
-
-    def test_content_follows_header_directly(self):
-        data = b"\xaa\xbb\xcc"
-        frame = _build_continuation_frame(3, data, last=True)
-        # Frame = header(1) + raw content (no length prefix)
-        self.assertEqual(len(frame), 1 + len(data))
-        self.assertEqual(frame[1:], data)
 
 
 class TestLOGSRVCommitTagType(unittest.TestCase):
@@ -4081,10 +4074,10 @@ class TestMEDVIEWServiceMap(unittest.TestCase):
             self.assertEqual(sel, i + 1)
 
     def test_handshake_selector_is_0x1F(self):
-        self.assertEqual(MEDVIEW_SELECTOR_HANDSHAKE, 0x1F)
+        self.assertEqual(MEDVIEW_ATTACH_SESSION, 0x1F)
 
     def test_title_open_selector_is_0x01(self):
-        self.assertEqual(MEDVIEW_SELECTOR_TITLE_OPEN, 0x01)
+        self.assertEqual(MEDVIEW_OPEN_TITLE, 0x01)
 
     def test_discovery_payload_size(self):
         handler = MEDVIEWHandler(5, "MEDVIEW")
@@ -4101,7 +4094,7 @@ class TestMEDVIEWHandshake(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Request: 0x01 0x01 (byte=1), 0x04 with 12 zero bytes, 0x83 recv.
         req_payload = bytes.fromhex("01 01 04 8c 00 00 20 00 06 40 00 00 09 04 00 00 83")
-        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_HANDSHAKE, 0, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_ATTACH_SESSION, 0, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -4137,7 +4130,7 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_OPEN,
+            MEDVIEW_OPEN_TITLE,
             1,
             req_payload,
             5,
@@ -4159,7 +4152,7 @@ class TestMEDVIEWTitleOpen(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_OPEN,
+            MEDVIEW_OPEN_TITLE,
             1,
             req_payload or self._MSN_TODAY_REQ,
             5,
@@ -4247,7 +4240,7 @@ class TestMEDVIEWOSR2TitleOpen(unittest.TestCase):
         )
         handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_HANDSHAKE,
+            MEDVIEW_ATTACH_SESSION,
             0,
             request,
             5,
@@ -4351,7 +4344,7 @@ class TestMEDVIEWTitleGetInfo(unittest.TestCase):
             "03 00 00 00 00"  # buffer_ptr=0
             "83"
         )
-        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_GET_INFO, 2, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_GET_TITLE_INFO_REMOTE, 2, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -4462,7 +4455,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
     def _subscribe(handler, notification_type, request_id):
         return handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
             request_id,
             bytes([0x01, notification_type, 0x85]),
             5,
@@ -4475,9 +4468,9 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         for selector in (
-            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
-            MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
-            MEDVIEW_SELECTOR_VA_RESOLVE,
+            MEDVIEW_CONVERT_HASH_TO_VA,
+            MEDVIEW_CONVERT_TOPIC_TO_VA,
+            MEDVIEW_FETCH_NEARBY_TOPIC,
         ):
             pkts = handler.handle_request(0x01, selector, 9, req_payload, 5, 5)
             self.assertIsNotNone(pkts, f"selector 0x{selector:02x} returned None")
@@ -4496,7 +4489,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+            MEDVIEW_CONVERT_HASH_TO_VA,
             9,
             hash_req,
             5,
@@ -4529,7 +4522,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             )
             handler.handle_request(
                 0x01,
-                MEDVIEW_SELECTOR_TITLE_OPEN,
+                MEDVIEW_OPEN_TITLE,
                 1,
                 open_req,
                 5,
@@ -4539,7 +4532,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             hash_req = b"\x01\x01\x03\x01\x00\x00\x00"
             pkts = handler.handle_request(
                 0x01,
-                MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+                MEDVIEW_CONVERT_HASH_TO_VA,
                 9,
                 hash_req,
                 5,
@@ -4564,7 +4557,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         )
         handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_OPEN,
+            MEDVIEW_OPEN_TITLE,
             1,
             open_req,
             5,
@@ -4575,7 +4568,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         hash_req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_VA_CONVERT_HASH,
+            MEDVIEW_CONVERT_HASH_TO_VA,
             9,
             hash_req,
             5,
@@ -4594,7 +4587,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_VA_CONVERT_TOPIC,
+            MEDVIEW_CONVERT_TOPIC_TO_VA,
             10,
             req,
             5,
@@ -4617,7 +4610,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_VA_RESOLVE,
+            MEDVIEW_FETCH_NEARBY_TOPIC,
             11,
             req,
             5,
@@ -4638,14 +4631,14 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             b"\x03\x00\x00\x00\x00"
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
-        handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5)
+        handler.handle_request(0x01, MEDVIEW_OPEN_TITLE, 1, open_req, 5, 5)
         self.assertIsNotNone(handler.loaded_m14)
         self._subscribe(handler, 0, 3)
         key = handler.loaded_m14.home_display.topic_pos
         req = b"\x01\x01\x03" + struct.pack("<I", key)
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_VA_RESOLVE,
+            MEDVIEW_FETCH_NEARBY_TOPIC,
             11,
             req,
             5,
@@ -4688,7 +4681,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
             b"\x03\x00\x00\x00\x00"
             b"\x81\x81\x83\x83\x83\x83\x83"
         )
-        handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_OPEN, 1, open_req, 5, 5)
+        handler.handle_request(0x01, MEDVIEW_OPEN_TITLE, 1, open_req, 5, 5)
         self._subscribe(handler, 0, 1)
 
         req_payload = b"\x01\x01\x03" + struct.pack("<I", 0x4696) + b"\x01\x01"
@@ -4744,7 +4737,7 @@ class TestMEDVIEWCacheMissRpcs(unittest.TestCase):
         req_payload = bytes.fromhex("01 01 03 be ba fe ca")
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC,
+            MEDVIEW_LOAD_TOPIC_HIGHLIGHTS,
             9,
             req_payload,
             5,
@@ -4765,7 +4758,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
     def _subscribe(handler, notification_type, request_id):
         handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
             request_id,
             bytes([0x01, notification_type, 0x85]),
             5,
@@ -4808,7 +4801,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Request: 0x01 0x00, 0x02 0x0a 0x00 (opcode=10), 0x04 with 6 bytes.
         req_payload = bytes.fromhex("01 00 02 0a 00 04 86 00 00 00 00 00 00")
-        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY, 3, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_PRE_NOTIFY_TITLE, 3, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         parsed = parse_packet(pkts[0][:-1])
         self.assertTrue(parsed.crc_ok)
@@ -4824,7 +4817,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         handler = MEDVIEWHandler(5, "MEDVIEW")
         # Request: 0x01 0x01, 0x02 0x08 0x00 (opcode=8), 0x04 0x81 0x91 (1-byte heartbeat).
         req_payload = bytes.fromhex("01 01 02 08 00 04 81 91")
-        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY, 7, req_payload, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_PRE_NOTIFY_TITLE, 7, req_payload, 5, 5)
         self.assertIsNotNone(pkts)
         reply = parse_packet(pkts[0][:-1]).payload[8:]
         self.assertEqual(reply, bytes([TAG_END_STATIC]))
@@ -4838,7 +4831,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(transfer_id=0x12345678),
             10,
@@ -4872,7 +4865,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         start_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(
                 transfer_id=7,
@@ -4891,7 +4884,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         subscribe_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+            MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
             4,
             b"\x01\x04\x85",
             20,
@@ -4940,7 +4933,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(transfer_id=7, mode=0),
             10,
@@ -5044,7 +5037,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(
                 transfer_id=7,
@@ -5075,7 +5068,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         start_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             5,
             self._picture_start_request(transfer_id=7, mode=1),
             10,
@@ -5087,7 +5080,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         # The client's own disable report must not release them either.
         disable_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             6,
             self._subscriber_state_request(4, False),
             20,
@@ -5097,7 +5090,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         enable_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             7,
             self._subscriber_state_request(4, True),
             30,
@@ -5122,7 +5115,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
         self._subscribe(handler, 4, 4)
         handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             5,
             self._subscriber_state_request(4, False),
             10,
@@ -5131,7 +5124,7 @@ class TestMEDVIEWTitlePreNotify(unittest.TestCase):
 
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY,
+            MEDVIEW_PRE_NOTIFY_TITLE,
             6,
             self._picture_start_request(transfer_id=7, mode=0),
             20,
@@ -5157,7 +5150,7 @@ class TestMEDVIEWSubscribeNotification(unittest.TestCase):
             req_payload = bytes([0x01, notification_type, 0x85])
             pkts = handler.handle_request(
                 0x01,
-                MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION,
+                MEDVIEW_SUBSCRIBE_NOTIFICATIONS,
                 notification_type,
                 req_payload,
                 5,
@@ -5592,7 +5585,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
     def test_hfs_open_pipe_bm0_is_rejected(self):
         # MVTTL14C's first probe is `|bm0` (`wsprintfA("|bm%d", idx)`);
         # rejection causes the wrapper to retry with the canonical name.
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_OPEN, 10, self._OPEN_REQ_PIPE_BM0)
+        reply = self._decode_reply(MEDVIEW_OPEN_REMOTE_HFS_FILE, 10, self._OPEN_REQ_PIPE_BM0)
         self.assertEqual(reply[0], TAG_END_STATIC)
         self.assertEqual(reply[1], 0x81)
         self.assertEqual(reply[2], 0x00)  # handle = 0 → reject
@@ -5600,7 +5593,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         self.assertEqual(struct.unpack("<I", reply[4:8])[0], 0)
 
     def test_hfs_open_bm0_declares_container_size(self):
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_OPEN, 11, self._OPEN_REQ_BM0)
+        reply = self._decode_reply(MEDVIEW_OPEN_REMOTE_HFS_FILE, 11, self._OPEN_REQ_BM0)
         self.assertEqual(reply[0], TAG_END_STATIC)
         self.assertEqual(reply[1], 0x81)
         self.assertEqual(reply[2], 0x42)
@@ -5615,7 +5608,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
         # kind5 header. Bitmap begins at offset 8; first byte must be 5
         # to clear MVDecodeBitmapBaggage's `kind < 5` gate.
         read_req = bytes.fromhex("01 42 03 40 00 00 00 03 00 00 00 00 81 85")
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
+        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 12, read_req)
         self.assertEqual(reply[0], 0x81)
         self.assertEqual(reply[1], 0x00)
         self.assertEqual(reply[2], TAG_END_STATIC)
@@ -5626,7 +5619,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
     def test_hfs_read_bm0_preamble_and_header_byte_sequence(self):
         # 38B = 8 preamble + 30 kind=5 header (wide-form pixel_byte_count).
         read_req = bytes.fromhex("01 42 03 26 00 00 00 03 00 00 00 00 81 85")
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 12, read_req)
+        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 12, read_req)
         chunk = reply[4 : 4 + 38]
         expected_header = bytes.fromhex(
             "00 00"  # container reserved
@@ -5647,7 +5640,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
     def test_hfs_read_bm0_pixel_data_is_solid_white(self):
         # Pixel data starts at container-offset 38 (= 8 preamble + 30 header).
         read_req = bytes.fromhex("01 42 03 20 00 00 00 03 26 00 00 00 81 85")
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 13, read_req)
+        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 13, read_req)
         chunk = reply[4 : 4 + 32]
         self.assertEqual(chunk, b"\xff" * 32)
 
@@ -5661,7 +5654,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
             + struct.pack("<I", offset)
             + b"\x81\x85"
         )
-        reply = self._decode_reply(MEDVIEW_SELECTOR_HFS_READ, 14, read_req)
+        reply = self._decode_reply(MEDVIEW_READ_REMOTE_HFS_FILE, 14, read_req)
         chunk = reply[4 : 4 + 7]
         self.assertEqual(chunk, b"\x00" * 7)
 
@@ -5676,7 +5669,7 @@ class TestMEDVIEWBaggageBm0(unittest.TestCase):
             + b"\x81\x85"
         )
         handler = MEDVIEWHandler(5, "MEDVIEW")
-        pkts = handler.handle_request(0x01, MEDVIEW_SELECTOR_HFS_READ, 12, read_req, 5, 5)
+        pkts = handler.handle_request(0x01, MEDVIEW_READ_REMOTE_HFS_FILE, 12, read_req, 5, 5)
         self.assertIsNotNone(pkts)
         self.assertGreater(len(pkts), 1)
         self.assertTrue(all(len(pkt) <= 1024 for pkt in pkts))
@@ -5694,7 +5687,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         )
         handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_TITLE_OPEN,
+            MEDVIEW_OPEN_TITLE,
             1,
             open_req,
             5,
@@ -5714,7 +5707,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         open_req = b"\x01\x01\x04" + bytes([0x80 | len(name)]) + name + b"\x01\x02\x81\x83"
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_HFS_OPEN,
+            MEDVIEW_OPEN_REMOTE_HFS_FILE,
             21,
             open_req,
             5,
@@ -5738,7 +5731,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         )
         pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_HFS_READ,
+            MEDVIEW_READ_REMOTE_HFS_FILE,
             22,
             read_req,
             5,
@@ -5756,7 +5749,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         open_req = b"\x01\x01\x04" + bytes([0x80 | len(name)]) + name + b"\x01\x02\x81\x83"
         open_pkts = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_HFS_OPEN,
+            MEDVIEW_OPEN_REMOTE_HFS_FILE,
             21,
             open_req,
             5,
@@ -5776,7 +5769,7 @@ class TestMEDVIEWM14BaggageDispatch(unittest.TestCase):
         )
         packets = handler.handle_request(
             0x01,
-            MEDVIEW_SELECTOR_HFS_READ,
+            MEDVIEW_READ_REMOTE_HFS_FILE,
             22,
             read_req,
             5,

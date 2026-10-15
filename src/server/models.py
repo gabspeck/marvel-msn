@@ -141,6 +141,18 @@ class HostBlock:
 
 
 @dataclass
+class _VariableField:
+    """Base for the two variable-field forms. Tag bit 0x40 marks the field
+    compressed (`MPCCL!AppendTaggedRequestField @ 0x046067E2`)."""
+
+    tag: int
+
+    @property
+    def compressed(self):
+        return bool(self.tag & 0x40)
+
+
+@dataclass
 class ByteParam:
     tag: int
     value: int
@@ -159,7 +171,7 @@ class DwordParam:
 
 
 @dataclass
-class VarParam:
+class VarParam(_VariableField):
     """An inline variable field.
 
     Tag 0x04 carries the argument as-is. Tag 0x44 carries it compressed:
@@ -170,16 +182,11 @@ class VarParam:
     wire, still deflated when the flag is set.
     """
 
-    tag: int
     data: bytes
-
-    @property
-    def compressed(self):
-        return bool(self.tag & 0x40)
 
 
 @dataclass
-class ChunkedParam:
+class ChunkedParam(_VariableField):
     """A variable field too large to fit in the inline request body.
 
     `MPCCL!AppendTaggedRequestField @ 0x046067E2` takes this path when the tag
@@ -200,13 +207,8 @@ class ChunkedParam:
     wire.
     """
 
-    tag: int
     stream_id: int
     total_length: int
-
-    @property
-    def compressed(self):
-        return bool(self.tag & 0x40)
 
 
 @dataclass
@@ -231,11 +233,9 @@ class UnknownParam:
 
 @dataclass
 class DirsrvRequest:
-    node_id: str = "0:0"
-    # Every id in the request's node array, in wire order. Left empty by
-    # callers that address a single node; `__post_init__` then fills it from
-    # `node_id` so a reply builder can always walk the list.
-    node_ids: list[str] = field(default_factory=list)
+    # Every id in the request's node array, in wire order. MOSFIND batches
+    # search hits into one call; every other caller sends exactly one.
+    node_ids: list[str] = field(default_factory=lambda: ["0:0"])
     prop_group: str = ""
     flags: int = 0
     dword_0: int = 0
@@ -245,6 +245,6 @@ class DirsrvRequest:
     locale_raw: bytes = b""
     locale_lcid: int | None = None
 
-    def __post_init__(self):
-        if not self.node_ids:
-            self.node_ids = [self.node_id]
+    @property
+    def node_id(self):
+        return self.node_ids[0]

@@ -25,7 +25,7 @@ NACK_SEQ_BYTE = 0x42  # Packet type: NACK
 # --- Header byte encoding ---
 HEADER_XOR_MASK = 0xC0
 HEADER_SPECIAL_VALUES = frozenset({0x8D, 0x90, 0x8B})
-HEADER_ENCODED_VALUES = frozenset({0x4D, 0x50, 0x4B})
+HEADER_ENCODED_VALUES = frozenset(v ^ HEADER_XOR_MASK for v in HEADER_SPECIAL_VALUES)
 
 # --- CRC-32 ---
 CRC_POLYNOMIAL = 0x248EF9BE
@@ -71,9 +71,8 @@ TAG_DYNAMIC_COMPLETE_SIGNAL = 0x86  # single-shot dynamic blob, signals Wait()
 TAG_DYNAMIC_STREAM_END = 0x88  # iterator stream end, signals +0x28/+0x2c
 
 # --- MPC host-block class bits ---
-# Frames whose msg_class has the top three bits set (0xE0 mask) are one-way
-# continuations of a multi-frame RPC (carrying large input buffers for the
-# preceding head).  They must not be acked — see §9a.3 / §9a.5b.
+# A msg_class with all of 0xE0 set is a one-way continuation frame carrying a
+# large input field for the preceding call. Nothing is sent back for it.
 MPC_CLASS_ONEWAY_MASK = 0xE0
 
 # A continuation frame is `[class][stream_id][raw bytes]` — no request id and no
@@ -121,18 +120,15 @@ DIRSRV_BROWSE_FLAGS_CONTAINER = 0x00
 DIRSRV_BROWSE_FLAGS_LEAF = 0x01
 DIRSRV_BROWSE_FLAGS_HAS_CHILDREN = 0x02
 DIRSRV_BROWSE_FLAGS_DELEGATE = 0x04
-DIRSRV_BROWSE_FLAGS_DENIED = 0x08
-DIRSRV_BROWSE_FLAGS_LEAF_DENIED = DIRSRV_BROWSE_FLAGS_LEAF | DIRSRV_BROWSE_FLAGS_DENIED
 
 # --- Pipe commands ---
 PIPE_CLOSE_CMD = 0x01
 
 # --- Transport defaults ---
-# PACKET_SIZE is the max wire-bytes per frame. Client registry default is
-# 1024 (PacketSize) and MOSCP uses MIN(client, server-advertised), so we
-# must advertise at least what build_service_packet actually emits.
+# Max wire bytes per packet, advertised as both PacketSize and MaxBytes. The
+# client registry default is 1024 and MOSCP uses MIN(client, advertised), so
+# the advertised value must cover what build_service_packet emits.
 TRANSPORT_PACKET_SIZE = 1024
-TRANSPORT_MAX_BYTES = 1024
 TRANSPORT_WINDOW_SIZE = 16
 TRANSPORT_ACK_BEHIND = 1
 TRANSPORT_ACK_TIMEOUT_MS = 600
@@ -144,8 +140,6 @@ SOCKET_TIMEOUT = 0.5
 
 # --- Byte-stuffing maps ---
 # Raw byte -> 0x1B-prefixed escape sequence
-ESCAPE_SET = frozenset({0x1B, 0x0D, 0x10, 0x0B, 0x8D, 0x90, 0x8B})
-
 STUFF_MAP = {
     0x1B: b"\x1b\x30",  # escape char
     0x0D: b"\x1b\x31",  # CR / packet terminator
@@ -156,357 +150,105 @@ STUFF_MAP = {
     0x8B: b"\x1b\x36",  # high control
 }
 
-UNSTUFF_MAP = {
-    0x30: 0x1B,
-    0x31: 0x0D,
-    0x32: 0x10,
-    0x33: 0x0B,
-    0x34: 0x8D,
-    0x35: 0x90,
-    0x36: 0x8B,
-}
+ESCAPE_SET = frozenset(STUFF_MAP)
+UNSTUFF_MAP = {seq[1]: raw for raw, seq in STUFF_MAP.items()}
 
 # --- Service interface GUIDs ---
-# Pre-computed as bytes_le (Windows in-memory layout) because
-# MPCCL resolves them with memcmp() against compiled-in GUID constants.
+# Each table is a service's discovery reply: (IID as bytes_le, selector), with
+# selectors assigned 1.. in table order. MPCCL resolves an IID with memcmp()
+# against its compiled-in GUID, so the bytes are the Windows in-memory layout.
+# The resolved selector becomes the class byte of every request on that
+# interface. docs/SERVICE-IIDS.md lists the IIDs each client actually resolves
+# and their call sites; the tables below advertise more than that set.
 
 
-def _guid_le(s):
-    return uuid.UUID(s).bytes_le
+def _iid_table(*iids):
+    return [(uuid.UUID(iid).bytes_le, sel) for sel, iid in enumerate(iids, start=1)]
 
 
-LOGSRV_INTERFACE_GUIDS = [
-    (_guid_le("00028BB6-0000-0000-C000-000000000046"), 0x01),
-    (_guid_le("00028BB7-0000-0000-C000-000000000046"), 0x02),
-    (_guid_le("00028BB8-0000-0000-C000-000000000046"), 0x03),
-    (_guid_le("00028BC0-0000-0000-C000-000000000046"), 0x04),
-    (_guid_le("00028BC1-0000-0000-C000-000000000046"), 0x05),
-    (_guid_le("00028BC2-0000-0000-C000-000000000046"), 0x06),  # Login interface
-    (_guid_le("00028BC3-0000-0000-C000-000000000046"), 0x07),
-    (_guid_le("00028BC4-0000-0000-C000-000000000046"), 0x08),
-    (_guid_le("00028BC5-0000-0000-C000-000000000046"), 0x09),
-    (_guid_le("00028BC6-0000-0000-C000-000000000046"), 0x0A),
-]
+def _mos_iid_table(suffixes):
+    """Table of `00028Bxx-0000-0000-C000-000000000046` IIDs, one `xx` per word."""
+    return _iid_table(*(f"00028B{xx}-0000-0000-C000-000000000046" for xx in suffixes.split()))
 
-# DIRSRV (directory browsing / tree navigation) interfaces.  Static analysis of
-# TREENVCL.CTreeNavClient (0x7f63113d) confirms IID 00028B27 as the directly
-# resolved DIRSRV interface.  Adjacent memory in TREENVCL holds the contiguous
-# family 00028B25..00028B2E.  We advertise all of them so whichever IID the
-# client resolves for GetShabby (TREENVCL 0x7f631bab) gets a selector back —
-# the (IID, selector) tuple for GetShabby is captured by Phase 0 tracing.
-DIRSRV_INTERFACE_GUIDS = [
-    (_guid_le("00028B25-0000-0000-C000-000000000046"), 0x01),
-    (_guid_le("00028B26-0000-0000-C000-000000000046"), 0x02),
-    (_guid_le("00028B27-0000-0000-C000-000000000046"), 0x03),
-    (_guid_le("00028B28-0000-0000-C000-000000000046"), 0x04),
-    (_guid_le("00028B29-0000-0000-C000-000000000046"), 0x05),
-    (_guid_le("00028B2A-0000-0000-C000-000000000046"), 0x06),
-    (_guid_le("00028B2B-0000-0000-C000-000000000046"), 0x07),
-    (_guid_le("00028B2C-0000-0000-C000-000000000046"), 0x08),
-    (_guid_le("00028B2D-0000-0000-C000-000000000046"), 0x09),
-    (_guid_le("00028B2E-0000-0000-C000-000000000046"), 0x0A),
-]
 
-# Conference locator. CONFAPI.DLL passes the 17-entry IID table at 0x7F5B5400
-# to OpenService("CONFLOC", ..., version=7). The client resolves methods on the
-# returned first interface, so selectors are assigned contiguously as for the
-# other client-side IID tables above.
-CONFLOC_INTERFACE_GUIDS = [
-    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
-    for sel, xx in enumerate(
-        (
-            0x52,
-            0x53,
-            0x54,
-            0x55,
-            0x56,
-            0x57,
-            0x58,
-            0x60,
-            0x61,
-            0x70,
-            0x71,
-            0x72,
-            0x73,
-            0x74,
-            0x78,
-            0x79,
-            0x81,
-        ),
-        start=0x01,
-    )
-]
+# Resolved: 00028BC2 (selector 6).
+LOGSRV_INTERFACE_GUIDS = _mos_iid_table("B6 B7 B8 C0 C1 C2 C3 C4 C5 C6")
 
-# Conference server. After CONFLOC resolves a room, CONFAPI.DLL opens CONFSRV
-# version 7 with the three-IID table at 0x7F5B5710.
-CONFSRV_INTERFACE_GUIDS = [
-    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
-    for sel, xx in enumerate((0xC8, 0xC9, 0xCA), start=0x01)
-]
+# Resolved: 00028B27 (TREENVCL CTreeNavClient @ 0x7F63113D, selector 3) and
+# 00028B28 (TREEEDCL CTreeEditClient, selector 4).
+DIRSRV_INTERFACE_GUIDS = _mos_iid_table("25 26 27 28 29 2A 2B 2C 2D 2E")
 
-# BBS advertises the generic tree IIDs plus one more: opening a message runs
-# BBSNAV FUN_7F5FCD1A (0x7F5FCD1A), which does a second CreateTnc("BBS", 3) and
-# then asks the marshaller for IID 00028B2F with the parameter string
-# `agid=<locale>`. That IID is one past the end of the DIRSRV table, so a
-# DIRSRV-shaped discovery reply makes the negotiation return E_NOINTERFACE
-# (0x80004002) and the reader gives up with "Cannot open message. This task
-# cannot be completed" — reported by FUN_7F5F99C1(hr, 0x44E) before any request
-# reaches the wire. Confirmed live 2026-07-28 via BPX 0x7F601578.
-# This is the message-content channel; its selectors are not implemented yet.
-BBS_INTERFACE_GUIDS = DIRSRV_INTERFACE_GUIDS + [
-    (_guid_le("00028B2F-0000-0000-C000-000000000046"), 0x0B),
-]
+# Resolved: 00028B52 (CONFAPI CmdInitializeConnection @ 0x7F5B1166) and
+# 00028B72 (DATAEDCL CDataEditClient).
+CONFLOC_INTERFACE_GUIDS = _mos_iid_table("52 53 54 55 56 57 58 60 61 70 71 72 73 74 78 79 81")
 
-# OLREGSRV (On-Line Registration Service) interfaces.  SIGNUP.EXE holds
-# the client-side IID table at 0x40b4e8 — sixteen 00028Bxx GUIDs covering
-# the phone-book / trial-info / product-details sync used by its "Get the
-# latest product details" flow.  Listed in the order they appear in the
-# binary, paired with a selector that the server assigns contiguously so
-# the client's IID→selector lookup resolves for each one.
-OLREGSRV_INTERFACE_GUIDS = [
-    (_guid_le("00028B73-0000-0000-C000-000000000046"), 0x01),
-    (_guid_le("00028B74-0000-0000-C000-000000000046"), 0x02),
-    (_guid_le("00028B78-0000-0000-C000-000000000046"), 0x03),
-    (_guid_le("00028B79-0000-0000-C000-000000000046"), 0x04),
-    (_guid_le("00028B81-0000-0000-C000-000000000046"), 0x05),
-    (_guid_le("00028B82-0000-0000-C000-000000000046"), 0x06),
-    (_guid_le("00028B83-0000-0000-C000-000000000046"), 0x07),
-    (_guid_le("00028B84-0000-0000-C000-000000000046"), 0x08),
-    (_guid_le("00028B85-0000-0000-C000-000000000046"), 0x09),
-    (_guid_le("00028B86-0000-0000-C000-000000000046"), 0x0A),
-    (_guid_le("00028B8A-0000-0000-C000-000000000046"), 0x0B),
-    (_guid_le("00028B8B-0000-0000-C000-000000000046"), 0x0C),
-    (_guid_le("00028B8C-0000-0000-C000-000000000046"), 0x0D),
-    (_guid_le("00028B8D-0000-0000-C000-000000000046"), 0x0E),
-    (_guid_le("00028B8E-0000-0000-C000-000000000046"), 0x0F),
-    (_guid_le("00028B8F-0000-0000-C000-000000000046"), 0x10),
-]
+# Resolved: 00028BC8 (CONFAPI CceJoin @ 0x7F5B16FC).
+CONFSRV_INTERFACE_GUIDS = _mos_iid_table("C8 C9 CA")
 
-# FTM (File Transfer Manager) interfaces.  BILLADD's CXferService::HrInit
-# opens a pipe on svc_name="FTM" and queries IID 0x00028B25.  Without a
-# discovery reply the client blocks for ~58 s and the billing dialog aborts.
-FTM_INTERFACE_GUIDS = [
-    (_guid_le("00028B25-0000-0000-C000-000000000046"), 0x01),
-    (_guid_le("00028B26-0000-0000-C000-000000000046"), 0x02),
-]
+# Resolved: 00028B27, and 00028B2F when a message opens: BBSNAV @ 0x7F5FCD1A
+# opens BBS a second time with parameter `agid=<locale>`. Without 00028B2F the
+# reader fails with "Cannot open message" (FUN_7F5F99C1(hr, 0x44E)) before any
+# request reaches the wire (SoftICE, BPX 0x7F601578).
+BBS_INTERFACE_GUIDS = _mos_iid_table("25 26 27 28 29 2A 2B 2C 2D 2E 2F")
 
-# OnlStmt (Online Statement / Tools > Billing > Summary of Charges).
-# Launched as ONLSTMT.EXE; opens a pipe with svc_name="OnlStmt".  The
-# client holds a 27-entry IID array at ONLSTMT.EXE:0x7f35be98, passed
-# as the second argument to proxy->m24("OnlStmt", iid_array, ..., 3, 0)
-# at 0x7f351491.  Selectors assigned contiguously so the client's
-# IID→selector lookup resolves for each one.
-ONLSTMT_INTERFACE_GUIDS = [
-    (_guid_le("00028B8D-0000-0000-C000-000000000046"), 0x01),
-    (_guid_le("00028B8E-0000-0000-C000-000000000046"), 0x02),
-    (_guid_le("00028B8F-0000-0000-C000-000000000046"), 0x03),
-    (_guid_le("00028B90-0000-0000-C000-000000000046"), 0x04),
-    (_guid_le("00028B91-0000-0000-C000-000000000046"), 0x05),
-    (_guid_le("00028BA0-0000-0000-C000-000000000046"), 0x06),
-    (_guid_le("00028BA1-0000-0000-C000-000000000046"), 0x07),
-    (_guid_le("00028BB0-0000-0000-C000-000000000046"), 0x08),
-    (_guid_le("00028BB1-0000-0000-C000-000000000046"), 0x09),
-    (_guid_le("00028BB2-0000-0000-C000-000000000046"), 0x0A),
-    (_guid_le("00028BB3-0000-0000-C000-000000000046"), 0x0B),
-    (_guid_le("00028BB4-0000-0000-C000-000000000046"), 0x0C),
-    (_guid_le("00028BB5-0000-0000-C000-000000000046"), 0x0D),
-    (_guid_le("00028BB6-0000-0000-C000-000000000046"), 0x0E),
-    (_guid_le("00028BB7-0000-0000-C000-000000000046"), 0x0F),
-    (_guid_le("00028BB8-0000-0000-C000-000000000046"), 0x10),
-    (_guid_le("00028BC0-0000-0000-C000-000000000046"), 0x11),
-    (_guid_le("00028BC1-0000-0000-C000-000000000046"), 0x12),
-    (_guid_le("00028BC2-0000-0000-C000-000000000046"), 0x13),
-    (_guid_le("00028BC3-0000-0000-C000-000000000046"), 0x14),
-    (_guid_le("00028BC4-0000-0000-C000-000000000046"), 0x15),
-    (_guid_le("00028BC5-0000-0000-C000-000000000046"), 0x16),
-    (_guid_le("00028BC6-0000-0000-C000-000000000046"), 0x17),
-    (_guid_le("00028BC7-0000-0000-C000-000000000046"), 0x18),
-    (_guid_le("00028BC8-0000-0000-C000-000000000046"), 0x19),
-    (_guid_le("00028BC9-0000-0000-C000-000000000046"), 0x1A),
-    (_guid_le("00028BCA-0000-0000-C000-000000000046"), 0x1B),
-]
+# Resolved: 00028B73 (SIGNUP.EXE @ 0x004030DC).
+OLREGSRV_INTERFACE_GUIDS = _mos_iid_table("73 74 78 79 81 82 83 84 85 86 8A 8B 8C 8D 8E 8F")
 
-# MOSABP (MSN member address book — MOSABP32.DLL, the MAPI AB provider that
-# backs the BBS reader's "Member Properties..." sheet).
-# `CAbConnection::HrGetMethod` @ 0x7F4D4311 is the single call site that opens
-# this service, and it resolves exactly one IID: the pointer it hands the
-# marshaller's slot 0x24 is `&DAT_7F4E6330` = 00028B22.  The seven GUIDs that
-# follow it in .rdata are a contiguous run the DLL never resolves, so one entry
-# is the whole table.  Selector 0x01 makes the request class 0x01; the client
-# learns the number from this reply, so the value is ours to pick.
-MOSABP_INTERFACE_GUIDS = [
-    (_guid_le("00028B22-0000-0000-C000-000000000046"), 0x01),
-]
+# Resolved: 00028B25 (FTMAPI HrInit @ 0x7F6B1E32). Without a discovery reply
+# BILLADD blocks for about 58 s and the billing dialog aborts.
+FTM_INTERFACE_GUIDS = _mos_iid_table("25 26")
 
-# MOSRXP (remote mail — MOSRXP32.DLL, the MAPI transport provider behind the
-# Exchange inbox).  `CConn::HrGetMethod` @ 0x7F431967 is the single call site
-# that opens this service and resolves exactly one IID: the pointer it hands
-# the marshaller's slot 0x24 is `&DAT_7F43C950` = 00028B20.  See docs/MOSRXP.md.
-MOSRXP_INTERFACE_GUIDS = [
-    (_guid_le("00028B20-0000-0000-C000-000000000046"), 0x01),
-]
+# Resolved: 00028B8D (ONLSTMT.EXE OnlStmt_WinMain @ 0x7F351218).
+ONLSTMT_INTERFACE_GUIDS = _mos_iid_table(
+    "8D 8E 8F 90 91 A0 A1 B0 B1 B2 B3 B4 B5 B6 B7 B8 C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA"
+)
 
-# FindSvc (directory search — MOSFIND.DLL, the COM server behind the
-# Find > MSN Service dialog).  `CFindConnection::HrSearch` @ 0x7E9B136A hands
-# the marshaller's slot 0x24 the IID array based at 0x7E9B45E8, which opens on
-# the contiguous run 00028BB0.  The array's end is not encoded in the binary;
-# 00028BB6 starts LOGSRV's own table, so the run is read as 00028BB0..00028BB5.
-# Only the first entry matters on the wire — the channel resolves it and every
-# request carries the selector assigned here as its class byte, so HrSearch's
-# `GetMethod(1)` arrives as class 0x01 selector 0x01.
-FINDSVC_INTERFACE_GUIDS = [
-    (_guid_le(f"00028BB{x}-0000-0000-C000-000000000046"), x + 1) for x in range(6)
-]
+# Resolved: 00028B22 (MOSABP32 CAbConnection::HrGetMethod @ 0x7F4D4311).
+MOSABP_INTERFACE_GUIDS = _mos_iid_table("22")
 
-# SASRV (system-administration service).  SACLIENT.DLL's
-# CSysAdminClient::CSysAdminClient at 0x7F3410F1 passes the 29-entry IID table
-# at 0x7F347570 to MPCCL while opening service "SASRV", version 4.
-SASRV_INTERFACE_GUIDS = [
-    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
-    for sel, xx in enumerate(
-        (
-            0x8B,
-            0x8C,
-            0x8D,
-            0x8E,
-            0x8F,
-            0x90,
-            0x91,
-            0xA0,
-            0xA1,
-            0xB0,
-            0xB1,
-            0xB2,
-            0xB3,
-            0xB4,
-            0xB5,
-            0xB6,
-            0xB7,
-            0xB8,
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC4,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC8,
-            0xC9,
-            0xCA,
-        ),
-        start=0x01,
-    )
-]
+# Resolved: 00028B20 (MOSRXP32 CConn::HrGetMethod @ 0x7F431967). See docs/MOSRXP.md.
+MOSRXP_INTERFACE_GUIDS = _mos_iid_table("20")
 
-# Bbird_OB (Blackbird Object Broker).  Unlike every other service there is no
-# client-side IID table to mirror: COSCL's `CMPCConnection::Init(name, guid,
-# version, param)` takes one GUID and `DoOpenMOSService` (COSCL.DLL:0x4021e4e9)
-# passes it straight to the MOS proxy's OpenService slot.  Two callers open the
-# service with two different GUIDs, so both have to be advertised or whichever
-# is missing gets E_NOINTERFACE and drops the pipe right after discovery.
-#
-#   ...50B  write side.  PUBLISH.DLL:0x40f01243, the Release Wizard's publish.
-#   ...50A  read side.   OBCL.EXE (the object broker), which is what BBVIEW
-#           goes through to fetch a title — it imports CMPCFileRead, the
-#           counterpart to the CMPCFileWrite the publish leg streams with.
-#
-# The selector byte becomes the wire msg_class, and the server assigns it, so
-# the write side keeps 0x01 to leave the verified publish path untouched.
-BBIRD_OB_INTERFACE_GUIDS = [
-    (_guid_le("EC76D50B-BAD7-11CE-B21F-00AA004A33DB"), 0x01),
-    (_guid_le("EC76D50A-BAD7-11CE-B21F-00AA004A33DB"), 0x02),
-]
+# Resolved: 00028BB0 (MOSFIND CFindConnection::HrSearch @ 0x7E9B136A), so
+# HrSearch's `GetMethod(1)` arrives as class 0x01 selector 0x01.
+FINDSVC_INTERFACE_GUIDS = _mos_iid_table("B0 B1 B2 B3 B4 B5")
 
-# BBIRService (Blackbird information retrieval — the Find/search back end).
-# Same single-GUID shape as Bbird_OB.  `IRMpcConnection::DoConnect`
-# (IRCS.DLL:0x10005fda) calls `CMPCConnection(name, guid, version, NULL)` with
-# the GUID at IRCS.DLL:0x10009008 and the version dword at 0x10009000 (= 1,
-# matching the `version=1` the pipe-open carries).  IRCS.DLL is the only module
-# in the shipped tree that names the service, so there is one caller and one
-# IID; the server assigns the msg_class.
-BBIR_INTERFACE_GUIDS = [
-    (_guid_le("27916FC1-7F7F-11CE-A366-00AA0051EA9C"), 0x01),
-]
+# Resolved: 00028B8B (SACLIENT CSysAdminClient @ 0x7F3410F1).
+SASRV_INTERFACE_GUIDS = _mos_iid_table(
+    "8B 8C 8D 8E 8F 90 91 A0 A1 B0 B1 B2 B3 B4 B5 B6 B7 B8 C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA"
+)
 
-# MEDVIEW (MedView title loader — MOSVIEW.EXE).  Client-side IID array at
-# MVTTL14C.DLL:0x7E84C1B0 — 42 IIDs consulted by hrAttachToService when
-# the factory resolves the service's interface table.  Selectors assigned
-# 1-based in array order, matching the in-code immediates used by
-# MVTTL14C (TitleOpen=1, TitleGetInfo=3, TitlePreNotify=0x1E, handshake=0x1F).
-# See docs/MEDVIEW.md §2.1.
-MEDVIEW_INTERFACE_GUIDS = [
-    (_guid_le(f"00028B{xx:02X}-0000-0000-C000-000000000046"), sel)
-    for sel, xx in enumerate(
-        (
-            0x71,
-            0x72,
-            0x73,
-            0x74,
-            0x78,
-            0x79,
-            0x81,
-            0x82,
-            0x83,
-            0x84,
-            0x85,
-            0x86,
-            0x8A,
-            0x8B,
-            0x8C,
-            0x8D,
-            0x8E,
-            0x8F,
-            0x90,
-            0x91,
-            0xA0,
-            0xA1,
-            0xB0,
-            0xB1,
-            0xB2,
-            0xB3,
-            0xB4,
-            0xB5,
-            0xB6,
-            0xB7,
-            0xB8,
-            0xC0,
-            0xC1,
-            0xC2,
-            0xC3,
-            0xC4,
-            0xC5,
-            0xC6,
-            0xC7,
-            0xC8,
-            0xC9,
-            0xCA,
-        ),
-        start=0x01,
-    )
-]
+# Bbird_OB takes one GUID per caller through COSCL `CMPCConnection::Init`
+# (`DoOpenMOSService` @ COSCL 0x4021E4E9), and two callers use different ones:
+#   ...50B  write side: PUBLISH.DLL @ 0x40F01243, the Release Wizard publish.
+#   ...50A  read side: OBCL.EXE, which BBVIEW goes through to fetch a title.
+# A missing one gets E_NOINTERFACE and the pipe drops right after discovery.
+BBIRD_OB_INTERFACE_GUIDS = _iid_table(
+    "EC76D50B-BAD7-11CE-B21F-00AA004A33DB",
+    "EC76D50A-BAD7-11CE-B21F-00AA004A33DB",
+)
 
-# MEDVIEW service version advertised at pipe-open time.  Value at
-# MVTTL14C.DLL:hrAttachToService (factory slot 0x24, 5th arg).  The client
-# stores it locally only — the server just has to accept the pipe.
-MEDVIEW_SERVICE_VERSION = 0x1400800A
+# IRCS `IRMpcConnection::DoConnect` @ 0x10005FDA, GUID at IRCS 0x10009008.
+BBIR_INTERFACE_GUIDS = _iid_table("27916FC1-7F7F-11CE-A366-00AA0051EA9C")
 
-# MEDVIEW selector constants per `docs/medview-service-contract.md`.
-# Names mirror the spec's `Class.Method` form so call sites read like the
-# wire contract.
+# Resolved: 00028B71 (MVTTL14C hrAttachToService @ 0x7E844114, selector 1) and
+# 00028B72 (DATAEDCL CDataEditClient, selector 2). MVTTL14C's method numbers
+# are in-code immediates (TitleOpen=1, TitleGetInfo=3, TitlePreNotify=0x1E,
+# handshake=0x1F). See docs/MEDVIEW.md §2.1.
+MEDVIEW_INTERFACE_GUIDS = _mos_iid_table(
+    "71 72 73 74 78 79 81 82 83 84 85 86 8A 8B 8C 8D 8E 8F 90 91 A0 A1"
+    " B0 B1 B2 B3 B4 B5 B6 B7 B8 C0 C1 C2 C3 C4 C5 C6 C7 C8 C9 CA"
+)
+
+# MEDVIEW selectors, named after `docs/medview-service-contract.md`.
 
 # DSNED uses the second advertised MEDVIEW interface as a DATAEDCL authoring
-# channel.  Its method selector 5 is CDataEditClient::GetTicket, distinct from
-# the title-viewing proxy's selector 5 below.
+# channel. Its method 5 is CDataEditClient::GetTicket, distinct from the
+# title proxy's selector 5.
 MEDVIEW_DATA_EDIT_CLASS = 0x02
 MEDVIEW_DATA_EDIT_ADD = 0x00
 MEDVIEW_DATA_EDIT_DELETE = 0x01
 MEDVIEW_DATA_EDIT_GET_TICKET = 0x05
-
-# --- BootstrapDiscovery (class 0x00) ---
-# Discovery selector 0x00 is bound to `class=0x00` and synthesised by
-# `build_discovery_packet` rather than dispatched through `handle_request`,
-# so no constant is exposed.
 
 # --- TitleService ---
 MEDVIEW_VALIDATE_TITLE = 0x00
@@ -517,6 +259,9 @@ MEDVIEW_QUERY_TOPICS = 0x04
 MEDVIEW_PRE_NOTIFY_TITLE = 0x1E
 
 # --- AddressHighlightService ---
+# 0x05-0x07 and 0x10 are cache-miss fallbacks (docs/MEDVIEW.md §6b), all
+# `0x01 <title_byte> 0x03 <key:dword>`. vaConvertHash (0x06) fires for the
+# initial navigation in `MOSVIEW!CreateMosViewWindowHierarchy` (SoftICE).
 MEDVIEW_CONVERT_ADDRESS_TO_VA = 0x05
 MEDVIEW_CONVERT_HASH_TO_VA = 0x06
 MEDVIEW_CONVERT_TOPIC_TO_VA = 0x07
@@ -536,75 +281,25 @@ MEDVIEW_READ_KEY_ADDRESSES = 0x0E
 MEDVIEW_SET_KEY_COUNT_HINT = 0x0F
 
 # --- TopicCacheService ---
+# 0x15: `MVTTL14C!HfcNear @ 0x7E84589F` on a per-title cache miss, shaped
+# like 0x07. Reached from CreateMosViewWindowHierarchy at initial open;
+# fMVSetAddress depends on it, and NavigateMosViewPane sets the pane FAIL
+# flag at +0x84 when fMVSetAddress returns zero, which blocks the paint.
+# 0x16: `MVTTL14C!HfcNextPrevHfc @ 0x7E845ABB`, 0x15's shape plus a
+# direction byte (0 = prev, 1 = next).
 MEDVIEW_FETCH_NEARBY_TOPIC = 0x15
 MEDVIEW_FETCH_ADJACENT_TOPIC = 0x16
 
 # --- SessionService ---
+# 0x17: hrAttachToService allocates five callback slots through
+# MVAsyncNotifyDispatch; each subscribes with one byte, the notification type.
 MEDVIEW_SUBSCRIBE_NOTIFICATIONS = 0x17
 MEDVIEW_UNSUBSCRIBE_NOTIFICATIONS = 0x18
 MEDVIEW_ATTACH_SESSION = 0x1F
 
 # --- RemoteFileService ---
+# Baggage access (docs/MEDVIEW.md §6c): OpenHfs, LcbReadHf, HfCloseHf.
 MEDVIEW_OPEN_REMOTE_HFS_FILE = 0x1A
 MEDVIEW_READ_REMOTE_HFS_FILE = 0x1B
 MEDVIEW_CLOSE_REMOTE_HFS_FILE = 0x1C
 MEDVIEW_GET_REMOTE_FS_ERROR = 0x1D
-
-# --- Legacy aliases retained for callers that imported the old names ---
-MEDVIEW_SELECTOR_TITLE_OPEN = MEDVIEW_OPEN_TITLE
-MEDVIEW_SELECTOR_TITLE_GET_INFO = MEDVIEW_GET_TITLE_INFO_REMOTE
-# Cache-miss fallback selectors (`docs/MEDVIEW.md` §6b).  All three
-# share the same wire shape — `0x01 <title_byte> 0x03 <key:dword>` —
-# and the same reply contract: ack-only via `0x87`, the real answer
-# arrives through the selector-`0x17` type-3 async-push channel.
-# Without ack-only handlers the engine sees `unhandled selector`,
-# treats it as an RPC error, and bails the retry loop on the first
-# iteration.  Empirically (live SoftIce trace 2026-04-27),
-# vaConvertHash fires for the initial-selector navigation in
-# `MOSVIEW!CreateMosViewWindowHierarchy` once the lp's title-handle slot is wired.
-MEDVIEW_SELECTOR_VA_CONVERT_HASH = MEDVIEW_CONVERT_HASH_TO_VA
-MEDVIEW_SELECTOR_VA_CONVERT_TOPIC = MEDVIEW_CONVERT_TOPIC_TO_VA
-MEDVIEW_SELECTOR_HIGHLIGHTS_IN_TOPIC = MEDVIEW_LOAD_TOPIC_HIGHLIGHTS
-# va→content-chunk fallback fired by `MVTTL14C!HfcNear @ 0x7E84589F` when
-# the per-title cache (`HfcCache_FindEntryAndPromote`, tree at `title+4`, recent at
-# `title+0x10..0x34`) misses.  Wire shape mirrors selector 0x07
-# (`vaConvertTopicNumber`): `0x01 <title_byte> 0x03 <va:dword>`, ack-only
-# reply.  The real answer is expected via selector 0x17 type-3 async push
-# (op-code unknown — likely op-code 5 `NotificationType3_ApplyInfo6eCacheRecord`, marked "secondary
-# cache, unresolved" in project memory).  Without this handler the
-# request would log "unhandled selector=0x15" and the client's RPC
-# returns -1, killing the retry loop.  fMVSetAddress in MVCL14N gates
-# initial paint on this — `NavigateMosViewPane` (MOSVIEW pane.SetAddress)
-# checks fMVSetAddress's return and sets the pane FAIL flag at +0x84
-# on zero, blocking paint of the inner content panes.  Reached from
-# MOSVIEW!CreateMosViewWindowHierarchy (CreateMediaViewWindow's pane attach) at
-# initial open, NOT from NavigateViewerSelection (which is the
-# click-handler path the original docs/MEDVIEW.md §6b assumed).
-MEDVIEW_SELECTOR_VA_RESOLVE = MEDVIEW_FETCH_NEARBY_TOPIC
-# `MVTTL14C!HfcNextPrevHfc @ 0x7E845ABB` — next/prev navigation on the
-# per-title cache (`title+4` tree).  Same wire shape as 0x15 plus a
-# direction byte (0=prev, 1=next).  Fires on cache miss when MVCL14N
-# walks adjacent content during render scrollback / pagination.  Reply
-# ack-only — engine retries internally; with the va=1 entry already
-# cached from our 0x15 push, it falls back to local cache.
-MEDVIEW_SELECTOR_HFC_NEXT_PREV = MEDVIEW_FETCH_ADJACENT_TOPIC
-# Async-notification subscribe: `hrAttachToService` allocates 5 callback
-# slots via `MVAsyncNotifyDispatch`, each of which fires `MVAsyncSubscriberSubscribe` to call
-# selector 0x17 with a single byte (the notification-type index, 0-7).
-# The reply is expected to carry an async-iterator handle; an empty
-# static-only reply tells the client "subscribe declined" so it stops
-# retrying this slot.  No live notification feed exists server-side yet.
-MEDVIEW_SELECTOR_SUBSCRIBE_NOTIFICATION = MEDVIEW_SUBSCRIBE_NOTIFICATIONS
-# Baggage / HFS file access (docs/MEDVIEW.md §6c).  HFS = a Marvel-
-# specific bundle of supporting media (icons, sounds, helper files)
-# referenced by authored content.  Fires once render starts and the
-# content graph references a baggage filename.  Three-call protocol:
-# OpenHfs → LcbReadHf (variable bytes) → HfCloseHf.  Decline opens
-# (reply byte=0) when no baggage is hosted server-side.
-MEDVIEW_SELECTOR_HFS_OPEN = MEDVIEW_OPEN_REMOTE_HFS_FILE
-MEDVIEW_SELECTOR_HFS_READ = MEDVIEW_READ_REMOTE_HFS_FILE
-MEDVIEW_SELECTOR_HFS_CLOSE = MEDVIEW_CLOSE_REMOTE_HFS_FILE
-MEDVIEW_SELECTOR_TITLE_PRE_NOTIFY = MEDVIEW_PRE_NOTIFY_TITLE
-MEDVIEW_SELECTOR_HANDSHAKE = MEDVIEW_ATTACH_SESSION
-
-del _guid_le

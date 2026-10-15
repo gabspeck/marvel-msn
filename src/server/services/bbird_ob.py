@@ -89,7 +89,6 @@ from ..config import (
 )
 from ..models import ChunkedParam, DwordParam, VarParam
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -103,6 +102,7 @@ from ..mpc import (
 from ..session import Session
 from ..store import blackbird_state
 from ._dispatch import describe_param
+from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
 
@@ -213,7 +213,7 @@ def _load_published_objects():
     return catalog
 
 
-class BbirdOBHandler:
+class BbirdOBHandler(ServiceHandler):
     def __init__(self, pipe_idx, svc_name, session=None):
         self.pipe_idx = pipe_idx
         self.svc_name = svc_name
@@ -235,7 +235,7 @@ class BbirdOBHandler:
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(BBIRD_OB_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

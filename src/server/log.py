@@ -22,14 +22,6 @@ TRACE = 5
 logging.addLevelName(TRACE, "TRACE")
 
 
-def _trace(self, msg, *args, **kwargs):
-    if self.isEnabledFor(TRACE):
-        self._log(TRACE, msg, args, **kwargs)
-
-
-logging.Logger.trace = _trace
-
-
 _conn_id: contextvars.ContextVar[int] = contextvars.ContextVar(
     "server_log_conn_id",
     default=0,
@@ -89,9 +81,9 @@ def reset_context():
 
 def configure(level=None):
     level_name = (level or os.environ.get("MSN_LOG_LEVEL", "INFO")).upper()
-    resolved = getattr(logging, level_name, None)
-    if resolved is None:
-        resolved = TRACE if level_name == "TRACE" else logging.INFO
+    resolved = logging.getLevelName(level_name)
+    if not isinstance(resolved, int):
+        raise ValueError(f"unknown log level {level_name!r}")
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(

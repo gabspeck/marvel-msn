@@ -8,13 +8,21 @@ from server.mpc import build_control_type1_ack, build_pipe_open_result
 from server.pipe import (
     build_control_frame,
     build_pipe_frame,
-    build_pipe_frame_has_length,
     parse_connection_request,
     parse_pipe_frame,
     parse_pipe_frames,
     parse_pipe_message,
 )
 from server.transport import parse_packet
+from server.wire import encode_header_byte
+
+
+def _has_length_frame(reassembly_index, data):
+    """Has-length format, which only the client sends: bit 4 set, then a
+    length byte covering the u16 content length and the content."""
+    hdr = encode_header_byte(0x80 | 0x10 | 0x40 | reassembly_index)
+    body = struct.pack("<H", len(data)) + data
+    return bytes([hdr, encode_header_byte(len(body) | 0x80)]) + body
 
 
 class TestPipeFrameContinuation(unittest.TestCase):
@@ -50,7 +58,7 @@ class TestPipeFrameContinuation(unittest.TestCase):
 class TestPipeFrameHasLength(unittest.TestCase):
     def test_roundtrip(self):
         data = b"hello pipe"
-        frame = build_pipe_frame_has_length(3, data)
+        frame = _has_length_frame(3, data)
         parsed, _ = parse_pipe_frame(frame)
         self.assertIsNotNone(parsed)
         self.assertEqual(parsed.reassembly_index, 3)
@@ -58,7 +66,7 @@ class TestPipeFrameHasLength(unittest.TestCase):
         self.assertEqual(parsed.content, data)
 
     def test_has_length_bit_set(self):
-        frame = build_pipe_frame_has_length(2, b"test")
+        frame = _has_length_frame(2, b"test")
         hdr = frame[0]
         self.assertTrue(hdr & 0x10, "Has-length bit should be set")
         self.assertFalse(hdr & 0x20, "Continuation bit should NOT be set")
@@ -85,7 +93,7 @@ class TestParseMultipleFrames(unittest.TestCase):
         self.assertEqual(consumed, len(frame))
 
     def test_two_frames(self):
-        f1 = build_pipe_frame_has_length(1, b"first")
+        f1 = _has_length_frame(1, b"first")
         f2 = build_pipe_frame(2, b"second")
         frames = parse_pipe_frames(f1 + f2)
         self.assertEqual(len(frames), 2)

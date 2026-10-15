@@ -30,7 +30,6 @@ from ..config import (
 )
 from ..models import ByteParam, ChunkedParam, DwordParam, VarParam, WordParam
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -46,6 +45,7 @@ from ..store.base import BbsFields
 from ..store.records import bbs_node, build_bbs_attachment_nodes, build_bbs_post
 from . import dirsrv
 from ._dispatch import log_unhandled_selector
+from ._handler import ServiceHandler
 
 # A request's `msg_class` is the *interface* — the selector we handed that IID in
 # the discovery table — and `selector` is the method index within it. Class 0x03
@@ -197,7 +197,7 @@ _EMPTY_BBS = BbsFields()
 log = logging.getLogger(__name__)
 
 
-class BBSHandler:
+class BBSHandler(ServiceHandler):
     """Handles BBS read-channel requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name, session=None):
@@ -226,7 +226,7 @@ class BBSHandler:
         CreateTnc("BBS", 3) when a message is opened. See BBS_INTERFACE_GUIDS.
         """
         payload = build_discovery_payload(BBS_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

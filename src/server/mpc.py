@@ -14,12 +14,9 @@ from .config import (
     MPC_TAG_CHUNKED_COMPRESSED,
     MPC_TAG_VARIABLE,
     MPC_TAG_VARIABLE_COMPRESSED,
-    PIPE_ALWAYS_SET,
-    PIPE_CONTINUATION,
-    PIPE_LAST_DATA,
-    REASSEMBLY_INDEX_MASK,
     TAG_DYNAMIC_STREAM_END,
     TAG_END_STATIC,
+    TRANSPORT_PACKET_SIZE,
 )
 from .models import (
     ByteParam,
@@ -33,9 +30,8 @@ from .models import (
     VarParam,
     WordParam,
 )
-from .pipe import build_control_frame, build_pipe_frame
+from .pipe import build_control_frame, build_pipe_frame, build_pipe_header
 from .transport import build_packet
-from .wire import encode_header_byte
 
 # --- Variable-Length Integers ---
 
@@ -84,11 +80,6 @@ def decode_vli(data, pos=0):
 def build_host_block(msg_class, selector, request_id, payload=b""):
     """Build an MPC host block: msg_class | selector | VLI request_id | payload."""
     return bytes([msg_class, selector]) + encode_vli(request_id) + payload
-
-
-def build_discovery_host_block(payload, request_id=0):
-    """Build a discovery block (selector=0, opcode=0)."""
-    return build_host_block(0x00, 0x00, request_id, payload)
 
 
 def parse_host_block(data):
@@ -165,6 +156,31 @@ def _decode_var_length(data, pos):
     return length, pos + 1
 
 
+_SCALAR_PARAMS = {
+    0x01: (ByteParam, "<B", 1),
+    0x02: (WordParam, "<H", 2),
+    0x03: (DwordParam, "<I", 4),
+}
+
+
+def _decode_scalar(tag, tag_type, data, pos):
+    """Decode a byte/word/dword field. Returns (param, new_pos), or
+    (None, pos) when the field is truncated."""
+    cls, fmt, size = _SCALAR_PARAMS[tag_type]
+    if pos + size > len(data):
+        return None, pos
+    return cls(tag=tag, value=struct.unpack_from(fmt, data, pos)[0]), pos + size
+
+
+def _decode_var(tag, data, pos):
+    """Decode an inline variable field. Returns (VarParam, new_pos), or
+    (None, pos) when the size prefix is truncated."""
+    length, pos = _decode_var_length(data, pos)
+    if length is None:
+        return None, pos
+    return VarParam(tag=tag, data=data[pos : pos + length]), pos + length
+
+
 def parse_request_params(data):
     """Decode send-side tagged parameters from an MPC request payload.
 
@@ -197,23 +213,11 @@ def parse_request_params(data):
             recv_descriptors.append(tag)
             continue
 
-        if tag == 0x01:
-            if pos >= len(data):
+        if tag in _SCALAR_PARAMS:
+            param, pos = _decode_scalar(tag, tag, data, pos)
+            if param is None:
                 break
-            send_params.append(ByteParam(tag=tag, value=data[pos]))
-            pos += 1
-        elif tag == 0x02:
-            if pos + 2 > len(data):
-                break
-            val = struct.unpack("<H", data[pos : pos + 2])[0]
-            send_params.append(WordParam(tag=tag, value=val))
-            pos += 2
-        elif tag == 0x03:
-            if pos + 4 > len(data):
-                break
-            val = struct.unpack("<I", data[pos : pos + 4])[0]
-            send_params.append(DwordParam(tag=tag, value=val))
-            pos += 4
+            send_params.append(param)
         elif tag in (MPC_TAG_CHUNKED, MPC_TAG_CHUNKED_COMPRESSED):
             if pos + MPC_CHUNKED_REF_LEN > len(data):
                 break
@@ -224,12 +228,10 @@ def parse_request_params(data):
             )
             pos += MPC_CHUNKED_REF_LEN
         elif tag in (MPC_TAG_VARIABLE, MPC_TAG_VARIABLE_COMPRESSED):
-            length, pos = _decode_var_length(data, pos)
-            if length is None:
+            param, pos = _decode_var(tag, data, pos)
+            if param is None:
                 break
-            val = data[pos : pos + length]
-            send_params.append(VarParam(tag=tag, data=val))
-            pos += length
+            send_params.append(param)
         else:
             send_params.append(UnknownParam(tag=tag, data=data[pos:]))
             break
@@ -246,25 +248,15 @@ def decode_dirsrv_request(payload):
     for p in send_params:
         if isinstance(p, VarParam):
             if var_idx == 0:
-                # Wire node_id is an 8-byte "_MosLid64": [field_0:u32][field_8:u32].
-                # Full 24-byte _MosNodeId is (field_0, pad4, field_8, field_c, field_10[u16]);
-                # field_c / field_10 are truncated on the wire.
-                # field_0 = service/class index (selects shell extension DLL),
-                # field_8 = within-service node sub-id.  Children inherit field_0
-                # from parent and get (field_8, field_c) from wire property 'a'.
-                #
-                # The field holds an ARRAY of them, `dword_0` ids long.
-                # MOSFIND's result-row filler resolves 20 search hits per call
-                # (CFindResultSet_GetNextRow @ 0x7E9B182B), so `node_ids` is
-                # what a reply has to answer for; `node_id` stays the first
-                # entry because every other caller sends exactly one.
+                # An array of 8-byte `_MosLid64` ids, `dword_0` long:
+                # [field_0:u32 service/class index][field_8:u32 node sub-id].
+                # MOSFIND resolves 20 search hits per call
+                # (CFindResultSet_GetNextRow @ 0x7E9B182B); every other caller
+                # sends one.
                 d = p.data
                 req.node_ids = [
                     f"{f0}:{f8}" for f0, f8 in struct.iter_unpack("<II", d[: len(d) - len(d) % 8])
-                ]
-                if not req.node_ids:
-                    req.node_ids = [d.hex()]
-                req.node_id = req.node_ids[0]
+                ] or [d.hex()]
                 req.node_id_raw = d
             elif var_idx == 1:
                 req.prop_group = p.data.rstrip(b"\x00").decode("ascii", errors="replace")
@@ -294,30 +286,16 @@ def parse_tagged_params(data):
         pos += 1
         tag_type = tag & 0x0F
 
-        if tag_type == 0x01:
-            if pos >= len(data):
+        if tag_type in _SCALAR_PARAMS:
+            param, pos = _decode_scalar(tag, tag_type, data, pos)
+            if param is None:
                 break
-            params.append(ByteParam(tag=tag, value=data[pos]))
-            pos += 1
-        elif tag_type == 0x02:
-            if pos + 2 > len(data):
-                break
-            val = struct.unpack("<H", data[pos : pos + 2])[0]
-            params.append(WordParam(tag=tag, value=val))
-            pos += 2
-        elif tag_type == 0x03:
-            if pos + 4 > len(data):
-                break
-            val = struct.unpack("<I", data[pos : pos + 4])[0]
-            params.append(DwordParam(tag=tag, value=val))
-            pos += 4
+            params.append(param)
         elif tag_type in (0x04, 0x05, 0x06, 0x08):
-            length, pos = _decode_var_length(data, pos)
-            if length is None:
+            param, pos = _decode_var(tag, data, pos)
+            if param is None:
                 break
-            val = data[pos : pos + length]
-            params.append(VarParam(tag=tag, data=val))
-            pos += length
+            params.append(param)
         elif tag_type == 0x07:
             params.append(EndMarker(tag=tag))
         elif tag_type == 0x0F:
@@ -383,40 +361,27 @@ def build_static_reply(*tagged_fields):
 # --- Service Packet Assembly ---
 
 
-def build_service_packet(pipe_idx, host_block, server_seq, client_ack, max_wire_bytes=1024):
+def build_service_packet(
+    pipe_idx, host_block, server_seq, client_ack, max_wire_bytes=TRANSPORT_PACKET_SIZE
+):
     """Wrap a host block for delivery on a logical service pipe.
 
-    Returns a list of wire packets.  When the payload fits in a single
-    transport packet (≤ max_wire_bytes on the wire), the list has one
-    element.  Larger payloads are split into as many frames as needed to
-    keep every wire packet under the limit, using MOSCP's multi-frame
-    pipe reassembly:
+    Returns a list of wire packets, each at most `max_wire_bytes`. A message
+    that does not fit in one packet is split across continuation frames that
+    MOSCP reassembles:
 
-      Frame 1 — continuation, last_data=0:
-        header_byte + uint16_le(total_pipe_data_len) + chunk1
+      frame 1      header_byte + u16 total_pipe_data_len + chunk
+      frames 2..N  header_byte + chunk; last_data set on frame N
 
-      Frames 2..N-1 — continuation, last_data=0:
-        header_byte + chunkK   (no size prefix)
-
-      Frame N — continuation, last_data=1:
-        header_byte + chunkN   (no size prefix)
-
-    MOSCP allocates the pipe buffer from the 2-byte prefix in frame 1
-    and keeps appending to it across frames until last_data is seen.
-
-    Split points are chosen by binary-searching the largest chunk whose
-    wire packet (after byte-stuffing) stays ≤ max_wire_bytes.  A fixed
-    margin is not enough — byte-stuffing expansion is content-dependent
-    and a dense run of 0x1B/0x0D/0x10/0x0B/0x8D/0x90/0x8B bytes can
-    inflate the wire more than a static estimate leaves room for.  The
-    GetShabby reply for default.ico (25 stuffable bytes in 1078 blob
-    bytes) is exactly the case that broke the old fixed-20 margin — the
-    first frame landed at 1029 wire bytes and MOSCP dropped it.
+    MOSCP sizes the buffer from frame 1's prefix and appends until last_data.
+    Each split point is the largest chunk whose stuffed packet still fits:
+    stuffing expansion depends on content, so a fixed margin can overflow
+    (GetShabby for default.ico, 25 stuffable bytes in 1078, produced a
+    1029-byte frame that MOSCP dropped).
     """
     routing_prefix = struct.pack("<H", pipe_idx)
     pipe_data = routing_prefix + host_block
 
-    # Try single-packet path
     frame = build_pipe_frame(pipe_idx, pipe_data, last=True)
     pkt = build_packet(server_seq, client_ack, frame)
     if len(pkt) <= max_wire_bytes:
@@ -433,17 +398,11 @@ def build_service_packet(pipe_idx, host_block, server_seq, client_ack, max_wire_
         prefix = size_prefix if frame_idx == 1 else b""
         remaining = len(pipe_data) - pos
 
-        # Binary-search the largest chunk whose wire packet fits.  The
-        # last_data flag only flips the header byte by a single bit —
-        # stuffing behavior is identical either way, so we can probe
-        # using the terminal last_data value for this split.
         lo, hi = 1, remaining
         while lo < hi:
             mid = (lo + hi + 1) // 2
             is_last = pos + mid == len(pipe_data)
-            probe_frame = _build_continuation_frame(
-                pipe_idx, prefix + pipe_data[pos : pos + mid], last=is_last
-            )
+            probe_frame = build_pipe_header(pipe_idx, is_last) + prefix + pipe_data[pos : pos + mid]
             if len(build_packet(seq, client_ack, probe_frame)) <= max_wire_bytes:
                 lo = mid
             else:
@@ -451,27 +410,12 @@ def build_service_packet(pipe_idx, host_block, server_seq, client_ack, max_wire_
 
         chunk_size = lo
         is_last = pos + chunk_size == len(pipe_data)
-        frame = _build_continuation_frame(
-            pipe_idx, prefix + pipe_data[pos : pos + chunk_size], last=is_last
-        )
+        frame = build_pipe_header(pipe_idx, is_last) + prefix + pipe_data[pos : pos + chunk_size]
         packets.append(build_packet(seq, client_ack, frame))
         pos += chunk_size
         seq = (seq + 1) & 0x7F
 
     return packets
-
-
-def _build_continuation_frame(pipe_idx, content, last=True):
-    """Build a raw continuation-format pipe frame (no size prefix added).
-
-    The content is placed directly after the header byte.  Used by
-    multi-frame fragmentation where the caller controls the prefix.
-    """
-    flags = PIPE_ALWAYS_SET | PIPE_CONTINUATION
-    if last:
-        flags |= PIPE_LAST_DATA
-    hdr = encode_header_byte(flags | (pipe_idx & REASSEMBLY_INDEX_MASK))
-    return bytes([hdr]) + content
 
 
 def build_pipe_open_result_content(client_pipe_idx):

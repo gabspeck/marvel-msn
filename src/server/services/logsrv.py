@@ -12,7 +12,6 @@ from ..config import (
 from ..log import TRACE
 from ..models import DwordParam, VarParam
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -26,6 +25,7 @@ from ..session import Session
 from ..store import app_store as _default_store
 from . import _ntlm
 from ._dispatch import log_unhandled_selector
+from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ LOGIN_RESULT_BAD_PASSWORD = 3
 PASSWORD_CHANGE_REFUSED = 1
 
 
-class LOGSRVHandler:
+class LOGSRVHandler(ServiceHandler):
     """Handles LOGSRV service requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name, session=None):
@@ -115,7 +115,7 @@ class LOGSRVHandler:
     def build_discovery_packet(self, server_seq, client_ack):
         """Build the IID->selector discovery block for LOGSRV."""
         payload = build_discovery_payload(LOGSRV_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

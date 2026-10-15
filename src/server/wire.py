@@ -16,19 +16,20 @@ from .config import (
     UNSTUFF_MAP,
 )
 
-# --- CRC-32 lookup table ---
-# Custom polynomial 0x248EF9BE, init=0, no final XOR.
-# NOT-after-XOR on the odd path (from ENGCT.EXE @ 0x05712da3).
 
-CRC_TABLE = []
-for _i in range(256):
-    _c = _i
-    for _ in range(8):
-        if _c & 1:
-            _c = (~((_c ^ CRC_POLYNOMIAL) >> 1)) & 0xFFFFFFFF
-        else:
-            _c >>= 1
-    CRC_TABLE.append(_c)
+def _build_crc_table():
+    """Polynomial 0x248EF9BE, init 0, no final XOR, with a NOT after the XOR
+    on the odd path (ENGCT.EXE @ 0x05712da3)."""
+    table = []
+    for i in range(256):
+        c = i
+        for _ in range(8):
+            c = (~((c ^ CRC_POLYNOMIAL) >> 1)) & 0xFFFFFFFF if c & 1 else c >> 1
+        table.append(c)
+    return table
+
+
+CRC_TABLE = _build_crc_table()
 
 
 def crc32(data):

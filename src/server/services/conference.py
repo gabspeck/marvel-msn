@@ -14,7 +14,6 @@ from ..config import (
 from ..models import DwordParam, VarParam, WordParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -26,6 +25,7 @@ from ..session import Session
 from ..store import ConferenceFields
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
+from ._handler import ServiceHandler
 from .dirsrv import (
     TREEEDCL_STATUS_REFUSED,
     _decode_property_record,
@@ -73,7 +73,7 @@ CONFSRV_EVENT_ROLE = 7
 DEFAULT_MESSAGE_LENGTH = 1000
 
 
-class CONFLOCHandler:
+class CONFLOCHandler(ServiceHandler):
     """Resolve a DIRSRV chat node to a CONFSRV instance."""
 
     def __init__(self, pipe_idx, svc_name, session=None, content_store=None):
@@ -85,7 +85,7 @@ class CONFLOCHandler:
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(CONFLOC_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
@@ -441,7 +441,7 @@ class CONFLOCHandler:
         )
 
 
-class CONFSRVHandler:
+class CONFSRVHandler(ServiceHandler):
     """Join a text conference and service its retained event iterator.
 
     One handler is one participant. Everything the client sees after the join
@@ -469,7 +469,7 @@ class CONFSRVHandler:
 
     def build_discovery_packet(self, server_seq, client_ack):
         payload = build_discovery_payload(CONFSRV_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

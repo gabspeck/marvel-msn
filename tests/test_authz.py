@@ -47,7 +47,7 @@ class TestDirectoryRights(unittest.TestCase):
     """Wire property `x` is the account's own mask, not a constant."""
 
     REQUEST = DirsrvRequest(
-        node_id="1:0",
+        node_ids=["1:0"],
         prop_group="a\x00e\x00x",
         recv_descriptors=[0x83, 0x83, 0x85],
     )

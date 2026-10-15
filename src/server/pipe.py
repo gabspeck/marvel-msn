@@ -27,35 +27,22 @@ from .models import (
 from .wire import decode_header_byte, encode_header_byte
 
 
-def build_pipe_frame(reassembly_index, data, last=True):
-    """Build a continuation-format pipe frame.
-
-    Continuation format: bit 5 set, all remaining packet bytes belong to this
-    message. `reassembly_index` names the receiver's partial-message buffer,
-    not a pipe; we pass the pipe number because only one message is ever in
-    flight per pipe, which makes it unique among our open messages.
-    """
+def build_pipe_header(reassembly_index, last=True):
+    """Continuation-format frame header byte: bit 5 set, so the rest of the
+    packet belongs to this frame. `reassembly_index` names the receiver's
+    partial-message buffer, not a pipe; we pass the pipe number because only
+    one message is ever in flight per pipe, which makes it unique among our
+    open messages."""
     flags = PIPE_ALWAYS_SET | PIPE_CONTINUATION
     if last:
         flags |= PIPE_LAST_DATA
-    hdr = encode_header_byte(flags | (reassembly_index & REASSEMBLY_INDEX_MASK))
-    content_length = struct.pack("<H", len(data))
-    return bytes([hdr]) + content_length + data
+    return bytes([encode_header_byte(flags | (reassembly_index & REASSEMBLY_INDEX_MASK))])
 
 
-def build_pipe_frame_has_length(reassembly_index, data, last=True):
-    """Build a has_length-format pipe frame.
-
-    Has_length format: bit 4 set, next byte gives the data length.
-    Used for pipe-open ACK and multi-frame packets.
-    """
-    flags = PIPE_ALWAYS_SET | PIPE_HAS_LENGTH
-    if last:
-        flags |= PIPE_LAST_DATA
-    hdr = encode_header_byte(flags | (reassembly_index & REASSEMBLY_INDEX_MASK))
-    data_bytes = struct.pack("<H", len(data)) + data
-    length_byte = encode_header_byte(len(data_bytes) | PIPE_ALWAYS_SET)
-    return bytes([hdr, length_byte]) + data_bytes
+def build_pipe_frame(reassembly_index, data, last=True):
+    """Continuation-format frame carrying one whole message: header byte,
+    u16 content length, content."""
+    return build_pipe_header(reassembly_index, last) + struct.pack("<H", len(data)) + data
 
 
 def build_control_frame(ctrl_type, payload):
@@ -128,11 +115,9 @@ def parse_pipe_frame(payload, pending=None):
 
     `pending` maps reassembly index to the bytes still owed on a frame that did
     not fit in one transport packet. Such a frame continues in the next packet
-    behind a header byte and nothing else — the 2-byte content length appears
-    once, in the packet that opens the frame. Reading a length out of every
-    fragment ate 2 bytes of content per packet boundary, which is what left an
-    uploaded post body short and its compressed RTF failing its own CRC.
-    Callers with no state to keep pass nothing and get single-packet framing.
+    behind a header byte only; the 2-byte content length appears once, in the
+    packet that opens the frame. Callers with no state to keep pass nothing and
+    get single-packet framing.
     """
     if not payload:
         return None, 0
@@ -168,8 +153,7 @@ def parse_pipe_frame(payload, pending=None):
     if pending is not None:
         pending[reassembly_index] = (owed or content_length) - len(content)
     if continuation:
-        # Only this frame's own bytes are consumed. Running to the end of the
-        # payload instead would swallow a second frame packed behind it.
+        # A second frame can be packed behind this one in the same payload.
         pos += consumed
 
     return PipeFrame(

@@ -32,7 +32,6 @@ from ..config import (
 )
 from ..models import ChunkedParam, DwordParam, VarParam
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -44,6 +43,7 @@ from ..session import Session
 from ..store import MailMessage, MailRecipient
 from ..store import app_store as _default_store
 from ._dispatch import log_unhandled_selector
+from ._handler import ServiceHandler
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +189,7 @@ class ChunkStream:
         self.complete = False
 
 
-class MOSRXPHandler:
+class MOSRXPHandler(ServiceHandler):
     """Handles remote-mail requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name, session=None):
@@ -220,7 +220,7 @@ class MOSRXPHandler:
         MOSRXP pipe with no traffic on it is waiting for.
         """
         payload = build_discovery_payload(MOSRXP_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):

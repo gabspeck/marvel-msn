@@ -23,7 +23,6 @@ from ..log import TRACE
 from ..models import ByteParam, ChunkedParam, DirsrvRequest, DwordParam, VarParam
 from ..mos_apps import APP_TEXT_CONFERENCE
 from ..mpc import (
-    build_discovery_host_block,
     build_discovery_payload,
     build_host_block,
     build_service_packet,
@@ -39,6 +38,7 @@ from ..store import RIGHTS_NONE, DirectoryNode, NodeContent, blackbird_state
 from ..store import app_store as _default_store
 from . import shabby
 from ._dispatch import log_unhandled_selector
+from ._handler import ServiceHandler
 from .rooms import room_population
 
 # DIRSRV wire selectors. Slot indices resolve to IIDs via the discovery table
@@ -178,7 +178,7 @@ def _dump_debug_bytes(path, blob):
     log.info("debug_dump path=%s bytes=%d", path, len(blob))
 
 
-class DIRSRVHandler:
+class DIRSRVHandler(ServiceHandler):
     """Handles DIRSRV service requests on a logical pipe."""
 
     def __init__(self, pipe_idx, svc_name, session=None):
@@ -194,7 +194,7 @@ class DIRSRVHandler:
     def build_discovery_packet(self, server_seq, client_ack):
         """Build the IID->selector discovery block for DIRSRV."""
         payload = build_discovery_payload(DIRSRV_INTERFACE_GUIDS)
-        host_block = build_discovery_host_block(payload)
+        host_block = build_host_block(0x00, 0x00, 0, payload)
         return build_service_packet(self.pipe_idx, host_block, server_seq, client_ack)
 
     def handle_request(self, msg_class, selector, request_id, payload, server_seq, client_ack):
@@ -925,7 +925,7 @@ def build_tree_reply_wire(records_with_ids):
 
     if log.isEnabledFor(TRACE):
         for i, rec in enumerate(records):
-            log.trace("record idx=%d len=%d hex=%s", i, len(rec), rec.hex())
+            log.log(TRACE, "record idx=%d len=%d hex=%s", i, len(rec), rec.hex())
 
     payload = bytearray()
     payload.extend(build_tagged_reply_dword(0))  # status = success

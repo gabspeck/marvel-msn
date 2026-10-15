@@ -24,7 +24,6 @@ from server import log as server_log
 from server.config import (
     TRANSPORT_ACK_BEHIND,
     TRANSPORT_ACK_TIMEOUT_MS,
-    TRANSPORT_MAX_BYTES,
     TRANSPORT_PACKET_SIZE,
     TRANSPORT_WINDOW_SIZE,
 )
@@ -710,7 +709,7 @@ class TestDirectGatewaySession(_ConnectionHarness):
         params = struct.pack(
             "<IIIII",
             TRANSPORT_PACKET_SIZE,
-            TRANSPORT_MAX_BYTES,
+            TRANSPORT_PACKET_SIZE,
             TRANSPORT_WINDOW_SIZE,
             TRANSPORT_ACK_BEHIND,
             TRANSPORT_ACK_TIMEOUT_MS,

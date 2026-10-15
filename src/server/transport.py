@@ -18,9 +18,9 @@ a close and 0 on everything else. The receiver overwrites its copy from the
 content before reading it (`PipeBuf_SetFlagFromContent` @ 0x0571384c), so it
 carries no information and never routes anything.
 
-Observed 2026-08-15 on the gateway port: the client's control type-4 arrived as
-`06 00 00 ff ff 04` and its 299-byte type-1 declared `2b 01` — the length counts
-the length field itself.
+The length counts itself: on the gateway port the client's control type-4
+arrives as `06 00 00 ff ff 04` and its 299-byte type-1 declares `2b 01` (wire
+capture).
 """
 
 import struct
@@ -31,7 +31,6 @@ from .config import (
     PACKET_TERMINATOR,
     TRANSPORT_ACK_BEHIND,
     TRANSPORT_ACK_TIMEOUT_MS,
-    TRANSPORT_MAX_BYTES,
     TRANSPORT_PACKET_SIZE,
     TRANSPORT_WINDOW_SIZE,
 )
@@ -162,7 +161,7 @@ def build_transport_params():
     params = struct.pack(
         "<IIIII",
         TRANSPORT_PACKET_SIZE,
-        TRANSPORT_MAX_BYTES,
+        TRANSPORT_PACKET_SIZE,
         TRANSPORT_WINDOW_SIZE,
         TRANSPORT_ACK_BEHIND,
         TRANSPORT_ACK_TIMEOUT_MS,
