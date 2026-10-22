@@ -22,7 +22,7 @@ browsing. The MSN Shell window renders and displays the content tree.
 |"Go to word" navigation|✅|
 |Blackbird content|In progress|
 |BBS|Pending|
-|Chat|Pending|
+|Chat|✅|
 
 ## What's been decoded
 
@@ -44,17 +44,15 @@ See [PROTOCOL.md](PROTOCOL.md) for the full wire protocol specification.
 
 ```
 PROTOCOL.md          Wire protocol specification (the main deliverable)
-server/
-  server.py          Emulated MSN server — drives the real 1995 client
-  phonebook.txt      Test dial-up phone numbers (localhost:2323)
+phonebook.txt        86Box modem phonebook: dial-up numbers -> localhost:2323
+src/server/          Emulated MSN server — drives the real 1995/1996 clients
 tools/
-  gdb_debug.py       GDB stub client library for 86Box debugging
+  e2e-vm/            Windows 95 OSR2 + MSN test VMs for 86Box (docs/E2E-VM.md)
   trace_*.py         Runtime tracing scripts (breakpoint-based)
   capture_*.py       Runtime capture scripts (IID/error sniffing)
   debug_mpccl.*      MPCCL login flow debugger
   watch_signout.py   Sign-out flow monitor (native GDB Python script)
-docs/
-  JOURNAL.md         Chronological research journal
+docs/                Per-module and per-service notes
 ```
 
 ## Running the server
@@ -62,7 +60,7 @@ docs/
 ### Prerequisites
 
 - [86Box](https://86box.net/) with a Windows 95 VM and the MSN client installed
-- Python 3.6+
+- Python 3.12+ and [uv](https://docs.astral.sh/uv/)
 - 86Box configured with a serial modem on COM1 or COM2
 
 ### 86Box modem setup
@@ -71,14 +69,15 @@ docs/
    to **None** — the modem network adapter claims it directly.
 2. **Network:** Add a network card of type **[COM] Standard Hayes-compliant
    Modem**. Click **Configure** and assign it to the serial port from step 1.
-3. **Phonebook:** Create a phonebook file (see `server/phonebook.txt`) that maps
-   the MSN dial-up number to `localhost:2323`. Point 86Box's modem config at
-   this file.
+3. **Phonebook:** Point 86Box's modem config at `phonebook.txt`. It maps the
+   numbers the clients dial to `localhost:2323`: `05006062` (the access number
+   the e2e VM uses) and the OSR2 sign-up's own `9501288` (+1 212 950-1288,
+   dialed locally from area code 212) and `18003282427` (its backup).
 
 ### Start the server
 
 ```sh
-python3 server/server.py
+make run
 ```
 
 The server listens on TCP port 2323. Open the MSN client in Windows 95, click
