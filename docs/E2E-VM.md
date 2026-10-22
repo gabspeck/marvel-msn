@@ -10,7 +10,8 @@ tools/e2e-vm/vm.py reset   # working VM back to the built state
 tools/e2e-vm/vm.py run     # 86Box on the working VM, automation socket on
 ```
 
-`run --held` starts the machine held (`--automation-hold`). The socket is
+`build` and `run` start 86Box headless (Qt `offscreen`); `--no-headless`
+shows the window. `run --held` starts the machine held (`--automation-hold`). The socket is
 `unix:~/.cache/marvel-msn-vm/vm/automation.sock`.
 
 ## Cache

@@ -321,11 +321,16 @@ def check_tap(exe):
         log(f"  sudo setcap cap_net_admin+ep {os.path.realpath(exe)}")
 
 
-def launch(vmdir):
+def emulator_env(headless):
+    """Qt's offscreen platform: no window; screenshots and automation still work."""
+    return {**os.environ, "QT_QPA_PLATFORM": "offscreen"} if headless else os.environ
+
+
+def launch(vmdir, headless):
     sock = vmdir / "automation.sock"
     sock.unlink(missing_ok=True)
     cmd = [emulator(), "-P", str(vmdir), "-N", "--automation", f"unix:{sock}"]
-    env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
+    env = emulator_env(headless)
     with open(vmdir / "86box.log", "w") as out:
         proc = subprocess.Popen(cmd, env=env, stdout=out, stderr=subprocess.STDOUT)
     for _ in range(300):
@@ -552,13 +557,13 @@ def shut_down(vm):
     vm.press(0x1C)
 
 
-def install(net, connect_protocol):
+def install(net, connect_protocol, headless):
     """Unattended Windows setup in build/, ending with the guest shut down."""
     disk = make_disk(net, connect_protocol)
     floppy = make_floppy()
     shutil.rmtree(BUILD / "nvr", ignore_errors=True)
     (BUILD / "86box.cfg").write_text(config(net, "automation", floppy.name))
-    proc, vm = launch(BUILD)
+    proc, vm = launch(BUILD, headless)
     shots = BUILD / "shots"
     shutil.rmtree(shots, ignore_errors=True)
     shots.mkdir()
@@ -634,7 +639,7 @@ def build(args):
         check_tap(emulator())
         fetch()
         extract_softice(Path(args.softice_from).expanduser())
-        finish(install(net, 0x0A if args.transport == "tcp" else 0))
+        finish(install(net, 0x0A if args.transport == "tcp" else 0, args.headless))
         snapshot(net)
     reset(args)
 
@@ -672,7 +677,7 @@ def start(args):
     cmd = [emulator(), "-P", str(VM), "-N", "--automation", f"unix:{VM / 'automation.sock'}"]
     if args.held:
         cmd.append("--automation-hold")
-    os.execvp(cmd[0], cmd)
+    os.execvpe(cmd[0], cmd, emulator_env(args.headless))
 
 
 def main():
@@ -682,11 +687,15 @@ def main():
     b.add_argument("--bridge", default="br0", help="host bridge the guest NIC joins (default br0)")
     b.add_argument("--transport", choices=("tcp", "modem"), default="tcp",
                    help="MSN connection the client starts with (default tcp)")
+    b.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True,
+                   help="run 86Box without a window (default); --no-headless shows it")
     b.add_argument("--softice-from", default="~/86Box VMs/Windows 95 OSR2/c.vhd",
                    help="Win95 disk image with SoftICE installed")
     sub.add_parser("reset", help="restore the working VM from the golden image")
     r = sub.add_parser("run", help="start 86Box on the working VM")
     r.add_argument("--held", action="store_true", help="start held (--automation-hold)")
+    r.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True,
+                   help="run 86Box without a window (default); --no-headless shows it")
     args = p.parse_args()
     {"build": build, "reset": reset, "run": start}[args.cmd](args)
 
