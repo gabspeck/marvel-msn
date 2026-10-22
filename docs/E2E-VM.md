@@ -5,14 +5,39 @@ Windows 95 OSR2 (4.00.1111) with the OSR2 MSN client (MSN 1.3, OPK2) under
 automation socket (`86Box/doc/specifications/automation.md`).
 
 ```sh
-tools/e2e-vm/vm.py build   # everything, cached; under 4 min once media is downloaded
-tools/e2e-vm/vm.py reset   # working VM back to the built state
-tools/e2e-vm/vm.py run     # 86Box on the working VM, automation socket on
+tools/e2e-vm/vm.py build         # everything, cached; under 4 min once media is downloaded
+tools/e2e-vm/vm.py reset 1 2     # instances 1 and 2 back to the built state
+tools/e2e-vm/vm.py run -i 2      # 86Box on instance 2, automation socket on
 ```
 
 `build` and `run` start 86Box headless (Qt `offscreen`); `--no-headless`
-shows the window. `run --held` starts the machine held (`--automation-hold`). The socket is
-`unix:~/.cache/marvel-msn-vm/vm/automation.sock`.
+shows the window. `run --held` starts the machine held (`--automation-hold`).
+`run` creates a missing instance; `-i` defaults to 1.
+
+## Instances
+
+Each instance `N` is a copy of the golden image in `vm/N/` and runs its own
+86Box, so several can be up at once, e.g. one client per member in a chat
+room:
+
+| | Instance N |
+|---|---|
+| Automation socket | `unix:~/.cache/marvel-msn-vm/vm/N/automation.sock` |
+| NetBIOS name | `MSNE2E-N`, also the NTLM workstation name LOGSRV sees |
+| NIC MAC | `00:0c:87:4d:53:NN` (hex), so its own DHCP lease and TAP on `br0` |
+| SoftICE PTY | `/tmp/msn-e2e-N.COM1.pty` |
+
+`reset` writes the name into `C:\E2E.REG`; `AUTOEXEC.BAT` imports it with
+real-mode `REGEDIT /L: /R:` and deletes it on the first boot, before Windows
+reads the registry. Two instances with one name would collide on the LAN.
+
+Every instance dials the same number and gateway; the server takes them as
+separate connections. Verified with two instances signed in at once as
+`billg` and `sjobs` over TCP.
+
+DHCP retries run on emulated time: fast-forwarding through boot (`ff on`)
+can exhaust them before dnsmasq, which probes a new address in real time,
+answers. `winipcfg` → Renew All recovers.
 
 ## Cache
 
@@ -24,7 +49,7 @@ shows the window. `run --held` starts the machine held (`--automation-hold`). Th
 | `iso/win95/` | the CD's `WIN95` directory, copied to `C:\WIN95` as setup's source |
 | `softice/` | SoftICE runtime files (see below) |
 | `golden/` | the built VM: `c.img`, `nvr/`, `86box.cfg`; files read-only |
-| `vm/` | the working copy `run` boots |
+| `vm/N/` | instance `N`, the copy `run -i N` boots |
 
 `build` skips every stage whose output exists; delete `golden/` to rebuild
 the VM. `reset` copies `golden/` with `cp --reflink=auto`, which is instant on
@@ -40,7 +65,7 @@ btrfs. The disk is a 1 GiB sparse raw image (CHS 2080/16/63, FAT16).
 | Video | S3 Vision968 PCI | OSR2 in-box driver; matches SoftICE's `[Siwvid]` settings |
 | HDD | IDE, speed `ramdisk` | |
 | NIC | PCnet-FAST III, TAP on `br0` | in-box `NETAMD.INF` |
-| COM1 | 86Box virtual console, PTY linked at `/tmp/msn-e2e.COM1.pty` | optional SoftICE serial console |
+| COM1 | 86Box virtual console, PTY linked at `/tmp/msn-e2e-N.COM1.pty` | optional SoftICE serial console |
 | COM2 | Hayes modem, phonebook `/phonebook.txt` | MSN dial-up |
 | Sound | none | |
 
@@ -69,7 +94,7 @@ image. Both sides are preset as on the reference VM: service type "MSN
 only", Standard Modem on COM2, default dialing location.
 
 Windows logs on as `e2e` with a blank password and does not prompt. `C:` is
-shared read/write without a password under NetBIOS name `MSNE2E`.
+shared read/write without a password under NetBIOS name `MSNE2E-N`.
 
 ## SoftICE
 
@@ -85,7 +110,7 @@ The console is the local display: `build` drops the `SERIAL` commands from
 automation socket:
 
 ```sh
-tools/e2e-vm/softice.py cmd "bpx CreateProcessA" "bl"   # pops SoftICE up first
+tools/e2e-vm/softice.py cmd "bpx CreateProcessA" "bl"   # pops SoftICE up first; -i N picks the instance
 tools/e2e-vm/softice.py resume
 tools/e2e-vm/softice.py wait 30                          # until a breakpoint pops it up
 tools/e2e-vm/softice.py screen
@@ -103,7 +128,7 @@ status line ("Enter a command" from column 5 of row 25, attribute 0x30).
 Windows. Commands that open an editor (`R`, `E` without data) do not return to
 the prompt; Esc leaves them.
 
-COM1 keeps its PTY at `/tmp/msn-e2e.COM1.pty`: `SERIAL VT100 COM1 115200` at
+COM1 keeps its PTY at `/tmp/msn-e2e-N.COM1.pty`: `SERIAL VT100 COM1 115200` at
 the prompt moves the console there, `SERIAL OFF` brings it back. A bare
 `SERIAL ON` selects the `SERIAL.EXE` remote protocol and fails to attach.
 

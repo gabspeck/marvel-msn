@@ -65,7 +65,7 @@ Env overrides: `VM_HOST` (NetBIOS name), `VM_IP` (adds `-I`), `VM_SHARE`
 (default `C`).
 
 The e2e VM (`tools/e2e-vm`, docs/E2E-VM.md) shares `C` the same way under
-NetBIOS name `MSNE2E`: `VM_HOST=MSNE2E`. It gets its address from DHCP on
+NetBIOS name `MSNE2E-N` for instance N: `VM_HOST=MSNE2E-1`. It gets its address from DHCP on
 `br0`.
 
 ## Shares

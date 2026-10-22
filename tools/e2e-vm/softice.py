@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from vm import VM, Automation  # noqa: E402
+from vm import Automation, instance_dir  # noqa: E402
 
 TEXT_BUFFER = 0xB8000
 COLS, ROWS = 80, 25
@@ -96,7 +96,7 @@ class SoftIce:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--socket", default=str(VM / "automation.sock"), help="automation socket")
+    p.add_argument("-i", "--instance", type=int, default=1, help="VM instance (default 1)")
     sub = p.add_subparsers(dest="action", required=True)
     sub.add_parser("popup")
     c = sub.add_parser("cmd")
@@ -107,7 +107,7 @@ def main():
     w.add_argument("seconds", nargs="?", type=float, default=60)
     args = p.parse_args()
 
-    si = SoftIce(Automation(args.socket))
+    si = SoftIce(Automation(instance_dir(args.instance) / "automation.sock"))
     if args.action == "popup":
         si.popup()
     elif args.action == "cmd":

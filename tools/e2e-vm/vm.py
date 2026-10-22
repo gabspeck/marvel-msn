@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Windows 95 OSR2 + MSN 1.3 VM for end-to-end testing the server under 86Box.
 
-  vm.py build   download media, install Windows unattended, snapshot the result
-  vm.py reset   restore the working VM from the snapshot
-  vm.py run     start 86Box on the working VM with the automation socket
+  vm.py build          download media, install Windows unattended, snapshot the result
+  vm.py reset [N ...]  make instance N (default 1) a fresh copy of the snapshot
+  vm.py run [-i N]     start 86Box on instance N with the automation socket
 
 Everything lives under $MSN_VM_CACHE (default ~/.cache/marvel-msn-vm):
 downloads/ (installation media), iso/ (the CD's WIN95 directory), softice/
-(SoftICE files), build/ (scratch), golden/ (pristine VM) and vm/ (the copy
-that runs). Each build stage is skipped
-when its output exists. See docs/E2E-VM.md.
+(SoftICE files), build/ (scratch), golden/ (pristine VM) and vm/N/ (the
+instances that run, side by side). Each build stage is skipped when its
+output exists. See docs/E2E-VM.md.
 """
 
 import argparse
@@ -35,7 +35,7 @@ DOWNLOADS = CACHE / "downloads"
 SOFTICE = CACHE / "softice"
 BUILD = CACHE / "build"
 GOLDEN = CACHE / "golden"
-VM = CACHE / "vm"
+VMS = CACHE / "vm"
 
 MEDIA = {
     "W95_FULL_AR.iso": (
@@ -59,6 +59,7 @@ PART_START = SPT
 COMPUTER_NAME = "MSNE2E"
 PHONE = "05006062"  # mapped to the server's modem port in /phonebook.txt
 PTY_LINK = "/tmp/msn-e2e.$PORT.pty"  # $PORT expands to COM1
+GOLDEN_MAC = "4d:53:4e"  # 86Box prepends 00:0c:87 for the PCnet
 
 MTOOLS_ENV = {**os.environ, "MTOOLS_SKIP_CHECK": "1"}
 
@@ -282,7 +283,7 @@ net_02_net_type = slirp
 net_02_link = 0
 
 [AMD PCnet-FAST III #1]
-mac = 4d:53:4e
+mac = {GOLDEN_MAC}
 
 [Standard Hayes-compliant Modem #2]
 port = 1
@@ -641,7 +642,7 @@ def build(args):
         extract_softice(Path(args.softice_from).expanduser())
         finish(install(net, 0x0A if args.transport == "tcp" else 0, args.headless))
         snapshot(net)
-    reset(args)
+    make_instance(1)
 
 
 def snapshot(net):
@@ -660,21 +661,66 @@ def snapshot(net):
     log(f"golden image in {GOLDEN}")
 
 
-def reset(args):
+def instance_dir(n):
+    return VMS / str(n)
+
+
+def make_instance(n):
+    """vm/N: a copy of golden/ with its own MAC, NetBIOS name and SoftICE PTY.
+
+    The disk carries C:\\E2E.REG, which AUTOEXEC.BAT imports with real-mode
+    REGEDIT and deletes on the first boot, before Windows reads the registry.
+    Instances that share a name would collide on the LAN.
+    """
     if not GOLDEN.exists():
         sys.exit(f"{GOLDEN} missing; run build")
-    shutil.rmtree(VM, ignore_errors=True)
+    if not 1 <= n <= 255:
+        sys.exit("instance numbers run from 1 to 255")
+    vm = instance_dir(n)
+    shutil.rmtree(vm, ignore_errors=True)
+    VMS.mkdir(exist_ok=True)
     # Reflink copy: instant on btrfs/XFS, a plain copy elsewhere.
-    run("cp", "-a", "--reflink=auto", GOLDEN, VM)
-    run("chmod", "-R", "u+w", VM)
-    log(f"working VM reset from {GOLDEN}")
+    run("cp", "-a", "--reflink=auto", GOLDEN, vm)
+    run("chmod", "-R", "u+w", vm)
+    cfg = (vm / "86box.cfg").read_text()
+    cfg = cfg.replace(f"mac = {GOLDEN_MAC}", f"mac = {GOLDEN_MAC[:6]}{n:02x}")
+    cfg = cfg.replace(PTY_LINK, instance_pty(n))
+    (vm / "86box.cfg").write_text(cfg)
+    name = f"{COMPUTER_NAME}-{n}"
+    img = f"{vm / 'c.img'}@@{PART_START * 512}"
+    BUILD.mkdir(exist_ok=True)
+    mput(img, dos_text(
+        "REGEDIT4\n\n"
+        "[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\control\\ComputerName\\ComputerName]\n"
+        f'"ComputerName"="{name}"\n\n'
+        "[HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\VxD\\VNETSUP]\n"
+        f'"ComputerName"="{name}"\n'
+    ), "::/E2E.REG")
+    autoexec = mget(img, "::/AUTOEXEC.BAT")
+    mput(img, dos_text(
+        "@IF EXIST C:\\E2E.REG C:\\WINDOWS\\REGEDIT.EXE /L:C:\\WINDOWS\\SYSTEM.DAT "
+        "/R:C:\\WINDOWS\\USER.DAT C:\\E2E.REG\n"
+        "@IF EXIST C:\\E2E.REG DEL C:\\E2E.REG\n"
+    ) + autoexec, "::/AUTOEXEC.BAT")
+    log(f"instance {n} reset from {GOLDEN}: {vm}, {name}, {instance_pty(n).replace('$PORT', 'COM1')}")
+
+
+def instance_pty(n):
+    return PTY_LINK.replace("msn-e2e.", f"msn-e2e-{n}.")
+
+
+def reset(args):
+    for n in args.instances or [1]:
+        make_instance(n)
 
 
 def start(args):
-    if not VM.exists():
-        sys.exit(f"{VM} missing; run build")
+    vm = instance_dir(args.instance)
+    if not vm.exists():
+        make_instance(args.instance)
     check_tap(emulator())
-    cmd = [emulator(), "-P", str(VM), "-N", "--automation", f"unix:{VM / 'automation.sock'}"]
+    cmd = [emulator(), "-P", str(vm), "-N", "-V", f"e2e-{args.instance}",
+           "--automation", f"unix:{vm / 'automation.sock'}"]
     if args.held:
         cmd.append("--automation-hold")
     os.execvpe(cmd[0], cmd, emulator_env(args.headless))
@@ -691,8 +737,10 @@ def main():
                    help="run 86Box without a window (default); --no-headless shows it")
     b.add_argument("--softice-from", default="~/86Box VMs/Windows 95 OSR2/c.vhd",
                    help="Win95 disk image with SoftICE installed")
-    sub.add_parser("reset", help="restore the working VM from the golden image")
-    r = sub.add_parser("run", help="start 86Box on the working VM")
+    rs = sub.add_parser("reset", help="make instances fresh copies of the golden image")
+    rs.add_argument("instances", nargs="*", type=int, help="instance numbers (default 1)")
+    r = sub.add_parser("run", help="start 86Box on an instance, creating it if missing")
+    r.add_argument("-i", "--instance", type=int, default=1, help="instance number (default 1)")
     r.add_argument("--held", action="store_true", help="start held (--automation-hold)")
     r.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True,
                    help="run 86Box without a window (default); --no-headless shows it")
