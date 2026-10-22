@@ -228,6 +228,14 @@ class InMemoryUserStore:
             return None
         return user
 
+    def add_user(self, user):
+        """Add a new account. False when the member id is already taken."""
+        key = user.username.casefold()
+        if not key or key in self._users:
+            return False
+        self._users[key] = user
+        return True
+
     def set_password(self, username, password):
         return self._replace(username, password=password)
 

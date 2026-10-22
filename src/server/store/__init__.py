@@ -6,6 +6,7 @@ from .base import (
     ANONYMOUS_USER,
     RIGHTS_AUTHORING,
     RIGHTS_NONE,
+    SIGNUP_USER,
     BillingProfile,
     ConferenceFields,
     DirectoryNode,
@@ -60,6 +61,7 @@ def reset_app_store():
 __all__ = [
     "AppStore",
     "ANONYMOUS_USER",
+    "SIGNUP_USER",
     "RIGHTS_AUTHORING",
     "RIGHTS_NONE",
     "BillingProfile",

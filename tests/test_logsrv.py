@@ -27,6 +27,7 @@ from server.services.logsrv import (
 )
 from server.session import Session
 from server.store import (
+    SIGNUP_USER,
     app_store,
     reset_app_store,
 )
@@ -211,7 +212,7 @@ class TestLOGSRVSignedPasswordChange(unittest.TestCase):
     def _call(self, handler, selector, payload):
         return reply_payload(handler.handle_request(0x06, selector, 0, payload, 1, 0))
 
-    def _authenticate(self, password):
+    def _authenticate(self, password, member_id=ADMIN):
         handler = LogsrvHandler(3, "LOGSRV", Session())
         flags = 0x82A2
         request = build_tagged_reply_var(0x04, _ntlm.wrap_token(Negotiate(flags=flags).pack()))
@@ -227,7 +228,7 @@ class TestLOGSRVSignedPasswordChange(unittest.TestCase):
             no_lm_response=False,
         )
         # The OSR2 AUTHENTICATE stops at byte 52 and fills only the LM slot.
-        fields = (lm_response, b"", b"", ADMIN.encode(), b"WIN95")
+        fields = (lm_response, b"", b"", member_id.encode(), b"WIN95")
         token = b"NTLMSSP\x00" + struct.pack("<I", 3)
         offset = 52
         for field in fields:
@@ -357,6 +358,22 @@ class TestLOGSRVSignedPasswordChange(unittest.TestCase):
         self.assertEqual(
             self._change(self._request(password.encode() + b"\x00fedcba9876543210\x00")), 0
         )
+
+
+class TestLOGSRVSignupSignIn(unittest.TestCase):
+    _authenticate = TestLOGSRVSignedPasswordChange._authenticate
+    _call = TestLOGSRVSignedPasswordChange._call
+
+    def test_signup_credentials_sign_in_without_an_account(self):
+        handler, client = self._authenticate("signup", member_id="signup")
+        self.assertIsNotNone(client)
+        self.assertIs(handler.session.user, SIGNUP_USER)
+        self.assertIsNone(app_store.users.get_user("signup"))
+
+    def test_signup_with_another_password_is_refused(self):
+        handler, client = self._authenticate("wrong", member_id="signup")
+        self.assertIsNone(client)
+        self.assertFalse(handler.session.is_authenticated)
 
 
 class TestLOGSRVBillingQuery(unittest.TestCase):

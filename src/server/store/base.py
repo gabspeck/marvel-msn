@@ -338,3 +338,9 @@ class User:
 # session is a real state, and giving it a User keeps `if user is None` out of
 # every handler.
 ANONYMOUS_USER = User(username="", password="", display_name="")
+
+# The account the OSR2 SIGNUP.EXE signs in with before the new member exists.
+# Its NTLM credentials callback (SIGNUP.EXE @ 0x004032d3) copies "signup" into
+# both the member id and the password; the 1.0 SIGNUP never signs in at all.
+# Not a member: it is not in the user store, so the Sign In dialog cannot use it.
+SIGNUP_USER = User(username="signup", password="signup", display_name="")

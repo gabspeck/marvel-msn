@@ -18,6 +18,7 @@ from ..mpc import (
     is_oneway,
     parse_request_params,
 )
+from ..store import SIGNUP_USER
 from ..store import app_store as _default_store
 from . import _ntlm
 from ._dispatch import log_unhandled_selector
@@ -613,6 +614,8 @@ def _handle_ntlm_authenticate(request_payload, session):
     )
 
     user = _default_store.users.get_user(auth.user_name)
+    if user is None and auth.user_name.casefold() == SIGNUP_USER.username:
+        user = SIGNUP_USER
     if user is None:
         log.info(
             "ntlm_reply result=%d reason=unknown_member_id member_id=%r",
