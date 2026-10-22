@@ -6,6 +6,9 @@ description: instructions on how to debug using the softice MCP
 * Select the SoftICE serial transport for the target VM before connecting:
   * Windows 95 RTM: `/tmp/win95.COM1.pty`
   * Windows 95 OSR2: `/tmp/win95osr2.COM1.pty`
+  * E2E VM (`tools/e2e-vm`, docs/E2E-VM.md): SoftICE uses the local display, not serial. Drive it with
+    `tools/e2e-vm/softice.py` (automation socket) instead of the MCP, or type `SERIAL VT100 COM1 115200` at
+    its prompt to move it to `/tmp/msn-e2e.COM1.pty`.
   Pass the selected path to `mcp__softice__connect`; do not assume the RTM path when debugging OSR2.
 
 * Always use `ADDR <context handle>` to set the correct address context for your breakpoints before arming them, 
