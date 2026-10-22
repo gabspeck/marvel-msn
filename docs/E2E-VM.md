@@ -92,7 +92,9 @@ sudo setcap cap_net_admin+ep "$(realpath ~/.local/bin/86Box)"
 ```
 
 Dial-up: the client dials `05006062`; `/phonebook.txt` maps it to
-`localhost:2323`.
+`localhost:2323`, along with `SIGNUP.EXE`'s own numbers (`9501288`, its
++1 212 950-1288 dialed locally, and the backup `18003282427`), so sign-up
+connects without editing its access numbers.
 
 The VM starts on TCP (`ConnectProtocol` 0x0a). Sign In → Settings switches
 between "Connect using my local area network" and "MSN is my dial-up
