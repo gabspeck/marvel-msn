@@ -57,6 +57,11 @@ DISK_SECTORS = SPT * HEADS * CYLS
 PART_START = SPT
 
 COMPUTER_NAME = "MSNE2E"
+# The guest clock starts here, not at the host's date: period software checks
+# dates against it (SIGNUP rejects card expiry years that have passed, and
+# 2027 and later as invalid). 86Box keeps the RTC in the NVR with time_sync off,
+# so every instance boots at the time the golden image was shut down.
+GUEST_DATE = "10-22-1996"  # DOS DATE syntax, mm-dd-yyyy
 PHONE = "05006062"  # mapped to the server's modem port in /phonebook.txt
 PTY_LINK = "/tmp/msn-e2e.$PORT.pty"  # $PORT expands to COM1
 GOLDEN_MAC = "4d:53:4e"  # 86Box prepends 00:0c:87 for the PCnet
@@ -223,6 +228,7 @@ def make_floppy():
         "@ECHO OFF\n"
         "FDISK /MBR\n"
         "SYS C:\n"
+        f"DATE {GUEST_DATE}\n"
         "ECHO E2E-SYS-DONE> COM1\n"
     ), "::/AUTOEXEC.BAT")
     return floppy
@@ -256,6 +262,7 @@ sound_muted = 1
 
 [Machine]
 machine = kn97
+time_sync = disabled
 cpu_family = pentium2_klamath
 cpu_speed = 300000000
 cpu_multi = 4.5

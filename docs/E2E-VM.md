@@ -71,6 +71,13 @@ btrfs. The disk is a 1 GiB sparse raw image (CHS 2080/16/63, FAT16).
 
 Measured at 100 % speed in real time on an Intel Core Ultra 7 356H.
 
+The guest clock runs on 1996 time. The config sets `time_sync = disabled`
+(a `[Machine]` key), so 86Box keeps the RTC in the NVR instead of copying the
+host clock at power-on, and the boot floppy runs `DATE 10-22-1996` during the
+build. Every instance therefore boots on 10/22/1996, shortly after midnight.
+Period software checks dates against the clock: SIGNUP refuses card expiry
+years that have passed and years from 2027 on.
+
 ## Connecting to the server
 
 TCP: `PrimaryMSNGateway`/`BackupMSNGateway` are `br0`'s host address, and
