@@ -1,0 +1,128 @@
+REGEDIT4
+
+; MSN connection settings. ConnectProtocol 0x0a = TCP (ENGCT via TCPCONN.DLL to
+; PrimaryMSNGateway:569), 0 = modem (MOSCP dialing Phone). Values as written by
+; the OSR2 client's own Settings dialog on the reference VM.
+[HKEY_CURRENT_USER\Software\Microsoft\MOS\Connection]
+"PrimaryMSNGateway"="@HOST_IP@"
+"BackupMSNGateway"="@HOST_IP@"
+"ConnectProtocol"=dword:@CONNECT_PROTOCOL@
+"CurrentCommDev"="Standard Modem"
+"Phone"="@PHONE@"
+"BackupPhone"="@PHONE@"
+
+; Present once MSN's first-run wizard (MSNSIG13.EXE) has run. Without it the
+; desktop icon opens the wizard, which rewrites the Connection values above.
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\MOS\SoftwareInstalled]
+
+; Primary network logon "Windows Logon", as the Network control panel writes
+; it. With Client for Microsoft Networks as primary, Windows asks for its
+; password on every boot once the NIC has a link.
+[HKEY_LOCAL_MACHINE\Network\Logon]
+"PrimaryProvider"=""
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Tips]
+"Show"=hex:00,00,00,00
+
+; Standard Modem on COM2, where 86Box's Hayes modem sits. Same devnode and
+; driver key Unimodem's wizard created on the reference VM.
+[HKEY_LOCAL_MACHINE\Enum\Root\MDMGEN\COM2]
+"Class"="Modem"
+"HardwareID"="MDMGEN"
+"DetFlags"=hex:00,00,00,00
+"DeviceDesc"="Standard Modem"
+"Driver"="Modem\\0000"
+"Mfg"="(Standard Modem Types)"
+"ConfigFlags"=hex:00,00,00,00
+"FriendlyName"="Standard Modem"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem]
+@="Modem"
+"Installer"="Modem.Cpl"
+"Icon"="0"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000]
+"FriendlyDriver"="Unimodem.vxd"
+"DevLoader"="*VCOMM"
+"ConfigDialog"="modemui.dll"
+"PortSubClass"=hex:02
+"EnumPropPages"="modemui.dll,EnumPropPages"
+"Reset"="ATZ<cr>"
+"Properties"=hex:80,01,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,03,00,00,00,c2,01,00,80,70,00,00
+"DeviceType"=hex:01
+"InfPath"="MDMGEN.INF"
+"InfSection"="Gen"
+"DriverDate"=" 8-24-1996"
+"DriverDesc"="Standard Modem"
+"AttachedTo"="COM2"
+"Manufacturer"="(Standard Modem Types)"
+"Model"="Standard Modem"
+"ID"=hex:e3,55,0b,00
+"Default"=hex:00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,01,00,00
+"DCB"=hex:1c,00,00,00,00,e1,00,00,15,20,00,00,00,00,0a,00,0a,00,08,00,00,11,13,00,00,00,00,c2
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000\Init]
+"1"="AT<cr>"
+"2"="ATE0V1<cr>"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000\Monitor]
+"1"="ATS0=0<cr>"
+"2"="None"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000\Answer]
+"1"="ATA<cr>"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000\Hangup]
+"1"="ATH<cr>"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000\Settings]
+"Prefix"="AT"
+"Terminator"="<cr>"
+"DialPrefix"="D"
+"Pulse"="P"
+"Tone"="T"
+"Blind_On"="X3"
+"Blind_Off"="X4"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000\Settings\Init]
+"1"="ATX4"
+
+[HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Class\Modem\0000\Responses]
+"<cr>"=hex:01,00,00,00,00,00,00,00,00,00
+"<lf>"=hex:01,00,00,00,00,00,00,00,00,00
+"<cr><lf>OK<cr><lf>"=hex:00,00,00,00,00,00,00,00,00,00
+"<cr><lf>RING<cr><lf>"=hex:08,00,00,00,00,00,00,00,00,00
+"<cr><lf>NO CARRIER<cr><lf>"=hex:04,00,00,00,00,00,00,00,00,00
+"<cr><lf>ERROR<cr><lf>"=hex:03,00,00,00,00,00,00,00,00,00
+"<cr><lf>NO DIALTONE<cr><lf>"=hex:05,00,00,00,00,00,00,00,00,00
+"<cr><lf>BUSY<cr><lf>"=hex:06,00,00,00,00,00,00,00,00,00
+"<cr><lf>NO ANSWER<cr><lf>"=hex:07,00,00,00,00,00,00,00,00,00
+"<cr><lf>CONNECT<cr><lf>"=hex:02,00,00,00,00,00,00,00,00,00
+"0<cr>"=hex:00,00,00,00,00,00,00,00,00,00
+"2<cr>"=hex:08,00,00,00,00,00,00,00,00,00
+"3<cr>"=hex:04,00,00,00,00,00,00,00,00,00
+"4<cr>"=hex:03,00,00,00,00,00,00,00,00,00
+"6<cr>"=hex:05,00,00,00,00,00,00,00,00,00
+"7<cr>"=hex:06,00,00,00,00,00,00,00,00,00
+"8<cr>"=hex:07,00,00,00,00,00,00,00,00,00
+"OK"=hex:00,00,00,00,00,00,00,00,00,00
+"RING"=hex:08,00,00,00,00,00,00,00,00,00
+"NO CARRIER"=hex:04,00,00,00,00,00,00,00,00,00
+"ERROR"=hex:03,00,00,00,00,00,00,00,00,00
+"NO DIALTONE"=hex:05,00,00,00,00,00,00,00,00,00
+"NO DIAL TONE"=hex:05,00,00,00,00,00,00,00,00,00
+"BUSY"=hex:06,00,00,00,00,00,00,00,00,00
+"NO ANSWER"=hex:07,00,00,00,00,00,00,00,00,00
+"FAX"=hex:03,00,00,00,00,00,00,00,00,00
+"DATA"=hex:03,00,00,00,00,00,00,00,00,00
+"VOICE"=hex:03,00,00,00,00,00,00,00,00,00
+"RINGING"=hex:01,00,00,00,00,00,00,00,00,00
+
+; Share C: read/write with no password (tools: .claude/skills/vm-smb).
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Network\LanMan\C]
+"Flags"=dword:00000192
+"Type"=dword:00000000
+"Path"="C:\\"
+"Parm2enc"=hex:
+"Parm1enc"=hex:
+"Remark"=""

@@ -1,0 +1,94 @@
+; Unattended Windows 95 OSR2 setup for the MSN e2e VM. @NAME@ placeholders
+; are filled in by tools/e2e-vm/vm.py.
+
+[Version]
+Signature="$CHICAGO$"
+
+[Setup]
+Express=1
+InstallDir="C:\WINDOWS"
+InstallType=3
+EBD=0
+ChangeDir=0
+OptionalComponents=1
+Network=1
+System=0
+CCP=0
+CleanBoot=0
+Display=0
+PenWinWarning=0
+Uninstall=0
+VRC=1
+NoDirWarn=1
+NoPrompt2Boot=1
+Verify=0
+TimeZone="GMT"
+
+[System]
+Locale=L0409
+SelectedKeyboard=KEYBOARD_00000409
+
+[NameAndOrg]
+Name="MSN e2e"
+Org=""
+Display=0
+
+[Network]
+ComputerName="@COMPUTER_NAME@"
+Workgroup="WORKGROUP"
+Description="MSN e2e test VM"
+Display=0
+Clients=VREDIR
+Protocols=MSTCP
+Services=VSERVER
+Security=share
+IgnoreDetectedNetCards=0
+ValidateNetCardResources=0
+
+; The PCI NIC is only found by PnP after the first reboot and its TCP/IP
+; binding takes the defaults, so the address comes from the bridge's DHCP.
+[MSTCP]
+DHCP=1
+DNS=0
+WINS=0
+
+[VREDIR]
+ValidatedLogon=0
+
+[VSERVER]
+LMAnnounce=0
+MaintainServerList=2
+
+[Printers]
+
+[OptionalComponents]
+"Accessories"=0
+"Accessibility Options"=0
+"Communications"=0
+"Dial-Up Networking"=1
+"Disk Tools"=0
+"Multimedia"=0
+"Multilanguage Support"=0
+"Microsoft Fax"=0
+"Microsoft NetMeeting"=0
+"Windows Messaging"=0
+"Microsoft Mail Services"=0
+"The Microsoft Network"=1
+
+[Install]
+AddReg=E2E.AddReg
+DelReg=E2E.DelReg
+
+[E2E.AddReg]
+HKLM,Software\Microsoft\Windows\CurrentVersion\RunOnce,E2EPost,,"C:\STAGE\POST.BAT"
+; "Do you want to see future DHCP messages?" answered No. VDHCP leaves a key
+; without Version alone and never requests a lease, so it is written too.
+HKLM,System\CurrentControlSet\Services\VxD\DHCP,Version,1,01,00,00,00
+HKLM,System\CurrentControlSet\Services\VxD\DHCP,PopupFlag,1,00,00,00,00
+; Windows Logon as the primary network logon (POST.REG sets it again).
+HKLM,Network\Logon,PrimaryProvider,,""
+
+; Inbox Setup Wizard (MSMAIL.INF), pulled in by MSN's dependency on Windows Messaging.
+[E2E.DelReg]
+HKLM,Software\Microsoft\Windows\CurrentVersion\RunOnce,"Windows Messaging"
+HKLM,Software\Microsoft\Windows\CurrentVersion\RunOnce\Setup,"Windows Messaging"

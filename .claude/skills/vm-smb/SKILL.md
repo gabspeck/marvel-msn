@@ -64,6 +64,10 @@ Examples:
 Env overrides: `VM_HOST` (NetBIOS name), `VM_IP` (adds `-I`), `VM_SHARE`
 (default `C`).
 
+The e2e VM (`tools/e2e-vm`, docs/E2E-VM.md) shares `C` the same way under
+NetBIOS name `MSNE2E`: `VM_HOST=MSNE2E`. It gets its address from DHCP on
+`br0`.
+
 ## Shares
 
 - `C` — the Win95 system drive. Read and write, no password.
